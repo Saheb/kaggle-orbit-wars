@@ -70,7 +70,7 @@ class BCConfig:
     num_trajectories: int = 5000
     num_steps: int = 5000
     learning_rate: float = 3e-4
-    batch_size: int = 256
+    batch_size: int = 128    # 128 < typical dataset so each epoch has multiple steps
 
 
 @dataclass
