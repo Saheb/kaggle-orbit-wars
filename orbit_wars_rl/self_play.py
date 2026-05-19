@@ -226,6 +226,153 @@ def collect_rollout(
     return transitions
 
 
+def collect_rollouts_vec(
+    model,
+    vec_pool,
+    device,
+    batch_size: int,
+    gamma: float = 0.995,
+    lam: float = 0.95,
+    epsilon: float = 0.0,
+    shaping_coef: float = 0.0,
+):
+    """Collect batch_size transitions from N environments in parallel.
+
+    Workers handle env.step + feature extraction simultaneously. Main process
+    batches all N observations into a single model forward (BS=N on MPS).
+
+    Returns (all_transitions_with_gae, episode_rewards) where
+    all_transitions_with_gae is a list of (Transition, advantage, return).
+    """
+    from vec_env import _to_tensors
+
+    N = vec_pool.num_envs
+    model.eval()
+    # For batched inference, MPS wins at BS≥4; keep model on training device.
+    infer_dev = device
+
+    # Per-env episode accumulators
+    ep_transitions = [[] for _ in range(N)]
+    completed: list[tuple] = []   # (Transition, advantage, return)
+    ep_rewards: list[float] = []
+    prev_materials = [0.0] * N
+
+    # Initial reset
+    obs_data = vec_pool.reset()
+
+    while len(completed) < batch_size:
+        # ---- Batch model inference ----------------------------------------
+        feats, masks = _to_tensors(obs_data)
+
+        with torch.no_grad():
+            outputs = model(
+                feats["planet_features"].to(infer_dev),
+                feats["fleet_features"].to(infer_dev),
+                feats["global_features"].to(infer_dev),
+                feats["planet_mask"].to(infer_dev),
+                feats["fleet_mask"].to(infer_dev),
+                fire_mask=masks["fire_mask"].to(infer_dev),
+                angle_mask=masks["angle_mask"].to(infer_dev),
+                slot_valid=masks["slot_valid"].to(infer_dev),
+                owned_indices=masks["owned_indices"].to(infer_dev),
+            )
+        # Move outputs to CPU for action sampling
+        outputs_cpu = {k: v.cpu() for k, v in outputs.items()}
+
+        # ---- Per-env action sampling + env step ---------------------------
+        all_actions = []
+        env_data = []
+
+        for i in range(N):
+            eo = {k: v[i:i+1] for k, v in outputs_cpu.items()}
+            fire_m  = masks["fire_mask"][i:i+1]
+            angle_m = masks["angle_mask"][i:i+1]
+
+            use_uniform = random.random() < epsilon
+            fa, aa, sa, fd, ad, sd = _sample_action_masked(
+                eo, fire_m, angle_m, torch.device("cpu"), uniform=use_uniform
+            )
+
+            env_actions = actions_from_policy(
+                eo["fire_logits"], eo["angle_logits"], eo["ship_logits"],
+                {
+                    "fire_mask":   fire_m,
+                    "angle_mask":  angle_m,
+                    "slot_valid":  masks["slot_valid"][i:i+1],
+                    "owned_indices": masks["owned_indices"][i],
+                    "max_ships":   masks["max_ships"][i:i+1],
+                    "owned_count": masks["owned_counts"][i],
+                },
+                obs_data[i]["obs"], obs_data[i]["obs"].get("player", 0),
+            )
+            all_actions.append(env_actions)
+            env_data.append({
+                "features": {
+                    "planet_features": feats["planet_features"][i],
+                    "fleet_features":  feats["fleet_features"][i],
+                    "global_features": feats["global_features"][i],
+                    "planet_mask":     feats["planet_mask"][i],
+                    "fleet_mask":      feats["fleet_mask"][i],
+                    "owned_indices":   masks["owned_indices"][i],
+                    "owned_count":     masks["owned_counts"][i],
+                },
+                "masks": {
+                    "fire_mask":    fire_m,
+                    "angle_mask":   angle_m,
+                    "slot_valid":   masks["slot_valid"][i:i+1],
+                    "owned_indices":masks["owned_indices"][i],
+                    "max_ships":    masks["max_ships"][i:i+1],
+                    "owned_count":  masks["owned_counts"][i],
+                },
+                "actions":   {"fire": fa, "angle": aa, "ship": sa},
+                "log_probs": {
+                    "fire":  fd.log_prob(fa.float()),
+                    "angle": ad.log_prob(aa),
+                    "ships": sd.log_prob(sa),
+                },
+                "value": eo["value"].item(),
+            })
+
+        # Step all envs (parallel in workers)
+        step_results = vec_pool.step(all_actions)
+
+        # ---- Process results per env -------------------------------------
+        obs_data = []
+        for i, (sr, ed) in enumerate(zip(step_results, env_data)):
+            done = sr["done"]
+            step_reward = 0.0  # shaping placeholder
+
+            t = Transition(
+                obs=sr["obs"],
+                features=ed["features"],
+                masks=ed["masks"],
+                actions=ed["actions"],
+                log_probs=ed["log_probs"],
+                reward=step_reward,
+                done=done,
+                value=ed["value"],
+            )
+            ep_transitions[i].append(t)
+
+            if done:
+                # Set terminal reward (worker auto-reset, so terminal_reward is separate)
+                term_r = sr.get("terminal_reward") or 0.0
+                ep_transitions[i][-1].reward += term_r
+
+                # GAE for completed episode
+                ep = ep_transitions[i]
+                adv, ret = compute_gae(ep, gamma=gamma, lam=lam)
+                for tt, a, r in zip(ep, adv, ret):
+                    completed.append((tt, float(a), float(r)))
+                ep_rewards.append(term_r)
+                ep_transitions[i] = []
+
+            # Worker already auto-reset on done; obs_data carries new obs
+            obs_data.append(sr)
+
+    return completed[:batch_size], ep_rewards
+
+
 def compute_gae(transitions, gamma=0.995, lam=0.95):
     """Compute GAE advantages and returns from transitions."""
     values = [t.value for t in transitions]

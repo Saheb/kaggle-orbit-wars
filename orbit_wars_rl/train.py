@@ -20,12 +20,13 @@ from config import Config
 from model import EntityTransformer, count_params
 from ppo import PPOLearner
 from self_play import (
-    OpponentPool, collect_rollout, compute_gae, make_batch, make_minibatches
+    OpponentPool, collect_rollout, collect_rollouts_vec,
+    compute_gae, make_batch, make_minibatches
 )
 from env import OrbitWarsEnv
 
 
-def train(cfg: Config, use_wandb: bool = False, resume_from: str = ""):
+def train(cfg: Config, use_wandb: bool = False, resume_from: str = "", num_envs: int = 1):
     device = torch.device(cfg.device)
     print(f"Training on device: {device}")
 
@@ -71,51 +72,72 @@ def train(cfg: Config, use_wandb: bool = False, resume_from: str = ""):
     print(f"Batch size: {cfg.ppo.batch_size}, Minibatches: {cfg.ppo.num_minibatches}")
     print(f"Self-play pool: {cfg.self_play.opponent_pool_size} snapshots")
     print(f"Shaping coef: {cfg.ppo.shaping_coef}")
+    print(f"Parallel envs: {num_envs}")
     print()
 
-    env = OrbitWarsEnv(num_players=cfg.env.num_players, seed=cfg.seed)
+    use_vec = num_envs > 1
+    if use_vec:
+        from vec_env import VecEnvPool
+        vec_pool = VecEnvPool(num_envs, num_players=cfg.env.num_players, base_seed=cfg.seed)
+        print(f"Spawning {num_envs} environment workers...")
+    else:
+        env = OrbitWarsEnv(num_players=cfg.env.num_players, seed=cfg.seed)
 
     while total_env_steps < cfg.ppo.total_env_steps:
-        # Move model to CPU for collection: BS=1 inference is ~60% faster on CPU
-        # than MPS (13ms vs 21ms). On Apple Silicon unified memory this is free.
-        model.cpu()
-        all_transitions = []
+        progress = total_env_steps / cfg.ppo.total_env_steps
+        epsilon = max(0.02, 0.1 * (1.0 - progress))
         episode_rewards = []
 
-        while len(all_transitions) < cfg.ppo.batch_size:
-            # Epsilon schedule: 0.1 → 0.02
-            progress = total_env_steps / cfg.ppo.total_env_steps
-            epsilon = max(0.02, 0.1 * (1.0 - progress))
-
-            # Sample opponent from pool (or None → random)
-            opponent_model = None
-            if len(opponent_pool) > 0 and random.random() < cfg.self_play.opponent_sample_prob_old:
-                params = opponent_pool.sample()
-                opponent_model = EntityTransformer(cfg.model).to(device)
-                opponent_model.load_state_dict(params)
-                opponent_model.eval()
-
-            transitions = collect_rollout(
-                model, env, device,
+        if use_vec:
+            # Vectorized: batched MPS inference, parallel env steps
+            # Model stays on training device for BS=N inference benefit
+            model.to(device)
+            all_transitions_with_gae, episode_rewards = collect_rollouts_vec(
+                model, vec_pool, device,
+                batch_size=cfg.ppo.batch_size,
+                gamma=cfg.ppo.gamma,
+                lam=cfg.ppo.gae_lambda,
                 epsilon=epsilon,
                 shaping_coef=cfg.ppo.shaping_coef,
-                opponent_model=opponent_model,
             )
+            all_transitions = all_transitions_with_gae
+        else:
+            # Single env: CPU inference (13ms < 21ms MPS for BS=1)
+            model.cpu()
+            all_transitions = []
 
-            if transitions:
-                advantages, returns = compute_gae(
-                    transitions,
-                    gamma=cfg.ppo.gamma,
-                    lam=cfg.ppo.gae_lambda,
+            while len(all_transitions) < cfg.ppo.batch_size:
+                # Sample opponent from pool (or None → random)
+                opponent_model = None
+                if len(opponent_pool) > 0 and random.random() < cfg.self_play.opponent_sample_prob_old:
+                    params = opponent_pool.sample()
+                    opponent_model = EntityTransformer(cfg.model).to(torch.device("cpu"))
+                    opponent_model.load_state_dict(params)
+                    opponent_model.eval()
+
+                transitions = collect_rollout(
+                    model, env, device,
+                    epsilon=epsilon,
+                    shaping_coef=cfg.ppo.shaping_coef,
+                    opponent_model=opponent_model,
                 )
-                all_transitions.extend(zip(transitions, advantages, returns))
-                episode_rewards.append(transitions[-1].reward)
 
-            total_env_steps += len(transitions)
-            episode_count += 1
+                if transitions:
+                    advantages, returns = compute_gae(
+                        transitions, gamma=cfg.ppo.gamma, lam=cfg.ppo.gae_lambda,
+                    )
+                    all_transitions.extend(zip(transitions, advantages, returns))
+                    episode_rewards.append(transitions[-1].reward)
 
-        # Move model back to training device for PPO gradient updates
-        # (large batches benefit from MPS/CUDA parallelism)
+                total_env_steps += len(transitions)
+                episode_count += 1
+
+        # Update step counters (vec mode counts steps inside collect_rollouts_vec)
+        if use_vec:
+            total_env_steps += len(all_transitions)
+            episode_count += len(episode_rewards)
+
+        # Move model to training device for PPO gradient updates
         model.to(device)
 
         # Subsample to batch_size
@@ -205,6 +227,8 @@ if __name__ == "__main__":
                         help="Material-delta shaping coefficient (default: cfg value)")
     parser.add_argument("--resume", type=str, default="",
                         help="Path to checkpoint or BC model to warm-start from")
+    parser.add_argument("--num-envs", type=int, default=1,
+                        help="Parallel environment workers (>1 enables VecEnvPool + batched MPS)")
     args = parser.parse_args()
 
     cfg = Config()
@@ -216,4 +240,4 @@ if __name__ == "__main__":
     if args.shaping_coef is not None:
         cfg.ppo.shaping_coef = args.shaping_coef
 
-    train(cfg, use_wandb=args.wandb, resume_from=args.resume)
+    train(cfg, use_wandb=args.wandb, resume_from=args.resume, num_envs=args.num_envs)
