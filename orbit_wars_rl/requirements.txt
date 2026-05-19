@@ -1,0 +1,4 @@
+torch>=2.0.0
+numpy>=1.24.0
+kaggle-environments>=1.28.0
+wandb>=0.15.0
