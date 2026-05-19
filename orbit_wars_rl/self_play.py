@@ -48,19 +48,25 @@ class OpponentPool:
 
 
 def _policy_forward(model, obs, player, num_players, device):
-    """Run a single forward pass; return (outputs, features, masks)."""
+    """Run a single forward pass; return (outputs, features, masks).
+
+    Uses whatever device the model is currently on. The caller is responsible
+    for placing the model on CPU before collection (faster for BS=1) and
+    moving it back to the training device before PPO updates.
+    """
     features = extract_features(obs, player, num_players=num_players)
     masks = compute_action_masks(obs, player)
 
-    planet_feats = features["planet_features"].unsqueeze(0).to(device)
-    fleet_feats = features["fleet_features"].unsqueeze(0).to(device)
-    global_feats = features["global_features"].unsqueeze(0).to(device)
-    planet_mask = features["planet_mask"].unsqueeze(0).to(device)
-    fleet_mask = features["fleet_mask"].unsqueeze(0).to(device)
-    fire_mask = masks["fire_mask"].to(device)
-    angle_mask = masks["angle_mask"].to(device)
-    slot_valid = masks["slot_valid"].to(device)
-    owned_indices = masks["owned_indices"].to(device)
+    infer_dev = next(model.parameters()).device
+    planet_feats = features["planet_features"].unsqueeze(0).to(infer_dev)
+    fleet_feats = features["fleet_features"].unsqueeze(0).to(infer_dev)
+    global_feats = features["global_features"].unsqueeze(0).to(infer_dev)
+    planet_mask = features["planet_mask"].unsqueeze(0).to(infer_dev)
+    fleet_mask = features["fleet_mask"].unsqueeze(0).to(infer_dev)
+    fire_mask = masks["fire_mask"].to(infer_dev)
+    angle_mask = masks["angle_mask"].to(infer_dev)
+    slot_valid = masks["slot_valid"].to(infer_dev)
+    owned_indices = masks["owned_indices"].to(infer_dev)
 
     with torch.no_grad():
         outputs = model(
@@ -70,7 +76,8 @@ def _policy_forward(model, obs, player, num_players, device):
             slot_valid=slot_valid, owned_indices=owned_indices,
             owned_count=masks["owned_count"],
         )
-    return outputs, features, masks
+    # Move outputs back to CPU so transitions are always stored on CPU
+    return {k: v.cpu() for k, v in outputs.items()}, features, masks
 
 
 def _sample_action_masked(outputs, fire_mask, angle_mask, device, uniform=False):
@@ -131,6 +138,11 @@ def collect_rollout(
     if opponent_model is not None:
         opponent_model.eval()
 
+    # Inference device: use wherever the model currently is.
+    # Callers should move model to CPU before collection (13ms CPU < 21ms MPS for BS=1)
+    # and back to training device before PPO updates (MPS/CUDA needed for large batches).
+    infer_dev = next(model.parameters()).device
+
     transitions = []
     obs = env.reset()
     done = False
@@ -143,18 +155,19 @@ def collect_rollout(
         outputs, features, masks = _policy_forward(model, obs, player, env.num_players, device)
         value = outputs["value"].item()
 
-        fire_mask = masks["fire_mask"].to(device)
-        angle_mask = masks["angle_mask"].to(device)
+        # outputs are always on CPU (returned by _policy_forward); masks stay on CPU too
+        fire_mask = masks["fire_mask"]
+        angle_mask = masks["angle_mask"]
 
         use_uniform = random.random() < epsilon
         fire_action, angle_action, ship_action, fire_dist, angle_dist, ship_dist = \
-            _sample_action_masked(outputs, fire_mask, angle_mask, device, uniform=use_uniform)
+            _sample_action_masked(outputs, fire_mask, angle_mask, infer_dev, uniform=use_uniform)
 
         log_prob_fire = fire_dist.log_prob(fire_action.float())
         log_prob_angle = angle_dist.log_prob(angle_action)
         log_prob_ships = ship_dist.log_prob(ship_action)
 
-        # Convert to env actions
+        # Convert to env actions (always on CPU)
         env_actions = actions_from_policy(
             outputs["fire_logits"], outputs["angle_logits"], outputs["ship_logits"],
             {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()},

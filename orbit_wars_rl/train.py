@@ -76,6 +76,9 @@ def train(cfg: Config, use_wandb: bool = False, resume_from: str = ""):
     env = OrbitWarsEnv(num_players=cfg.env.num_players, seed=cfg.seed)
 
     while total_env_steps < cfg.ppo.total_env_steps:
+        # Move model to CPU for collection: BS=1 inference is ~60% faster on CPU
+        # than MPS (13ms vs 21ms). On Apple Silicon unified memory this is free.
+        model.cpu()
         all_transitions = []
         episode_rewards = []
 
@@ -110,6 +113,10 @@ def train(cfg: Config, use_wandb: bool = False, resume_from: str = ""):
 
             total_env_steps += len(transitions)
             episode_count += 1
+
+        # Move model back to training device for PPO gradient updates
+        # (large batches benefit from MPS/CUDA parallelism)
+        model.to(device)
 
         # Subsample to batch_size
         if len(all_transitions) > cfg.ppo.batch_size:
