@@ -232,10 +232,17 @@ def train_bc(
 ) -> dict:
     """Train model via BC for cfg_bc.num_steps gradient steps.
 
+    Uses cosine LR decay (lr → lr/10) to prevent divergence when the dataset
+    is small relative to num_steps.
+
     Returns final val metrics.
     """
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg_bc.learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=cfg_bc.learning_rate, eps=1e-5)
+    # Cosine decay: lr falls from learning_rate to learning_rate/10 over num_steps
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=cfg_bc.num_steps, eta_min=cfg_bc.learning_rate / 10
+    )
 
     # Train / val split
     n_val = max(1, int(len(samples) * val_frac))
@@ -245,8 +252,11 @@ def train_bc(
     if not train_samples:
         raise ValueError("No training samples after split")
 
+    steps_per_epoch = max(1, len(train_samples) // cfg_bc.batch_size)
+    num_epochs = max(1, cfg_bc.num_steps // steps_per_epoch)
     print(f"BC training: {len(train_samples)} train / {len(val_samples)} val samples")
-    print(f"Steps: {cfg_bc.num_steps}, batch size: {cfg_bc.batch_size}")
+    print(f"Steps: {cfg_bc.num_steps}, batch: {cfg_bc.batch_size}, "
+          f"~{steps_per_epoch} steps/epoch, ~{num_epochs} epochs")
 
     best_val_loss = float("inf")
     step = 0
@@ -272,17 +282,19 @@ def train_bc(
             loss, metrics = bc_loss(outputs, batch)
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
+            scheduler.step()
 
             batch_start += cfg_bc.batch_size
             step += 1
 
             if step % 100 == 0:
+                lr_now = optimizer.param_groups[0]["lr"]
                 print(f"  step {step:4d} | loss {metrics['loss']:.4f} | "
                       f"fire {metrics['fire_loss']:.4f} | "
                       f"angle {metrics['angle_loss']:.4f} | "
-                      f"ship {metrics['ship_loss']:.4f}")
+                      f"ship {metrics['ship_loss']:.4f} | lr {lr_now:.2e}")
 
     # Validation
     model.eval()
