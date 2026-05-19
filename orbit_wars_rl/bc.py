@@ -188,8 +188,9 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
     ship_target = batch["ship_target"]        # (B, max_owned)
 
     # Fire loss (binary cross-entropy per slot, masked)
+    # Clamp logits to ±30 to avoid MPS float16 overflow from -1e9 mask values
     fire_loss = F.binary_cross_entropy_with_logits(
-        fire_logits, fire_target.float(), reduction="none"
+        fire_logits.clamp(-30, 30), fire_target.float(), reduction="none"
     ) * slot_valid
     fire_loss = fire_loss.sum() / slot_valid.sum().clamp(min=1)
 

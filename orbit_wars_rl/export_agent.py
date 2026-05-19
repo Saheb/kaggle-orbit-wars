@@ -129,13 +129,13 @@ class _Model(nn.Module):
         sl = self.ship_head(oe)
 
         if fire_mask is not None:
-            fl = fl.masked_fill(~fire_mask, -1e9)
+            fl = fl.masked_fill(~fire_mask, -100.0)
         if angle_mask is not None:
-            al = al.masked_fill(~angle_mask, -1e9)
+            al = al.masked_fill(~angle_mask, -100.0)
         if slot_valid is not None:
-            fl = fl.masked_fill(~slot_valid, -1e9)
-            al = al.masked_fill(~slot_valid.unsqueeze(-1), -1e9)
-            sl = sl.masked_fill(~slot_valid.unsqueeze(-1), -1e9)
+            fl = fl.masked_fill(~slot_valid, -100.0)
+            al = al.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
+            sl = sl.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
         vf = (~attn_mask).float()
         pooled = (x * vf.unsqueeze(-1)).sum(1) / vf.sum(1, keepdim=True).clamp(min=1)

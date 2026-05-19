@@ -129,15 +129,15 @@ class EntityTransformer(nn.Module):
         angle_logits = self.angle_head(owned_entities)  # (B, max_owned, 72)
         ship_logits = self.ship_head(owned_entities)  # (B, max_owned, 16)
 
-        # Apply masks
+        # Apply masks (-100 is safe in float16 on MPS; -1e9 overflows)
         if fire_mask is not None:
-            fire_logits = fire_logits.masked_fill(~fire_mask, -1e9)
+            fire_logits = fire_logits.masked_fill(~fire_mask, -100.0)
         if angle_mask is not None:
-            angle_logits = angle_logits.masked_fill(~angle_mask, -1e9)
+            angle_logits = angle_logits.masked_fill(~angle_mask, -100.0)
         if slot_valid is not None:
-            fire_logits = fire_logits.masked_fill(~slot_valid, -1e9)
-            angle_logits = angle_logits.masked_fill(~slot_valid.unsqueeze(-1), -1e9)
-            ship_logits = ship_logits.masked_fill(~slot_valid.unsqueeze(-1), -1e9)
+            fire_logits = fire_logits.masked_fill(~slot_valid, -100.0)
+            angle_logits = angle_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
+            ship_logits = ship_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
         # Value head: mean-pool valid entities
         valid_float = (~attn_mask).float()  # (B, N) 1=valid, 0=pad
