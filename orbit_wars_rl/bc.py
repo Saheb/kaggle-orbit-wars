@@ -259,11 +259,16 @@ def train_bc(
           f"~{steps_per_epoch} steps/epoch, ~{num_epochs} epochs")
 
     best_val_loss = float("inf")
+    best_state = None
+    patience = max(5, num_epochs // 4)  # stop if no improvement for 25% of epochs
+    epochs_no_improve = 0
     step = 0
+    epoch = 0
 
     while step < cfg_bc.num_steps:
         model.train()
         np.random.shuffle(train_samples)
+        epoch += 1
 
         batch_start = 0
         while batch_start < len(train_samples) and step < cfg_bc.num_steps:
@@ -295,6 +300,41 @@ def train_bc(
                       f"fire {metrics['fire_loss']:.4f} | "
                       f"angle {metrics['angle_loss']:.4f} | "
                       f"ship {metrics['ship_loss']:.4f} | lr {lr_now:.2e}")
+
+        # End-of-epoch validation for early stopping
+        model.eval()
+        ep_val_loss = 0.0
+        ep_val_batches = 0
+        with torch.no_grad():
+            for bs in range(0, len(val_samples), cfg_bc.batch_size):
+                vbatch = _collate(val_samples[bs: bs + cfg_bc.batch_size], device)
+                vout = model(
+                    vbatch["planet_features"], vbatch["fleet_features"], vbatch["global_features"],
+                    vbatch["planet_mask"], vbatch["fleet_mask"],
+                    fire_mask=vbatch["fire_mask"], angle_mask=vbatch["angle_mask"],
+                    slot_valid=vbatch["slot_valid"], owned_indices=vbatch["owned_indices"],
+                )
+                _, vm = bc_loss(vout, vbatch)
+                ep_val_loss += vm["loss"]
+                ep_val_batches += 1
+        ep_val_loss /= max(ep_val_batches, 1)
+
+        if ep_val_loss < best_val_loss - 0.01:
+            best_val_loss = ep_val_loss
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+
+        if epochs_no_improve >= patience and step >= cfg_bc.num_steps // 4:
+            print(f"  Early stopping at epoch {epoch} (step {step}): "
+                  f"no val improvement for {patience} epochs")
+            break
+
+    # Restore best weights
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        print(f"  Restored best weights (val_loss={best_val_loss:.4f})")
 
     # Validation
     model.eval()
