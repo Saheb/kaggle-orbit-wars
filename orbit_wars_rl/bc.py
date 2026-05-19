@@ -309,7 +309,7 @@ def train_bc(
     return val_metrics
 
 
-def validate_bc(cfg: Config, agent_path: str, verbose: bool = True):
+def validate_bc(cfg: Config, agent_path: str, save_path: str = "", verbose: bool = True):
     """Full BC validation pipeline."""
     device = torch.device(cfg.device)
 
@@ -337,6 +337,11 @@ def validate_bc(cfg: Config, agent_path: str, verbose: bool = True):
     model = EntityTransformer(cfg.model)
     val_metrics = train_bc(model, samples, cfg.bc, device)
 
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        torch.save({"model": model.state_dict()}, save_path)
+        print(f"BC model saved → {save_path}")
+
     print("\nBC validation complete!")
     print(f"  Final val loss: {val_metrics.get('val_loss', float('nan')):.4f}")
     return val_metrics
@@ -349,6 +354,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-games", type=int, default=100)
     parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--save", type=str, default="checkpoints/bc_warmstart.pt",
+                        help="Where to save the BC-pretrained model")
     args = parser.parse_args()
 
     cfg = Config()
@@ -356,4 +363,4 @@ if __name__ == "__main__":
     cfg.bc.num_trajectories = args.num_games
     cfg.bc.num_steps = args.steps
 
-    validate_bc(cfg, agent_path=args.agent)
+    validate_bc(cfg, agent_path=args.agent, save_path=args.save)

@@ -25,13 +25,20 @@ from self_play import (
 from env import OrbitWarsEnv
 
 
-def train(cfg: Config, use_wandb: bool = False):
+def train(cfg: Config, use_wandb: bool = False, resume_from: str = ""):
     device = torch.device(cfg.device)
     print(f"Training on device: {device}")
 
     torch.manual_seed(cfg.seed)
     model = EntityTransformer(cfg.model)
     print(f"Model params: {count_params(model):,}")
+
+    if resume_from:
+        sd = torch.load(resume_from, map_location="cpu", weights_only=True)
+        if "model" in sd:
+            sd = sd["model"]
+        model.load_state_dict(sd)
+        print(f"Resumed model weights from {resume_from}")
 
     learner = PPOLearner(model, cfg, device=device)
     opponent_pool = OpponentPool(max_size=cfg.self_play.opponent_pool_size)
@@ -189,6 +196,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-players", type=int, choices=[2, 4], default=2)
     parser.add_argument("--shaping-coef", type=float, default=None,
                         help="Material-delta shaping coefficient (default: cfg value)")
+    parser.add_argument("--resume", type=str, default="",
+                        help="Path to checkpoint or BC model to warm-start from")
     args = parser.parse_args()
 
     cfg = Config()
@@ -200,4 +209,4 @@ if __name__ == "__main__":
     if args.shaping_coef is not None:
         cfg.ppo.shaping_coef = args.shaping_coef
 
-    train(cfg, use_wandb=args.wandb)
+    train(cfg, use_wandb=args.wandb, resume_from=args.resume)
