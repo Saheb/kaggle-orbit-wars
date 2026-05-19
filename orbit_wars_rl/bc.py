@@ -48,39 +48,30 @@ def collect_heuristic_trajectories(
 ) -> list[dict]:
     """Collect (obs, action) pairs from a heuristic agent.
 
+    Uses OrbitWarsEnv (direct Python calls, ~196 SPS) instead of kaggle_environments
+    env.run() (subprocess JSON serialization, ~0.7 SPS). The agent function is loaded
+    directly via importlib.
+
     Returns a list of dicts with keys: obs (dict), action (list of moves).
     """
-    from kaggle_environments import make
+    from env import OrbitWarsEnv
 
+    agent_fn = _load_agent_fn(agent_path)
     trajectories = []
 
     for seed in range(num_games):
-        env = make("orbit_wars", configuration={"seed": seed}, debug=False)
-        agents = [agent_path, opponent]
-        env.run(agents)
+        env = OrbitWarsEnv(num_players=2, seed=seed)
+        obs = env.reset(seed=seed)
+        done = False
 
-        for env_step in env.steps:
-            step_data = env_step[0]
-            raw_obs = step_data.observation
-            action = step_data.action
+        while not done:
+            # Call heuristic agent on current observation
+            action = agent_fn(obs)
 
-            if action is None or len(action) == 0:
-                continue
+            if action and len(action) > 0:
+                trajectories.append({"obs": obs, "action": action})
 
-            # Convert observation to our dict format
-            obs = {
-                "step": int(getattr(raw_obs, "step", 0)),
-                "player": 0,
-                "planets": [[p[0], p[1], p[2], p[3], p[4], p[5], p[6]]
-                            for p in raw_obs.planets],
-                "fleets": [[f[0], f[1], f[2], f[3], f[4], f[5], f[6]]
-                           for f in raw_obs.fleets],
-                "angular_velocity": float(getattr(raw_obs, "angular_velocity", 0.0)),
-                "initial_planets": [[p[0], p[1], p[2], p[3], p[4], p[5], p[6]]
-                                    for p in getattr(raw_obs, "initial_planets", raw_obs.planets)],
-                "comet_planet_ids": list(getattr(raw_obs, "comet_planet_ids", [])),
-            }
-            trajectories.append({"obs": obs, "action": action})
+            obs, reward, done, _ = env.step(action or [])
 
         if verbose and (seed + 1) % 20 == 0:
             print(f"  Collected {seed + 1}/{num_games} games, "
