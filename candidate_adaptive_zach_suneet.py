@@ -1,14 +1,8 @@
-"""Adaptive strong heuristic entrypoint for Orbit Wars.
+"""Adaptive review candidate: Suneet default with Zach anti-rush opening.
 
-This wraps the strongest local public-kernel references currently in the repo:
-
-- Suneet is the default policy because it is strong into Zach-style slow opens.
-- Zach is used as an early anti-rush response when hostile fleets appear before
-  turn 30, which fixes Suneet's observed Marco failure mode.
-
-For Kaggle single-file submission this must be inlined, or submitted as a
-multi-file tarball with ``candidate_zach_public.py`` and
-``candidate_suneet_lb1200.py`` at the root.
+This is a local teacher-candidate wrapper, not submission-ready as a single
+file. It imports the strongest pulled heuristic agents so we can validate the
+policy switch before inlining or packaging it.
 """
 
 from __future__ import annotations
@@ -33,8 +27,8 @@ def _load(path, name):
     return module
 
 
-_zach = _load("candidate_zach_public.py", "main_adaptive_zach_public")
-_suneet = _load("candidate_suneet_lb1200.py", "main_adaptive_suneet_public")
+_zach = _load("candidate_zach_public.py", "adaptive_zach_public")
+_suneet = _load("candidate_suneet_lb1200.py", "adaptive_suneet_public")
 
 
 def _read(obs, key, default=None):

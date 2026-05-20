@@ -9,14 +9,15 @@ from statistics import mean
 from kaggle_environments import make
 
 import main
-from evaluate_ablation import VARIANTS, final_material
+from evaluate_ablation import EXPERIMENT_DEFAULTS, VARIANTS, final_material
 
 
 @contextmanager
 def variant_flags(settings):
-    old = {name: getattr(main, name) for name in settings}
+    effective = {**EXPERIMENT_DEFAULTS, **settings}
+    old = {name: getattr(main, name) for name in effective}
     try:
-        for name, value in settings.items():
+        for name, value in effective.items():
             setattr(main, name, value)
         yield
     finally:
@@ -35,10 +36,10 @@ def variant_agent(name):
     return agent
 
 
-def run_match(seed, candidate, baseline, candidate_slot):
+def run_match(seed, candidate, baseline, candidate_slot, debug=False):
     agents = [variant_agent(baseline) for _ in range(4)]
     agents[candidate_slot] = variant_agent(candidate)
-    env = make("orbit_wars", configuration={"seed": seed}, debug=True)
+    env = make("orbit_wars", configuration={"seed": seed}, debug=debug)
     env.run(agents)
     rewards = [state.reward for state in env.steps[-1]]
     winner = max(range(4), key=lambda i: rewards[i])
@@ -58,25 +59,28 @@ def main_cli():
     parser.add_argument("--baseline", default="legacy", choices=sorted(VARIANTS))
     parser.add_argument("--seeds", type=int, default=4)
     parser.add_argument("--start-seed", type=int, default=0)
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
     rows = []
     for seed in range(args.start_seed, args.start_seed + args.seeds):
         for slot in range(4):
-            row = run_match(seed, args.candidate, args.baseline, slot)
+            row = run_match(seed, args.candidate, args.baseline, slot, debug=args.debug)
             rows.append(row)
             print(
                 f"seed={seed:03d} slot={slot} winner={row['winner']} "
                 f"candidate_won={row['candidate_won']} "
                 f"candidate_reward={row['candidate_reward']} "
-                f"steps={row['steps']} material={row['material']}"
+                f"steps={row['steps']} material={row['material']}",
+                flush=True,
             )
 
     wins = sum(row["candidate_won"] for row in rows)
     rewards = [row["candidate_reward"] for row in rows]
     print(
         f"\n{args.candidate} vs {args.baseline}: "
-        f"wins={wins}/{len(rows)} avg_reward={mean(rewards):.3f}"
+        f"wins={wins}/{len(rows)} avg_reward={mean(rewards):.3f}",
+        flush=True,
     )
 
 
