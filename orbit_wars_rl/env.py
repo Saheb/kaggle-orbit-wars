@@ -7,11 +7,18 @@ The kaggle_environments package handles all game logic; we just convert observat
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 from kaggle_environments import make
-from kaggle_environments.envs.orbit_wars.orbit_wars import Planet, Fleet, CENTER, ROTATION_RADIUS_LIMIT
+from kaggle_environments.envs.orbit_wars.orbit_wars import (
+    Planet,
+    Fleet,
+    CENTER,
+    ROTATION_RADIUS_LIMIT,
+    random_agent,
+    starter_agent,
+)
 
 BOARD_SIZE = 100.0
 SUN_RADIUS = 10.0
@@ -19,10 +26,11 @@ MAX_SPEED = 6.0
 
 
 class OrbitWarsEnv:
-    def __init__(self, num_players=2, seed=None, debug=False):
+    def __init__(self, num_players=2, seed=None, debug=False, opponent_policy="random"):
         self.num_players = num_players
         self.default_seed = seed
         self.debug = debug
+        self.opponent_policy = opponent_policy
         self.env = None
 
     def reset(self, seed=None):
@@ -37,16 +45,32 @@ class OrbitWarsEnv:
     def step(self, agent_actions, opponent_actions=None):
         """agent_actions: list of [from_planet_id, angle, ships] for player 0.
         opponent_actions: optional list of actions for players 1..N-1.
-        If None, opponents play randomly."""
+        If None, opponents use this wrapper's configured opponent policy."""
         if opponent_actions is not None:
             actions = [agent_actions] + list(opponent_actions)
         else:
-            actions = [agent_actions] + [["random"]] * (self.num_players - 1)
+            actions = [agent_actions] + [
+                self._opponent_actions(player)
+                for player in range(1, self.num_players)
+            ]
         self.env.step(actions)
         self.done = self.env.steps[-1][0].status == "DONE"
         obs = self._get_obs(0)
         reward = self._compute_reward()
         return obs, reward, self.done, {}
+
+    def _opponent_actions(self, player):
+        obs = self._get_obs(player)
+        policy = self.opponent_policy
+        if policy in (None, "none"):
+            return []
+        if policy == "random":
+            return random_agent(obs)
+        if policy == "starter":
+            return starter_agent(obs)
+        if callable(policy):
+            return policy(obs)
+        raise ValueError(f"Unknown opponent_policy: {policy!r}")
 
     def _get_obs(self, player):
         obs = self.env.steps[-1][player].observation

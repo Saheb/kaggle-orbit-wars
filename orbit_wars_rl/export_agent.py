@@ -59,6 +59,7 @@ _FLEET_DIM = {fleet_feature_dim}
 _GLOBAL_DIM = {global_feature_dim}
 _MAX_PLANETS = 48
 _MAX_FLEETS = 128
+_FIRE_THRESHOLD = {fire_threshold}
 
 
 # --- Embedded parameters (base64-encoded torch state_dict) ---
@@ -151,7 +152,10 @@ def _get_model():
         return _model_cache[0]
     m = _Model()
     buf = io.BytesIO(base64.b64decode(_PARAMS_B64))
-    sd = torch.load(buf, map_location="cpu", weights_only=True)
+    try:
+        sd = torch.load(buf, map_location="cpu", weights_only=True)
+    except Exception:
+        sd = torch.load(buf, map_location="cpu", weights_only=False)
     m.load_state_dict(sd)
     m.eval()
     _model_cache[0] = m
@@ -210,6 +214,7 @@ def agent(obs):
         out["ship_logits"],
         {{k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()}},
         obs, player,
+        fire_threshold=_FIRE_THRESHOLD,
     )
 '''
 
@@ -250,7 +255,10 @@ def _read_module_body(filepath: str, strip_imports: bool = True) -> str:
 
 def load_model(checkpoint_path: str, cfg: Config) -> EntityTransformer:
     model = EntityTransformer(cfg.model)
-    sd = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    try:
+        sd = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    except Exception:
+        sd = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if "model" in sd:
         sd = sd["model"]
     model.load_state_dict(sd)
@@ -258,7 +266,7 @@ def load_model(checkpoint_path: str, cfg: Config) -> EntityTransformer:
     return model
 
 
-def export_agent(checkpoint_path: str, output_path: str, cfg: Config):
+def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_threshold: float = 0.5):
     model = load_model(checkpoint_path, cfg)
 
     # Encode state_dict as base64
@@ -283,6 +291,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config):
         planet_feature_dim=m.planet_feature_dim,
         fleet_feature_dim=m.fleet_feature_dim,
         global_feature_dim=m.global_feature_dim,
+        fire_threshold=fire_threshold,
         params_b64=params_b64,
         features_code=features_code,
         action_mask_code=action_mask_code,
@@ -293,6 +302,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config):
 
     print(f"Exported agent → {output_path}")
     print(f"  Param bytes (base64): {len(params_b64):,}")
+    print(f"  Fire threshold: {fire_threshold}")
     print(f"  File size: {os.path.getsize(output_path) / 1024:.1f} KB")
 
 
@@ -301,8 +311,9 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", default="main_submitted.py")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--fire-threshold", type=float, default=0.5)
     args = parser.parse_args()
 
     cfg = Config()
     cfg.seed = args.seed
-    export_agent(args.checkpoint, args.output, cfg)
+    export_agent(args.checkpoint, args.output, cfg, fire_threshold=args.fire_threshold)

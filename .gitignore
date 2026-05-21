@@ -2,3 +2,4 @@ __pycache__
 leader-replays/*
 orbit-wars-data/orbit-wars.zip
 kernels/
+*.pt

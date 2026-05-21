@@ -83,20 +83,22 @@ class PPOLearner:
         angle_action = to_dev(batch["actions"]["angle"])
         ship_action = to_dev(batch["actions"]["ship"])
 
-        # New log probs — sum across owned-planet slots to get per-episode log prob
+        # New log probs. Angle/ship choices are only part of the executed action
+        # for slots that actually fire; when fire=0 the env ignores them.
         slot_valid = slot_valid_2d.unsqueeze(-1)  # (B, max_owned, 1)
+        fired_slots = fire_action.float() * slot_valid.squeeze(-1)
 
         new_log_prob_fire = fire_dist.log_prob(fire_action.float()) * slot_valid.squeeze(-1)
-        new_log_prob_angle = angle_dist.log_prob(angle_action) * slot_valid.squeeze(-1)
-        new_log_prob_ships = ship_dist.log_prob(ship_action) * slot_valid.squeeze(-1)
+        new_log_prob_angle = angle_dist.log_prob(angle_action) * fired_slots
+        new_log_prob_ships = ship_dist.log_prob(ship_action) * fired_slots
 
         # Sum across planet slots: (B, max_owned) -> (B,)
         new_log_prob = (new_log_prob_fire + new_log_prob_angle + new_log_prob_ships).sum(dim=-1)
 
         # Old log probs — same treatment
         old_fire = to_dev(batch["old_log_probs"]["fire"]) * slot_valid.squeeze(-1)
-        old_angle = to_dev(batch["old_log_probs"]["angle"]) * slot_valid.squeeze(-1)
-        old_ships = to_dev(batch["old_log_probs"]["ships"]) * slot_valid.squeeze(-1)
+        old_angle = to_dev(batch["old_log_probs"]["angle"]) * fired_slots
+        old_ships = to_dev(batch["old_log_probs"]["ships"]) * fired_slots
         old_log_prob = (old_fire + old_angle + old_ships).sum(dim=-1)  # (B,)
 
         # Advantages
@@ -126,8 +128,39 @@ class PPOLearner:
         angle_entropy = angle_dist.entropy().mean()
         ship_entropy = ship_dist.entropy().mean()
 
+        bc_loss = torch.tensor(0.0, device=self.device)
+        if cfg.bc_coef > 0 and "bc_targets" in batch:
+            bc_fire_target = to_dev(batch["bc_targets"]["fire"]).float()
+            bc_angle_target = to_dev(batch["bc_targets"]["angle"])
+            bc_ship_target = to_dev(batch["bc_targets"]["ship"])
+            bc_fired = (bc_fire_target > 0.5).float() * slot_valid.squeeze(-1)
+
+            bc_fire_loss = F.binary_cross_entropy_with_logits(
+                fire_logits.clamp(-30, 30),
+                bc_fire_target,
+                reduction="none",
+            )
+            bc_fire_loss = (bc_fire_loss * slot_valid.squeeze(-1)).sum() / slot_valid.squeeze(-1).sum().clamp(min=1)
+
+            B, max_owned, _ = angle_logits.shape
+            bc_angle_loss = F.cross_entropy(
+                angle_logits.reshape(B * max_owned, -1),
+                bc_angle_target.reshape(B * max_owned),
+                reduction="none",
+            ).reshape(B, max_owned)
+            bc_angle_loss = (bc_angle_loss * bc_fired).sum() / bc_fired.sum().clamp(min=1)
+
+            bc_ship_loss = F.cross_entropy(
+                ship_logits.reshape(B * max_owned, -1),
+                bc_ship_target.reshape(B * max_owned),
+                reduction="none",
+            ).reshape(B, max_owned)
+            bc_ship_loss = (bc_ship_loss * bc_fired).sum() / bc_fired.sum().clamp(min=1)
+            bc_loss = bc_fire_loss + bc_angle_loss + bc_ship_loss
+
         loss = (policy_loss
                 + cfg.value_coef * value_loss
+                + cfg.bc_coef * bc_loss
                 - cfg.entropy_coef_fire * fire_entropy
                 - cfg.entropy_coef_angle * angle_entropy
                 - cfg.entropy_coef_ships * ship_entropy)
@@ -141,6 +174,7 @@ class PPOLearner:
                 "fire_entropy": fire_entropy.item(),
                 "angle_entropy": angle_entropy.item(),
                 "ship_entropy": ship_entropy.item(),
+                "bc_loss": bc_loss.item(),
                 "clip_frac": clip_frac.item(),
                 "approx_kl": (old_log_prob - new_log_prob).mean().item(),
                 "mean_advantage": advantages.mean().item(),

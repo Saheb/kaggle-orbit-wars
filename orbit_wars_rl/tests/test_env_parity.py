@@ -163,6 +163,55 @@ def test_env_wrapper_reset_and_step():
     print("test_env_wrapper_reset_and_step: PASS")
 
 
+def test_fast_env_matches_kaggle_scripted_actions():
+    """FastOrbitWarsEnv matches Kaggle on deterministic trajectories."""
+    from fast_env import FastOrbitWarsEnv
+
+    def obs_from_kaggle(env):
+        obs = env.steps[-1][0].observation
+        return {
+            "step": obs.step,
+            "planets": [list(p) for p in obs.planets],
+            "fleets": [list(f) for f in obs.fleets],
+        }
+
+    def scripted_actions(obs, t):
+        actions = [[], []]
+        if t in (0, 20, 60):
+            for player in (0, 1):
+                owned = [p for p in obs["planets"] if p[1] == player]
+                if owned and owned[0][5] >= 5:
+                    ships = max(1, int(owned[0][5] // 2))
+                    actions[player].append([owned[0][0], 0.25 + player * 2.0 + t * 0.01, ships])
+        return actions
+
+    seed = 42
+    kaggle_env = make("orbit_wars", configuration={"seed": seed}, debug=False)
+    kaggle_env.reset(2)
+    fast_env = FastOrbitWarsEnv(num_players=2, seed=seed, opponent_policy="none")
+    fast_env.reset(seed=seed)
+
+    for t in range(121):
+        kaggle_obs = obs_from_kaggle(kaggle_env)
+        fast_obs = fast_env._get_obs(0)
+        assert kaggle_obs["step"] == fast_obs["step"]
+        assert len(kaggle_obs["planets"]) == len(fast_obs["planets"])
+        assert len(kaggle_obs["fleets"]) == len(fast_obs["fleets"])
+
+        for expected, actual in zip(kaggle_obs["planets"], fast_obs["planets"]):
+            assert np.allclose(expected, actual, atol=1e-8), (t, expected, actual)
+        for expected, actual in zip(kaggle_obs["fleets"], fast_obs["fleets"]):
+            assert np.allclose(expected, actual, atol=1e-8), (t, expected, actual)
+
+        if t == 120:
+            break
+        actions = scripted_actions(fast_obs, t)
+        kaggle_env.step(actions)
+        fast_env.step(actions[0], opponent_actions=[actions[1]])
+
+    print("test_fast_env_matches_kaggle_scripted_actions: PASS")
+
+
 def test_material_accounting():
     """compute_material sums ships on owned planets."""
     from env import OrbitWarsEnv
@@ -191,5 +240,6 @@ if __name__ == "__main__":
     test_fleet_speed_range()
     test_sun_crossing_detection()
     test_env_wrapper_reset_and_step()
+    test_fast_env_matches_kaggle_scripted_actions()
     test_material_accounting()
     print("\nAll environment tests passed!")

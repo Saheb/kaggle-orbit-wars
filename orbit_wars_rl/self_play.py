@@ -12,14 +12,33 @@ import torch
 
 from env import OrbitWarsEnv
 from features import extract_features
-from action_mask import compute_action_masks, actions_from_policy
-from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS
+from action_mask import (
+    compute_action_masks,
+    actions_from_policy,
+    actions_from_sampled_policy,
+    _ship_bin_to_count,
+)
+from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH
 
 
 class Transition:
-    __slots__ = ['obs', 'features', 'masks', 'actions', 'log_probs', 'reward', 'done', 'value']
+    __slots__ = [
+        'obs', 'features', 'masks', 'actions', 'log_probs', 'reward', 'done',
+        'value', 'bc_targets',
+    ]
 
-    def __init__(self, obs, features, masks, actions, log_probs, reward, done, value):
+    def __init__(
+        self,
+        obs,
+        features,
+        masks,
+        actions,
+        log_probs,
+        reward,
+        done,
+        value,
+        bc_targets=None,
+    ):
         self.obs = obs
         self.features = features
         self.masks = masks
@@ -28,6 +47,7 @@ class Transition:
         self.reward = reward
         self.done = done
         self.value = value
+        self.bc_targets = bc_targets
 
 
 class OpponentPool:
@@ -45,6 +65,62 @@ class OpponentPool:
 
     def __len__(self):
         return len(self.checkpoints)
+
+
+def _material_from_obs(obs, player):
+    total = 0.0
+    for p in obs["planets"]:
+        if p[1] == player:
+            total += p[5]
+    for f in obs["fleets"]:
+        if f[1] == player:
+            total += f[6]
+    return total
+
+
+def _find_angle_bin(angle_rad: float) -> int:
+    return int(float(angle_rad) / ANGLE_BIN_WIDTH) % NUM_ANGLE_BINS
+
+
+def _find_ship_bin(ships: int, max_ships: int = 10000) -> int:
+    best_bin, best_diff = 0, float("inf")
+    for b in range(NUM_SHIP_BINS):
+        count = _ship_bin_to_count(b, max_ships)
+        diff = abs(count - int(ships))
+        if diff < best_diff:
+            best_bin, best_diff = b, diff
+    return best_bin
+
+
+def teacher_targets_from_action(obs, action, masks, max_owned: int = 10):
+    """Convert teacher moves into per-owned-slot BC targets."""
+    player = obs.get("player", 0)
+    planets = obs["planets"]
+    owned_indices = masks["owned_indices"].cpu().numpy()
+    max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
+    n_owned = masks["owned_count"]
+
+    pid_to_slot = {}
+    for slot in range(min(n_owned, max_owned)):
+        pidx = int(owned_indices[slot])
+        if pidx < len(planets):
+            pid_to_slot[int(planets[pidx][0])] = slot
+
+    fire = torch.zeros(max_owned, dtype=torch.long)
+    angle = torch.zeros(max_owned, dtype=torch.long)
+    ship = torch.zeros(max_owned, dtype=torch.long)
+
+    for move in action or []:
+        if len(move) < 3:
+            continue
+        slot = pid_to_slot.get(int(move[0]))
+        if slot is None:
+            continue
+        fire[slot] = 1
+        angle[slot] = _find_angle_bin(float(move[1]))
+        ship[slot] = _find_ship_bin(int(move[2]), int(max_ships[slot]))
+
+    return {"fire": fire, "angle": angle, "ship": ship}
 
 
 def _policy_forward(model, obs, player, num_players, device):
@@ -121,6 +197,7 @@ def collect_rollout(
     epsilon=0.0,
     shaping_coef=0.0,
     opponent_model=None,
+    teacher_agent=None,
 ):
     """Collect one episode of transitions using the current policy.
 
@@ -150,6 +227,7 @@ def collect_rollout(
     prev_material = env.compute_material(0)
 
     while not done and step < num_steps:
+        prev_obs = obs
         player = obs["player"]
 
         outputs, features, masks = _policy_forward(model, obs, player, env.num_players, device)
@@ -167,12 +245,20 @@ def collect_rollout(
         log_prob_angle = angle_dist.log_prob(angle_action)
         log_prob_ships = ship_dist.log_prob(ship_action)
 
-        # Convert to env actions (always on CPU)
-        env_actions = actions_from_policy(
-            outputs["fire_logits"], outputs["angle_logits"], outputs["ship_logits"],
+        # Convert the sampled action to env actions. PPO log-probs must describe
+        # the same action that is applied to the environment.
+        env_actions = actions_from_sampled_policy(
+            fire_action, angle_action, ship_action,
             {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()},
             obs, player,
         )
+        bc_targets = None
+        if teacher_agent is not None:
+            bc_targets = teacher_targets_from_action(
+                prev_obs,
+                teacher_agent(prev_obs),
+                {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()},
+            )
 
         # Compute opponent actions if self-playing
         opponent_actions = None
@@ -198,7 +284,7 @@ def collect_rollout(
             step_reward = 0.0
 
         transition = Transition(
-            obs=obs,
+            obs=prev_obs,
             features={k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in features.items()},
             masks={k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()},
             actions={
@@ -214,6 +300,7 @@ def collect_rollout(
             reward=step_reward,
             done=done,
             value=value,
+            bc_targets=bc_targets,
         )
         transitions.append(transition)
         step += 1
@@ -235,6 +322,7 @@ def collect_rollouts_vec(
     lam: float = 0.95,
     epsilon: float = 0.0,
     shaping_coef: float = 0.0,
+    teacher_agent=None,
 ):
     """Collect batch_size transitions from N environments in parallel.
 
@@ -259,6 +347,7 @@ def collect_rollouts_vec(
 
     # Initial reset
     obs_data = vec_pool.reset()
+    prev_materials = [_material_from_obs(x["obs"], x["obs"].get("player", 0)) for x in obs_data]
 
     while len(completed) < batch_size:
         # ---- Batch model inference ----------------------------------------
@@ -293,8 +382,8 @@ def collect_rollouts_vec(
                 eo, fire_m, angle_m, torch.device("cpu"), uniform=use_uniform
             )
 
-            env_actions = actions_from_policy(
-                eo["fire_logits"], eo["angle_logits"], eo["ship_logits"],
+            env_actions = actions_from_sampled_policy(
+                fa, aa, sa,
                 {
                     "fire_mask":   fire_m,
                     "angle_mask":  angle_m,
@@ -305,8 +394,24 @@ def collect_rollouts_vec(
                 },
                 obs_data[i]["obs"], obs_data[i]["obs"].get("player", 0),
             )
+            bc_targets = None
+            if teacher_agent is not None:
+                teacher_obs = obs_data[i]["obs"]
+                bc_targets = teacher_targets_from_action(
+                    teacher_obs,
+                    teacher_agent(teacher_obs),
+                    {
+                        "fire_mask": fire_m,
+                        "angle_mask": angle_m,
+                        "slot_valid": masks["slot_valid"][i:i+1],
+                        "owned_indices": masks["owned_indices"][i],
+                        "max_ships": masks["max_ships"][i:i+1],
+                        "owned_count": masks["owned_counts"][i],
+                    },
+                )
             all_actions.append(env_actions)
             env_data.append({
+                "obs": obs_data[i]["obs"],
                 "features": {
                     "planet_features": feats["planet_features"][i],
                     "fleet_features":  feats["fleet_features"][i],
@@ -331,6 +436,7 @@ def collect_rollouts_vec(
                     "ships": sd.log_prob(sa),
                 },
                 "value": eo["value"].item(),
+                "bc_targets": bc_targets,
             })
 
         # Step all envs (parallel in workers)
@@ -340,10 +446,16 @@ def collect_rollouts_vec(
         obs_data = []
         for i, (sr, ed) in enumerate(zip(step_results, env_data)):
             done = sr["done"]
-            step_reward = 0.0  # shaping placeholder
+            player = sr["obs"].get("player", 0)
+            if shaping_coef > 0.0 and not done:
+                curr_material = _material_from_obs(sr["obs"], player)
+                step_reward = shaping_coef * (curr_material - prev_materials[i])
+                prev_materials[i] = curr_material
+            else:
+                step_reward = 0.0
 
             t = Transition(
-                obs=sr["obs"],
+                obs=ed["obs"],
                 features=ed["features"],
                 masks=ed["masks"],
                 actions=ed["actions"],
@@ -351,6 +463,7 @@ def collect_rollouts_vec(
                 reward=step_reward,
                 done=done,
                 value=ed["value"],
+                bc_targets=ed["bc_targets"],
             )
             ep_transitions[i].append(t)
 
@@ -366,6 +479,7 @@ def collect_rollouts_vec(
                     completed.append((tt, float(a), float(r)))
                 ep_rewards.append(term_r)
                 ep_transitions[i] = []
+                prev_materials[i] = _material_from_obs(sr["obs"], player)
 
             # Worker already auto-reset on done; obs_data carries new obs
             obs_data.append(sr)
@@ -423,7 +537,7 @@ def make_batch(transitions, advantages, returns, device="cpu"):
     adv_tensor = torch.tensor(advantages, dtype=torch.float32)
     ret_tensor = torch.tensor(returns, dtype=torch.float32)
 
-    return {
+    out = {
         "planet_features": planet_features,
         "fleet_features": fleet_features,
         "global_features": global_features,
@@ -447,6 +561,15 @@ def make_batch(transitions, advantages, returns, device="cpu"):
         "returns": ret_tensor,
         "old_values": old_values,
     }
+
+    if transitions and transitions[0].bc_targets is not None:
+        out["bc_targets"] = {
+            "fire": torch.stack([t.bc_targets["fire"] for t in transitions]),
+            "angle": torch.stack([t.bc_targets["angle"] for t in transitions]),
+            "ship": torch.stack([t.bc_targets["ship"] for t in transitions]),
+        }
+
+    return out
 
 
 def make_minibatches(batch, num_minibatches, device="cpu"):

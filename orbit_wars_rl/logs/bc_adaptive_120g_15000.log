@@ -1,0 +1,109 @@
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+Collecting heuristic trajectories...
+  Collected 20/120 games, 2009 transitions so far
+  Collected 40/120 games, 3887 transitions so far
+  Collected 60/120 games, 5765 transitions so far
+  Collected 80/120 games, 7801 transitions so far
+  Collected 100/120 games, 9604 transitions so far
+  Collected 120/120 games, 11348 transitions so far
+Collected 11348 raw transitions
+Converting to training samples...
+Usable samples: 11348
+BC training: 10214 train / 1134 val samples
+Steps: 15000, batch: 128, ~79 steps/epoch, ~189 epochs
+  step  100 | loss 5.6182 | fire 0.5194 | angle 3.6075 | ship 1.4912 | lr 3.00e-04
+  step  200 | loss 5.5731 | fire 0.5340 | angle 3.4969 | ship 1.5423 | lr 3.00e-04
+  step  300 | loss 5.2260 | fire 0.5383 | angle 3.3589 | ship 1.3289 | lr 3.00e-04
+  step  400 | loss 5.0573 | fire 0.5086 | angle 3.3517 | ship 1.1970 | lr 3.00e-04
+  step  500 | loss 4.8650 | fire 0.4672 | angle 3.2461 | ship 1.1517 | lr 2.99e-04
+  step  600 | loss 4.9841 | fire 0.4731 | angle 3.2321 | ship 1.2788 | lr 2.99e-04
+  step  700 | loss 4.8376 | fire 0.4733 | angle 3.1865 | ship 1.1777 | lr 2.99e-04
+  step  800 | loss 4.7456 | fire 0.4655 | angle 3.1683 | ship 1.1118 | lr 2.98e-04
+  step  900 | loss 4.7169 | fire 0.4321 | angle 3.1487 | ship 1.1361 | lr 2.98e-04
+  step 1000 | loss 4.7981 | fire 0.4303 | angle 3.2201 | ship 1.1477 | lr 2.97e-04
+  step 1100 | loss 4.6880 | fire 0.4626 | angle 3.1525 | ship 1.0729 | lr 2.96e-04
+  step 1200 | loss 4.7015 | fire 0.4381 | angle 3.1037 | ship 1.1597 | lr 2.96e-04
+  step 1300 | loss 4.4594 | fire 0.4412 | angle 3.0105 | ship 1.0078 | lr 2.95e-04
+  step 1400 | loss 4.6981 | fire 0.4307 | angle 3.0406 | ship 1.2267 | lr 2.94e-04
+  step 1500 | loss 4.6094 | fire 0.4563 | angle 3.0425 | ship 1.1107 | lr 2.93e-04
+  step 1600 | loss 4.5638 | fire 0.3973 | angle 3.0364 | ship 1.1302 | lr 2.92e-04
+  step 1700 | loss 4.5774 | fire 0.4721 | angle 3.0338 | ship 1.0714 | lr 2.92e-04
+  step 1800 | loss 4.2816 | fire 0.4368 | angle 2.8319 | ship 1.0129 | lr 2.91e-04
+  step 1900 | loss 4.8567 | fire 0.4233 | angle 3.3541 | ship 1.0792 | lr 2.89e-04
+  step 2000 | loss 4.4491 | fire 0.4210 | angle 3.0398 | ship 0.9883 | lr 2.88e-04
+  step 2100 | loss 4.4827 | fire 0.4126 | angle 2.9846 | ship 1.0854 | lr 2.87e-04
+  step 2200 | loss 4.5143 | fire 0.4043 | angle 3.1326 | ship 0.9774 | lr 2.86e-04
+  step 2300 | loss 4.1910 | fire 0.3951 | angle 2.8586 | ship 0.9373 | lr 2.85e-04
+  step 2400 | loss 4.2260 | fire 0.4082 | angle 2.7989 | ship 1.0189 | lr 2.83e-04
+  step 2500 | loss 4.1325 | fire 0.3605 | angle 2.8051 | ship 0.9668 | lr 2.82e-04
+  step 2600 | loss 4.1335 | fire 0.3666 | angle 2.7911 | ship 0.9758 | lr 2.80e-04
+  step 2700 | loss 3.8700 | fire 0.3836 | angle 2.6159 | ship 0.8705 | lr 2.79e-04
+  step 2800 | loss 4.1979 | fire 0.4490 | angle 2.7667 | ship 0.9822 | lr 2.77e-04
+  step 2900 | loss 3.9304 | fire 0.3690 | angle 2.5876 | ship 0.9737 | lr 2.76e-04
+  step 3000 | loss 3.7848 | fire 0.3807 | angle 2.5606 | ship 0.8436 | lr 2.74e-04
+  step 3100 | loss 3.9871 | fire 0.3928 | angle 2.6807 | ship 0.9136 | lr 2.73e-04
+  step 3200 | loss 3.7899 | fire 0.3742 | angle 2.6245 | ship 0.7912 | lr 2.71e-04
+  step 3300 | loss 3.8120 | fire 0.3592 | angle 2.5888 | ship 0.8640 | lr 2.69e-04
+  step 3400 | loss 4.4162 | fire 0.4047 | angle 3.0725 | ship 0.9390 | lr 2.67e-04
+  step 3500 | loss 3.8783 | fire 0.3893 | angle 2.5895 | ship 0.8995 | lr 2.65e-04
+  step 3600 | loss 3.8050 | fire 0.3873 | angle 2.5973 | ship 0.8204 | lr 2.63e-04
+  step 3700 | loss 3.6833 | fire 0.3875 | angle 2.4225 | ship 0.8733 | lr 2.61e-04
+  step 3800 | loss 3.9119 | fire 0.3899 | angle 2.6649 | ship 0.8571 | lr 2.59e-04
+  step 3900 | loss 3.8050 | fire 0.3941 | angle 2.5862 | ship 0.8247 | lr 2.57e-04
+  step 4000 | loss 4.3342 | fire 0.3691 | angle 3.0498 | ship 0.9153 | lr 2.55e-04
+  step 4100 | loss 3.6809 | fire 0.3743 | angle 2.5311 | ship 0.7755 | lr 2.53e-04
+  step 4200 | loss 3.4663 | fire 0.3530 | angle 2.3336 | ship 0.7796 | lr 2.51e-04
+  step 4300 | loss 3.4669 | fire 0.3838 | angle 2.3558 | ship 0.7273 | lr 2.49e-04
+  step 4400 | loss 3.5674 | fire 0.3398 | angle 2.5405 | ship 0.6871 | lr 2.47e-04
+  step 4500 | loss 3.4651 | fire 0.3326 | angle 2.4239 | ship 0.7085 | lr 2.44e-04
+  step 4600 | loss 3.5551 | fire 0.3607 | angle 2.4005 | ship 0.7940 | lr 2.42e-04
+  step 4700 | loss 3.5163 | fire 0.3611 | angle 2.3688 | ship 0.7864 | lr 2.40e-04
+  step 4800 | loss 3.4946 | fire 0.3257 | angle 2.4643 | ship 0.7046 | lr 2.37e-04
+  step 4900 | loss 3.4129 | fire 0.3359 | angle 2.4877 | ship 0.5893 | lr 2.35e-04
+  step 5000 | loss 3.4307 | fire 0.3496 | angle 2.3807 | ship 0.7004 | lr 2.33e-04
+  step 5100 | loss 3.4876 | fire 0.3758 | angle 2.4147 | ship 0.6971 | lr 2.30e-04
+  step 5200 | loss 4.0469 | fire 0.3762 | angle 2.9556 | ship 0.7151 | lr 2.28e-04
+  step 5300 | loss 3.3618 | fire 0.3683 | angle 2.3234 | ship 0.6701 | lr 2.25e-04
+  step 5400 | loss 3.1981 | fire 0.3496 | angle 2.2325 | ship 0.6160 | lr 2.22e-04
+  step 5500 | loss 3.3754 | fire 0.3678 | angle 2.3089 | ship 0.6988 | lr 2.20e-04
+  step 5600 | loss 3.3355 | fire 0.3833 | angle 2.2773 | ship 0.6749 | lr 2.17e-04
+  step 5700 | loss 3.6779 | fire 0.3572 | angle 2.6750 | ship 0.6457 | lr 2.15e-04
+  step 5800 | loss 3.5157 | fire 0.3298 | angle 2.6078 | ship 0.5782 | lr 2.12e-04
+  step 5900 | loss 3.2853 | fire 0.3645 | angle 2.1963 | ship 0.7244 | lr 2.09e-04
+  step 6000 | loss 2.9025 | fire 0.3676 | angle 1.9866 | ship 0.5483 | lr 2.07e-04
+  step 6100 | loss 3.1089 | fire 0.3263 | angle 2.1734 | ship 0.6092 | lr 2.04e-04
+  step 6200 | loss 3.3091 | fire 0.3059 | angle 2.4125 | ship 0.5907 | lr 2.01e-04
+  Early stopping at epoch 78 (step 6240): no val improvement for 47 epochs
+  Restored best weights (val_loss=5.2177)
+
+BC validation: {'val_fire_loss': 0.4094517429669698, 'val_angle_loss': 3.6719319820404053, 'val_ship_loss': 1.1363266905148823, 'val_loss': 5.21771044201321}
+BC model saved → checkpoints/bc_warmstart.pt
+
+BC validation complete!
+  Final val loss: 5.2177

@@ -15,7 +15,7 @@ from features import extract_features
 from action_mask import compute_action_masks, actions_from_policy
 
 
-def build_agent_fn(model: EntityTransformer, device: torch.device):
+def build_agent_fn(model: EntityTransformer, device: torch.device, fire_threshold: float = 0.5):
     """Return a kaggle_environments-compatible agent function wrapping the model."""
     model.eval()
 
@@ -59,6 +59,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device):
             outputs["ship_logits"].cpu(),
             {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()},
             obs, player,
+            fire_threshold=fire_threshold,
         )
 
     return agent_fn
@@ -71,6 +72,7 @@ def evaluate_against_baseline(
     seed_start: int = 0,
     opponent: str = "random",
     num_players: int = 2,
+    fire_threshold: float = 0.5,
 ) -> dict:
     """Evaluate trained policy against a baseline using kaggle_environments.
 
@@ -80,7 +82,7 @@ def evaluate_against_baseline(
     """
     from kaggle_environments import make
 
-    agent_fn = build_agent_fn(model, device)
+    agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold)
     opponents = [opponent] * (num_players - 1)
     agents = [agent_fn] + opponents
 
@@ -122,12 +124,15 @@ def evaluate_against_baseline(
 
 
 def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
-                        opponent: str = "random"):
+                        opponent: str = "random", fire_threshold: float = 0.5):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
     model = EntityTransformer(cfg.model).to(device)
 
-    state_dict = torch.load(params_path, map_location="cpu", weights_only=True)
+    try:
+        state_dict = torch.load(params_path, map_location="cpu", weights_only=True)
+    except Exception:
+        state_dict = torch.load(params_path, map_location="cpu", weights_only=False)
     if "model" in state_dict:
         state_dict = state_dict["model"]
     model.load_state_dict(state_dict)
@@ -138,10 +143,12 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         num_games=num_games,
         opponent=opponent,
         num_players=cfg.env.num_players,
+        fire_threshold=fire_threshold,
     )
 
     print(f"Win rate vs {opponent}: {results['win_rate']:.2%}  "
           f"({results['wins']}/{results['total_games']})")
+    print(f"Fire threshold: {fire_threshold}")
     print(f"Avg material: {results['avg_material']:.1f}")
     for r in results["results"][:5]:
         print(f"  seed={r['seed']} win={r['win']} "
@@ -157,8 +164,15 @@ if __name__ == "__main__":
     parser.add_argument("--opponent", default="random",
                         help="'random' or path to agent .py file")
     parser.add_argument("--num-players", type=int, choices=[2, 4], default=2)
+    parser.add_argument("--fire-threshold", type=float, default=0.5)
     args = parser.parse_args()
 
     cfg = Config()
     cfg.env.num_players = args.num_players
-    evaluate_checkpoint(args.checkpoint, cfg, num_games=args.games, opponent=args.opponent)
+    evaluate_checkpoint(
+        args.checkpoint,
+        cfg,
+        num_games=args.games,
+        opponent=args.opponent,
+        fire_threshold=args.fire_threshold,
+    )

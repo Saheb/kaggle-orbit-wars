@@ -100,7 +100,7 @@ def _point_segment_distance_array(px, py, ax_arr, ay_arr, bx_arr, by_arr):
     return np.sqrt((px - proj_x) ** 2 + (py - proj_y) ** 2)
 
 
-def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, player):
+def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, player, fire_threshold=0.5):
     """Convert policy outputs to environment action format.
 
     Returns: list of [from_planet_id, angle_radians, ship_count]
@@ -110,7 +110,7 @@ def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, playe
     owned_indices = masks["owned_indices"].cpu().numpy()
     max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
 
-    fire_decisions = (torch.sigmoid(fire_probs) > 0.5).cpu().numpy().squeeze(0)
+    fire_decisions = (torch.sigmoid(fire_probs) > fire_threshold).cpu().numpy().squeeze(0)
     angle_bins = torch.argmax(angle_logits, dim=-1).cpu().numpy().squeeze(0)
     ship_bins = torch.argmax(ship_logits, dim=-1).cpu().numpy().squeeze(0)
 
@@ -128,6 +128,37 @@ def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, playe
         from_id = int(planets[pidx][0])
 
         angle = float(angle_bins[slot] * ANGLE_BIN_WIDTH + ANGLE_BIN_WIDTH / 2)
+        ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]))
+        if ships > 0 and planets[pidx][5] > ships:
+            moves.append([from_id, angle, ships])
+
+    return moves
+
+
+def actions_from_sampled_policy(fire_action, angle_action, ship_action, masks, obs, player):
+    """Convert sampled policy action tensors to environment action format."""
+    planets = obs["planets"]
+    owned_indices = masks["owned_indices"].cpu().numpy()
+    max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
+
+    fire_decisions = fire_action.cpu().numpy().squeeze(0).astype(bool)
+    angle_bins = angle_action.cpu().numpy().squeeze(0)
+    ship_bins = ship_action.cpu().numpy().squeeze(0)
+
+    moves = []
+    max_moves = 8
+    for slot in range(min(masks["owned_count"], fire_decisions.shape[0])):
+        if len(moves) >= max_moves:
+            break
+        if not fire_decisions[slot]:
+            continue
+
+        pidx = int(owned_indices[slot])
+        if pidx >= len(planets):
+            continue
+        from_id = int(planets[pidx][0])
+
+        angle = float(int(angle_bins[slot]) * ANGLE_BIN_WIDTH + ANGLE_BIN_WIDTH / 2)
         ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]))
         if ships > 0 and planets[pidx][5] > ships:
             moves.append([from_id, angle, ships])

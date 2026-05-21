@@ -1,0 +1,195 @@
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+Training on device: mps
+Model params: 307,482
+Resumed model weights from checkpoints/bc_warmstart.pt
+
+Starting training: 1,000,000 env steps
+Batch size: 2048, Minibatches: 4
+Self-play pool: 8 snapshots
+Shaping coef: 0.001
+Parallel envs: 4
+
+Spawning 4 environment workers...
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+Episode    40 | Steps     10,240 | SPS      32 | Reward  +1.00 | Clip 0.313 | KL 4.3867 | V_loss 0.3200 | LR 0.000005
+Episode    80 | Steps     20,480 | SPS      30 | Reward  +0.97 | Clip 0.293 | KL 3.1700 | V_loss 0.2588 | LR 0.000010
+Episode   120 | Steps     30,720 | SPS      32 | Reward  +0.98 | Clip 0.286 | KL 3.2656 | V_loss 0.1949 | LR 0.000014
+Episode   160 | Steps     40,960 | SPS      33 | Reward  +0.96 | Clip 0.278 | KL 3.1511 | V_loss 0.2297 | LR 0.000019
+Episode   200 | Steps     51,200 | SPS      33 | Reward  +0.96 | Clip 0.276 | KL 3.4628 | V_loss 0.2208 | LR 0.000024
+Episode   240 | Steps     61,440 | SPS      32 | Reward  +0.96 | Clip 0.285 | KL 2.8188 | V_loss 0.1050 | LR 0.000029
+Episode   280 | Steps     71,680 | SPS      33 | Reward  +0.94 | Clip 0.291 | KL 3.1074 | V_loss 0.1385 | LR 0.000034
+Episode   320 | Steps     81,920 | SPS      33 | Reward  +0.94 | Clip 0.295 | KL 2.7528 | V_loss 0.1552 | LR 0.000038
+Episode   360 | Steps     92,160 | SPS      35 | Reward  +0.90 | Clip 0.300 | KL 3.1580 | V_loss 0.1916 | LR 0.000043
+Episode   400 | Steps    102,400 | SPS      37 | Reward  +0.94 | Clip 0.305 | KL 2.6146 | V_loss 0.1785 | LR 0.000048
+Episode   440 | Steps    112,640 | SPS      38 | Reward  +0.96 | Clip 0.307 | KL 3.1484 | V_loss 0.1154 | LR 0.000053
+Episode   480 | Steps    122,880 | SPS      39 | Reward  +1.00 | Clip 0.310 | KL 3.1710 | V_loss 0.0908 | LR 0.000058
+Episode   520 | Steps    133,120 | SPS      39 | Reward  +0.94 | Clip 0.315 | KL 3.1413 | V_loss 0.0872 | LR 0.000062
+Episode   570 | Steps    147,456 | SPS      40 | Reward  +0.94 | Clip 0.321 | KL 2.8707 | V_loss 0.1262 | LR 0.000069
+Episode   610 | Steps    157,696 | SPS      40 | Reward  +0.94 | Clip 0.326 | KL 2.6934 | V_loss 0.0780 | LR 0.000074
+Episode   650 | Steps    167,936 | SPS      40 | Reward  +0.98 | Clip 0.330 | KL 2.6535 | V_loss 0.1023 | LR 0.000079
+Episode   690 | Steps    178,176 | SPS      40 | Reward  +0.94 | Clip 0.334 | KL 2.5143 | V_loss 0.0609 | LR 0.000084
+Episode   730 | Steps    188,416 | SPS      40 | Reward  +0.94 | Clip 0.338 | KL 2.8153 | V_loss 0.0583 | LR 0.000088
+Episode   770 | Steps    198,656 | SPS      41 | Reward  +0.96 | Clip 0.343 | KL 2.8004 | V_loss 0.0618 | LR 0.000093
+Episode   810 | Steps    208,896 | SPS      41 | Reward  +0.98 | Clip 0.349 | KL 2.2089 | V_loss 0.0781 | LR 0.000098
+Episode   850 | Steps    219,136 | SPS      41 | Reward  +0.98 | Clip 0.355 | KL 2.3240 | V_loss 0.0647 | LR 0.000103
+Episode   890 | Steps    229,376 | SPS      42 | Reward  +0.96 | Clip 0.365 | KL 2.6766 | V_loss 0.0546 | LR 0.000108
+Episode   930 | Steps    239,616 | SPS      42 | Reward  +0.98 | Clip 0.375 | KL 2.4564 | V_loss 0.0632 | LR 0.000112
+Episode   970 | Steps    249,856 | SPS      42 | Reward  +0.98 | Clip 0.386 | KL 1.7984 | V_loss 0.0442 | LR 0.000117
+Episode  1010 | Steps    260,096 | SPS      42 | Reward  +0.94 | Clip 0.395 | KL 2.5932 | V_loss 0.0537 | LR 0.000122
+Episode  1050 | Steps    270,336 | SPS      43 | Reward  +0.90 | Clip 0.401 | KL 2.3837 | V_loss 0.0409 | LR 0.000127
+Episode  1090 | Steps    280,576 | SPS      43 | Reward  +0.90 | Clip 0.410 | KL 2.1998 | V_loss 0.0875 | LR 0.000132
+Episode  1130 | Steps    290,816 | SPS      43 | Reward  +0.94 | Clip 0.416 | KL 1.7641 | V_loss 0.0677 | LR 0.000136
+Episode  1170 | Steps    301,056 | SPS      43 | Reward  +0.96 | Clip 0.425 | KL 2.5814 | V_loss 0.0371 | LR 0.000141
+Episode  1210 | Steps    311,296 | SPS      43 | Reward  +1.00 | Clip 0.434 | KL 2.0562 | V_loss 0.0395 | LR 0.000146
+Episode  1250 | Steps    321,536 | SPS      43 | Reward  +1.00 | Clip 0.444 | KL 2.0106 | V_loss 0.0471 | LR 0.000151
+Episode  1290 | Steps    331,776 | SPS      44 | Reward  +1.00 | Clip 0.453 | KL 2.0456 | V_loss 0.0710 | LR 0.000156
+Episode  1330 | Steps    342,016 | SPS      44 | Reward  +1.00 | Clip 0.462 | KL 1.9143 | V_loss 0.0585 | LR 0.000160
+Episode  1370 | Steps    352,256 | SPS      44 | Reward  +0.96 | Clip 0.472 | KL 1.4440 | V_loss 0.0531 | LR 0.000165
+Episode  1410 | Steps    362,496 | SPS      44 | Reward  +0.94 | Clip 0.481 | KL 1.5822 | V_loss 0.0565 | LR 0.000170
+Episode  1450 | Steps    372,736 | SPS      44 | Reward  +0.92 | Clip 0.488 | KL 2.3392 | V_loss 0.0318 | LR 0.000175
+Episode  1490 | Steps    382,976 | SPS      44 | Reward  +0.96 | Clip 0.495 | KL 1.9568 | V_loss 0.0517 | LR 0.000180
+Episode  1530 | Steps    393,216 | SPS      44 | Reward  +0.92 | Clip 0.502 | KL 2.2602 | V_loss 0.0409 | LR 0.000184
+Episode  1570 | Steps    403,456 | SPS      44 | Reward  +0.86 | Clip 0.507 | KL 1.7575 | V_loss 0.0544 | LR 0.000189
+Episode  1610 | Steps    413,696 | SPS      45 | Reward  +0.82 | Clip 0.514 | KL 1.7985 | V_loss 0.0417 | LR 0.000194
+Episode  1650 | Steps    423,936 | SPS      45 | Reward  +0.86 | Clip 0.521 | KL 1.6382 | V_loss 0.0302 | LR 0.000199
+Episode  1690 | Steps    434,176 | SPS      45 | Reward  +0.94 | Clip 0.526 | KL 2.0952 | V_loss 0.0433 | LR 0.000204
+Episode  1730 | Steps    444,416 | SPS      45 | Reward  +0.94 | Clip 0.531 | KL 1.7102 | V_loss 0.0726 | LR 0.000208
+Episode  1770 | Steps    454,656 | SPS      45 | Reward  +0.96 | Clip 0.536 | KL 1.6472 | V_loss 0.0397 | LR 0.000213
+Episode  1810 | Steps    464,896 | SPS      45 | Reward  +0.94 | Clip 0.542 | KL 1.6670 | V_loss 0.0295 | LR 0.000218
+Episode  1850 | Steps    475,136 | SPS      45 | Reward  +0.94 | Clip 0.549 | KL 1.5519 | V_loss 0.0426 | LR 0.000223
+Episode  1890 | Steps    485,376 | SPS      44 | Reward  +0.92 | Clip 0.554 | KL 1.6613 | V_loss 0.0479 | LR 0.000228
+Episode  1930 | Steps    495,616 | SPS      44 | Reward  +0.92 | Clip 0.559 | KL 1.5528 | V_loss 0.0239 | LR 0.000232
+Episode  1970 | Steps    505,856 | SPS      44 | Reward  +0.94 | Clip 0.562 | KL 1.6754 | V_loss 0.0274 | LR 0.000237

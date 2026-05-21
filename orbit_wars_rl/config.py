@@ -48,6 +48,7 @@ class PPOConfig:
     entropy_coef_fire: float = 0.01
     entropy_coef_angle: float = 0.02
     entropy_coef_ships: float = 0.01
+    bc_coef: float = 0.0
     value_coef: float = 0.5
     shaping_coef: float = 0.001
     max_grad_norm: float = 0.5

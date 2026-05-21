@@ -28,7 +28,13 @@ import torch
 # Worker process
 # ---------------------------------------------------------------------------
 
-def _worker_fn(conn: Connection, worker_id: int, num_players: int):
+def _worker_fn(
+    conn: Connection,
+    worker_id: int,
+    num_players: int,
+    opponent_policy: str,
+    env_backend: str,
+):
     """Worker entry point — runs in a separate process.
 
     Protocol:
@@ -41,11 +47,16 @@ def _worker_fn(conn: Connection, worker_id: int, num_players: int):
     if _dir not in sys.path:
         sys.path.insert(0, _dir)
 
-    from env import OrbitWarsEnv
+    if env_backend == "fast":
+        from fast_env import FastOrbitWarsEnv as EnvCls
+    elif env_backend == "kaggle":
+        from env import OrbitWarsEnv as EnvCls
+    else:
+        raise ValueError(f"Unknown env_backend: {env_backend!r}")
     from features import extract_features
     from action_mask import compute_action_masks
 
-    env = OrbitWarsEnv(num_players=num_players)
+    env = EnvCls(num_players=num_players, opponent_policy=opponent_policy)
 
     def _extract(obs):
         player = obs.get("player", 0)
@@ -119,10 +130,19 @@ class VecEnvPool:
             step_data = pool.step(actions_list)
     """
 
-    def __init__(self, num_envs: int, num_players: int = 2, base_seed: int = 0):
+    def __init__(
+        self,
+        num_envs: int,
+        num_players: int = 2,
+        base_seed: int = 0,
+        opponent_policy: str = "random",
+        env_backend: str = "kaggle",
+    ):
         self.num_envs = num_envs
         self.num_players = num_players
         self.base_seed = base_seed
+        self.opponent_policy = opponent_policy
+        self.env_backend = env_backend
         self._closed = False
 
         ctx = mp.get_context("spawn")
@@ -133,7 +153,7 @@ class VecEnvPool:
             parent_conn, child_conn = ctx.Pipe(duplex=True)
             p = ctx.Process(
                 target=_worker_fn,
-                args=(child_conn, i, num_players),
+                args=(child_conn, i, num_players, opponent_policy, env_backend),
                 daemon=True,
             )
             p.start()
