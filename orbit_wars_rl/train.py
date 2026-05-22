@@ -437,6 +437,8 @@ if __name__ == "__main__":
     parser.add_argument("--opponent-policy", choices=["random", "starter", "none"],
                         default="random",
                         help="Fast-wrapper opponent policy for PPO rollouts")
+    parser.add_argument("--opponent-agent", type=str, default="",
+                        help="Path to a .py agent file to use as opponent (overrides --opponent-policy)")
     parser.add_argument("--env-backend", choices=["kaggle", "fast"], default="kaggle",
                         help="Rollout env backend. Eval still uses official Kaggle env.")
     parser.add_argument("--epsilon-start", type=float, default=0.1,
@@ -480,12 +482,23 @@ if __name__ == "__main__":
     if args.kl_target is not None:
         cfg.ppo.kl_target = args.kl_target
 
+    # Load a .py agent file as the callable opponent if specified.
+    # This lets us train directly against competition heuristics.
+    resolved_opponent_policy = args.opponent_policy
+    if args.opponent_agent:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("_opp_agent", args.opponent_agent)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        resolved_opponent_policy = _mod.agent
+        print(f"Opponent agent loaded from: {args.opponent_agent}")
+
     train(
         cfg,
         use_wandb=args.wandb,
         resume_from=args.resume,
         num_envs=args.num_envs,
-        opponent_policy=args.opponent_policy,
+        opponent_policy=resolved_opponent_policy,
         env_backend=args.env_backend,
         epsilon_start=args.epsilon_start,
         epsilon_final=args.epsilon_final,
