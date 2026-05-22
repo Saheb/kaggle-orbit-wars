@@ -82,6 +82,10 @@ class VecTorchEnv:
         self.step_count: torch.Tensor = None    # (N,) long
         self.angular_velocity: torch.Tensor = None  # (N,) float
         self.next_fleet_id: torch.Tensor = None     # (N,) long
+        self.done: torch.Tensor = None              # (N,) bool
+        self.rewards: torch.Tensor = None           # (N, num_players) float
+        # Seeds (per-env) so we can deterministically auto-reset
+        self.seeds: list[int] = []
 
         # Pre-computed once per reset for orbital motion
         self._planet_initial_angle: torch.Tensor = None  # (N, P) float
@@ -150,6 +154,9 @@ class VecTorchEnv:
         self.step_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.angular_velocity = torch.tensor(angular_velocities, dtype=torch.float32, device=self.device)
         self.next_fleet_id = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.rewards = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
+        self.seeds = list(seeds)
 
         self._precompute_orbital_params()
         return self._state_dict()
@@ -462,7 +469,108 @@ class VecTorchEnv:
 
         # 10. Advance step
         self.step_count = self.step_count + 1
+
+        # 11. Termination + reward
+        rewards, done = self._check_done()
+        # 12. Auto-reset done envs in-place
+        if done.any():
+            self._auto_reset(done)
         return self._state_dict()
+
+    # ---------------------------------------------------------------------
+    # Termination logic — matches fast_env._maybe_terminate
+    # Episode ends if step_count >= episode_steps - 1 OR <= 1 player alive
+    # (alive = has any owned planet or any in-flight fleet).
+    # Reward: per-env, per-player. +1 if that player has the max score AND
+    # max > 0, else -1.
+    # ---------------------------------------------------------------------
+
+    def _check_done(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (rewards: (N, num_players), done: (N,) bool).
+
+        rewards are 0 for envs not done, ±1 for envs that just terminated.
+        """
+        N = self.num_envs
+        P_ = self.num_players
+
+        # Per-player alive check: any planet owned OR any fleet owned
+        owner_p = self.planets[:, :, 1].long()         # (N, P)
+        owner_f = self.fleets[:, :, 1].long()          # (N, F)
+        # Build (N, num_players) "has any" masks
+        alive_mask = torch.zeros(N, P_, dtype=torch.bool, device=self.device)
+        for pl in range(P_):
+            has_planet = ((owner_p == pl) & self.planet_alive).any(dim=1)
+            has_fleet  = ((owner_f == pl) & self.fleet_alive).any(dim=1)
+            alive_mask[:, pl] = has_planet | has_fleet
+        n_alive = alive_mask.long().sum(dim=1)         # (N,)
+
+        time_up = self.step_count >= (self.episode_steps - 1)
+        few_left = n_alive <= 1
+        newly_done = (time_up | few_left) & ~self.done
+
+        # Scores: ships on owned planets + ships in fleets, per player.
+        scores = torch.zeros(N, P_, dtype=torch.float32, device=self.device)
+        ships_p = self.planets[:, :, 5] * self.planet_alive.float()
+        ships_f = self.fleets[:, :, 6] * self.fleet_alive.float()
+        for pl in range(P_):
+            sp = (owner_p == pl).float() * ships_p
+            sf = (owner_f == pl).float() * ships_f
+            scores[:, pl] = sp.sum(dim=1) + sf.sum(dim=1)
+        max_score, _ = scores.max(dim=1, keepdim=True)  # (N, 1)
+        wins = (scores == max_score) & (max_score > 0)
+        rewards = torch.where(wins, torch.ones_like(scores), -torch.ones_like(scores))
+        # Only return rewards for newly-done envs; zero otherwise
+        rewards = rewards * newly_done.unsqueeze(1).float()
+        self.rewards = torch.where(newly_done.unsqueeze(1), rewards, self.rewards)
+        self.done = self.done | newly_done
+        return rewards, newly_done
+
+    # ---------------------------------------------------------------------
+    # Auto-reset: pick new seeds for done envs and regenerate their state.
+    # Keeps the running training loop simple — no need for caller-side resets.
+    # ---------------------------------------------------------------------
+
+    def _auto_reset(self, done_mask: torch.Tensor):
+        """Re-generate state for envs where done_mask is True."""
+        from kaggle_environments.envs.orbit_wars.orbit_wars import generate_planets
+
+        done_idx = torch.where(done_mask)[0].cpu().tolist()
+        for env_i in done_idx:
+            seed = random.randint(0, 2**31)
+            self.seeds[env_i] = seed
+            init_rng = random.Random(seed)
+            ang_vel = init_rng.uniform(0.025, 0.05)
+            raw_planets = generate_planets(init_rng)
+            n = len(raw_planets)
+            pad = np.zeros((MAX_PLANETS, 7), dtype=np.float32)
+            for i, p in enumerate(raw_planets):
+                pad[i] = p
+            alive = np.zeros(MAX_PLANETS, dtype=bool)
+            alive[:n] = True
+            num_groups = n // 4
+            if num_groups > 0:
+                home_group = init_rng.randint(0, num_groups - 1)
+                base = home_group * 4
+                if self.num_players == 2:
+                    pad[base, 1] = 0;     pad[base, 5] = 10
+                    pad[base + 3, 1] = 1; pad[base + 3, 5] = 10
+                elif self.num_players == 4:
+                    for j in range(4):
+                        pad[base + j, 1] = j; pad[base + j, 5] = 10
+            pad[n:, 1] = -1
+
+            self.planets[env_i] = torch.from_numpy(pad).to(self.device)
+            self.init_planets[env_i] = self.planets[env_i].clone()
+            self.planet_alive[env_i] = torch.from_numpy(alive).to(self.device)
+            self.fleets[env_i] = 0
+            self.fleet_alive[env_i] = False
+            self.step_count[env_i] = 0
+            self.angular_velocity[env_i] = ang_vel
+            self.next_fleet_id[env_i] = 0
+            self.done[env_i] = False
+            self.rewards[env_i] = 0.0
+        # Re-precompute orbital params for changed envs
+        self._precompute_orbital_params()
 
 
 # -------------------------------------------------------------------------
