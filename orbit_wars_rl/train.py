@@ -33,6 +33,7 @@ def train(
     resume_from: str = "",
     num_envs: int = 1,
     opponent_policy: str = "random",
+    opponent_agent_path: str = "",   # .py path — passed to VecEnvPool workers
     env_backend: str = "kaggle",
     epsilon_start: float = 0.1,
     epsilon_final: float = 0.02,
@@ -186,6 +187,7 @@ def train(
             base_seed=cfg.seed,
             opponent_policy=opponent_policy,
             env_backend=env_backend,
+            opponent_agent_path=opponent_agent_path,
         )
         print(f"Spawning {num_envs} environment workers...")
     else:
@@ -499,6 +501,7 @@ if __name__ == "__main__":
         resume_from=args.resume,
         num_envs=args.num_envs,
         opponent_policy=resolved_opponent_policy,
+        opponent_agent_path=args.opponent_agent,
         env_backend=args.env_backend,
         epsilon_start=args.epsilon_start,
         epsilon_final=args.epsilon_final,

@@ -32,7 +32,7 @@ def _worker_fn(
     conn: Connection,
     worker_id: int,
     num_players: int,
-    opponent_policy: str,
+    opponent_policy: str,   # string OR a .py file path — never a raw callable
     env_backend: str,
 ):
     """Worker entry point — runs in a separate process.
@@ -56,7 +56,17 @@ def _worker_fn(
     from features import extract_features
     from action_mask import compute_action_masks
 
-    env = EnvCls(num_players=num_players, opponent_policy=opponent_policy)
+    # If opponent_policy is a .py file path, load the agent callable inside
+    # this worker process — avoids pickling a function across process boundary.
+    resolved_policy = opponent_policy
+    if isinstance(opponent_policy, str) and opponent_policy.endswith(".py"):
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("_opp_w", opponent_policy)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        resolved_policy = _mod.agent
+
+    env = EnvCls(num_players=num_players, opponent_policy=resolved_policy)
 
     def _extract(obs):
         player = obs.get("player", 0)
@@ -137,13 +147,16 @@ class VecEnvPool:
         base_seed: int = 0,
         opponent_policy: str = "random",
         env_backend: str = "kaggle",
+        opponent_agent_path: str = "",   # .py path overrides opponent_policy string
     ):
         self.num_envs = num_envs
         self.num_players = num_players
         self.base_seed = base_seed
-        self.opponent_policy = opponent_policy
         self.env_backend = env_backend
         self._closed = False
+
+        # Workers receive a plain string — either a policy name or a .py path.
+        worker_policy = opponent_agent_path if opponent_agent_path else opponent_policy
 
         ctx = mp.get_context("spawn")
         self._parent_conns: list[Connection] = []
@@ -153,7 +166,7 @@ class VecEnvPool:
             parent_conn, child_conn = ctx.Pipe(duplex=True)
             p = ctx.Process(
                 target=_worker_fn,
-                args=(child_conn, i, num_players, opponent_policy, env_backend),
+                args=(child_conn, i, num_players, worker_policy, env_backend),
                 daemon=True,
             )
             p.start()
