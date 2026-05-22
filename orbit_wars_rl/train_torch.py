@@ -111,7 +111,7 @@ def _act_deterministic(model, env, player):
 
 
 def eval_vs_baseline(current_model, baseline_model, device, n_games=64, episode_steps=500):
-    """Play current vs baseline. Returns (win_rate, n_completed)."""
+    """Play current vs baseline model. Returns (win_rate, n_completed)."""
     from torch_env import VecTorchEnv
     current_model.eval()
     baseline_model.eval()
@@ -136,6 +136,108 @@ def eval_vs_baseline(current_model, baseline_model, device, n_games=64, episode_
 
 
 # ----------------------------------------------------------------------------
+# Eval vs heuristic agent (e.g. ../main.py). The heuristic runs in Python
+# per-env so this is slow — keep n_games small (16-32).
+# ----------------------------------------------------------------------------
+
+def _load_heuristic(agent_path: str):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("heuristic_opp", agent_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.agent
+
+
+def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device):
+    """Convert list-of-lists [[from_pid, angle_rad, ships], ...] per env into
+    a (num_envs, MAX_OWNED, 3) action tensor."""
+    from torch_env import MAX_OWNED, NUM_ANGLE_BINS, ANGLE_BIN_WIDTH, SHIP_COUNTS
+    import math as _math
+
+    N = env.num_envs
+    owned_idx, slot_valid = env.owned_indices_for(player)   # (N, MAX_OWNED)
+    fire = torch.zeros(N, MAX_OWNED, dtype=torch.long)
+    angle_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
+    ship_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
+
+    # Gather planet ids per (env, slot)
+    gather_idx = owned_idx.unsqueeze(-1).expand(-1, -1, 7).cpu()
+    planets_cpu = env.planets.cpu()
+    src = planets_cpu.gather(1, gather_idx)        # (N, MAX_OWNED, 7)
+    sv_cpu = slot_valid.cpu()
+
+    for e in range(N):
+        moves = moves_per_env[e]
+        if not moves:
+            continue
+        # Map planet_id → slot index for this env
+        pid_to_slot = {}
+        for k in range(MAX_OWNED):
+            if sv_cpu[e, k].item():
+                pid_to_slot[int(src[e, k, 0].item())] = k
+        for mv in moves:
+            if not isinstance(mv, (list, tuple)) or len(mv) < 3:
+                continue
+            from_pid = int(mv[0])
+            slot = pid_to_slot.get(from_pid)
+            if slot is None:
+                continue
+            ang = float(mv[1]) % (2 * _math.pi)
+            ab = int(ang / ANGLE_BIN_WIDTH) % NUM_ANGLE_BINS
+            ships = int(mv[2])
+            # Find nearest ship-bin
+            best, best_diff = 0, 10**9
+            for b, c in enumerate(SHIP_COUNTS):
+                if abs(c - ships) < best_diff:
+                    best_diff, best = abs(c - ships), b
+            fire[e, slot] = 1
+            angle_bin[e, slot] = ab
+            ship_bin[e, slot] = best
+    return torch.stack([fire, angle_bin, ship_bin], dim=-1).to(device)
+
+
+def eval_vs_heuristic(current_model, heuristic_path, device, n_games=16, episode_steps=500):
+    """Play current model (player 0) vs Python heuristic (player 1).
+
+    Slow (heuristic runs in Python per env per step) so n_games defaults to 16.
+    Returns (win_rate, n_completed).
+    """
+    from torch_env import VecTorchEnv, to_legacy_obs
+    current_model.eval()
+    agent_fn = _load_heuristic(heuristic_path)
+
+    env = VecTorchEnv(num_envs=n_games, num_players=2, device=device, episode_steps=episode_steps)
+    env.reset(seeds=list(range(20000, 20000 + n_games)))
+    current_wins = 0
+    heuristic_wins = 0
+    done_count = 0
+    for _ in range(episode_steps + 50):
+        # Player 0: our model
+        a0 = _act_deterministic(current_model, env, 0)
+        # Player 1: heuristic — call per env
+        moves_per_env = []
+        for e in range(n_games):
+            obs = to_legacy_obs(env, env_idx=e, player=1)
+            try:
+                moves = agent_fn(obs) or []
+            except Exception:
+                moves = []
+            moves_per_env.append(moves)
+        a1 = _heuristic_moves_to_action_tensor(moves_per_env, env, 1, device)
+
+        _, rewards, done = env.step({0: a0, 1: a1})
+        for i in torch.where(done)[0].tolist():
+            r0, r1 = rewards[i, 0].item(), rewards[i, 1].item()
+            if r0 > r1: current_wins += 1
+            elif r1 > r0: heuristic_wins += 1
+            done_count += 1
+        if done_count >= n_games:
+            break
+    win_rate = current_wins / max(done_count, 1)
+    return win_rate, done_count
+
+
+# ----------------------------------------------------------------------------
 # Training loop
 # ----------------------------------------------------------------------------
 
@@ -152,6 +254,12 @@ def train(args):
     cfg.ppo.total_env_steps = args.total_steps
     cfg.device = args.device
     cfg.ppo.num_minibatches = args.num_minibatches
+    if args.learning_rate is not None:
+        cfg.ppo.learning_rate = args.learning_rate
+    if args.ppo_epochs is not None:
+        cfg.ppo.ppo_epochs = args.ppo_epochs
+    print(f"PPO config: lr={cfg.ppo.learning_rate}, ppo_epochs={cfg.ppo.ppo_epochs}, "
+          f"num_minibatches={cfg.ppo.num_minibatches}, kl_target={cfg.ppo.kl_target}")
 
     env = VecTorchEnv(num_envs=args.num_envs, num_players=2,
                       device=device, episode_steps=500)
@@ -404,16 +512,24 @@ def train(args):
             torch.save(learner.state_dict(), path)
             print(f"  saved {path}")
 
-        # Periodic eval vs frozen baseline
+        # Periodic eval vs frozen baseline (and optionally heuristic)
         if args.eval_interval > 0 and total_env_steps - last_eval_step >= args.eval_interval:
             last_eval_step = total_env_steps
             win_rate, ng = eval_vs_baseline(model, baseline_model, device,
                                              n_games=args.eval_games)
+            heur_str = ""
+            if args.eval_heuristic:
+                try:
+                    heur_wr, heur_ng = eval_vs_heuristic(model, args.eval_heuristic,
+                                                         device, n_games=args.eval_heuristic_games)
+                    heur_str = f"  | vs heuristic: {heur_wr:.1%} ({heur_ng} games)"
+                except Exception as e:
+                    heur_str = f"  | vs heuristic: FAILED ({type(e).__name__}: {str(e)[:80]})"
             eval_history.append((total_env_steps, win_rate))
             improved = win_rate > best_eval_winrate + 0.01
             tag = "★" if improved else " "
             print(f"  {tag} EVAL @ step {total_env_steps:,}: "
-                  f"win_rate vs initial = {win_rate:.1%} ({ng} games) "
+                  f"vs initial = {win_rate:.1%} ({ng} games){heur_str} "
                   f"[best={best_eval_winrate:.1%}, no_improve={no_improve_evals}]")
             if improved:
                 best_eval_winrate = win_rate
@@ -467,9 +583,17 @@ if __name__ == "__main__":
                         help="Run eval vs frozen initial policy every N env steps "
                              "(0 to disable)")
     parser.add_argument("--eval-games", type=int, default=64)
+    parser.add_argument("--eval-heuristic", type=str, default="",
+                        help="Path to heuristic .py file (e.g. ../main.py). "
+                             "Eval against it at every checkpoint (slow, small N).")
+    parser.add_argument("--eval-heuristic-games", type=int, default=16)
     parser.add_argument("--early-stop-patience", type=int, default=3,
                         help="Stop if N consecutive evals show no improvement "
                              "(set high to disable)")
+    parser.add_argument("--learning-rate", type=float, default=None,
+                        help="Override PPO learning rate (default: cfg.ppo.learning_rate=3e-4)")
+    parser.add_argument("--ppo-epochs", type=int, default=None,
+                        help="Override PPO epochs per rollout (default: 4)")
     parser.add_argument("--terminate-on-done", action="store_true",
                         help="Run 'sudo shutdown -h +1' after training. Combined "
                              "with EC2 InstanceInitiatedShutdownBehavior=terminate "
