@@ -37,6 +37,13 @@ MAX_SHIP_SPEED = 6.0
 # Tensor sizes (worst-case bounds from kaggle env)
 MAX_PLANETS = 48
 MAX_FLEETS = 256
+MAX_OWNED = 10
+
+# Discrete action bins (match action_mask.py / model.py)
+NUM_ANGLE_BINS = 72
+ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
+NUM_SHIP_BINS = 16
+SHIP_COUNTS = [1, 2, 3, 5, 8, 13, 20, 30, 45, 65, 90, 120, 160, 200, 250, 300]
 
 
 def _ship_speed(ships: torch.Tensor) -> torch.Tensor:
@@ -171,15 +178,119 @@ class VecTorchEnv:
         }
 
     # ---------------------------------------------------------------------
+    # Owned-planet indices per player — vectorized.
+    # For each env, returns the planet-array indices of the first MAX_OWNED
+    # planets where owner == player. Pad with 0 and use a `slot_valid` mask.
+    # ---------------------------------------------------------------------
+
+    def owned_indices_for(self, player: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (owned_idx: (N, MAX_OWNED) long, slot_valid: (N, MAX_OWNED) bool).
+
+        Single-pass topk: planets are scored by their array index (lowest first)
+        with non-mine slots assigned a sentinel > P. Top-K smallest = first K mine.
+        """
+        owner = self.planets[:, :, 1]
+        is_mine = (owner.long() == player) & self.planet_alive          # (N, P)
+        N, P = is_mine.shape
+        SENTINEL = P + 1
+        idx_grid = torch.arange(P, device=self.device).expand(N, P)
+        scores = torch.where(is_mine, idx_grid, torch.full_like(idx_grid, SENTINEL))
+        owned_idx, _ = torch.topk(scores, MAX_OWNED, dim=1, largest=False)  # (N, MAX_OWNED)
+        slot_valid = owned_idx < P
+        owned_idx = owned_idx.clamp(max=P - 1)  # keep gather-safe
+        return owned_idx, slot_valid
+
+    # ---------------------------------------------------------------------
+    # Apply actions for one player. Launches fleets from owned planets.
+    # actions: (N, MAX_OWNED, 3) int — [fire, angle_bin, ship_bin]
+    # ---------------------------------------------------------------------
+
+    def _apply_actions(self, actions: torch.Tensor, owner_id: int):
+        if actions is None:
+            return
+        owned_idx, slot_valid = self.owned_indices_for(owner_id)
+        N = self.num_envs
+
+        # Decode action components
+        fire = actions[:, :, 0].bool() & slot_valid                # (N, MAX_OWNED)
+        angle_bin = actions[:, :, 1].long().clamp(0, NUM_ANGLE_BINS - 1)
+        ship_bin = actions[:, :, 2].long().clamp(0, NUM_SHIP_BINS - 1)
+        ship_counts_t = torch.tensor(SHIP_COUNTS, dtype=torch.float32, device=self.device)
+        ship_count = ship_counts_t[ship_bin]                      # (N, MAX_OWNED)
+        # angle uses BIN center (matches actions_from_policy convention)
+        angle = (angle_bin.float() + 0.5) * ANGLE_BIN_WIDTH       # (N, MAX_OWNED)
+
+        # Gather source planet state: (N, MAX_OWNED, 7)
+        gather_idx = owned_idx.unsqueeze(-1).expand(-1, -1, 7)
+        src = self.planets.gather(1, gather_idx)                  # (N, MAX_OWNED, 7)
+        src_x = src[:, :, 2]; src_y = src[:, :, 3]; src_r = src[:, :, 4]
+        src_ships = src[:, :, 5]; src_owner = src[:, :, 1].long()
+
+        # Validate: planet still owned by this player AND has enough ships
+        valid_owner = (src_owner == owner_id) & slot_valid
+        valid_ships = src_ships >= ship_count
+        can_fire = fire & valid_owner & valid_ships & (ship_count > 0)  # (N, MAX_OWNED)
+
+        # Compute launch positions (just outside planet radius along angle)
+        start_x = src_x + torch.cos(angle) * (src_r + 0.1)
+        start_y = src_y + torch.sin(angle) * (src_r + 0.1)
+
+        # Debit ships from source planets. Use scatter_add with negative values.
+        # Multiple fires from same planet aren't possible (one slot per planet),
+        # so scatter is well-defined.
+        debit = ship_count * can_fire.float()                     # (N, MAX_OWNED)
+        ships_col = self.planets[:, :, 5]
+        new_ships = ships_col.scatter_add(1, owned_idx, -debit)
+        self.planets[:, :, 5] = new_ships
+
+        # Find first MAX_OWNED dead fleet slots per env via topk-smallest trick.
+        dead = ~self.fleet_alive                                  # (N, F) bool
+        F = dead.shape[1]
+        SENTINEL_F = F + 1
+        slot_grid = torch.arange(F, device=self.device).expand(N, F)
+        slot_scores = torch.where(dead, slot_grid, torch.full_like(slot_grid, SENTINEL_F))
+        rank_to_slot, _ = torch.topk(slot_scores, MAX_OWNED, dim=1, largest=False)  # (N, MAX_OWNED)
+        rank_has = rank_to_slot < F
+        rank_to_slot = rank_to_slot.clamp(max=F - 1)
+
+        # fire_rank: among `can_fire` slots in an env, what's the rank of this slot?
+        fire_rank = (can_fire.long().cumsum(dim=1) - 1).clamp(min=0)   # (N, MAX_OWNED)
+        target_slot = rank_to_slot.gather(1, fire_rank)                # (N, MAX_OWNED)
+        target_valid = rank_has.gather(1, fire_rank) & can_fire        # (N, MAX_OWNED)
+
+        # Per-env IDs for new fleets: next_fleet_id + 0, 1, 2, ... within env.
+        new_id_within_env = (target_valid.long().cumsum(dim=1) - 1).clamp(min=0)
+        new_ids = self.next_fleet_id.unsqueeze(1) + new_id_within_env  # (N, MAX_OWNED)
+
+        # Vectorized scatter into fleets tensor — advanced indexing in one shot.
+        env_arange = torch.arange(N, device=self.device).unsqueeze(1).expand(N, MAX_OWNED)
+        flat_env = env_arange[target_valid]                            # (K,)
+        flat_slot = target_slot[target_valid]                          # (K,)
+        self.fleets[flat_env, flat_slot, 0] = new_ids[target_valid].float()
+        self.fleets[flat_env, flat_slot, 1] = float(owner_id)
+        self.fleets[flat_env, flat_slot, 2] = start_x[target_valid]
+        self.fleets[flat_env, flat_slot, 3] = start_y[target_valid]
+        self.fleets[flat_env, flat_slot, 4] = angle[target_valid]
+        self.fleets[flat_env, flat_slot, 5] = src[..., 0][target_valid]
+        self.fleets[flat_env, flat_slot, 6] = ship_count[target_valid]
+        self.fleet_alive[flat_env, flat_slot] = True
+        self.next_fleet_id = self.next_fleet_id + target_valid.long().sum(dim=1)
+
+    # ---------------------------------------------------------------------
     # Step — pure tensor ops, runs all N envs in one pass.
-    # Phase 1 scope: orbital motion + fleet movement + collision/combat.
+    # Phase 2 scope: orbital motion + collision/combat + action processing.
     # ---------------------------------------------------------------------
 
     def step(self, actions=None) -> dict:
         """Advance all N envs by one tick.
 
-        Phase 1: actions still ignored (no launch yet). Adds collision and combat.
+        actions: optional dict {player_id: (N, MAX_OWNED, 3) tensor}.
+                 Each player's fleets are launched before physics.
         """
+        if actions is not None:
+            for pid, act in actions.items():
+                self._apply_actions(act, pid)
+
         # 1. Production: planet[5] += planet[6] for owned planets (owner != -1)
         owner = self.planets[:, :, 1]
         prod  = self.planets[:, :, 6]
