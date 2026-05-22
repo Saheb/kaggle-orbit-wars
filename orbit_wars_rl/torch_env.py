@@ -185,6 +185,214 @@ class VecTorchEnv:
         }
 
     # ---------------------------------------------------------------------
+    # Vectorized feature extraction (matches features.extract_features).
+    # Returns batched tensors for all N envs in one pass — no Python loops.
+    # ---------------------------------------------------------------------
+
+    def get_features(self, player: int, max_planets: int = 48, max_fleets: int = 128) -> dict:
+        """Returns dict of batched tensors for model input.
+
+        Output shapes (batched over N envs):
+            planet_features:  (N, max_planets, 18)
+            fleet_features:   (N, max_fleets, 9)
+            global_features:  (N, 10)
+            planet_mask:      (N, max_planets) bool
+            fleet_mask:       (N, max_fleets) bool
+            fire_mask:        (N, MAX_OWNED) bool — can fire (owned planet)
+            angle_mask:       (N, MAX_OWNED, NUM_ANGLE_BINS) bool — all True for now
+            slot_valid:       (N, MAX_OWNED) bool
+            owned_indices:    (N, MAX_OWNED) long
+            max_ships:        (N, MAX_OWNED) float — ships available
+            owned_count:      list[int] of length N
+        """
+        N = self.num_envs
+        P = max_planets   # truncate to model's expected dim
+        F = max_fleets    # model expects 128 even though env stores up to 256
+
+        # Truncate state to model dimensions
+        planets = self.planets[:, :P, :]
+        planet_alive = self.planet_alive[:, :P]
+        init_planets = self.init_planets[:, :P, :]
+        fleets = self.fleets[:, :F, :]
+        fleet_alive = self.fleet_alive[:, :F]
+
+        owner = planets[:, :, 1].long()
+        x  = planets[:, :, 2];  y  = planets[:, :, 3]
+        r  = planets[:, :, 4]
+        ships = planets[:, :, 5]
+        prod  = planets[:, :, 6]
+
+        is_mine    = (owner == player) & planet_alive
+        is_enemy   = (owner != player) & (owner != -1) & planet_alive
+        is_neutral = (owner == -1) & planet_alive
+
+        # Owner encoding: mine=1, enemy=-1, neutral=0
+        owner_emb = torch.where(is_mine, torch.ones_like(x),
+                     torch.where(is_enemy, -torch.ones_like(x), torch.zeros_like(x)))
+
+        dist_to_sun = torch.sqrt((x - CENTER) ** 2 + (y - CENTER) ** 2)
+        is_orbiting = ((dist_to_sun + r) < ROTATION_RADIUS_LIMIT) & planet_alive
+
+        # Predicted position 5 turns ahead
+        step_f = self.step_count.float().unsqueeze(-1)
+        ang_vel = self.angular_velocity.unsqueeze(-1)
+        ix = init_planets[:, :, 2]; iy = init_planets[:, :, 3]
+        dx = ix - CENTER; dy = iy - CENTER
+        orb_r = torch.sqrt(dx * dx + dy * dy)
+        init_ang = torch.atan2(dy, dx)
+        future_ang = init_ang + ang_vel * (step_f + 5)
+        pred_x = torch.where(is_orbiting, CENTER + orb_r * torch.cos(future_ang), x)
+        pred_y = torch.where(is_orbiting, CENTER + orb_r * torch.sin(future_ang), y)
+
+        # Incoming fleet pressure (vectorized).
+        # For each (planet, fleet): compute "along" and "perp" projections.
+        # along > 0 AND perp < r + 1.5 → fleet is incoming.
+        fx = fleets[:, :, 2]; fy = fleets[:, :, 3]
+        fa = fleets[:, :, 4]
+        f_owner = fleets[:, :, 1].long()
+        f_ships = fleets[:, :, 6]
+        fcos = torch.cos(fa); fsin = torch.sin(fa)
+
+        # Broadcast: planet (N, P, 1) vs fleet (N, 1, F)
+        vx = x.unsqueeze(2) - fx.unsqueeze(1)
+        vy = y.unsqueeze(2) - fy.unsqueeze(1)
+        along = vx * fcos.unsqueeze(1) + vy * fsin.unsqueeze(1)
+        perp  = torch.abs(vx * fsin.unsqueeze(1) - vy * fcos.unsqueeze(1))
+        incoming = (along > 0) & (perp < r.unsqueeze(2) + 1.5) & fleet_alive.unsqueeze(1)
+
+        friend = incoming & (f_owner.unsqueeze(1) == player)
+        enemy  = incoming & (f_owner.unsqueeze(1) != player) & (f_owner.unsqueeze(1) >= 0)
+        friendly_pressure = (f_ships.unsqueeze(1) * friend.float()).sum(dim=2)  # (N, P)
+        enemy_pressure    = (f_ships.unsqueeze(1) * enemy.float()).sum(dim=2)
+
+        # Capture cost
+        capture_cost = torch.where(
+            is_neutral, ships + 1,
+            torch.where(is_enemy, ships + prod * 3 + 1, torch.zeros_like(ships)),
+        )
+
+        # Distance from each planet to nearest mine planet.
+        # Pairwise (P, P) distance, mask non-mine columns to inf, take min.
+        dxp = x.unsqueeze(2) - x.unsqueeze(1)     # (N, P, P)
+        dyp = y.unsqueeze(2) - y.unsqueeze(1)
+        dpp = torch.sqrt(dxp * dxp + dyp * dyp)
+        mine_col = is_mine.unsqueeze(1)            # (N, 1, P)
+        big = torch.full_like(dpp, BOARD_SIZE)
+        dpp_masked = torch.where(mine_col, dpp, big)
+        min_owned_dist = dpp_masked.min(dim=2).values  # (N, P)
+        any_mine = is_mine.any(dim=1, keepdim=True)
+        min_owned_dist = torch.where(any_mine.expand_as(min_owned_dist),
+                                      min_owned_dist, torch.zeros_like(min_owned_dist))
+
+        # is_home heuristic
+        is_home = is_mine & (ships <= 10 + prod * 5) & (ships >= 10 - prod)
+
+        # is_comet — skip for now (comets not implemented in Phase 3a)
+        is_comet = torch.zeros_like(is_orbiting)
+
+        # Assemble planet features (N, P, 18). Dead slots get zero — matches
+        # legacy extract_features which only iterates over alive planets.
+        pf = torch.stack([
+            (x - CENTER) / CENTER,
+            (y - CENTER) / CENTER,
+            owner_emb,
+            r / 2.0,
+            torch.log1p(ships) / 8.0,
+            prod / 5.0,
+            is_orbiting.float(),
+            is_comet.float(),
+            dist_to_sun / CENTER,
+            orb_r / CENTER,
+            (pred_x - CENTER) / CENTER,
+            (pred_y - CENTER) / CENTER,
+            friendly_pressure / 100.0,
+            enemy_pressure / 100.0,
+            torch.log1p(capture_cost) / 8.0,
+            min_owned_dist / BOARD_SIZE,
+            is_home.float(),
+            planet_alive.float(),  # active mask
+        ], dim=2)  # (N, P, 18)
+        # Zero out dead slots so output matches legacy (which leaves them zero).
+        pf = pf * planet_alive.unsqueeze(-1).float()
+
+        # Fleet features (N, F, 9)
+        f_speed = _ship_speed(f_ships)
+        f_dist_sun = torch.sqrt((fx - CENTER) ** 2 + (fy - CENTER) ** 2)
+        f_owner_emb = torch.where(
+            f_owner == player, torch.ones_like(fx),
+            torch.where(f_owner >= 0, -torch.ones_like(fx), torch.full_like(fx, -0.5)),
+        )
+        ff = torch.stack([
+            (fx - CENTER) / CENTER,
+            (fy - CENTER) / CENTER,
+            f_owner_emb,
+            fcos,
+            fsin,
+            torch.log1p(f_ships) / 8.0,
+            f_speed / MAX_SHIP_SPEED,
+            f_dist_sun / CENTER,
+            fleet_alive.float(),
+        ], dim=2)
+        # Zero out dead fleet slots
+        ff = ff * fleet_alive.unsqueeze(-1).float()
+
+        # Global features (N, 10)
+        total_owned_ships = (ships * is_mine.float()).sum(dim=1)
+        total_owned_prod  = (prod  * is_mine.float()).sum(dim=1)
+        num_owned         = is_mine.float().sum(dim=1)
+        enemy_planet_ships = (ships * is_enemy.float()).sum(dim=1)
+        is_enemy_fleet = (f_owner != player) & (f_owner >= 0) & fleet_alive
+        enemy_fleet_ships = (f_ships * is_enemy_fleet.float()).sum(dim=1)
+        total_enemy_ships = enemy_planet_ships + enemy_fleet_ships
+        is_my_fleet = (f_owner == player) & fleet_alive
+        my_fleet_ships = (f_ships * is_my_fleet.float()).sum(dim=1)
+        fleet_commit = my_fleet_ships / torch.clamp(total_owned_ships + my_fleet_ships, min=1)
+
+        mode_2p = float(self.num_players == 2)
+        mode_4p = float(self.num_players == 4)
+        player_norm = player / max(self.num_players - 1, 1)
+
+        gf = torch.stack([
+            torch.full_like(total_owned_ships, player_norm),
+            self.step_count.float() / 500.0,
+            self.angular_velocity / 0.05,
+            num_owned / 10.0,
+            total_owned_ships / 500.0,
+            total_owned_prod / 20.0,
+            total_enemy_ships / 2000.0,
+            fleet_commit,
+            torch.full_like(total_owned_ships, mode_2p),
+            torch.full_like(total_owned_ships, mode_4p),
+        ], dim=1)  # (N, 10)
+
+        # Action masks
+        owned_idx, slot_valid = self.owned_indices_for(player)
+        # max_ships per slot: ships at the owned planet
+        gather_idx = owned_idx.unsqueeze(-1).expand(-1, -1, 7)
+        owned_ships = self.planets.gather(1, gather_idx)[:, :, 5]
+        max_ships = owned_ships * slot_valid.float()
+        # Fire mask: can fire iff slot is valid and has at least 1 ship
+        fire_mask = slot_valid & (max_ships >= 1.0)
+        # Angle mask: all angles legal (no sun-blocking for now)
+        angle_mask = torch.ones(N, MAX_OWNED, NUM_ANGLE_BINS, dtype=torch.bool, device=self.device)
+        # Per-env owned_count for the model
+        owned_count = slot_valid.long().sum(dim=1).tolist()
+
+        return {
+            "planet_features": pf,
+            "fleet_features":  ff,
+            "global_features": gf,
+            "planet_mask":     planet_alive,
+            "fleet_mask":      fleet_alive,
+            "fire_mask":       fire_mask,
+            "angle_mask":      angle_mask,
+            "slot_valid":      slot_valid,
+            "owned_indices":   owned_idx,
+            "max_ships":       max_ships,
+            "owned_count":     owned_count,
+        }
+
+    # ---------------------------------------------------------------------
     # Owned-planet indices per player — vectorized.
     # For each env, returns the planet-array indices of the first MAX_OWNED
     # planets where owner == player. Pad with 0 and use a `slot_valid` mask.
@@ -600,12 +808,19 @@ def to_legacy_obs(env: VecTorchEnv, env_idx: int = 0, player: int = 0) -> dict:
                 float(f[i, 2]), float(f[i, 3]), float(f[i, 4]),
                 int(f[i, 5]), float(f[i, 6]),
             ])
+    ip = env.init_planets[env_idx].cpu().numpy()
+    initial_planets = [
+        [int(ip[i, 0]), int(ip[i, 1]),
+         float(ip[i, 2]), float(ip[i, 3]), float(ip[i, 4]),
+         float(ip[i, 5]), float(ip[i, 6])]
+        for i in range(MAX_PLANETS) if a[i]
+    ]
     return {
         "step": int(env.step_count[env_idx].item()),
         "player": player,
         "planets": planets,
         "fleets": fleets,
         "angular_velocity": float(env.angular_velocity[env_idx].item()),
-        "initial_planets": [],
+        "initial_planets": initial_planets,
         "comet_planet_ids": [],
     }
