@@ -8,3 +8,4 @@ replays*
 *.zip
 *.csv
 *.pkl
+gpu_run_artifacts/

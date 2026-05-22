@@ -88,6 +88,54 @@ def compute_gae(rewards: torch.Tensor, values: torch.Tensor,
 
 
 # ----------------------------------------------------------------------------
+# Periodic eval — current policy vs frozen baseline
+# ----------------------------------------------------------------------------
+
+def _act_deterministic(model, env, player):
+    """Sample action from current policy (used during eval rollouts)."""
+    feats = env.get_features(player)
+    with torch.no_grad():
+        out = model(
+            feats["planet_features"], feats["fleet_features"], feats["global_features"],
+            feats["planet_mask"], feats["fleet_mask"],
+            fire_mask=feats["fire_mask"], angle_mask=feats["angle_mask"],
+            slot_valid=feats["slot_valid"], owned_indices=feats["owned_indices"],
+            owned_count=feats["owned_count"],
+        )
+    fl = out["fire_logits"].masked_fill(~feats["fire_mask"], -1e9)
+    al = out["angle_logits"].masked_fill(~feats["angle_mask"], -1e9)
+    f = torch.distributions.Bernoulli(logits=fl).sample().long()
+    a = torch.distributions.Categorical(logits=al).sample()
+    s = torch.distributions.Categorical(logits=out["ship_logits"]).sample()
+    return torch.stack([f, a, s], dim=-1)
+
+
+def eval_vs_baseline(current_model, baseline_model, device, n_games=64, episode_steps=500):
+    """Play current vs baseline. Returns (win_rate, n_completed)."""
+    from torch_env import VecTorchEnv
+    current_model.eval()
+    baseline_model.eval()
+    env = VecTorchEnv(num_envs=n_games, num_players=2, device=device, episode_steps=episode_steps)
+    env.reset(seeds=list(range(10000, 10000 + n_games)))
+    current_wins = 0
+    baseline_wins = 0
+    done_count = 0
+    for _ in range(episode_steps + 50):
+        a0 = _act_deterministic(current_model, env, 0)
+        a1 = _act_deterministic(baseline_model, env, 1)
+        _, rewards, done = env.step({0: a0, 1: a1})
+        for i in torch.where(done)[0].tolist():
+            r0, r1 = rewards[i, 0].item(), rewards[i, 1].item()
+            if r0 > r1: current_wins += 1
+            elif r1 > r0: baseline_wins += 1
+            done_count += 1
+        if done_count >= n_games:
+            break
+    win_rate = current_wins / max(done_count, 1)
+    return win_rate, done_count
+
+
+# ----------------------------------------------------------------------------
 # Training loop
 # ----------------------------------------------------------------------------
 
@@ -130,6 +178,13 @@ def train(args):
         return 0.5 * (1.0 + np.cos(np.pi * progress))
     scheduler = torch.optim.lr_scheduler.LambdaLR(learner.optimizer, lr_lambda)
 
+    # Freeze a snapshot of the initial policy for periodic eval.
+    # As training proceeds, current vs frozen-initial win rate should rise.
+    import copy
+    baseline_model = copy.deepcopy(model).to(device)
+    baseline_model.eval()
+    print("Baseline policy snapshotted for periodic eval.\n")
+
     total_env_steps = 0
     iter_count = 0
     start = time.perf_counter()
@@ -137,6 +192,11 @@ def train(args):
     clipfrac_history = deque(maxlen=50)
     best_avg_reward = float("-inf")
     last_log = start
+    last_eval_step = 0
+    last_ckpt_step = 0
+    eval_history: list[tuple[int, float]] = []   # (step, win_rate vs baseline)
+    best_eval_winrate = 0.0
+    no_improve_evals = 0
 
     rollout_T = args.rollout_steps
     N = args.num_envs
@@ -336,15 +396,58 @@ def train(args):
             torch.save(learner.state_dict(), "checkpoints/torch_best.pt")
             print(f"  ★ best updated: reward={avg_r:+.3f}")
 
-        # Periodic checkpoint
-        if total_env_steps % args.checkpoint_interval < (rollout_T * N):
+        # Periodic checkpoint by fixed step interval
+        if total_env_steps - last_ckpt_step >= args.checkpoint_interval:
+            last_ckpt_step = total_env_steps
             os.makedirs("checkpoints", exist_ok=True)
             path = f"checkpoints/torch_step_{total_env_steps}.pt"
             torch.save(learner.state_dict(), path)
             print(f"  saved {path}")
 
+        # Periodic eval vs frozen baseline
+        if args.eval_interval > 0 and total_env_steps - last_eval_step >= args.eval_interval:
+            last_eval_step = total_env_steps
+            win_rate, ng = eval_vs_baseline(model, baseline_model, device,
+                                             n_games=args.eval_games)
+            eval_history.append((total_env_steps, win_rate))
+            improved = win_rate > best_eval_winrate + 0.01
+            tag = "★" if improved else " "
+            print(f"  {tag} EVAL @ step {total_env_steps:,}: "
+                  f"win_rate vs initial = {win_rate:.1%} ({ng} games) "
+                  f"[best={best_eval_winrate:.1%}, no_improve={no_improve_evals}]")
+            if improved:
+                best_eval_winrate = win_rate
+                no_improve_evals = 0
+                os.makedirs("checkpoints", exist_ok=True)
+                torch.save(learner.state_dict(), "checkpoints/torch_eval_best.pt")
+            else:
+                no_improve_evals += 1
+                if no_improve_evals >= args.early_stop_patience:
+                    print(f"\nEarly stop: no eval improvement for "
+                          f"{args.early_stop_patience} consecutive checks "
+                          f"(best win_rate = {best_eval_winrate:.1%})")
+                    break
+
+    elapsed = time.perf_counter() - start
+    sps = total_env_steps / elapsed if elapsed > 0 else 0
     print(f"\nTraining complete: {total_env_steps:,} env steps in {elapsed:.0f}s")
     print(f"Final SPS: {sps:,.0f}")
+    print(f"Best eval win_rate vs initial: {best_eval_winrate:.1%}")
+    if eval_history:
+        print("Eval history (step, win_rate):")
+        for s, w in eval_history:
+            print(f"  {s:>12,}  {w:.1%}")
+
+    # Final checkpoint
+    os.makedirs("checkpoints", exist_ok=True)
+    torch.save(learner.state_dict(), f"checkpoints/torch_step_{total_env_steps}_final.pt")
+
+    # Auto-terminate the host (cost control). Set
+    # InstanceInitiatedShutdownBehavior=terminate on the EC2 instance and this
+    # command will tear down the VM, ending billing.
+    if args.terminate_on_done:
+        print("\n--terminate-on-done: powering off the instance...")
+        os.system("sudo shutdown -h +1 'training complete, auto-terminating'")
 
 
 if __name__ == "__main__":
@@ -358,7 +461,19 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--resume", type=str, default="")
-    parser.add_argument("--checkpoint-interval", type=int, default=2_000_000)
+    parser.add_argument("--checkpoint-interval", type=int, default=5_000_000,
+                        help="Save a periodic checkpoint every N env steps")
+    parser.add_argument("--eval-interval", type=int, default=5_000_000,
+                        help="Run eval vs frozen initial policy every N env steps "
+                             "(0 to disable)")
+    parser.add_argument("--eval-games", type=int, default=64)
+    parser.add_argument("--early-stop-patience", type=int, default=3,
+                        help="Stop if N consecutive evals show no improvement "
+                             "(set high to disable)")
+    parser.add_argument("--terminate-on-done", action="store_true",
+                        help="Run 'sudo shutdown -h +1' after training. Combined "
+                             "with EC2 InstanceInitiatedShutdownBehavior=terminate "
+                             "this stops the instance to end billing.")
     args = parser.parse_args()
 
     if not args.device:
