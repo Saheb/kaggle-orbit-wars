@@ -129,6 +129,10 @@ def train(
     avg_clip_frac = 0.0  # keep in scope for checkpoint warning
     last_log_steps = 0
 
+    # Best-checkpoint tracking: save whenever rolling reward improves
+    best_avg_reward = float("-inf")
+    best_ckpt_dir = "checkpoints/best"
+
     # LR scheduler: warmup (per optimizer step) + cosine decay
     warmup_steps = cfg.ppo.lr_warmup_steps
     total_opt_steps = cfg.ppo.total_env_steps  # proxy; actual opt steps ~ total/500 * 16
@@ -268,36 +272,21 @@ def train(
             batch = make_batch(trans_list, adv_list, ret_list, device)
             minibatches = make_minibatches(batch, cfg.ppo.num_minibatches, device)
 
-            # PPO update — scheduler steps per optimizer step inside update()
-            metrics = learner.update(minibatches, scheduler=scheduler)
-            metrics["learning_rate"] = learner.get_lr()
-
+            # Assemble BC mini-batch once per rollout (if BC regularization on).
+            # Passed to update() so PPO and BC gradients are combined in a single
+            # backward per minibatch step — no separate competing optimizer call.
+            ppo_bc_batch = None
             if bc_samples and cfg.ppo.bc_coef > 0:
-                from bc import _collate, bc_loss
+                from bc import _collate
 
                 n = min(bc_batch_size, len(bc_samples))
                 idx = np.random.choice(len(bc_samples), n, replace=len(bc_samples) < n)
-                bc_batch = _collate([bc_samples[i] for i in idx], device)
-                bc_outputs = learner.model(
-                    bc_batch["planet_features"],
-                    bc_batch["fleet_features"],
-                    bc_batch["global_features"],
-                    bc_batch["planet_mask"],
-                    bc_batch["fleet_mask"],
-                    fire_mask=bc_batch["fire_mask"],
-                    angle_mask=bc_batch["angle_mask"],
-                    slot_valid=bc_batch["slot_valid"],
-                    owned_indices=bc_batch["owned_indices"],
-                )
-                aux_bc_loss, bc_metrics = bc_loss(bc_outputs, bc_batch)
-                learner.optimizer.zero_grad()
-                (cfg.ppo.bc_coef * aux_bc_loss).backward()
-                torch.nn.utils.clip_grad_norm_(learner.model.parameters(), cfg.ppo.max_grad_norm)
-                learner.optimizer.step()
-                metrics["aux_bc_loss"] = bc_metrics["loss"]
-                metrics["aux_bc_fire_loss"] = bc_metrics["fire_loss"]
-                metrics["aux_bc_angle_loss"] = bc_metrics["angle_loss"]
-                metrics["aux_bc_ship_loss"] = bc_metrics["ship_loss"]
+                ppo_bc_batch = _collate([bc_samples[i] for i in idx], torch.device("cpu"))
+
+            metrics = learner.update(minibatches, scheduler=scheduler,
+                                     kl_target=cfg.ppo.kl_target,
+                                     bc_batch=ppo_bc_batch)
+            metrics["learning_rate"] = learner.get_lr()
 
             reward_history.extend(episode_rewards)
             clip_frac_history.append(metrics.get("clip_frac", 0))
@@ -309,6 +298,10 @@ def train(
                 sps = total_env_steps / elapsed if elapsed > 0 else 0
                 avg_reward = float(np.mean(reward_history)) if reward_history else 0.0
 
+                bc_tag = (
+                    f" | BC {metrics.get('bc_loss', 0):.4f}"
+                    if cfg.ppo.bc_coef > 0 and bc_samples else ""
+                )
                 print(
                     f"Episode {episode_count:5d} | Steps {total_env_steps:>10,} | "
                     f"SPS {sps:7.0f} | Reward {avg_reward:+6.2f} | "
@@ -316,6 +309,7 @@ def train(
                     f"KL {metrics.get('approx_kl', 0):.4f} | "
                     f"V_loss {metrics.get('value_loss', 0):.4f} | "
                     f"LR {metrics['learning_rate']:.6f}"
+                    f"{bc_tag}"
                 )
 
                 if use_wandb:
@@ -329,11 +323,18 @@ def train(
                         **{f"train/{k}": v for k, v in metrics.items()},
                     })
 
+                # Best-checkpoint: save whenever rolling reward improves by ≥0.02
+                if len(reward_history) >= 50 and avg_reward > best_avg_reward + 0.02:
+                    best_avg_reward = avg_reward
+                    os.makedirs(best_ckpt_dir, exist_ok=True)
+                    torch.save(learner.state_dict(), os.path.join(best_ckpt_dir, "checkpoint.pt"))
+                    print(f"  ★ Best checkpoint updated: reward={avg_reward:+.4f} @ {total_env_steps:,} steps")
+
             # Add current policy to opponent pool periodically
             if episode_count % 50 == 0:
                 opponent_pool.add(learner.model.state_dict(), total_env_steps)
 
-            # Checkpoint
+            # Periodic checkpoint
             if total_env_steps % cfg.self_play.checkpoint_interval_steps < cfg.ppo.batch_size:
                 ckpt_dir = f"checkpoints/step_{total_env_steps}"
                 os.makedirs(ckpt_dir, exist_ok=True)
@@ -423,6 +424,8 @@ if __name__ == "__main__":
                         help="Override checkpoint interval in env steps")
     parser.add_argument("--bc-coef", type=float, default=None,
                         help="Auxiliary behavior-cloning loss coefficient during PPO")
+    parser.add_argument("--kl-target", type=float, default=None,
+                        help="KL early-stop threshold per PPO epoch (default: 0.05, inf=disabled)")
     parser.add_argument("--bc-agent", type=str, default="",
                         help="Teacher agent .py file for PPO BC regularization")
     parser.add_argument("--bc-games", type=int, default=0,
@@ -474,6 +477,8 @@ if __name__ == "__main__":
         cfg.self_play.checkpoint_interval_steps = args.checkpoint_interval
     if args.bc_coef is not None:
         cfg.ppo.bc_coef = args.bc_coef
+    if args.kl_target is not None:
+        cfg.ppo.kl_target = args.kl_target
 
     train(
         cfg,

@@ -128,39 +128,10 @@ class PPOLearner:
         angle_entropy = angle_dist.entropy().mean()
         ship_entropy = ship_dist.entropy().mean()
 
-        bc_loss = torch.tensor(0.0, device=self.device)
-        if cfg.bc_coef > 0 and "bc_targets" in batch:
-            bc_fire_target = to_dev(batch["bc_targets"]["fire"]).float()
-            bc_angle_target = to_dev(batch["bc_targets"]["angle"])
-            bc_ship_target = to_dev(batch["bc_targets"]["ship"])
-            bc_fired = (bc_fire_target > 0.5).float() * slot_valid.squeeze(-1)
-
-            bc_fire_loss = F.binary_cross_entropy_with_logits(
-                fire_logits.clamp(-30, 30),
-                bc_fire_target,
-                reduction="none",
-            )
-            bc_fire_loss = (bc_fire_loss * slot_valid.squeeze(-1)).sum() / slot_valid.squeeze(-1).sum().clamp(min=1)
-
-            B, max_owned, _ = angle_logits.shape
-            bc_angle_loss = F.cross_entropy(
-                angle_logits.reshape(B * max_owned, -1),
-                bc_angle_target.reshape(B * max_owned),
-                reduction="none",
-            ).reshape(B, max_owned)
-            bc_angle_loss = (bc_angle_loss * bc_fired).sum() / bc_fired.sum().clamp(min=1)
-
-            bc_ship_loss = F.cross_entropy(
-                ship_logits.reshape(B * max_owned, -1),
-                bc_ship_target.reshape(B * max_owned),
-                reduction="none",
-            ).reshape(B, max_owned)
-            bc_ship_loss = (bc_ship_loss * bc_fired).sum() / bc_fired.sum().clamp(min=1)
-            bc_loss = bc_fire_loss + bc_angle_loss + bc_ship_loss
-
+        # Note: BC regularization is handled in update() via a separate forward
+        # pass combined into the same backward. compute_loss() handles PPO only.
         loss = (policy_loss
                 + cfg.value_coef * value_loss
-                + cfg.bc_coef * bc_loss
                 - cfg.entropy_coef_fire * fire_entropy
                 - cfg.entropy_coef_angle * angle_entropy
                 - cfg.entropy_coef_ships * ship_entropy)
@@ -174,7 +145,6 @@ class PPOLearner:
                 "fire_entropy": fire_entropy.item(),
                 "angle_entropy": angle_entropy.item(),
                 "ship_entropy": ship_entropy.item(),
-                "bc_loss": bc_loss.item(),
                 "clip_frac": clip_frac.item(),
                 "approx_kl": (old_log_prob - new_log_prob).mean().item(),
                 "mean_advantage": advantages.mean().item(),
@@ -185,29 +155,79 @@ class PPOLearner:
 
         return loss
 
-    def update(self, batches, scheduler=None, ppo_epochs=None):
-        """Run PPO update on a list of minibatches."""
+    def update(self, batches, scheduler=None, ppo_epochs=None,
+               kl_target: float = 0.05, bc_batch: dict | None = None):
+        """Run PPO update on a list of minibatches.
+
+        kl_target:  stop epoch loop early if mean approx-KL exceeds this value,
+                    preventing destructive policy updates.
+                    Good range: 0.01–0.05. Pass float('inf') to disable.
+        bc_batch:   optional dict of BC training samples (from bc._collate).
+                    If provided, a BC forward pass is combined into the same
+                    backward as each PPO minibatch (single optimizer step),
+                    preventing competing gradient updates.
+        """
         cfg = self.cfg.ppo
         epochs = ppo_epochs or cfg.ppo_epochs
 
-        total_metrics = {}
+        sum_metrics: dict[str, float] = {}
+        n_updates = 0
+        early_stopped = False
+
         for epoch in range(epochs):
+            epoch_kl = 0.0
             for batch in batches:
-                loss, metrics = self.compute_loss(batch, return_metrics=True)
+                ppo_loss, metrics = self.compute_loss(batch, return_metrics=True)
+
+                # BC regularization: separate forward pass, combined backward.
+                # This avoids the batch-size mismatch of embedding bc_targets
+                # inside the PPO forward, while still using a single optimizer step.
+                bc_loss_val = 0.0
+                if bc_batch is not None and cfg.bc_coef > 0:
+                    from bc import bc_loss as _bc_loss
+                    bc_out = self.model(
+                        bc_batch["planet_features"].to(self.device),
+                        bc_batch["fleet_features"].to(self.device),
+                        bc_batch["global_features"].to(self.device),
+                        bc_batch["planet_mask"].to(self.device),
+                        bc_batch["fleet_mask"].to(self.device),
+                        fire_mask=bc_batch["fire_mask"].to(self.device),
+                        angle_mask=bc_batch["angle_mask"].to(self.device),
+                        slot_valid=bc_batch["slot_valid"].to(self.device),
+                        owned_indices=bc_batch["owned_indices"],
+                    )
+                    bc_loss_tensor, bc_m = _bc_loss(bc_out, {
+                        k: v.to(self.device) for k, v in bc_batch.items()
+                    })
+                    total_loss = ppo_loss + cfg.bc_coef * bc_loss_tensor
+                    bc_loss_val = bc_m["loss"]
+                    for k, v in bc_m.items():
+                        metrics[f"bc_{k}"] = v
+                else:
+                    total_loss = ppo_loss
+
                 self.optimizer.zero_grad()
-                loss.backward()
+                total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.max_grad_norm)
                 self.optimizer.step()
                 if scheduler is not None:
                     scheduler.step()
 
                 for k, v in metrics.items():
-                    total_metrics[k] = total_metrics.get(k, 0) + v
+                    sum_metrics[k] = sum_metrics.get(k, 0.0) + v
+                epoch_kl += metrics.get("approx_kl", 0.0)
+                n_updates += 1
 
-        n_updates = epochs * len(batches)
-        avg_metrics = {k: v / n_updates for k, v in total_metrics.items()}
+            # KL early stopping: if this epoch's mean KL exceeded the target,
+            # bail out before the next epoch to prevent policy collapse.
+            if (epoch_kl / max(len(batches), 1)) > kl_target:
+                early_stopped = True
+                break
+
+        n = max(n_updates, 1)
+        avg_metrics = {k: v / n for k, v in sum_metrics.items()}
         avg_metrics["learning_rate"] = self.optimizer.param_groups[0]["lr"]
-        avg_metrics["grad_norm"] = total_metrics.get("grad_norm", 0) / max(n_updates, 1)
+        avg_metrics["kl_early_stop"] = float(early_stopped)
         self.update_count += n_updates
         return avg_metrics
 

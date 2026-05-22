@@ -49,6 +49,7 @@ class PPOConfig:
     entropy_coef_angle: float = 0.02
     entropy_coef_ships: float = 0.01
     bc_coef: float = 0.0
+    kl_target: float = 0.05   # KL early-stop threshold per epoch; inf = disabled
     value_coef: float = 0.5
     shaping_coef: float = 0.01
     max_grad_norm: float = 0.5
