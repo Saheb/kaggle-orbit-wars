@@ -678,12 +678,12 @@ class VecTorchEnv:
         # 10. Advance step
         self.step_count = self.step_count + 1
 
-        # 11. Termination + reward
-        rewards, done = self._check_done()
-        # 12. Auto-reset done envs in-place
+        # 11. Termination + reward (terminal_rewards is non-zero only for newly-done envs)
+        terminal_rewards, done = self._check_done()
+        # 12. Auto-reset done envs in-place — must come AFTER capturing rewards
         if done.any():
             self._auto_reset(done)
-        return self._state_dict()
+        return self._state_dict(), terminal_rewards, done
 
     # ---------------------------------------------------------------------
     # Termination logic — matches fast_env._maybe_terminate
