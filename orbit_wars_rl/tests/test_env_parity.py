@@ -70,8 +70,10 @@ def run_parity_test(num_games=3, max_steps=50):
     all_errors = []
 
     for seed in range(num_games):
-        kaggle_env = OrbitWarsEnv(num_players=2, seed=seed, debug=False)
-        fast_env = FastOrbitWarsEnv(num_players=2, seed=seed)
+        kaggle_env = OrbitWarsEnv(num_players=2, seed=seed, debug=False,
+                                   opponent_policy=None)
+        fast_env = FastOrbitWarsEnv(num_players=2, seed=seed,
+                                    opponent_policy="none")
 
         k_obs = kaggle_env.reset(seed=seed)
         f_obs = fast_env.reset(seed=seed)
@@ -81,9 +83,12 @@ def run_parity_test(num_games=3, max_steps=50):
         all_errors.extend(errors)
 
         for step in range(1, max_steps + 1):
+            # Both players do nothing — isolates pure physics from agent behaviour
             actions = _do_nothing_agent(k_obs)
-            k_obs_next, k_reward, k_done, _ = kaggle_env.step(actions)
-            f_obs_next, f_reward, f_done, _ = fast_env.step(actions)
+            k_obs_next, k_reward, k_done, _ = kaggle_env.step(
+                actions, opponent_actions=[[]] * (kaggle_env.num_players - 1))
+            f_obs_next, f_reward, f_done, _ = fast_env.step(
+                actions, opponent_actions=[[]] * (fast_env.num_players - 1))
 
             errors = compare_obs(k_obs_next, f_obs_next, step)
             all_errors.extend(errors)
