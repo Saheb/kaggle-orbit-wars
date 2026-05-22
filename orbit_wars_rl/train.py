@@ -43,6 +43,9 @@ def train(
     bc_agent_path: str = "",
     bc_games: int = 0,
     bc_batch_size: int = 128,
+    bc_replay_data: str = "",
+    opponent_checkpoint: str = "",
+    self_play_prob: float = 0.5,
 ):
     device = torch.device(cfg.device)
     print(f"Training on device: {device}")
@@ -85,6 +88,34 @@ def train(
             raise ValueError("No BC samples collected for PPO regularization")
         print(f"BC regularization samples: {len(bc_samples)}")
 
+    # Load replay BC data if provided
+    if args.bc_replay_data:
+        import pickle
+        from bc import _collate, bc_loss
+        with open(args.bc_replay_data, "rb") as f:
+            replay_samples = pickle.load(f)
+        # Convert replay samples to torch tensors if needed
+        converted = []
+        for s in replay_samples:
+            sample = {}
+            for k in ["planet_features", "fleet_features", "global_features",
+                      "planet_mask", "fleet_mask", "fire_mask", "angle_mask",
+                      "slot_valid", "owned_indices", "fire_target", "angle_target", "ship_target"]:
+                v = s.get(k)
+                if v is not None:
+                    if isinstance(v, np.ndarray):
+                        sample[k] = torch.from_numpy(v)
+                    elif isinstance(v, torch.Tensor):
+                        sample[k] = v
+                    else:
+                        sample[k] = torch.tensor(v)
+            if "owned_count" in s:
+                sample["owned_count"] = s["owned_count"]
+            converted.append(sample)
+        bc_samples.extend(converted)
+        print(f"Loaded {len(converted)} replay BC samples from {args.bc_replay_data}")
+        print(f"Total BC samples: {len(bc_samples)}")
+
     if use_wandb:
         import wandb
         wandb.init(project=cfg.wandb_project, entity=cfg.wandb_entity, config=cfg.__dict__)
@@ -124,6 +155,22 @@ def train(
         f"BC regularization: coef={cfg.ppo.bc_coef} "
         f"samples={len(bc_samples)} agent={bc_agent_path or 'none'}"
     )
+
+    # Load fixed self-play opponent checkpoint if provided
+    fixed_opponent = None
+    if opponent_checkpoint:
+        fixed_opponent = EntityTransformer(cfg.model).to(torch.device("cpu"))
+        try:
+            sd = torch.load(opponent_checkpoint, map_location="cpu", weights_only=True)
+        except Exception:
+            sd = torch.load(opponent_checkpoint, map_location="cpu", weights_only=False)
+        if "model" in sd:
+            sd = sd["model"]
+        fixed_opponent.load_state_dict(sd)
+        fixed_opponent.eval()
+        print(f"Loaded self-play opponent from {opponent_checkpoint}")
+        print(f"Self-play prob: {self_play_prob}")
+
     print()
 
     use_vec = num_envs > 1
@@ -172,9 +219,11 @@ def train(
                 all_transitions = []
 
                 while len(all_transitions) < cfg.ppo.batch_size:
-                    # Sample opponent from pool (or None -> random)
+                    # Select opponent: fixed self-play checkpoint, pool snapshot, or random
                     opponent_model = None
-                    if len(opponent_pool) > 0 and random.random() < cfg.self_play.opponent_sample_prob_old:
+                    if fixed_opponent is not None and random.random() < self_play_prob:
+                        opponent_model = fixed_opponent
+                    elif len(opponent_pool) > 0 and random.random() < cfg.self_play.opponent_sample_prob_old:
                         params = opponent_pool.sample()
                         opponent_model = EntityTransformer(cfg.model).to(torch.device("cpu"))
                         opponent_model.load_state_dict(params)
@@ -378,6 +427,8 @@ if __name__ == "__main__":
                         help="Teacher agent .py file for PPO BC regularization")
     parser.add_argument("--bc-games", type=int, default=0,
                         help="Teacher games to collect once for PPO BC regularization")
+    parser.add_argument("--bc-replay-data", type=str, default="",
+                        help="Path to pickle file with BC samples from replays (from replay_to_bc.py)")
     parser.add_argument("--bc-batch-size", type=int, default=128,
                         help="Auxiliary BC batch size per PPO update")
     parser.add_argument("--opponent-policy", choices=["random", "starter", "none"],
@@ -397,6 +448,10 @@ if __name__ == "__main__":
                         help="Eval opponent: 'random' or path to agent .py")
     parser.add_argument("--eval-fire-threshold", type=float, default=0.5,
                         help="Deterministic fire threshold used by eval.py agent wrapper")
+    parser.add_argument("--opponent-checkpoint", type=str, default="",
+                        help="Path to checkpoint for fixed self-play opponent")
+    parser.add_argument("--self-play-prob", type=float, default=0.5,
+                        help="Probability of using fixed opponent vs random (0=random only, 1=opponent only)")
     args = parser.parse_args()
 
     cfg = Config()
@@ -436,4 +491,7 @@ if __name__ == "__main__":
         bc_agent_path=args.bc_agent,
         bc_games=args.bc_games,
         bc_batch_size=args.bc_batch_size,
+        bc_replay_data=args.bc_replay_data,
+        opponent_checkpoint=args.opponent_checkpoint,
+        self_play_prob=args.self_play_prob,
     )

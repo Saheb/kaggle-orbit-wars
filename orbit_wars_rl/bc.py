@@ -20,9 +20,9 @@ import torch
 import torch.nn.functional as F
 
 from config import Config, BCConfig
-from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH
+from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, SHIP_COUNTS
 from features import extract_features
-from action_mask import compute_action_masks, _ship_bin_to_count
+from action_mask import compute_action_masks
 
 
 # ---------------------------------------------------------------------------
@@ -89,10 +89,9 @@ def _find_angle_bin(angle_rad: float) -> int:
 
 
 def _find_ship_bin(ships: int, max_ships: int = 10000) -> int:
-    """Find the closest log-scale ship bin for a given ship count."""
     best_bin, best_diff = 0, float("inf")
     for b in range(NUM_SHIP_BINS):
-        count = _ship_bin_to_count(b, max_ships)
+        count = SHIP_COUNTS[b]
         diff = abs(count - ships)
         if diff < best_diff:
             best_diff, best_bin = diff, b

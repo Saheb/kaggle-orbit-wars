@@ -166,7 +166,8 @@ def actions_from_sampled_policy(fire_action, angle_action, ship_action, masks, o
     return moves
 
 
+SHIP_COUNTS = [1, 2, 3, 5, 8, 13, 20, 30, 45, 65, 90, 120, 160, 200, 250, 300]
+
+
 def _ship_bin_to_count(bin_idx, max_ships):
-    _NUM_SHIP_BINS = 16
-    counts = [int(math.ceil(2 ** ((i + 1) / 2.0))) for i in range(_NUM_SHIP_BINS)]
-    return min(counts[bin_idx], max(1, max_ships))
+    return min(SHIP_COUNTS[bin_idx], max(1, max_ships))

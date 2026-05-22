@@ -223,34 +223,74 @@ def agent(obs):
 # Export logic
 # ---------------------------------------------------------------------------
 
-def _read_module_body(filepath: str, strip_imports: bool = True) -> str:
-    """Read a Python file and optionally strip top-level import lines."""
-    with open(filepath) as f:
-        lines = f.readlines()
+def _strip_module_docstring(source: str) -> str:
+    """Remove only the module-level docstring from Python source."""
+    lines = source.split('\n')
+    # Find the module docstring: skip blanks/comments, then find """ or '''
+    start = None
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s == '' or s.startswith('#'):
+            continue
+        if s.startswith('"""') or s.startswith("'''"):
+            start = i
+            break
+        break  # first real line is not a docstring
+    if start is None:
+        return source
 
-    if not strip_imports:
-        return "".join(lines)
+    delim = '"""' if lines[start].strip().startswith('"""') else "'''"
+    stripped_start = lines[start].strip()
+    # Check single-line docstring: """...all on one line..."""
+    if stripped_start.count(delim) >= 2 and stripped_start.endswith(delim) and len(stripped_start) > 3:
+        lines[start] = ''
+        return '\n'.join(lines)
 
+    # Multi-line: find closing delimiter
+    end = None
+    for i in range(start + 1, len(lines)):
+        if lines[i].strip() == delim or (lines[i].strip().endswith(delim) and lines[i].strip().startswith(delim) == False):
+            # Simple closing on its own line, or closing at end of line
+            if lines[i].strip() == delim:
+                end = i
+                break
+            # Closing delimiter at end of content line
+            end = i
+            break
+        if lines[i].strip().endswith(delim):
+            end = i
+            break
+
+    if end is not None:
+        for i in range(start, end + 1):
+            lines[i] = ''
+    return '\n'.join(lines)
+
+
+def _strip_imports(source: str) -> str:
+    """Strip top-level import lines from Python source."""
+    lines = source.split('\n')
     out = []
-    in_docstring = False
     for line in lines:
         stripped = line.strip()
-        # Skip module-level imports and the module docstring
-        if stripped.startswith('"""') or stripped.startswith("'''"):
-            in_docstring = not in_docstring
-            continue
-        if in_docstring:
-            continue
         if stripped.startswith("from __future__"):
             continue
         if stripped.startswith("import ") or stripped.startswith("from "):
-            # Keep relative imports that refer to game constants
             if "kaggle_environments" in stripped:
-                continue  # the template already imports CENTER / ROTATION_RADIUS_LIMIT
+                continue
             continue
         out.append(line)
+    return '\n'.join(out)
 
-    return "".join(out)
+
+def _read_module_body(filepath: str, strip_imports: bool = True) -> str:
+    """Read a Python file and strip module docstring + top-level imports."""
+    with open(filepath) as f:
+        source = f.read()
+    if strip_imports:
+        source = _strip_module_docstring(source)
+        source = _strip_imports(source)
+    return source
 
 
 def load_model(checkpoint_path: str, cfg: Config) -> EntityTransformer:

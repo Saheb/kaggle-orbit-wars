@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import random
 from collections import deque
 from typing import Optional
@@ -16,9 +17,8 @@ from action_mask import (
     compute_action_masks,
     actions_from_policy,
     actions_from_sampled_policy,
-    _ship_bin_to_count,
 )
-from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH
+from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, SHIP_COUNTS
 
 
 class Transition:
@@ -85,7 +85,7 @@ def _find_angle_bin(angle_rad: float) -> int:
 def _find_ship_bin(ships: int, max_ships: int = 10000) -> int:
     best_bin, best_diff = 0, float("inf")
     for b in range(NUM_SHIP_BINS):
-        count = _ship_bin_to_count(b, max_ships)
+        count = SHIP_COUNTS[b]
         diff = abs(count - int(ships))
         if diff < best_diff:
             best_bin, best_diff = b, diff
@@ -275,10 +275,11 @@ def collect_rollout(
         # Step environment
         obs, reward, done, info = env.step(env_actions, opponent_actions=opponent_actions)
 
-        # Shaping reward: material delta (small signal, dominated by terminal ±1)
+        # Shaping reward: tanh-scaled material delta keeps signal in [-1,1] range
         if shaping_coef > 0.0 and not done:
             curr_material = env.compute_material(0)
-            step_reward = shaping_coef * (curr_material - prev_material)
+            delta = curr_material - prev_material
+            step_reward = shaping_coef * math.tanh(delta / 50.0)
             prev_material = curr_material
         else:
             step_reward = 0.0
@@ -323,6 +324,7 @@ def collect_rollouts_vec(
     epsilon: float = 0.0,
     shaping_coef: float = 0.0,
     teacher_agent=None,
+    opponent_model=None,
 ):
     """Collect batch_size transitions from N environments in parallel.
 
@@ -449,7 +451,8 @@ def collect_rollouts_vec(
             player = sr["obs"].get("player", 0)
             if shaping_coef > 0.0 and not done:
                 curr_material = _material_from_obs(sr["obs"], player)
-                step_reward = shaping_coef * (curr_material - prev_materials[i])
+                delta = curr_material - prev_materials[i]
+                step_reward = shaping_coef * math.tanh(delta / 50.0)
                 prev_materials[i] = curr_material
             else:
                 step_reward = 0.0

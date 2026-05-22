@@ -1,0 +1,1136 @@
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+Training on device: mps
+Model params: 307,482
+Resumed model weights from /Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/checkpoints/bc_warmstart.pt
+Collecting 12 teacher games for PPO BC regularization...
+BC regularization samples: 471
+
+Starting training: 2,000,000 env steps
+Batch size: 2048, Minibatches: 4
+Self-play pool: 8 snapshots
+Shaping coef: 0.01
+Parallel envs: 4
+Opponent policy: random
+Env backend: fast
+Rollout inference device: cpu
+Uniform exploration epsilon: 0.15 -> 0.03
+BC regularization: coef=0.02 samples=471 agent=/Users/saheb/home/kaggle-orbit-wars/main.py
+
+Spawning 4 environment workers...
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+Episode     6 | Steps      2,048 | SPS      18 | Reward  -1.00 | Clip 0.125 | KL 1.2573 | V_loss 0.0199 | LR 0.000000
+Episode    11 | Steps      4,096 | SPS      20 | Reward  -0.82 | Clip 0.128 | KL 1.7076 | V_loss 0.0211 | LR 0.000000
+Episode    16 | Steps      6,144 | SPS      21 | Reward  -0.75 | Clip 0.133 | KL 2.0844 | V_loss 0.0218 | LR 0.000001
+Episode    22 | Steps      8,192 | SPS      23 | Reward  -0.82 | Clip 0.133 | KL 1.8557 | V_loss 0.0198 | LR 0.000001
+Episode    28 | Steps     10,240 | SPS      24 | Reward  -0.71 | Clip 0.133 | KL 1.4779 | V_loss 0.0246 | LR 0.000001
+Episode    34 | Steps     12,288 | SPS      23 | Reward  -0.71 | Clip 0.133 | KL 1.7368 | V_loss 0.0235 | LR 0.000001
+Episode    39 | Steps     14,336 | SPS      23 | Reward  -0.64 | Clip 0.133 | KL 1.6478 | V_loss 0.0230 | LR 0.000002
+Episode    45 | Steps     16,384 | SPS      23 | Reward  -0.60 | Clip 0.132 | KL 1.4734 | V_loss 0.0236 | LR 0.000002
+Episode    51 | Steps     18,432 | SPS      23 | Reward  -0.65 | Clip 0.130 | KL 1.0140 | V_loss 0.0196 | LR 0.000002
+Episode    56 | Steps     20,480 | SPS      23 | Reward  -0.64 | Clip 0.130 | KL 1.5509 | V_loss 0.0209 | LR 0.000002
+Episode    61 | Steps     22,528 | SPS      23 | Reward  -0.61 | Clip 0.130 | KL 1.9210 | V_loss 0.0249 | LR 0.000003
+Episode    66 | Steps     24,576 | SPS      24 | Reward  -0.58 | Clip 0.131 | KL 1.7053 | V_loss 0.0212 | LR 0.000003
+Episode    71 | Steps     26,624 | SPS      24 | Reward  -0.61 | Clip 0.133 | KL 2.3018 | V_loss 0.0165 | LR 0.000003
+Episode    77 | Steps     28,672 | SPS      24 | Reward  -0.56 | Clip 0.133 | KL 2.1501 | V_loss 0.0256 | LR 0.000003
+Episode    82 | Steps     30,720 | SPS      24 | Reward  -0.56 | Clip 0.134 | KL 2.0777 | V_loss 0.0218 | LR 0.000004
+Episode    88 | Steps     32,768 | SPS      24 | Reward  -0.59 | Clip 0.134 | KL 0.9939 | V_loss 0.0191 | LR 0.000004
+Episode    94 | Steps     34,816 | SPS      25 | Reward  -0.60 | Clip 0.134 | KL 1.1046 | V_loss 0.0216 | LR 0.000004
+Episode   100 | Steps     36,864 | SPS      25 | Reward  -0.60 | Clip 0.133 | KL 1.3091 | V_loss 0.0204 | LR 0.000004
+Episode   106 | Steps     38,912 | SPS      25 | Reward  -0.58 | Clip 0.134 | KL 1.2377 | V_loss 0.0181 | LR 0.000005
+Episode   111 | Steps     40,960 | SPS      26 | Reward  -0.60 | Clip 0.134 | KL 1.1404 | V_loss 0.0175 | LR 0.000005
+Episode   117 | Steps     43,008 | SPS      27 | Reward  -0.60 | Clip 0.134 | KL 1.6866 | V_loss 0.0204 | LR 0.000005
+Episode   122 | Steps     45,056 | SPS      28 | Reward  -0.60 | Clip 0.133 | KL 1.1782 | V_loss 0.0151 | LR 0.000005
+Episode   127 | Steps     47,104 | SPS      29 | Reward  -0.62 | Clip 0.134 | KL 1.1572 | V_loss 0.0135 | LR 0.000006
+Episode   133 | Steps     49,152 | SPS      29 | Reward  -0.66 | Clip 0.135 | KL 1.6254 | V_loss 0.0164 | LR 0.000006
+Episode   139 | Steps     51,200 | SPS      30 | Reward  -0.68 | Clip 0.135 | KL 1.7980 | V_loss 0.0219 | LR 0.000006
+Episode   144 | Steps     53,248 | SPS      31 | Reward  -0.68 | Clip 0.136 | KL 2.0907 | V_loss 0.0162 | LR 0.000006
+Episode   152 | Steps     55,296 | SPS      31 | Reward  -0.66 | Clip 0.135 | KL 1.3239 | V_loss 0.0307 | LR 0.000006
+Episode   158 | Steps     57,344 | SPS      32 | Reward  -0.64 | Clip 0.136 | KL 1.4909 | V_loss 0.0188 | LR 0.000007
+Episode   164 | Steps     59,392 | SPS      33 | Reward  -0.70 | Clip 0.136 | KL 1.0891 | V_loss 0.0150 | LR 0.000007
+Episode   170 | Steps     61,440 | SPS      33 | Reward  -0.70 | Clip 0.136 | KL 1.0519 | V_loss 0.0184 | LR 0.000007
+Episode   175 | Steps     63,488 | SPS      34 | Reward  -0.74 | Clip 0.136 | KL 1.3764 | V_loss 0.0116 | LR 0.000007
+Episode   181 | Steps     65,536 | SPS      34 | Reward  -0.78 | Clip 0.137 | KL 1.0627 | V_loss 0.0150 | LR 0.000008
+Episode   186 | Steps     67,584 | SPS      35 | Reward  -0.76 | Clip 0.138 | KL 1.7281 | V_loss 0.0160 | LR 0.000008
+Episode   191 | Steps     69,632 | SPS      35 | Reward  -0.76 | Clip 0.139 | KL 1.9692 | V_loss 0.0183 | LR 0.000008
+Episode   197 | Steps     71,680 | SPS      36 | Reward  -0.72 | Clip 0.139 | KL 2.0018 | V_loss 0.0234 | LR 0.000008
+Episode   203 | Steps     73,728 | SPS      36 | Reward  -0.72 | Clip 0.139 | KL 0.5679 | V_loss 0.0136 | LR 0.000009
+Episode   209 | Steps     75,776 | SPS      37 | Reward  -0.72 | Clip 0.138 | KL 1.2801 | V_loss 0.0187 | LR 0.000009
+Episode   215 | Steps     77,824 | SPS      37 | Reward  -0.66 | Clip 0.138 | KL 2.2502 | V_loss 0.0246 | LR 0.000009
+Episode   221 | Steps     79,872 | SPS      38 | Reward  -0.64 | Clip 0.138 | KL 0.8960 | V_loss 0.0153 | LR 0.000009
+Episode   227 | Steps     81,920 | SPS      38 | Reward  -0.62 | Clip 0.138 | KL 1.7472 | V_loss 0.0168 | LR 0.000010
+Episode   232 | Steps     83,968 | SPS      39 | Reward  -0.60 | Clip 0.139 | KL 2.4386 | V_loss 0.0145 | LR 0.000010
+Episode   237 | Steps     86,016 | SPS      39 | Reward  -0.60 | Clip 0.140 | KL 1.6760 | V_loss 0.0132 | LR 0.000010
+Episode   243 | Steps     88,064 | SPS      40 | Reward  -0.62 | Clip 0.140 | KL 1.2244 | V_loss 0.0106 | LR 0.000010
+Episode   248 | Steps     90,112 | SPS      40 | Reward  -0.60 | Clip 0.140 | KL 0.6933 | V_loss 0.0120 | LR 0.000011
+Episode   253 | Steps     92,160 | SPS      40 | Reward  -0.62 | Clip 0.140 | KL 2.2085 | V_loss 0.0154 | LR 0.000011
+Episode   259 | Steps     94,208 | SPS      41 | Reward  -0.64 | Clip 0.141 | KL 1.6273 | V_loss 0.0175 | LR 0.000011
+Episode   264 | Steps     96,256 | SPS      41 | Reward  -0.64 | Clip 0.141 | KL 1.1039 | V_loss 0.0074 | LR 0.000011
+Episode   270 | Steps     98,304 | SPS      42 | Reward  -0.62 | Clip 0.142 | KL 1.5777 | V_loss 0.0173 | LR 0.000012
+Episode   276 | Steps    100,352 | SPS      42 | Reward  -0.58 | Clip 0.142 | KL 1.2843 | V_loss 0.0134 | LR 0.000012
+Episode   282 | Steps    102,400 | SPS      42 | Reward  -0.54 | Clip 0.142 | KL 1.4531 | V_loss 0.0192 | LR 0.000012
+Episode   288 | Steps    104,448 | SPS      43 | Reward  -0.54 | Clip 0.142 | KL 1.4207 | V_loss 0.0155 | LR 0.000012
+Episode   294 | Steps    106,496 | SPS      43 | Reward  -0.58 | Clip 0.142 | KL 1.1132 | V_loss 0.0083 | LR 0.000012
+Episode   300 | Steps    108,544 | SPS      43 | Reward  -0.58 | Clip 0.142 | KL 1.1207 | V_loss 0.0136 | LR 0.000013
+Episode   305 | Steps    110,592 | SPS      43 | Reward  -0.58 | Clip 0.142 | KL 1.0311 | V_loss 0.0071 | LR 0.000013
+Episode   310 | Steps    112,640 | SPS      44 | Reward  -0.58 | Clip 0.142 | KL 1.3891 | V_loss 0.0148 | LR 0.000013
+Episode   315 | Steps    114,688 | SPS      44 | Reward  -0.60 | Clip 0.142 | KL 1.7596 | V_loss 0.0164 | LR 0.000013
+Episode   322 | Steps    116,736 | SPS      44 | Reward  -0.58 | Clip 0.142 | KL 1.2099 | V_loss 0.0139 | LR 0.000014
+Episode   327 | Steps    118,784 | SPS      45 | Reward  -0.56 | Clip 0.142 | KL 1.5148 | V_loss 0.0147 | LR 0.000014
+Episode   333 | Steps    120,832 | SPS      45 | Reward  -0.54 | Clip 0.142 | KL 0.8734 | V_loss 0.0102 | LR 0.000014
+Episode   338 | Steps    122,880 | SPS      45 | Reward  -0.52 | Clip 0.142 | KL 2.2033 | V_loss 0.0136 | LR 0.000014
+Episode   343 | Steps    124,928 | SPS      45 | Reward  -0.48 | Clip 0.143 | KL 1.9703 | V_loss 0.0130 | LR 0.000015
+Episode   348 | Steps    126,976 | SPS      46 | Reward  -0.46 | Clip 0.143 | KL 1.9003 | V_loss 0.0146 | LR 0.000015
+Episode   353 | Steps    129,024 | SPS      46 | Reward  -0.42 | Clip 0.143 | KL 2.0426 | V_loss 0.0145 | LR 0.000015
+Episode   360 | Steps    131,072 | SPS      46 | Reward  -0.42 | Clip 0.143 | KL 0.7775 | V_loss 0.0085 | LR 0.000015
+Episode   365 | Steps    133,120 | SPS      46 | Reward  -0.40 | Clip 0.144 | KL 1.1658 | V_loss 0.0097 | LR 0.000016
+Episode   370 | Steps    135,168 | SPS      47 | Reward  -0.36 | Clip 0.144 | KL 1.7462 | V_loss 0.0158 | LR 0.000016
+Episode   375 | Steps    137,216 | SPS      47 | Reward  -0.32 | Clip 0.144 | KL 1.9089 | V_loss 0.0119 | LR 0.000016
+Episode   381 | Steps    139,264 | SPS      47 | Reward  -0.34 | Clip 0.144 | KL 0.9655 | V_loss 0.0080 | LR 0.000016
+Episode   387 | Steps    141,312 | SPS      47 | Reward  -0.32 | Clip 0.145 | KL 1.4037 | V_loss 0.0101 | LR 0.000017
+Episode   392 | Steps    143,360 | SPS      48 | Reward  -0.28 | Clip 0.146 | KL 1.6935 | V_loss 0.0094 | LR 0.000017
+Episode   397 | Steps    145,408 | SPS      48 | Reward  -0.24 | Clip 0.146 | KL 2.0357 | V_loss 0.0120 | LR 0.000017
+Episode   402 | Steps    147,456 | SPS      48 | Reward  -0.20 | Clip 0.147 | KL 1.9968 | V_loss 0.0084 | LR 0.000017
+Episode   407 | Steps    149,504 | SPS      48 | Reward  -0.22 | Clip 0.147 | KL 0.9648 | V_loss 0.0082 | LR 0.000018
+Episode   412 | Steps    151,552 | SPS      48 | Reward  -0.22 | Clip 0.148 | KL 2.2134 | V_loss 0.0061 | LR 0.000018
+Episode   417 | Steps    153,600 | SPS      49 | Reward  -0.22 | Clip 0.148 | KL 1.6146 | V_loss 0.0063 | LR 0.000018
+Episode   422 | Steps    155,648 | SPS      49 | Reward  -0.24 | Clip 0.149 | KL 1.7294 | V_loss 0.0056 | LR 0.000018
+Episode   427 | Steps    157,696 | SPS      49 | Reward  -0.24 | Clip 0.148 | KL 1.1458 | V_loss 0.0126 | LR 0.000018
+Episode   433 | Steps    159,744 | SPS      49 | Reward  -0.24 | Clip 0.149 | KL 1.3129 | V_loss 0.0128 | LR 0.000019
+Episode   440 | Steps    161,792 | SPS      49 | Reward  -0.24 | Clip 0.149 | KL 0.7393 | V_loss 0.0107 | LR 0.000019
+Episode   445 | Steps    163,840 | SPS      50 | Reward  -0.24 | Clip 0.150 | KL 1.6201 | V_loss 0.0108 | LR 0.000019
+Episode   450 | Steps    165,888 | SPS      50 | Reward  -0.22 | Clip 0.150 | KL 2.2867 | V_loss 0.0094 | LR 0.000019
+Episode   455 | Steps    167,936 | SPS      50 | Reward  -0.20 | Clip 0.150 | KL 2.6565 | V_loss 0.0125 | LR 0.000020
+Episode   460 | Steps    169,984 | SPS      50 | Reward  -0.20 | Clip 0.150 | KL 1.3195 | V_loss 0.0068 | LR 0.000020
+Episode   465 | Steps    172,032 | SPS      50 | Reward  -0.20 | Clip 0.150 | KL 1.4591 | V_loss 0.0048 | LR 0.000020
+Episode   471 | Steps    174,080 | SPS      50 | Reward  -0.26 | Clip 0.150 | KL 0.8887 | V_loss 0.0037 | LR 0.000020
+Episode   476 | Steps    176,128 | SPS      51 | Reward  -0.34 | Clip 0.150 | KL 0.9492 | V_loss 0.0059 | LR 0.000021
+Episode   481 | Steps    178,176 | SPS      51 | Reward  -0.32 | Clip 0.150 | KL 1.1347 | V_loss 0.0074 | LR 0.000021
+Episode   487 | Steps    180,224 | SPS      51 | Reward  -0.32 | Clip 0.150 | KL 1.1898 | V_loss 0.0065 | LR 0.000021
+Episode   492 | Steps    182,272 | SPS      51 | Reward  -0.32 | Clip 0.150 | KL 1.8811 | V_loss 0.0093 | LR 0.000021
+Episode   498 | Steps    184,320 | SPS      51 | Reward  -0.32 | Clip 0.151 | KL 1.2278 | V_loss 0.0085 | LR 0.000022
+Episode   503 | Steps    186,368 | SPS      51 | Reward  -0.36 | Clip 0.151 | KL 0.9716 | V_loss 0.0060 | LR 0.000022
+Episode   508 | Steps    188,416 | SPS      52 | Reward  -0.32 | Clip 0.151 | KL 1.4284 | V_loss 0.0079 | LR 0.000022
+Episode   515 | Steps    190,464 | SPS      52 | Reward  -0.34 | Clip 0.151 | KL 1.7002 | V_loss 0.0158 | LR 0.000022
+Episode   523 | Steps    192,512 | SPS      52 | Reward  -0.28 | Clip 0.151 | KL 2.2648 | V_loss 0.0086 | LR 0.000023
+Episode   528 | Steps    194,560 | SPS      52 | Reward  -0.32 | Clip 0.152 | KL 1.3807 | V_loss 0.0049 | LR 0.000023
+Episode   534 | Steps    196,608 | SPS      52 | Reward  -0.30 | Clip 0.152 | KL 2.0250 | V_loss 0.0165 | LR 0.000023
+Episode   539 | Steps    198,656 | SPS      52 | Reward  -0.26 | Clip 0.152 | KL 1.9651 | V_loss 0.0077 | LR 0.000023
+Episode   545 | Steps    200,704 | SPS      52 | Reward  -0.32 | Clip 0.152 | KL 1.0542 | V_loss 0.0077 | LR 0.000024
+Episode   551 | Steps    202,752 | SPS      52 | Reward  -0.36 | Clip 0.152 | KL 1.3134 | V_loss 0.0113 | LR 0.000024
+Episode   556 | Steps    204,800 | SPS      53 | Reward  -0.38 | Clip 0.152 | KL 1.3884 | V_loss 0.0108 | LR 0.000024
+Episode   561 | Steps    206,848 | SPS      53 | Reward  -0.36 | Clip 0.153 | KL 1.5782 | V_loss 0.0067 | LR 0.000024
+Episode   566 | Steps    208,896 | SPS      53 | Reward  -0.38 | Clip 0.154 | KL 0.9236 | V_loss 0.0048 | LR 0.000024
+Episode   574 | Steps    210,944 | SPS      53 | Reward  -0.28 | Clip 0.154 | KL 2.4131 | V_loss 0.0088 | LR 0.000025
+Episode   580 | Steps    212,992 | SPS      53 | Reward  -0.26 | Clip 0.154 | KL 1.4777 | V_loss 0.0065 | LR 0.000025
+Episode   586 | Steps    215,040 | SPS      53 | Reward  -0.30 | Clip 0.154 | KL 1.4195 | V_loss 0.0120 | LR 0.000025
+Episode   591 | Steps    217,088 | SPS      53 | Reward  -0.32 | Clip 0.155 | KL 1.2864 | V_loss 0.0075 | LR 0.000025
+Episode   597 | Steps    219,136 | SPS      53 | Reward  -0.32 | Clip 0.155 | KL 0.9724 | V_loss 0.0057 | LR 0.000026
+Episode   605 | Steps    221,184 | SPS      53 | Reward  -0.26 | Clip 0.155 | KL 2.5144 | V_loss 0.0124 | LR 0.000026
+Episode   610 | Steps    223,232 | SPS      53 | Reward  -0.26 | Clip 0.156 | KL 1.5539 | V_loss 0.0098 | LR 0.000026
+Episode   615 | Steps    225,280 | SPS      54 | Reward  -0.30 | Clip 0.157 | KL 0.5756 | V_loss 0.0033 | LR 0.000026
+Episode   620 | Steps    227,328 | SPS      54 | Reward  -0.32 | Clip 0.157 | KL 1.3137 | V_loss 0.0062 | LR 0.000027
+Episode   625 | Steps    229,376 | SPS      54 | Reward  -0.32 | Clip 0.157 | KL 1.7967 | V_loss 0.0077 | LR 0.000027
+Episode   630 | Steps    231,424 | SPS      54 | Reward  -0.32 | Clip 0.158 | KL 1.3200 | V_loss 0.0057 | LR 0.000027
+Episode   636 | Steps    233,472 | SPS      54 | Reward  -0.36 | Clip 0.158 | KL 0.4392 | V_loss 0.0034 | LR 0.000027
+Episode   641 | Steps    235,520 | SPS      54 | Reward  -0.38 | Clip 0.158 | KL 0.8781 | V_loss 0.0083 | LR 0.000028
+Episode   646 | Steps    237,568 | SPS      54 | Reward  -0.36 | Clip 0.158 | KL 1.8399 | V_loss 0.0096 | LR 0.000028
+Episode   651 | Steps    239,616 | SPS      54 | Reward  -0.38 | Clip 0.158 | KL 1.3372 | V_loss 0.0069 | LR 0.000028
+Episode   656 | Steps    241,664 | SPS      55 | Reward  -0.34 | Clip 0.159 | KL 2.2789 | V_loss 0.0106 | LR 0.000028
+Episode   661 | Steps    243,712 | SPS      55 | Reward  -0.34 | Clip 0.159 | KL 1.0790 | V_loss 0.0052 | LR 0.000029
+Episode   666 | Steps    245,760 | SPS      55 | Reward  -0.34 | Clip 0.159 | KL 1.5198 | V_loss 0.0082 | LR 0.000029
+Episode   671 | Steps    247,808 | SPS      55 | Reward  -0.38 | Clip 0.160 | KL 1.4285 | V_loss 0.0086 | LR 0.000029
+Episode   676 | Steps    249,856 | SPS      55 | Reward  -0.38 | Clip 0.160 | KL 1.5986 | V_loss 0.0132 | LR 0.000029
+Episode   681 | Steps    251,904 | SPS      55 | Reward  -0.40 | Clip 0.160 | KL 1.0353 | V_loss 0.0039 | LR 0.000030
+Episode   687 | Steps    253,952 | SPS      55 | Reward  -0.40 | Clip 0.161 | KL 1.2292 | V_loss 0.0062 | LR 0.000030
+Episode   692 | Steps    256,000 | SPS      55 | Reward  -0.36 | Clip 0.161 | KL 1.8427 | V_loss 0.0050 | LR 0.000030
+Episode   697 | Steps    258,048 | SPS      56 | Reward  -0.36 | Clip 0.161 | KL 1.5738 | V_loss 0.0066 | LR 0.000030
+Episode   702 | Steps    260,096 | SPS      56 | Reward  -0.38 | Clip 0.161 | KL 2.5063 | V_loss 0.0123 | LR 0.000030
+Episode   707 | Steps    262,144 | SPS      56 | Reward  -0.40 | Clip 0.162 | KL 0.9134 | V_loss 0.0037 | LR 0.000030
+Episode   713 | Steps    264,192 | SPS      56 | Reward  -0.42 | Clip 0.162 | KL 0.5683 | V_loss 0.0040 | LR 0.000030
+Episode   718 | Steps    266,240 | SPS      56 | Reward  -0.40 | Clip 0.162 | KL 1.4286 | V_loss 0.0055 | LR 0.000030
+Episode   724 | Steps    268,288 | SPS      56 | Reward  -0.44 | Clip 0.162 | KL 1.4287 | V_loss 0.0056 | LR 0.000030
+Episode   729 | Steps    270,336 | SPS      56 | Reward  -0.42 | Clip 0.162 | KL 1.8495 | V_loss 0.0079 | LR 0.000030
+Episode   734 | Steps    272,384 | SPS      56 | Reward  -0.40 | Clip 0.162 | KL 1.4901 | V_loss 0.0043 | LR 0.000030
+Episode   739 | Steps    274,432 | SPS      56 | Reward  -0.36 | Clip 0.163 | KL 1.1639 | V_loss 0.0045 | LR 0.000030
+Episode   744 | Steps    276,480 | SPS      57 | Reward  -0.38 | Clip 0.163 | KL 2.3395 | V_loss 0.0068 | LR 0.000030
+Episode   750 | Steps    278,528 | SPS      57 | Reward  -0.38 | Clip 0.164 | KL 2.1827 | V_loss 0.0184 | LR 0.000030
+Episode   755 | Steps    280,576 | SPS      57 | Reward  -0.42 | Clip 0.164 | KL 1.0498 | V_loss 0.0068 | LR 0.000030
+Episode   761 | Steps    282,624 | SPS      57 | Reward  -0.46 | Clip 0.164 | KL 0.7843 | V_loss 0.0046 | LR 0.000030
+Episode   766 | Steps    284,672 | SPS      57 | Reward  -0.44 | Clip 0.164 | KL 1.7380 | V_loss 0.0058 | LR 0.000030
+Episode   772 | Steps    286,720 | SPS      57 | Reward  -0.42 | Clip 0.164 | KL 1.2086 | V_loss 0.0055 | LR 0.000030
+Episode   778 | Steps    288,768 | SPS      57 | Reward  -0.40 | Clip 0.164 | KL 2.2374 | V_loss 0.0085 | LR 0.000030
+Episode   783 | Steps    290,816 | SPS      57 | Reward  -0.40 | Clip 0.164 | KL 0.9068 | V_loss 0.0035 | LR 0.000030
+Episode   788 | Steps    292,864 | SPS      57 | Reward  -0.40 | Clip 0.165 | KL 1.2314 | V_loss 0.0134 | LR 0.000030
+Episode   794 | Steps    294,912 | SPS      57 | Reward  -0.46 | Clip 0.165 | KL 0.9765 | V_loss 0.0034 | LR 0.000030
+Episode   799 | Steps    296,960 | SPS      58 | Reward  -0.44 | Clip 0.165 | KL 1.5752 | V_loss 0.0144 | LR 0.000030
+Episode   806 | Steps    299,008 | SPS      58 | Reward  -0.44 | Clip 0.165 | KL 1.1335 | V_loss 0.0102 | LR 0.000030
+Episode   811 | Steps    301,056 | SPS      58 | Reward  -0.38 | Clip 0.165 | KL 2.4493 | V_loss 0.0125 | LR 0.000030
+Episode   816 | Steps    303,104 | SPS      58 | Reward  -0.34 | Clip 0.165 | KL 2.6280 | V_loss 0.0107 | LR 0.000030
+Episode   821 | Steps    305,152 | SPS      58 | Reward  -0.32 | Clip 0.165 | KL 2.6815 | V_loss 0.0056 | LR 0.000030
+Episode   826 | Steps    307,200 | SPS      58 | Reward  -0.30 | Clip 0.165 | KL 1.3392 | V_loss 0.0071 | LR 0.000030
+Episode   831 | Steps    309,248 | SPS      58 | Reward  -0.34 | Clip 0.165 | KL 0.9106 | V_loss 0.0061 | LR 0.000030
+Episode   836 | Steps    311,296 | SPS      58 | Reward  -0.32 | Clip 0.165 | KL 2.0671 | V_loss 0.0048 | LR 0.000030
+Episode   842 | Steps    313,344 | SPS      58 | Reward  -0.32 | Clip 0.166 | KL 1.7987 | V_loss 0.0053 | LR 0.000030
+Episode   847 | Steps    315,392 | SPS      58 | Reward  -0.32 | Clip 0.166 | KL 1.2533 | V_loss 0.0049 | LR 0.000030
+Episode   852 | Steps    317,440 | SPS      58 | Reward  -0.28 | Clip 0.166 | KL 2.0114 | V_loss 0.0071 | LR 0.000030
+Episode   860 | Steps    319,488 | SPS      59 | Reward  -0.16 | Clip 0.166 | KL 2.8187 | V_loss 0.0068 | LR 0.000030
+Episode   866 | Steps    321,536 | SPS      59 | Reward  -0.16 | Clip 0.166 | KL 1.4435 | V_loss 0.0097 | LR 0.000030
+Episode   871 | Steps    323,584 | SPS      59 | Reward  -0.14 | Clip 0.166 | KL 1.6677 | V_loss 0.0110 | LR 0.000030
+Episode   876 | Steps    325,632 | SPS      59 | Reward  -0.16 | Clip 0.167 | KL 1.7690 | V_loss 0.0067 | LR 0.000030
+Episode   881 | Steps    327,680 | SPS      59 | Reward  -0.16 | Clip 0.167 | KL 1.0954 | V_loss 0.0091 | LR 0.000030
+Episode   886 | Steps    329,728 | SPS      59 | Reward  -0.16 | Clip 0.167 | KL 0.8124 | V_loss 0.0047 | LR 0.000030
+Episode   891 | Steps    331,776 | SPS      59 | Reward  -0.14 | Clip 0.167 | KL 2.6583 | V_loss 0.0067 | LR 0.000030
+Episode   897 | Steps    333,824 | SPS      59 | Reward  -0.12 | Clip 0.167 | KL 1.4779 | V_loss 0.0062 | LR 0.000030
+Episode   902 | Steps    335,872 | SPS      59 | Reward  -0.08 | Clip 0.167 | KL 2.1428 | V_loss 0.0051 | LR 0.000030
+Episode   907 | Steps    337,920 | SPS      59 | Reward  -0.02 | Clip 0.167 | KL 1.8967 | V_loss 0.0105 | LR 0.000030
+Episode   915 | Steps    339,968 | SPS      59 | Reward  -0.10 | Clip 0.167 | KL 1.2226 | V_loss 0.0101 | LR 0.000030
+Episode   920 | Steps    342,016 | SPS      59 | Reward  -0.12 | Clip 0.167 | KL 1.4093 | V_loss 0.0094 | LR 0.000030
+Episode   925 | Steps    344,064 | SPS      59 | Reward  -0.10 | Clip 0.167 | KL 2.2722 | V_loss 0.0063 | LR 0.000030
+Episode   931 | Steps    346,112 | SPS      60 | Reward  -0.08 | Clip 0.167 | KL 0.9875 | V_loss 0.0050 | LR 0.000030
+Episode   936 | Steps    348,160 | SPS      60 | Reward  -0.12 | Clip 0.167 | KL 1.1494 | V_loss 0.0076 | LR 0.000030
+Episode   941 | Steps    350,208 | SPS      60 | Reward  -0.10 | Clip 0.166 | KL 1.9091 | V_loss 0.0068 | LR 0.000030
+Episode   946 | Steps    352,256 | SPS      60 | Reward  -0.12 | Clip 0.166 | KL 1.5808 | V_loss 0.0100 | LR 0.000030
+Episode   952 | Steps    354,304 | SPS      60 | Reward  -0.16 | Clip 0.166 | KL 0.8070 | V_loss 0.0103 | LR 0.000030
+Episode   957 | Steps    356,352 | SPS      60 | Reward  -0.18 | Clip 0.165 | KL 1.5021 | V_loss 0.0065 | LR 0.000030
+Episode   965 | Steps    358,400 | SPS      60 | Reward  -0.18 | Clip 0.165 | KL 1.9534 | V_loss 0.0044 | LR 0.000030
+Episode   971 | Steps    360,448 | SPS      60 | Reward  -0.16 | Clip 0.164 | KL 1.9109 | V_loss 0.0123 | LR 0.000030
+Episode   977 | Steps    362,496 | SPS      60 | Reward  -0.16 | Clip 0.165 | KL 1.6370 | V_loss 0.0044 | LR 0.000030
+Episode   983 | Steps    364,544 | SPS      60 | Reward  -0.12 | Clip 0.165 | KL 1.8019 | V_loss 0.0076 | LR 0.000030
+Episode   988 | Steps    366,592 | SPS      60 | Reward  -0.14 | Clip 0.165 | KL 1.8668 | V_loss 0.0096 | LR 0.000030
+Episode   993 | Steps    368,640 | SPS      60 | Reward  -0.16 | Clip 0.164 | KL 0.9414 | V_loss 0.0054 | LR 0.000030
+Episode   998 | Steps    370,688 | SPS      60 | Reward  -0.20 | Clip 0.165 | KL 1.5751 | V_loss 0.0119 | LR 0.000030
+Episode  1006 | Steps    372,736 | SPS      60 | Reward  -0.18 | Clip 0.165 | KL 2.3995 | V_loss 0.0051 | LR 0.000030
+Episode  1011 | Steps    374,784 | SPS      60 | Reward  -0.16 | Clip 0.165 | KL 1.8663 | V_loss 0.0109 | LR 0.000030
+Episode  1017 | Steps    376,832 | SPS      61 | Reward  -0.14 | Clip 0.165 | KL 1.5481 | V_loss 0.0119 | LR 0.000030
+Episode  1025 | Steps    378,880 | SPS      61 | Reward  -0.16 | Clip 0.165 | KL 1.3497 | V_loss 0.0085 | LR 0.000030
+Episode  1031 | Steps    380,928 | SPS      61 | Reward  -0.14 | Clip 0.165 | KL 1.5250 | V_loss 0.0041 | LR 0.000030
+Episode  1036 | Steps    382,976 | SPS      61 | Reward  -0.16 | Clip 0.165 | KL 0.8286 | V_loss 0.0056 | LR 0.000030
+Episode  1041 | Steps    385,024 | SPS      61 | Reward  -0.14 | Clip 0.165 | KL 2.3840 | V_loss 0.0097 | LR 0.000030
+Episode  1046 | Steps    387,072 | SPS      61 | Reward  -0.08 | Clip 0.165 | KL 2.0339 | V_loss 0.0033 | LR 0.000030
+Episode  1051 | Steps    389,120 | SPS      61 | Reward  -0.08 | Clip 0.165 | KL 1.0591 | V_loss 0.0075 | LR 0.000030
+Episode  1056 | Steps    391,168 | SPS      61 | Reward  -0.08 | Clip 0.165 | KL 1.4955 | V_loss 0.0048 | LR 0.000030
+Episode  1061 | Steps    393,216 | SPS      61 | Reward  -0.14 | Clip 0.165 | KL 1.2264 | V_loss 0.0071 | LR 0.000030
+Episode  1066 | Steps    395,264 | SPS      61 | Reward  -0.16 | Clip 0.166 | KL 1.1471 | V_loss 0.0066 | LR 0.000030
+Episode  1072 | Steps    397,312 | SPS      61 | Reward  -0.14 | Clip 0.165 | KL 1.9915 | V_loss 0.0112 | LR 0.000030
+Episode  1077 | Steps    399,360 | SPS      61 | Reward  -0.18 | Clip 0.165 | KL 1.4495 | V_loss 0.0067 | LR 0.000030
+Episode  1082 | Steps    401,408 | SPS      61 | Reward  -0.18 | Clip 0.165 | KL 1.9920 | V_loss 0.0043 | LR 0.000030
+Episode  1087 | Steps    403,456 | SPS      61 | Reward  -0.16 | Clip 0.166 | KL 1.5925 | V_loss 0.0055 | LR 0.000030
+Episode  1092 | Steps    405,504 | SPS      61 | Reward  -0.14 | Clip 0.166 | KL 1.3594 | V_loss 0.0039 | LR 0.000030
+Episode  1097 | Steps    407,552 | SPS      61 | Reward  -0.12 | Clip 0.165 | KL 0.8989 | V_loss 0.0052 | LR 0.000030
+Episode  1102 | Steps    409,600 | SPS      61 | Reward  -0.18 | Clip 0.166 | KL 1.7251 | V_loss 0.0072 | LR 0.000030
+Episode  1107 | Steps    411,648 | SPS      62 | Reward  -0.20 | Clip 0.165 | KL 1.4671 | V_loss 0.0043 | LR 0.000030
+Episode  1112 | Steps    413,696 | SPS      62 | Reward  -0.18 | Clip 0.165 | KL 1.5982 | V_loss 0.0063 | LR 0.000030
+Episode  1118 | Steps    415,744 | SPS      62 | Reward  -0.18 | Clip 0.165 | KL 1.0129 | V_loss 0.0125 | LR 0.000030
+Episode  1123 | Steps    417,792 | SPS      62 | Reward  -0.18 | Clip 0.165 | KL 1.5725 | V_loss 0.0063 | LR 0.000030
+Episode  1129 | Steps    419,840 | SPS      62 | Reward  -0.22 | Clip 0.165 | KL 1.3363 | V_loss 0.0055 | LR 0.000030
+Episode  1134 | Steps    421,888 | SPS      62 | Reward  -0.20 | Clip 0.165 | KL 1.1311 | V_loss 0.0074 | LR 0.000030
+Episode  1139 | Steps    423,936 | SPS      62 | Reward  -0.16 | Clip 0.165 | KL 2.1294 | V_loss 0.0066 | LR 0.000030
+Episode  1144 | Steps    425,984 | SPS      62 | Reward  -0.18 | Clip 0.165 | KL 1.6743 | V_loss 0.0076 | LR 0.000030
+Episode  1149 | Steps    428,032 | SPS      62 | Reward  -0.20 | Clip 0.165 | KL 1.4476 | V_loss 0.0071 | LR 0.000030
+Episode  1154 | Steps    430,080 | SPS      62 | Reward  -0.22 | Clip 0.165 | KL 0.9482 | V_loss 0.0060 | LR 0.000030
+Episode  1159 | Steps    432,128 | SPS      62 | Reward  -0.18 | Clip 0.165 | KL 1.5337 | V_loss 0.0069 | LR 0.000030
+Episode  1164 | Steps    434,176 | SPS      62 | Reward  -0.14 | Clip 0.165 | KL 1.2796 | V_loss 0.0091 | LR 0.000030
+Episode  1170 | Steps    436,224 | SPS      62 | Reward  -0.18 | Clip 0.165 | KL 0.7021 | V_loss 0.0073 | LR 0.000030
+Episode  1176 | Steps    438,272 | SPS      62 | Reward  -0.16 | Clip 0.164 | KL 1.6803 | V_loss 0.0047 | LR 0.000030
+Episode  1181 | Steps    440,320 | SPS      62 | Reward  -0.16 | Clip 0.164 | KL 1.7251 | V_loss 0.0048 | LR 0.000030
+Episode  1186 | Steps    442,368 | SPS      62 | Reward  -0.16 | Clip 0.165 | KL 1.7613 | V_loss 0.0127 | LR 0.000030
+Episode  1191 | Steps    444,416 | SPS      62 | Reward  -0.16 | Clip 0.165 | KL 1.4500 | V_loss 0.0068 | LR 0.000030
+Episode  1196 | Steps    446,464 | SPS      62 | Reward  -0.16 | Clip 0.165 | KL 1.3680 | V_loss 0.0060 | LR 0.000030
+Episode  1201 | Steps    448,512 | SPS      62 | Reward  -0.18 | Clip 0.165 | KL 1.4180 | V_loss 0.0111 | LR 0.000030
+Episode  1206 | Steps    450,560 | SPS      62 | Reward  -0.18 | Clip 0.165 | KL 1.4854 | V_loss 0.0054 | LR 0.000030
+Episode  1212 | Steps    452,608 | SPS      63 | Reward  -0.18 | Clip 0.165 | KL 2.2484 | V_loss 0.0058 | LR 0.000030
+Episode  1217 | Steps    454,656 | SPS      63 | Reward  -0.16 | Clip 0.164 | KL 1.2577 | V_loss 0.0069 | LR 0.000030
+Episode  1222 | Steps    456,704 | SPS      63 | Reward  -0.14 | Clip 0.165 | KL 1.4410 | V_loss 0.0114 | LR 0.000030
+Episode  1227 | Steps    458,752 | SPS      63 | Reward  -0.14 | Clip 0.164 | KL 1.5150 | V_loss 0.0102 | LR 0.000030
+Episode  1232 | Steps    460,800 | SPS      63 | Reward  -0.10 | Clip 0.164 | KL 1.4220 | V_loss 0.0050 | LR 0.000030
+Episode  1237 | Steps    462,848 | SPS      63 | Reward  -0.14 | Clip 0.164 | KL 2.0266 | V_loss 0.0090 | LR 0.000030
+Episode  1243 | Steps    464,896 | SPS      63 | Reward  -0.20 | Clip 0.165 | KL 0.7128 | V_loss 0.0069 | LR 0.000030
+Episode  1248 | Steps    466,944 | SPS      63 | Reward  -0.18 | Clip 0.164 | KL 1.5033 | V_loss 0.0053 | LR 0.000030
+Episode  1253 | Steps    468,992 | SPS      63 | Reward  -0.16 | Clip 0.165 | KL 1.4895 | V_loss 0.0056 | LR 0.000030
+Episode  1258 | Steps    471,040 | SPS      63 | Reward  -0.18 | Clip 0.165 | KL 1.3480 | V_loss 0.0056 | LR 0.000030
+Episode  1266 | Steps    473,088 | SPS      63 | Reward  -0.08 | Clip 0.164 | KL 2.0396 | V_loss 0.0032 | LR 0.000030
+Episode  1274 | Steps    475,136 | SPS      63 | Reward  -0.04 | Clip 0.164 | KL 1.4838 | V_loss 0.0064 | LR 0.000030
+Episode  1280 | Steps    477,184 | SPS      63 | Reward  -0.08 | Clip 0.164 | KL 0.8903 | V_loss 0.0059 | LR 0.000030
+Episode  1285 | Steps    479,232 | SPS      63 | Reward  -0.10 | Clip 0.164 | KL 0.9152 | V_loss 0.0045 | LR 0.000030
+Episode  1290 | Steps    481,280 | SPS      63 | Reward  -0.08 | Clip 0.163 | KL 1.6575 | V_loss 0.0113 | LR 0.000030
+Episode  1295 | Steps    483,328 | SPS      63 | Reward  -0.08 | Clip 0.163 | KL 1.5407 | V_loss 0.0099 | LR 0.000030
+Episode  1300 | Steps    485,376 | SPS      63 | Reward  -0.02 | Clip 0.163 | KL 2.3134 | V_loss 0.0068 | LR 0.000030
+Episode  1305 | Steps    487,424 | SPS      63 | Reward  -0.08 | Clip 0.163 | KL 0.9949 | V_loss 0.0072 | LR 0.000030
+Episode  1310 | Steps    489,472 | SPS      63 | Reward  -0.06 | Clip 0.163 | KL 1.9744 | V_loss 0.0049 | LR 0.000030
+Episode  1315 | Steps    491,520 | SPS      63 | Reward  -0.10 | Clip 0.163 | KL 1.2344 | V_loss 0.0039 | LR 0.000030
+Episode  1320 | Steps    493,568 | SPS      63 | Reward  -0.08 | Clip 0.163 | KL 1.1305 | V_loss 0.0119 | LR 0.000030
+Episode  1326 | Steps    495,616 | SPS      64 | Reward  -0.06 | Clip 0.163 | KL 1.9926 | V_loss 0.0107 | LR 0.000030
+Episode  1331 | Steps    497,664 | SPS      64 | Reward  -0.06 | Clip 0.163 | KL 1.6268 | V_loss 0.0061 | LR 0.000030
+Episode  1336 | Steps    499,712 | SPS      64 | Reward  -0.08 | Clip 0.163 | KL 1.7697 | V_loss 0.0065 | LR 0.000030
+Episode  1341 | Steps    501,760 | SPS      64 | Reward  -0.04 | Clip 0.163 | KL 1.7144 | V_loss 0.0168 | LR 0.000030
+Checkpoint saved at checkpoints/step_501760
+Episode  1347 | Steps    503,808 | SPS      64 | Reward  -0.04 | Clip 0.163 | KL 1.2383 | V_loss 0.0073 | LR 0.000030
+Episode  1352 | Steps    505,856 | SPS      64 | Reward  -0.04 | Clip 0.163 | KL 1.6429 | V_loss 0.0036 | LR 0.000030
+Episode  1357 | Steps    507,904 | SPS      64 | Reward  -0.04 | Clip 0.163 | KL 1.0376 | V_loss 0.0048 | LR 0.000030
+Episode  1365 | Steps    509,952 | SPS      64 | Reward  -0.08 | Clip 0.163 | KL 1.5620 | V_loss 0.0060 | LR 0.000030
+Episode  1370 | Steps    512,000 | SPS      64 | Reward  -0.12 | Clip 0.163 | KL 0.9108 | V_loss 0.0060 | LR 0.000030
+Episode  1375 | Steps    514,048 | SPS      64 | Reward  -0.16 | Clip 0.163 | KL 1.3425 | V_loss 0.0038 | LR 0.000030
+Episode  1383 | Steps    516,096 | SPS      64 | Reward  -0.14 | Clip 0.163 | KL 1.7512 | V_loss 0.0097 | LR 0.000030
+Episode  1388 | Steps    518,144 | SPS      64 | Reward  -0.14 | Clip 0.163 | KL 1.2446 | V_loss 0.0047 | LR 0.000030
+Episode  1393 | Steps    520,192 | SPS      64 | Reward  -0.10 | Clip 0.163 | KL 1.9812 | V_loss 0.0055 | LR 0.000030
+Episode  1401 | Steps    522,240 | SPS      64 | Reward  -0.06 | Clip 0.163 | KL 1.7749 | V_loss 0.0064 | LR 0.000030
+Episode  1406 | Steps    524,288 | SPS      64 | Reward  -0.04 | Clip 0.163 | KL 0.9781 | V_loss 0.0048 | LR 0.000030
+Episode  1412 | Steps    526,336 | SPS      64 | Reward  -0.10 | Clip 0.163 | KL 1.4995 | V_loss 0.0078 | LR 0.000030
+Episode  1417 | Steps    528,384 | SPS      64 | Reward  -0.08 | Clip 0.163 | KL 1.3050 | V_loss 0.0044 | LR 0.000030
+Episode  1422 | Steps    530,432 | SPS      64 | Reward  -0.10 | Clip 0.164 | KL 1.1402 | V_loss 0.0074 | LR 0.000030
+Episode  1427 | Steps    532,480 | SPS      64 | Reward  -0.16 | Clip 0.164 | KL 1.3826 | V_loss 0.0063 | LR 0.000030
+Episode  1432 | Steps    534,528 | SPS      64 | Reward  -0.10 | Clip 0.164 | KL 1.7504 | V_loss 0.0076 | LR 0.000030
+Episode  1437 | Steps    536,576 | SPS      64 | Reward  -0.06 | Clip 0.163 | KL 1.8807 | V_loss 0.0085 | LR 0.000030
+Episode  1442 | Steps    538,624 | SPS      64 | Reward  -0.10 | Clip 0.163 | KL 1.2177 | V_loss 0.0075 | LR 0.000030
+Episode  1447 | Steps    540,672 | SPS      64 | Reward  -0.08 | Clip 0.163 | KL 2.0585 | V_loss 0.0042 | LR 0.000030
+Episode  1452 | Steps    542,720 | SPS      64 | Reward  -0.06 | Clip 0.163 | KL 1.7397 | V_loss 0.0061 | LR 0.000030
+Episode  1457 | Steps    544,768 | SPS      64 | Reward  -0.04 | Clip 0.163 | KL 1.3298 | V_loss 0.0070 | LR 0.000030
+Episode  1462 | Steps    546,816 | SPS      64 | Reward  -0.04 | Clip 0.162 | KL 1.4998 | V_loss 0.0067 | LR 0.000030
+Episode  1467 | Steps    548,864 | SPS      64 | Reward  -0.04 | Clip 0.162 | KL 1.5744 | V_loss 0.0042 | LR 0.000030
+Episode  1472 | Steps    550,912 | SPS      65 | Reward  +0.00 | Clip 0.162 | KL 2.2988 | V_loss 0.0073 | LR 0.000030
+Episode  1478 | Steps    552,960 | SPS      65 | Reward  +0.02 | Clip 0.162 | KL 1.6421 | V_loss 0.0064 | LR 0.000030
+Episode  1483 | Steps    555,008 | SPS      65 | Reward  +0.04 | Clip 0.162 | KL 1.6721 | V_loss 0.0069 | LR 0.000030
+Episode  1491 | Steps    557,056 | SPS      65 | Reward  +0.08 | Clip 0.162 | KL 1.8706 | V_loss 0.0095 | LR 0.000030
+Episode  1496 | Steps    559,104 | SPS      65 | Reward  +0.08 | Clip 0.162 | KL 1.2672 | V_loss 0.0138 | LR 0.000030
+Episode  1501 | Steps    561,152 | SPS      65 | Reward  +0.04 | Clip 0.162 | KL 1.9367 | V_loss 0.0052 | LR 0.000030
+Episode  1506 | Steps    563,200 | SPS      65 | Reward  +0.08 | Clip 0.162 | KL 1.3637 | V_loss 0.0053 | LR 0.000030
+Episode  1511 | Steps    565,248 | SPS      65 | Reward  +0.06 | Clip 0.162 | KL 1.2593 | V_loss 0.0052 | LR 0.000030
+Episode  1516 | Steps    567,296 | SPS      65 | Reward  +0.10 | Clip 0.162 | KL 1.9772 | V_loss 0.0078 | LR 0.000030
+Episode  1521 | Steps    569,344 | SPS      65 | Reward  +0.14 | Clip 0.162 | KL 1.6125 | V_loss 0.0034 | LR 0.000030
+Episode  1529 | Steps    571,392 | SPS      65 | Reward  +0.24 | Clip 0.161 | KL 2.2656 | V_loss 0.0046 | LR 0.000030
+Episode  1534 | Steps    573,440 | SPS      65 | Reward  +0.24 | Clip 0.161 | KL 1.2958 | V_loss 0.0045 | LR 0.000030
+Episode  1540 | Steps    575,488 | SPS      65 | Reward  +0.26 | Clip 0.160 | KL 1.4636 | V_loss 0.0040 | LR 0.000030
+Episode  1545 | Steps    577,536 | SPS      65 | Reward  +0.28 | Clip 0.160 | KL 1.8957 | V_loss 0.0064 | LR 0.000030
+Episode  1550 | Steps    579,584 | SPS      65 | Reward  +0.26 | Clip 0.160 | KL 2.3277 | V_loss 0.0087 | LR 0.000030
+Episode  1556 | Steps    581,632 | SPS      65 | Reward  +0.26 | Clip 0.159 | KL 1.7925 | V_loss 0.0085 | LR 0.000030
+Episode  1561 | Steps    583,680 | SPS      65 | Reward  +0.26 | Clip 0.159 | KL 1.6562 | V_loss 0.0087 | LR 0.000030
+Episode  1566 | Steps    585,728 | SPS      65 | Reward  +0.26 | Clip 0.159 | KL 1.2809 | V_loss 0.0074 | LR 0.000030
+Episode  1571 | Steps    587,776 | SPS      65 | Reward  +0.20 | Clip 0.159 | KL 1.3987 | V_loss 0.0078 | LR 0.000030
+Episode  1576 | Steps    589,824 | SPS      65 | Reward  +0.26 | Clip 0.158 | KL 1.7559 | V_loss 0.0074 | LR 0.000030
+Episode  1581 | Steps    591,872 | SPS      65 | Reward  +0.24 | Clip 0.158 | KL 1.3017 | V_loss 0.0059 | LR 0.000030
+Episode  1587 | Steps    593,920 | SPS      65 | Reward  +0.24 | Clip 0.158 | KL 1.3288 | V_loss 0.0043 | LR 0.000030
+Episode  1592 | Steps    595,968 | SPS      65 | Reward  +0.26 | Clip 0.158 | KL 2.0445 | V_loss 0.0070 | LR 0.000030
+Episode  1598 | Steps    598,016 | SPS      65 | Reward  +0.22 | Clip 0.158 | KL 1.3796 | V_loss 0.0045 | LR 0.000030
+Episode  1603 | Steps    600,064 | SPS      65 | Reward  +0.22 | Clip 0.157 | KL 1.6379 | V_loss 0.0046 | LR 0.000030
+Episode  1608 | Steps    602,112 | SPS      65 | Reward  +0.18 | Clip 0.157 | KL 0.9139 | V_loss 0.0063 | LR 0.000030
+Episode  1613 | Steps    604,160 | SPS      66 | Reward  +0.22 | Clip 0.157 | KL 1.6069 | V_loss 0.0051 | LR 0.000030
+Episode  1618 | Steps    606,208 | SPS      66 | Reward  +0.26 | Clip 0.156 | KL 1.5646 | V_loss 0.0082 | LR 0.000030
+Episode  1623 | Steps    608,256 | SPS      66 | Reward  +0.20 | Clip 0.156 | KL 1.3467 | V_loss 0.0065 | LR 0.000030
+Episode  1628 | Steps    610,304 | SPS      66 | Reward  +0.16 | Clip 0.156 | KL 1.6998 | V_loss 0.0038 | LR 0.000030
+Episode  1633 | Steps    612,352 | SPS      66 | Reward  +0.16 | Clip 0.155 | KL 1.7463 | V_loss 0.0057 | LR 0.000030
+Episode  1638 | Steps    614,400 | SPS      66 | Reward  +0.12 | Clip 0.155 | KL 1.5333 | V_loss 0.0116 | LR 0.000030
+Episode  1643 | Steps    616,448 | SPS      66 | Reward  +0.08 | Clip 0.155 | KL 1.6961 | V_loss 0.0119 | LR 0.000030
+Episode  1648 | Steps    618,496 | SPS      66 | Reward  +0.06 | Clip 0.155 | KL 1.4827 | V_loss 0.0055 | LR 0.000030
+Episode  1653 | Steps    620,544 | SPS      66 | Reward  +0.08 | Clip 0.155 | KL 2.1560 | V_loss 0.0032 | LR 0.000030
+Episode  1658 | Steps    622,592 | SPS      66 | Reward  +0.06 | Clip 0.154 | KL 1.3574 | V_loss 0.0036 | LR 0.000030
+Episode  1664 | Steps    624,640 | SPS      66 | Reward  +0.04 | Clip 0.154 | KL 0.8189 | V_loss 0.0072 | LR 0.000030
+Episode  1669 | Steps    626,688 | SPS      66 | Reward  +0.04 | Clip 0.154 | KL 1.3917 | V_loss 0.0072 | LR 0.000030
+Episode  1674 | Steps    628,736 | SPS      66 | Reward  +0.06 | Clip 0.154 | KL 1.9543 | V_loss 0.0044 | LR 0.000030
+Episode  1679 | Steps    630,784 | SPS      66 | Reward  +0.06 | Clip 0.154 | KL 1.1254 | V_loss 0.0064 | LR 0.000030
+Episode  1684 | Steps    632,832 | SPS      66 | Reward  +0.06 | Clip 0.153 | KL 1.3883 | V_loss 0.0032 | LR 0.000030
+Episode  1689 | Steps    634,880 | SPS      66 | Reward  +0.04 | Clip 0.153 | KL 1.3393 | V_loss 0.0071 | LR 0.000030
+Episode  1694 | Steps    636,928 | SPS      66 | Reward  +0.00 | Clip 0.153 | KL 1.1499 | V_loss 0.0048 | LR 0.000030
+Episode  1699 | Steps    638,976 | SPS      66 | Reward  +0.02 | Clip 0.153 | KL 1.9693 | V_loss 0.0065 | LR 0.000030
+Episode  1705 | Steps    641,024 | SPS      66 | Reward  +0.04 | Clip 0.153 | KL 1.0511 | V_loss 0.0043 | LR 0.000030
+Episode  1711 | Steps    643,072 | SPS      66 | Reward  +0.04 | Clip 0.153 | KL 1.1635 | V_loss 0.0073 | LR 0.000030
+Episode  1719 | Steps    645,120 | SPS      66 | Reward  +0.06 | Clip 0.153 | KL 1.5079 | V_loss 0.0068 | LR 0.000030
+Episode  1724 | Steps    647,168 | SPS      66 | Reward  +0.08 | Clip 0.152 | KL 1.7025 | V_loss 0.0045 | LR 0.000030
+Episode  1729 | Steps    649,216 | SPS      66 | Reward  +0.06 | Clip 0.152 | KL 1.3432 | V_loss 0.0059 | LR 0.000030
+Episode  1735 | Steps    651,264 | SPS      66 | Reward  +0.04 | Clip 0.151 | KL 0.9817 | V_loss 0.0055 | LR 0.000030
+Episode  1740 | Steps    653,312 | SPS      66 | Reward  +0.06 | Clip 0.151 | KL 1.2113 | V_loss 0.0059 | LR 0.000030
+Episode  1745 | Steps    655,360 | SPS      66 | Reward  +0.06 | Clip 0.151 | KL 1.7915 | V_loss 0.0060 | LR 0.000030
+Episode  1750 | Steps    657,408 | SPS      66 | Reward  +0.10 | Clip 0.151 | KL 1.2940 | V_loss 0.0043 | LR 0.000030
+Episode  1758 | Steps    659,456 | SPS      66 | Reward  +0.10 | Clip 0.151 | KL 1.5042 | V_loss 0.0059 | LR 0.000030
+Episode  1763 | Steps    661,504 | SPS      66 | Reward  +0.14 | Clip 0.151 | KL 1.1933 | V_loss 0.0058 | LR 0.000030
+Episode  1769 | Steps    663,552 | SPS      66 | Reward  +0.18 | Clip 0.151 | KL 1.1488 | V_loss 0.0057 | LR 0.000030
+Episode  1774 | Steps    665,600 | SPS      67 | Reward  +0.14 | Clip 0.151 | KL 0.8525 | V_loss 0.0105 | LR 0.000030
+Episode  1780 | Steps    667,648 | SPS      67 | Reward  +0.14 | Clip 0.150 | KL 0.9983 | V_loss 0.0085 | LR 0.000030
+Episode  1785 | Steps    669,696 | SPS      67 | Reward  +0.14 | Clip 0.150 | KL 1.1816 | V_loss 0.0034 | LR 0.000030
+Episode  1790 | Steps    671,744 | SPS      67 | Reward  +0.16 | Clip 0.150 | KL 1.1032 | V_loss 0.0104 | LR 0.000030
+Episode  1796 | Steps    673,792 | SPS      67 | Reward  +0.16 | Clip 0.149 | KL 1.7158 | V_loss 0.0060 | LR 0.000030
+Episode  1801 | Steps    675,840 | SPS      67 | Reward  +0.20 | Clip 0.149 | KL 1.4548 | V_loss 0.0089 | LR 0.000030
+Episode  1806 | Steps    677,888 | SPS      67 | Reward  +0.22 | Clip 0.150 | KL 1.2871 | V_loss 0.0075 | LR 0.000030
+Episode  1811 | Steps    679,936 | SPS      67 | Reward  +0.18 | Clip 0.149 | KL 0.6598 | V_loss 0.0078 | LR 0.000030
+Episode  1816 | Steps    681,984 | SPS      67 | Reward  +0.14 | Clip 0.149 | KL 0.9122 | V_loss 0.0074 | LR 0.000030
+Episode  1822 | Steps    684,032 | SPS      67 | Reward  +0.12 | Clip 0.149 | KL 1.1131 | V_loss 0.0054 | LR 0.000030
+Episode  1827 | Steps    686,080 | SPS      67 | Reward  +0.12 | Clip 0.149 | KL 1.4667 | V_loss 0.0092 | LR 0.000030
+Episode  1832 | Steps    688,128 | SPS      67 | Reward  +0.16 | Clip 0.149 | KL 1.2083 | V_loss 0.0098 | LR 0.000030
+Episode  1837 | Steps    690,176 | SPS      67 | Reward  +0.18 | Clip 0.148 | KL 1.4429 | V_loss 0.0041 | LR 0.000030
+Episode  1842 | Steps    692,224 | SPS      67 | Reward  +0.20 | Clip 0.148 | KL 1.4364 | V_loss 0.0038 | LR 0.000030
+Episode  1847 | Steps    694,272 | SPS      67 | Reward  +0.16 | Clip 0.148 | KL 0.8731 | V_loss 0.0125 | LR 0.000030
+Episode  1852 | Steps    696,320 | SPS      67 | Reward  +0.16 | Clip 0.148 | KL 1.2521 | V_loss 0.0067 | LR 0.000030
+Episode  1857 | Steps    698,368 | SPS      67 | Reward  +0.16 | Clip 0.147 | KL 1.5967 | V_loss 0.0076 | LR 0.000030
+Episode  1862 | Steps    700,416 | SPS      67 | Reward  +0.16 | Clip 0.147 | KL 1.2649 | V_loss 0.0061 | LR 0.000030
+Episode  1867 | Steps    702,464 | SPS      67 | Reward  +0.14 | Clip 0.147 | KL 1.0301 | V_loss 0.0045 | LR 0.000030
+Episode  1872 | Steps    704,512 | SPS      67 | Reward  +0.18 | Clip 0.146 | KL 1.9473 | V_loss 0.0029 | LR 0.000030
+Episode  1877 | Steps    706,560 | SPS      67 | Reward  +0.20 | Clip 0.145 | KL 1.3435 | V_loss 0.0029 | LR 0.000030
+Episode  1882 | Steps    708,608 | SPS      67 | Reward  +0.22 | Clip 0.145 | KL 1.7168 | V_loss 0.0044 | LR 0.000030
+Episode  1887 | Steps    710,656 | SPS      67 | Reward  +0.26 | Clip 0.145 | KL 1.9629 | V_loss 0.0041 | LR 0.000030
+Episode  1892 | Steps    712,704 | SPS      67 | Reward  +0.24 | Clip 0.145 | KL 1.1409 | V_loss 0.0036 | LR 0.000030
+Episode  1900 | Steps    714,752 | SPS      67 | Reward  +0.28 | Clip 0.144 | KL 1.9071 | V_loss 0.0037 | LR 0.000030
+Episode  1905 | Steps    716,800 | SPS      67 | Reward  +0.30 | Clip 0.144 | KL 1.4006 | V_loss 0.0026 | LR 0.000030
+Episode  1910 | Steps    718,848 | SPS      67 | Reward  +0.32 | Clip 0.144 | KL 1.2613 | V_loss 0.0053 | LR 0.000030
+Episode  1915 | Steps    720,896 | SPS      67 | Reward  +0.36 | Clip 0.143 | KL 1.6779 | V_loss 0.0033 | LR 0.000030
+Episode  1920 | Steps    722,944 | SPS      67 | Reward  +0.34 | Clip 0.144 | KL 1.1663 | V_loss 0.0055 | LR 0.000030
+Episode  1925 | Steps    724,992 | SPS      67 | Reward  +0.36 | Clip 0.143 | KL 2.1724 | V_loss 0.0035 | LR 0.000030
+Episode  1930 | Steps    727,040 | SPS      67 | Reward  +0.38 | Clip 0.143 | KL 1.1947 | V_loss 0.0093 | LR 0.000030
+Episode  1936 | Steps    729,088 | SPS      67 | Reward  +0.32 | Clip 0.142 | KL 1.1535 | V_loss 0.0076 | LR 0.000030
+Episode  1941 | Steps    731,136 | SPS      67 | Reward  +0.30 | Clip 0.143 | KL 1.3033 | V_loss 0.0056 | LR 0.000030
+Episode  1946 | Steps    733,184 | SPS      67 | Reward  +0.30 | Clip 0.142 | KL 1.1040 | V_loss 0.0120 | LR 0.000030
+Episode  1954 | Steps    735,232 | SPS      68 | Reward  +0.34 | Clip 0.141 | KL 1.0534 | V_loss 0.0038 | LR 0.000030
+Episode  1959 | Steps    737,280 | SPS      68 | Reward  +0.32 | Clip 0.141 | KL 1.1048 | V_loss 0.0041 | LR 0.000030
+Episode  1964 | Steps    739,328 | SPS      68 | Reward  +0.36 | Clip 0.140 | KL 1.4635 | V_loss 0.0070 | LR 0.000030
+Episode  1970 | Steps    741,376 | SPS      68 | Reward  +0.32 | Clip 0.140 | KL 1.1135 | V_loss 0.0046 | LR 0.000030
+Episode  1975 | Steps    743,424 | SPS      68 | Reward  +0.30 | Clip 0.140 | KL 1.3863 | V_loss 0.0023 | LR 0.000030
+Episode  1981 | Steps    745,472 | SPS      68 | Reward  +0.28 | Clip 0.140 | KL 1.3487 | V_loss 0.0038 | LR 0.000030
+Episode  1986 | Steps    747,520 | SPS      68 | Reward  +0.28 | Clip 0.140 | KL 1.3927 | V_loss 0.0059 | LR 0.000030
+Episode  1994 | Steps    749,568 | SPS      68 | Reward  +0.32 | Clip 0.139 | KL 1.6389 | V_loss 0.0046 | LR 0.000030
+Episode  1999 | Steps    751,616 | SPS      68 | Reward  +0.28 | Clip 0.139 | KL 1.5477 | V_loss 0.0035 | LR 0.000030
+Episode  2004 | Steps    753,664 | SPS      68 | Reward  +0.28 | Clip 0.139 | KL 2.0023 | V_loss 0.0043 | LR 0.000030
+Episode  2009 | Steps    755,712 | SPS      68 | Reward  +0.26 | Clip 0.139 | KL 1.3440 | V_loss 0.0034 | LR 0.000030
+Episode  2014 | Steps    757,760 | SPS      68 | Reward  +0.28 | Clip 0.139 | KL 1.9361 | V_loss 0.0053 | LR 0.000030
+Episode  2019 | Steps    759,808 | SPS      68 | Reward  +0.30 | Clip 0.139 | KL 1.3238 | V_loss 0.0061 | LR 0.000030
+Episode  2027 | Steps    761,856 | SPS      68 | Reward  +0.34 | Clip 0.138 | KL 1.5797 | V_loss 0.0025 | LR 0.000030
+Episode  2033 | Steps    763,904 | SPS      68 | Reward  +0.36 | Clip 0.138 | KL 1.2996 | V_loss 0.0115 | LR 0.000030
+Episode  2039 | Steps    765,952 | SPS      68 | Reward  +0.38 | Clip 0.138 | KL 1.5616 | V_loss 0.0062 | LR 0.000030
+Episode  2044 | Steps    768,000 | SPS      68 | Reward  +0.42 | Clip 0.137 | KL 1.5690 | V_loss 0.0038 | LR 0.000030
+Episode  2049 | Steps    770,048 | SPS      68 | Reward  +0.40 | Clip 0.137 | KL 1.0562 | V_loss 0.0097 | LR 0.000030
+Episode  2054 | Steps    772,096 | SPS      68 | Reward  +0.36 | Clip 0.137 | KL 1.0358 | V_loss 0.0086 | LR 0.000030
+Episode  2059 | Steps    774,144 | SPS      68 | Reward  +0.34 | Clip 0.137 | KL 1.2410 | V_loss 0.0053 | LR 0.000030
+Episode  2064 | Steps    776,192 | SPS      68 | Reward  +0.32 | Clip 0.137 | KL 1.4113 | V_loss 0.0034 | LR 0.000030
+Episode  2072 | Steps    778,240 | SPS      68 | Reward  +0.40 | Clip 0.137 | KL 1.7742 | V_loss 0.0027 | LR 0.000030
+Episode  2080 | Steps    780,288 | SPS      68 | Reward  +0.46 | Clip 0.136 | KL 1.9123 | V_loss 0.0031 | LR 0.000030
+Episode  2085 | Steps    782,336 | SPS      68 | Reward  +0.44 | Clip 0.136 | KL 1.7247 | V_loss 0.0089 | LR 0.000030
+Episode  2090 | Steps    784,384 | SPS      68 | Reward  +0.40 | Clip 0.136 | KL 1.1084 | V_loss 0.0052 | LR 0.000030
+Episode  2095 | Steps    786,432 | SPS      68 | Reward  +0.40 | Clip 0.136 | KL 1.6696 | V_loss 0.0030 | LR 0.000030
+Episode  2103 | Steps    788,480 | SPS      68 | Reward  +0.42 | Clip 0.136 | KL 1.4875 | V_loss 0.0063 | LR 0.000030
+Episode  2108 | Steps    790,528 | SPS      68 | Reward  +0.42 | Clip 0.135 | KL 2.0837 | V_loss 0.0026 | LR 0.000030
+Episode  2113 | Steps    792,576 | SPS      68 | Reward  +0.40 | Clip 0.135 | KL 1.3613 | V_loss 0.0112 | LR 0.000030
+Episode  2121 | Steps    794,624 | SPS      68 | Reward  +0.40 | Clip 0.135 | KL 1.7935 | V_loss 0.0041 | LR 0.000030
+Episode  2126 | Steps    796,672 | SPS      68 | Reward  +0.34 | Clip 0.134 | KL 1.5976 | V_loss 0.0040 | LR 0.000030
+Episode  2131 | Steps    798,720 | SPS      68 | Reward  +0.36 | Clip 0.134 | KL 1.2375 | V_loss 0.0058 | LR 0.000030
+Episode  2136 | Steps    800,768 | SPS      68 | Reward  +0.38 | Clip 0.134 | KL 1.4613 | V_loss 0.0047 | LR 0.000030
+Episode  2141 | Steps    802,816 | SPS      68 | Reward  +0.40 | Clip 0.133 | KL 1.9662 | V_loss 0.0024 | LR 0.000030
+Episode  2146 | Steps    804,864 | SPS      68 | Reward  +0.40 | Clip 0.133 | KL 1.6997 | V_loss 0.0053 | LR 0.000030
+Episode  2151 | Steps    806,912 | SPS      68 | Reward  +0.44 | Clip 0.132 | KL 1.3106 | V_loss 0.0083 | LR 0.000030
+Episode  2156 | Steps    808,960 | SPS      69 | Reward  +0.44 | Clip 0.132 | KL 1.7598 | V_loss 0.0066 | LR 0.000030
+Episode  2161 | Steps    811,008 | SPS      69 | Reward  +0.42 | Clip 0.132 | KL 0.9294 | V_loss 0.0155 | LR 0.000030
+Episode  2166 | Steps    813,056 | SPS      69 | Reward  +0.40 | Clip 0.132 | KL 1.2006 | V_loss 0.0135 | LR 0.000030
+Episode  2171 | Steps    815,104 | SPS      69 | Reward  +0.36 | Clip 0.131 | KL 1.1678 | V_loss 0.0040 | LR 0.000030
+Episode  2179 | Steps    817,152 | SPS      69 | Reward  +0.32 | Clip 0.131 | KL 1.1187 | V_loss 0.0056 | LR 0.000030
+Episode  2184 | Steps    819,200 | SPS      69 | Reward  +0.30 | Clip 0.130 | KL 1.0612 | V_loss 0.0076 | LR 0.000030
+Episode  2189 | Steps    821,248 | SPS      69 | Reward  +0.32 | Clip 0.130 | KL 1.5398 | V_loss 0.0057 | LR 0.000030
+Episode  2196 | Steps    823,296 | SPS      69 | Reward  +0.32 | Clip 0.129 | KL 1.4073 | V_loss 0.0100 | LR 0.000030
+Episode  2204 | Steps    825,344 | SPS      69 | Reward  +0.34 | Clip 0.129 | KL 1.9817 | V_loss 0.0041 | LR 0.000030
+Episode  2212 | Steps    827,392 | SPS      69 | Reward  +0.38 | Clip 0.128 | KL 1.5521 | V_loss 0.0114 | LR 0.000030
+Episode  2220 | Steps    829,440 | SPS      69 | Reward  +0.40 | Clip 0.128 | KL 1.3323 | V_loss 0.0092 | LR 0.000030
+Episode  2225 | Steps    831,488 | SPS      69 | Reward  +0.38 | Clip 0.128 | KL 0.5497 | V_loss 0.0123 | LR 0.000030
+Episode  2230 | Steps    833,536 | SPS      69 | Reward  +0.38 | Clip 0.127 | KL 1.2115 | V_loss 0.0041 | LR 0.000030
+Episode  2235 | Steps    835,584 | SPS      69 | Reward  +0.36 | Clip 0.127 | KL 1.1880 | V_loss 0.0052 | LR 0.000030
+Episode  2240 | Steps    837,632 | SPS      69 | Reward  +0.34 | Clip 0.127 | KL 1.5849 | V_loss 0.0055 | LR 0.000030
+Episode  2245 | Steps    839,680 | SPS      69 | Reward  +0.36 | Clip 0.126 | KL 1.5045 | V_loss 0.0019 | LR 0.000030
+Episode  2253 | Steps    841,728 | SPS      69 | Reward  +0.34 | Clip 0.127 | KL 1.2043 | V_loss 0.0062 | LR 0.000030
+Episode  2258 | Steps    843,776 | SPS      69 | Reward  +0.42 | Clip 0.126 | KL 1.8049 | V_loss 0.0030 | LR 0.000030
+Episode  2266 | Steps    845,824 | SPS      69 | Reward  +0.50 | Clip 0.126 | KL 1.7694 | V_loss 0.0025 | LR 0.000030
+Episode  2271 | Steps    847,872 | SPS      69 | Reward  +0.46 | Clip 0.125 | KL 0.8019 | V_loss 0.0110 | LR 0.000030
+Episode  2279 | Steps    849,920 | SPS      69 | Reward  +0.46 | Clip 0.125 | KL 1.6241 | V_loss 0.0139 | LR 0.000030
+Episode  2284 | Steps    851,968 | SPS      69 | Reward  +0.44 | Clip 0.125 | KL 1.1000 | V_loss 0.0080 | LR 0.000030
+Episode  2292 | Steps    854,016 | SPS      69 | Reward  +0.44 | Clip 0.125 | KL 1.5968 | V_loss 0.0079 | LR 0.000030
+Episode  2297 | Steps    856,064 | SPS      69 | Reward  +0.46 | Clip 0.125 | KL 1.7279 | V_loss 0.0020 | LR 0.000030
+Episode  2305 | Steps    858,112 | SPS      69 | Reward  +0.46 | Clip 0.124 | KL 1.6600 | V_loss 0.0041 | LR 0.000030
+Episode  2310 | Steps    860,160 | SPS      69 | Reward  +0.46 | Clip 0.124 | KL 1.3312 | V_loss 0.0037 | LR 0.000030
+Episode  2315 | Steps    862,208 | SPS      69 | Reward  +0.46 | Clip 0.124 | KL 1.3323 | V_loss 0.0032 | LR 0.000030
+Episode  2320 | Steps    864,256 | SPS      69 | Reward  +0.46 | Clip 0.123 | KL 1.7784 | V_loss 0.0057 | LR 0.000030
+Episode  2328 | Steps    866,304 | SPS      69 | Reward  +0.54 | Clip 0.123 | KL 1.3866 | V_loss 0.0056 | LR 0.000030
+Episode  2336 | Steps    868,352 | SPS      69 | Reward  +0.56 | Clip 0.123 | KL 1.8261 | V_loss 0.0038 | LR 0.000030
+Episode  2344 | Steps    870,400 | SPS      69 | Reward  +0.56 | Clip 0.122 | KL 1.3224 | V_loss 0.0071 | LR 0.000030
+Episode  2349 | Steps    872,448 | SPS      69 | Reward  +0.60 | Clip 0.122 | KL 1.2319 | V_loss 0.0035 | LR 0.000030
+Episode  2354 | Steps    874,496 | SPS      69 | Reward  +0.62 | Clip 0.122 | KL 1.7218 | V_loss 0.0022 | LR 0.000030
+Episode  2359 | Steps    876,544 | SPS      69 | Reward  +0.58 | Clip 0.121 | KL 0.9121 | V_loss 0.0030 | LR 0.000030
+Episode  2364 | Steps    878,592 | SPS      69 | Reward  +0.54 | Clip 0.121 | KL 1.7920 | V_loss 0.0072 | LR 0.000030
+Episode  2369 | Steps    880,640 | SPS      69 | Reward  +0.54 | Clip 0.121 | KL 1.4677 | V_loss 0.0044 | LR 0.000030
+Episode  2374 | Steps    882,688 | SPS      69 | Reward  +0.56 | Clip 0.120 | KL 1.5658 | V_loss 0.0092 | LR 0.000030
+Episode  2382 | Steps    884,736 | SPS      69 | Reward  +0.62 | Clip 0.120 | KL 1.7668 | V_loss 0.0047 | LR 0.000030
+Episode  2387 | Steps    886,784 | SPS      69 | Reward  +0.64 | Clip 0.120 | KL 1.4352 | V_loss 0.0024 | LR 0.000030
+Episode  2392 | Steps    888,832 | SPS      69 | Reward  +0.64 | Clip 0.120 | KL 1.4468 | V_loss 0.0033 | LR 0.000030
+Episode  2397 | Steps    890,880 | SPS      69 | Reward  +0.60 | Clip 0.120 | KL 1.1095 | V_loss 0.0059 | LR 0.000030
+Episode  2405 | Steps    892,928 | SPS      69 | Reward  +0.60 | Clip 0.120 | KL 1.9408 | V_loss 0.0036 | LR 0.000030
+Episode  2410 | Steps    894,976 | SPS      69 | Reward  +0.60 | Clip 0.120 | KL 1.2184 | V_loss 0.0032 | LR 0.000030
+Episode  2418 | Steps    897,024 | SPS      69 | Reward  +0.60 | Clip 0.119 | KL 1.2949 | V_loss 0.0035 | LR 0.000030
+Episode  2423 | Steps    899,072 | SPS      69 | Reward  +0.62 | Clip 0.119 | KL 1.0453 | V_loss 0.0031 | LR 0.000030
+Episode  2431 | Steps    901,120 | SPS      69 | Reward  +0.60 | Clip 0.119 | KL 1.4873 | V_loss 0.0062 | LR 0.000030
+Episode  2436 | Steps    903,168 | SPS      69 | Reward  +0.58 | Clip 0.118 | KL 1.8576 | V_loss 0.0018 | LR 0.000030
+Episode  2441 | Steps    905,216 | SPS      70 | Reward  +0.58 | Clip 0.118 | KL 1.7356 | V_loss 0.0029 | LR 0.000030
+Episode  2446 | Steps    907,264 | SPS      70 | Reward  +0.58 | Clip 0.119 | KL 1.6640 | V_loss 0.0028 | LR 0.000030
+Episode  2454 | Steps    909,312 | SPS      70 | Reward  +0.58 | Clip 0.118 | KL 1.6655 | V_loss 0.0039 | LR 0.000030
+Episode  2462 | Steps    911,360 | SPS      70 | Reward  +0.62 | Clip 0.118 | KL 1.8810 | V_loss 0.0016 | LR 0.000030
+Episode  2467 | Steps    913,408 | SPS      70 | Reward  +0.64 | Clip 0.118 | KL 1.4762 | V_loss 0.0022 | LR 0.000030
+Episode  2472 | Steps    915,456 | SPS      70 | Reward  +0.62 | Clip 0.118 | KL 1.3005 | V_loss 0.0094 | LR 0.000030
+Episode  2477 | Steps    917,504 | SPS      70 | Reward  +0.64 | Clip 0.118 | KL 1.2595 | V_loss 0.0036 | LR 0.000030
+Episode  2482 | Steps    919,552 | SPS      70 | Reward  +0.62 | Clip 0.118 | KL 1.3832 | V_loss 0.0036 | LR 0.000030
+Episode  2487 | Steps    921,600 | SPS      70 | Reward  +0.60 | Clip 0.118 | KL 1.5476 | V_loss 0.0046 | LR 0.000030
+Episode  2492 | Steps    923,648 | SPS      70 | Reward  +0.58 | Clip 0.118 | KL 1.2600 | V_loss 0.0039 | LR 0.000030
+Episode  2497 | Steps    925,696 | SPS      70 | Reward  +0.60 | Clip 0.117 | KL 1.4666 | V_loss 0.0035 | LR 0.000030
+Episode  2502 | Steps    927,744 | SPS      70 | Reward  +0.58 | Clip 0.117 | KL 1.6717 | V_loss 0.0025 | LR 0.000030
+Episode  2507 | Steps    929,792 | SPS      70 | Reward  +0.62 | Clip 0.116 | KL 1.8501 | V_loss 0.0015 | LR 0.000030
+Episode  2512 | Steps    931,840 | SPS      70 | Reward  +0.60 | Clip 0.116 | KL 1.5630 | V_loss 0.0031 | LR 0.000030
+Episode  2520 | Steps    933,888 | SPS      70 | Reward  +0.60 | Clip 0.116 | KL 1.1611 | V_loss 0.0136 | LR 0.000030
+Episode  2528 | Steps    935,936 | SPS      70 | Reward  +0.62 | Clip 0.115 | KL 1.6054 | V_loss 0.0024 | LR 0.000030
+Episode  2533 | Steps    937,984 | SPS      70 | Reward  +0.62 | Clip 0.115 | KL 1.5675 | V_loss 0.0039 | LR 0.000030
+Episode  2538 | Steps    940,032 | SPS      70 | Reward  +0.64 | Clip 0.115 | KL 1.1904 | V_loss 0.0044 | LR 0.000030
+Episode  2543 | Steps    942,080 | SPS      70 | Reward  +0.62 | Clip 0.115 | KL 1.3183 | V_loss 0.0037 | LR 0.000030
+Episode  2548 | Steps    944,128 | SPS      70 | Reward  +0.56 | Clip 0.115 | KL 1.2669 | V_loss 0.0056 | LR 0.000030
+Episode  2553 | Steps    946,176 | SPS      70 | Reward  +0.52 | Clip 0.115 | KL 1.4915 | V_loss 0.0111 | LR 0.000030
+Episode  2558 | Steps    948,224 | SPS      70 | Reward  +0.48 | Clip 0.115 | KL 1.2350 | V_loss 0.0033 | LR 0.000030
+Episode  2563 | Steps    950,272 | SPS      70 | Reward  +0.46 | Clip 0.115 | KL 1.9274 | V_loss 0.0134 | LR 0.000030
+Episode  2568 | Steps    952,320 | SPS      70 | Reward  +0.48 | Clip 0.114 | KL 1.5950 | V_loss 0.0037 | LR 0.000030
+Episode  2573 | Steps    954,368 | SPS      70 | Reward  +0.48 | Clip 0.114 | KL 1.2343 | V_loss 0.0030 | LR 0.000030
+Episode  2578 | Steps    956,416 | SPS      70 | Reward  +0.46 | Clip 0.114 | KL 1.7897 | V_loss 0.0033 | LR 0.000030
+Episode  2586 | Steps    958,464 | SPS      70 | Reward  +0.46 | Clip 0.114 | KL 1.7909 | V_loss 0.0118 | LR 0.000030
+Episode  2594 | Steps    960,512 | SPS      70 | Reward  +0.50 | Clip 0.114 | KL 1.6401 | V_loss 0.0025 | LR 0.000030
+Episode  2599 | Steps    962,560 | SPS      70 | Reward  +0.50 | Clip 0.113 | KL 1.2529 | V_loss 0.0070 | LR 0.000030
+Episode  2604 | Steps    964,608 | SPS      70 | Reward  +0.46 | Clip 0.113 | KL 1.0650 | V_loss 0.0057 | LR 0.000030
+Episode  2609 | Steps    966,656 | SPS      70 | Reward  +0.48 | Clip 0.113 | KL 1.6777 | V_loss 0.0026 | LR 0.000030
+Episode  2614 | Steps    968,704 | SPS      70 | Reward  +0.50 | Clip 0.113 | KL 1.7707 | V_loss 0.0064 | LR 0.000030
+Episode  2622 | Steps    970,752 | SPS      70 | Reward  +0.44 | Clip 0.113 | KL 1.3471 | V_loss 0.0090 | LR 0.000030
+Episode  2630 | Steps    972,800 | SPS      70 | Reward  +0.42 | Clip 0.113 | KL 1.3830 | V_loss 0.0034 | LR 0.000030
+Episode  2638 | Steps    974,848 | SPS      70 | Reward  +0.46 | Clip 0.113 | KL 1.3785 | V_loss 0.0020 | LR 0.000030
+Episode  2643 | Steps    976,896 | SPS      70 | Reward  +0.44 | Clip 0.113 | KL 1.5758 | V_loss 0.0076 | LR 0.000030
+Episode  2648 | Steps    978,944 | SPS      70 | Reward  +0.46 | Clip 0.112 | KL 1.2534 | V_loss 0.0043 | LR 0.000030
+Episode  2656 | Steps    980,992 | SPS      70 | Reward  +0.48 | Clip 0.112 | KL 1.2917 | V_loss 0.0087 | LR 0.000030
+Episode  2661 | Steps    983,040 | SPS      70 | Reward  +0.44 | Clip 0.112 | KL 0.7234 | V_loss 0.0061 | LR 0.000030
+Episode  2666 | Steps    985,088 | SPS      70 | Reward  +0.44 | Clip 0.112 | KL 1.4925 | V_loss 0.0034 | LR 0.000030
+Episode  2671 | Steps    987,136 | SPS      70 | Reward  +0.48 | Clip 0.112 | KL 1.4261 | V_loss 0.0043 | LR 0.000030
+Episode  2676 | Steps    989,184 | SPS      70 | Reward  +0.48 | Clip 0.112 | KL 1.5349 | V_loss 0.0055 | LR 0.000030
+Episode  2684 | Steps    991,232 | SPS      70 | Reward  +0.50 | Clip 0.112 | KL 1.5502 | V_loss 0.0024 | LR 0.000030
+Episode  2689 | Steps    993,280 | SPS      70 | Reward  +0.50 | Clip 0.112 | KL 1.7224 | V_loss 0.0037 | LR 0.000030
+Episode  2694 | Steps    995,328 | SPS      70 | Reward  +0.50 | Clip 0.111 | KL 1.5917 | V_loss 0.0015 | LR 0.000030
+Episode  2699 | Steps    997,376 | SPS      70 | Reward  +0.52 | Clip 0.111 | KL 1.7002 | V_loss 0.0017 | LR 0.000030
+Episode  2705 | Steps    999,424 | SPS      70 | Reward  +0.52 | Clip 0.111 | KL 0.7445 | V_loss 0.0047 | LR 0.000030
+Episode  2713 | Steps  1,001,472 | SPS      70 | Reward  +0.48 | Clip 0.111 | KL 1.2712 | V_loss 0.0056 | LR 0.000030
+Checkpoint saved at checkpoints/step_1001472
+Episode  2721 | Steps  1,003,520 | SPS      70 | Reward  +0.56 | Clip 0.111 | KL 1.6590 | V_loss 0.0017 | LR 0.000030
+Episode  2729 | Steps  1,005,568 | SPS      70 | Reward  +0.56 | Clip 0.111 | KL 1.3538 | V_loss 0.0025 | LR 0.000030
+Episode  2734 | Steps  1,007,616 | SPS      70 | Reward  +0.54 | Clip 0.111 | KL 1.2896 | V_loss 0.0024 | LR 0.000030
+Episode  2742 | Steps  1,009,664 | SPS      70 | Reward  +0.50 | Clip 0.111 | KL 1.3609 | V_loss 0.0062 | LR 0.000030
+Episode  2750 | Steps  1,011,712 | SPS      70 | Reward  +0.54 | Clip 0.111 | KL 1.6387 | V_loss 0.0122 | LR 0.000030
+Episode  2755 | Steps  1,013,760 | SPS      70 | Reward  +0.54 | Clip 0.111 | KL 1.5056 | V_loss 0.0020 | LR 0.000030
+Episode  2760 | Steps  1,015,808 | SPS      70 | Reward  +0.60 | Clip 0.110 | KL 1.0933 | V_loss 0.0044 | LR 0.000030
+Episode  2765 | Steps  1,017,856 | SPS      70 | Reward  +0.62 | Clip 0.110 | KL 1.6389 | V_loss 0.0014 | LR 0.000030
+Episode  2771 | Steps  1,019,904 | SPS      70 | Reward  +0.58 | Clip 0.110 | KL 0.9942 | V_loss 0.0079 | LR 0.000030
+Episode  2779 | Steps  1,021,952 | SPS      70 | Reward  +0.56 | Clip 0.111 | KL 1.4980 | V_loss 0.0162 | LR 0.000030
+Episode  2784 | Steps  1,024,000 | SPS      70 | Reward  +0.56 | Clip 0.111 | KL 1.7323 | V_loss 0.0016 | LR 0.000030
+Episode  2792 | Steps  1,026,048 | SPS      70 | Reward  +0.54 | Clip 0.111 | KL 1.6925 | V_loss 0.0015 | LR 0.000030
+Episode  2797 | Steps  1,028,096 | SPS      70 | Reward  +0.54 | Clip 0.111 | KL 1.6785 | V_loss 0.0009 | LR 0.000030
+Episode  2802 | Steps  1,030,144 | SPS      70 | Reward  +0.56 | Clip 0.110 | KL 1.6601 | V_loss 0.0018 | LR 0.000030
+Episode  2808 | Steps  1,032,192 | SPS      70 | Reward  +0.58 | Clip 0.110 | KL 0.9872 | V_loss 0.0038 | LR 0.000030
+Episode  2816 | Steps  1,034,240 | SPS      70 | Reward  +0.56 | Clip 0.110 | KL 1.2352 | V_loss 0.0059 | LR 0.000030
+Episode  2821 | Steps  1,036,288 | SPS      71 | Reward  +0.56 | Clip 0.110 | KL 1.5924 | V_loss 0.0029 | LR 0.000030
+Episode  2826 | Steps  1,038,336 | SPS      71 | Reward  +0.58 | Clip 0.110 | KL 1.3001 | V_loss 0.0027 | LR 0.000030
+Episode  2831 | Steps  1,040,384 | SPS      71 | Reward  +0.58 | Clip 0.110 | KL 1.1424 | V_loss 0.0076 | LR 0.000030
+Episode  2836 | Steps  1,042,432 | SPS      71 | Reward  +0.58 | Clip 0.109 | KL 1.5383 | V_loss 0.0048 | LR 0.000030
+Episode  2844 | Steps  1,044,480 | SPS      71 | Reward  +0.64 | Clip 0.110 | KL 2.0014 | V_loss 0.0017 | LR 0.000030
+Episode  2852 | Steps  1,046,528 | SPS      71 | Reward  +0.66 | Clip 0.109 | KL 1.1779 | V_loss 0.0053 | LR 0.000030
+Episode  2860 | Steps  1,048,576 | SPS      71 | Reward  +0.66 | Clip 0.109 | KL 1.5670 | V_loss 0.0091 | LR 0.000030
+Episode  2868 | Steps  1,050,624 | SPS      71 | Reward  +0.70 | Clip 0.109 | KL 1.5165 | V_loss 0.0014 | LR 0.000030
+Episode  2873 | Steps  1,052,672 | SPS      71 | Reward  +0.72 | Clip 0.109 | KL 1.6118 | V_loss 0.0019 | LR 0.000030
+Episode  2881 | Steps  1,054,720 | SPS      71 | Reward  +0.74 | Clip 0.109 | KL 1.4625 | V_loss 0.0016 | LR 0.000030
+Episode  2886 | Steps  1,056,768 | SPS      71 | Reward  +0.72 | Clip 0.109 | KL 1.7219 | V_loss 0.0015 | LR 0.000030
+Episode  2894 | Steps  1,058,816 | SPS      71 | Reward  +0.74 | Clip 0.109 | KL 1.3023 | V_loss 0.0040 | LR 0.000030
+Episode  2899 | Steps  1,060,864 | SPS      71 | Reward  +0.74 | Clip 0.108 | KL 1.2958 | V_loss 0.0013 | LR 0.000030
+Episode  2904 | Steps  1,062,912 | SPS      71 | Reward  +0.76 | Clip 0.108 | KL 1.2477 | V_loss 0.0018 | LR 0.000030
+Episode  2912 | Steps  1,064,960 | SPS      71 | Reward  +0.76 | Clip 0.108 | KL 1.4892 | V_loss 0.0014 | LR 0.000030
+Episode  2917 | Steps  1,067,008 | SPS      71 | Reward  +0.74 | Clip 0.108 | KL 1.4260 | V_loss 0.0028 | LR 0.000030
+Episode  2925 | Steps  1,069,056 | SPS      71 | Reward  +0.68 | Clip 0.107 | KL 1.1368 | V_loss 0.0102 | LR 0.000030
+Episode  2933 | Steps  1,071,104 | SPS      71 | Reward  +0.68 | Clip 0.107 | KL 1.4409 | V_loss 0.0013 | LR 0.000030
+Episode  2941 | Steps  1,073,152 | SPS      71 | Reward  +0.66 | Clip 0.107 | KL 1.4329 | V_loss 0.0063 | LR 0.000030
+Episode  2949 | Steps  1,075,200 | SPS      71 | Reward  +0.70 | Clip 0.106 | KL 1.7104 | V_loss 0.0018 | LR 0.000030
+Episode  2954 | Steps  1,077,248 | SPS      71 | Reward  +0.70 | Clip 0.106 | KL 1.4349 | V_loss 0.0031 | LR 0.000030
+Episode  2959 | Steps  1,079,296 | SPS      71 | Reward  +0.68 | Clip 0.106 | KL 1.5495 | V_loss 0.0018 | LR 0.000030
+Episode  2967 | Steps  1,081,344 | SPS      71 | Reward  +0.68 | Clip 0.106 | KL 1.3819 | V_loss 0.0040 | LR 0.000030
+Episode  2972 | Steps  1,083,392 | SPS      71 | Reward  +0.64 | Clip 0.106 | KL 1.1076 | V_loss 0.0031 | LR 0.000030
+Episode  2977 | Steps  1,085,440 | SPS      71 | Reward  +0.64 | Clip 0.106 | KL 1.5728 | V_loss 0.0057 | LR 0.000030
+Episode  2982 | Steps  1,087,488 | SPS      71 | Reward  +0.62 | Clip 0.106 | KL 1.1747 | V_loss 0.0028 | LR 0.000030
+Episode  2990 | Steps  1,089,536 | SPS      71 | Reward  +0.66 | Clip 0.105 | KL 1.1618 | V_loss 0.0035 | LR 0.000030
+Episode  2995 | Steps  1,091,584 | SPS      71 | Reward  +0.64 | Clip 0.105 | KL 1.3792 | V_loss 0.0014 | LR 0.000030
+Episode  3000 | Steps  1,093,632 | SPS      71 | Reward  +0.64 | Clip 0.105 | KL 1.3100 | V_loss 0.0023 | LR 0.000030
+Episode  3005 | Steps  1,095,680 | SPS      71 | Reward  +0.64 | Clip 0.105 | KL 1.2668 | V_loss 0.0042 | LR 0.000030
+Episode  3013 | Steps  1,097,728 | SPS      71 | Reward  +0.66 | Clip 0.105 | KL 1.4002 | V_loss 0.0009 | LR 0.000030
+Episode  3018 | Steps  1,099,776 | SPS      71 | Reward  +0.68 | Clip 0.104 | KL 1.2352 | V_loss 0.0020 | LR 0.000030
+Episode  3023 | Steps  1,101,824 | SPS      71 | Reward  +0.70 | Clip 0.105 | KL 1.1810 | V_loss 0.0074 | LR 0.000030
+Episode  3031 | Steps  1,103,872 | SPS      71 | Reward  +0.68 | Clip 0.105 | KL 1.3610 | V_loss 0.0035 | LR 0.000030
+Episode  3039 | Steps  1,105,920 | SPS      71 | Reward  +0.72 | Clip 0.105 | KL 1.4693 | V_loss 0.0012 | LR 0.000030
+Episode  3044 | Steps  1,107,968 | SPS      71 | Reward  +0.70 | Clip 0.104 | KL 0.8899 | V_loss 0.0038 | LR 0.000030
+Episode  3052 | Steps  1,110,016 | SPS      71 | Reward  +0.68 | Clip 0.104 | KL 1.2478 | V_loss 0.0024 | LR 0.000030
+Episode  3060 | Steps  1,112,064 | SPS      71 | Reward  +0.72 | Clip 0.104 | KL 1.3559 | V_loss 0.0012 | LR 0.000030
+Episode  3065 | Steps  1,114,112 | SPS      71 | Reward  +0.72 | Clip 0.103 | KL 1.0296 | V_loss 0.0025 | LR 0.000030
+Episode  3070 | Steps  1,116,160 | SPS      71 | Reward  +0.74 | Clip 0.103 | KL 1.8567 | V_loss 0.0011 | LR 0.000030
+Episode  3078 | Steps  1,118,208 | SPS      71 | Reward  +0.80 | Clip 0.103 | KL 1.0215 | V_loss 0.0045 | LR 0.000030
+Episode  3083 | Steps  1,120,256 | SPS      71 | Reward  +0.78 | Clip 0.103 | KL 1.4274 | V_loss 0.0011 | LR 0.000030
+Episode  3088 | Steps  1,122,304 | SPS      71 | Reward  +0.78 | Clip 0.102 | KL 1.1336 | V_loss 0.0016 | LR 0.000030
+Episode  3093 | Steps  1,124,352 | SPS      71 | Reward  +0.76 | Clip 0.102 | KL 1.2635 | V_loss 0.0010 | LR 0.000030
+Episode  3101 | Steps  1,126,400 | SPS      71 | Reward  +0.78 | Clip 0.102 | KL 1.3619 | V_loss 0.0117 | LR 0.000030
+Episode  3106 | Steps  1,128,448 | SPS      71 | Reward  +0.78 | Clip 0.102 | KL 1.2521 | V_loss 0.0023 | LR 0.000030
+Episode  3111 | Steps  1,130,496 | SPS      71 | Reward  +0.76 | Clip 0.102 | KL 1.2746 | V_loss 0.0032 | LR 0.000030
+Episode  3116 | Steps  1,132,544 | SPS      71 | Reward  +0.74 | Clip 0.102 | KL 0.8745 | V_loss 0.0104 | LR 0.000030
+Episode  3121 | Steps  1,134,592 | SPS      71 | Reward  +0.72 | Clip 0.102 | KL 1.0249 | V_loss 0.0090 | LR 0.000030
+Episode  3126 | Steps  1,136,640 | SPS      71 | Reward  +0.68 | Clip 0.101 | KL 1.3798 | V_loss 0.0109 | LR 0.000030
+Episode  3131 | Steps  1,138,688 | SPS      71 | Reward  +0.70 | Clip 0.101 | KL 1.2411 | V_loss 0.0039 | LR 0.000030
+Episode  3139 | Steps  1,140,736 | SPS      71 | Reward  +0.70 | Clip 0.101 | KL 1.2482 | V_loss 0.0028 | LR 0.000030
+Episode  3144 | Steps  1,142,784 | SPS      71 | Reward  +0.68 | Clip 0.101 | KL 0.8700 | V_loss 0.0035 | LR 0.000030
+Episode  3149 | Steps  1,144,832 | SPS      71 | Reward  +0.64 | Clip 0.102 | KL 1.2849 | V_loss 0.0024 | LR 0.000030
+Episode  3154 | Steps  1,146,880 | SPS      71 | Reward  +0.64 | Clip 0.101 | KL 1.4381 | V_loss 0.0028 | LR 0.000030
+Episode  3162 | Steps  1,148,928 | SPS      71 | Reward  +0.62 | Clip 0.101 | KL 1.6522 | V_loss 0.0020 | LR 0.000030
+Episode  3170 | Steps  1,150,976 | SPS      71 | Reward  +0.60 | Clip 0.101 | KL 1.1534 | V_loss 0.0069 | LR 0.000030
+Episode  3178 | Steps  1,153,024 | SPS      71 | Reward  +0.56 | Clip 0.101 | KL 1.0102 | V_loss 0.0041 | LR 0.000030
+Episode  3183 | Steps  1,155,072 | SPS      71 | Reward  +0.56 | Clip 0.101 | KL 1.5261 | V_loss 0.0012 | LR 0.000030
+Episode  3188 | Steps  1,157,120 | SPS      71 | Reward  +0.54 | Clip 0.101 | KL 1.5150 | V_loss 0.0016 | LR 0.000030
+Episode  3196 | Steps  1,159,168 | SPS      71 | Reward  +0.56 | Clip 0.101 | KL 0.8452 | V_loss 0.0053 | LR 0.000030
+Episode  3201 | Steps  1,161,216 | SPS      71 | Reward  +0.52 | Clip 0.100 | KL 1.2986 | V_loss 0.0057 | LR 0.000030
+Episode  3206 | Steps  1,163,264 | SPS      71 | Reward  +0.50 | Clip 0.100 | KL 0.8149 | V_loss 0.0063 | LR 0.000030
+Episode  3211 | Steps  1,165,312 | SPS      71 | Reward  +0.50 | Clip 0.100 | KL 1.1428 | V_loss 0.0036 | LR 0.000030
+Episode  3219 | Steps  1,167,360 | SPS      71 | Reward  +0.56 | Clip 0.100 | KL 1.3798 | V_loss 0.0024 | LR 0.000030
+Episode  3224 | Steps  1,169,408 | SPS      71 | Reward  +0.56 | Clip 0.100 | KL 1.1232 | V_loss 0.0057 | LR 0.000030
+Episode  3232 | Steps  1,171,456 | SPS      71 | Reward  +0.60 | Clip 0.100 | KL 1.1136 | V_loss 0.0023 | LR 0.000030
+Episode  3237 | Steps  1,173,504 | SPS      71 | Reward  +0.58 | Clip 0.100 | KL 1.2904 | V_loss 0.0018 | LR 0.000030
+Episode  3245 | Steps  1,175,552 | SPS      71 | Reward  +0.62 | Clip 0.100 | KL 1.1633 | V_loss 0.0068 | LR 0.000030
+Episode  3250 | Steps  1,177,600 | SPS      71 | Reward  +0.60 | Clip 0.100 | KL 1.0267 | V_loss 0.0063 | LR 0.000030
+Episode  3255 | Steps  1,179,648 | SPS      71 | Reward  +0.58 | Clip 0.100 | KL 0.6023 | V_loss 0.0048 | LR 0.000030
+Episode  3260 | Steps  1,181,696 | SPS      71 | Reward  +0.58 | Clip 0.100 | KL 1.1200 | V_loss 0.0023 | LR 0.000030
+Episode  3268 | Steps  1,183,744 | SPS      71 | Reward  +0.58 | Clip 0.099 | KL 1.1030 | V_loss 0.0040 | LR 0.000030
+Episode  3274 | Steps  1,185,792 | SPS      71 | Reward  +0.56 | Clip 0.099 | KL 0.7639 | V_loss 0.0028 | LR 0.000030
+Episode  3279 | Steps  1,187,840 | SPS      71 | Reward  +0.54 | Clip 0.099 | KL 0.7929 | V_loss 0.0050 | LR 0.000030
+Episode  3284 | Steps  1,189,888 | SPS      71 | Reward  +0.50 | Clip 0.099 | KL 0.4505 | V_loss 0.0039 | LR 0.000030
+Episode  3289 | Steps  1,191,936 | SPS      71 | Reward  +0.48 | Clip 0.099 | KL 1.0192 | V_loss 0.0035 | LR 0.000030
+Episode  3297 | Steps  1,193,984 | SPS      71 | Reward  +0.48 | Clip 0.099 | KL 1.3665 | V_loss 0.0015 | LR 0.000030
+Episode  3302 | Steps  1,196,032 | SPS      71 | Reward  +0.52 | Clip 0.099 | KL 1.3507 | V_loss 0.0021 | LR 0.000030
+Episode  3307 | Steps  1,198,080 | SPS      71 | Reward  +0.52 | Clip 0.099 | KL 0.7983 | V_loss 0.0039 | LR 0.000030
+Episode  3312 | Steps  1,200,128 | SPS      71 | Reward  +0.50 | Clip 0.098 | KL 1.2954 | V_loss 0.0017 | LR 0.000030
+Episode  3317 | Steps  1,202,176 | SPS      71 | Reward  +0.50 | Clip 0.098 | KL 1.0468 | V_loss 0.0042 | LR 0.000030
+Episode  3322 | Steps  1,204,224 | SPS      71 | Reward  +0.52 | Clip 0.098 | KL 1.0362 | V_loss 0.0030 | LR 0.000030
+Episode  3327 | Steps  1,206,272 | SPS      72 | Reward  +0.48 | Clip 0.098 | KL 1.0390 | V_loss 0.0061 | LR 0.000030
+Episode  3332 | Steps  1,208,320 | SPS      72 | Reward  +0.44 | Clip 0.098 | KL 1.1783 | V_loss 0.0076 | LR 0.000030
+Episode  3337 | Steps  1,210,368 | SPS      72 | Reward  +0.42 | Clip 0.098 | KL 1.0701 | V_loss 0.0032 | LR 0.000030
+Episode  3342 | Steps  1,212,416 | SPS      72 | Reward  +0.42 | Clip 0.098 | KL 0.9722 | V_loss 0.0033 | LR 0.000030
+Episode  3347 | Steps  1,214,464 | SPS      72 | Reward  +0.40 | Clip 0.098 | KL 1.0205 | V_loss 0.0022 | LR 0.000030
+Episode  3355 | Steps  1,216,512 | SPS      72 | Reward  +0.48 | Clip 0.098 | KL 1.1987 | V_loss 0.0015 | LR 0.000030
+Episode  3360 | Steps  1,218,560 | SPS      72 | Reward  +0.48 | Clip 0.097 | KL 1.1374 | V_loss 0.0015 | LR 0.000030
+Episode  3368 | Steps  1,220,608 | SPS      72 | Reward  +0.48 | Clip 0.097 | KL 1.1620 | V_loss 0.0027 | LR 0.000030
+Episode  3376 | Steps  1,222,656 | SPS      72 | Reward  +0.56 | Clip 0.097 | KL 1.1288 | V_loss 0.0025 | LR 0.000030
+Episode  3384 | Steps  1,224,704 | SPS      72 | Reward  +0.62 | Clip 0.097 | KL 0.8546 | V_loss 0.0023 | LR 0.000030
+Episode  3392 | Steps  1,226,752 | SPS      72 | Reward  +0.64 | Clip 0.096 | KL 0.9143 | V_loss 0.0075 | LR 0.000030
+Episode  3397 | Steps  1,228,800 | SPS      72 | Reward  +0.64 | Clip 0.096 | KL 1.0480 | V_loss 0.0018 | LR 0.000030
+Episode  3402 | Steps  1,230,848 | SPS      72 | Reward  +0.64 | Clip 0.096 | KL 0.9320 | V_loss 0.0024 | LR 0.000030
+Episode  3410 | Steps  1,232,896 | SPS      72 | Reward  +0.68 | Clip 0.096 | KL 1.3077 | V_loss 0.0013 | LR 0.000030
+Episode  3415 | Steps  1,234,944 | SPS      72 | Reward  +0.68 | Clip 0.096 | KL 0.9285 | V_loss 0.0019 | LR 0.000030
+Episode  3420 | Steps  1,236,992 | SPS      72 | Reward  +0.64 | Clip 0.096 | KL 0.8097 | V_loss 0.0022 | LR 0.000030
+Episode  3428 | Steps  1,239,040 | SPS      72 | Reward  +0.68 | Clip 0.096 | KL 0.9686 | V_loss 0.0039 | LR 0.000030
+Episode  3436 | Steps  1,241,088 | SPS      72 | Reward  +0.72 | Clip 0.096 | KL 1.0492 | V_loss 0.0015 | LR 0.000030
+Episode  3444 | Steps  1,243,136 | SPS      72 | Reward  +0.74 | Clip 0.095 | KL 1.2079 | V_loss 0.0022 | LR 0.000030
+Episode  3449 | Steps  1,245,184 | SPS      72 | Reward  +0.76 | Clip 0.095 | KL 1.0928 | V_loss 0.0040 | LR 0.000030
+Episode  3454 | Steps  1,247,232 | SPS      72 | Reward  +0.74 | Clip 0.095 | KL 1.1470 | V_loss 0.0020 | LR 0.000030
+Episode  3459 | Steps  1,249,280 | SPS      72 | Reward  +0.70 | Clip 0.095 | KL 0.9421 | V_loss 0.0024 | LR 0.000030
+Episode  3464 | Steps  1,251,328 | SPS      72 | Reward  +0.70 | Clip 0.095 | KL 1.2792 | V_loss 0.0019 | LR 0.000030
+Episode  3469 | Steps  1,253,376 | SPS      72 | Reward  +0.68 | Clip 0.095 | KL 1.0322 | V_loss 0.0059 | LR 0.000030
+Episode  3474 | Steps  1,255,424 | SPS      72 | Reward  +0.68 | Clip 0.095 | KL 1.1423 | V_loss 0.0066 | LR 0.000030
+Episode  3479 | Steps  1,257,472 | SPS      72 | Reward  +0.68 | Clip 0.095 | KL 1.2541 | V_loss 0.0030 | LR 0.000030
+Episode  3487 | Steps  1,259,520 | SPS      72 | Reward  +0.70 | Clip 0.095 | KL 0.8940 | V_loss 0.0038 | LR 0.000030
+Episode  3495 | Steps  1,261,568 | SPS      72 | Reward  +0.66 | Clip 0.095 | KL 0.7744 | V_loss 0.0080 | LR 0.000030
+Episode  3500 | Steps  1,263,616 | SPS      72 | Reward  +0.68 | Clip 0.094 | KL 0.8673 | V_loss 0.0024 | LR 0.000030
+Episode  3506 | Steps  1,265,664 | SPS      72 | Reward  +0.64 | Clip 0.094 | KL 0.7594 | V_loss 0.0055 | LR 0.000030
+Episode  3514 | Steps  1,267,712 | SPS      72 | Reward  +0.64 | Clip 0.094 | KL 1.1074 | V_loss 0.0017 | LR 0.000030
+Episode  3519 | Steps  1,269,760 | SPS      72 | Reward  +0.62 | Clip 0.094 | KL 1.0036 | V_loss 0.0028 | LR 0.000030
+Episode  3524 | Steps  1,271,808 | SPS      72 | Reward  +0.66 | Clip 0.094 | KL 0.8705 | V_loss 0.0014 | LR 0.000030
+Episode  3529 | Steps  1,273,856 | SPS      72 | Reward  +0.64 | Clip 0.094 | KL 0.9476 | V_loss 0.0028 | LR 0.000030
+Episode  3537 | Steps  1,275,904 | SPS      72 | Reward  +0.62 | Clip 0.094 | KL 0.9615 | V_loss 0.0066 | LR 0.000030
+Episode  3542 | Steps  1,277,952 | SPS      72 | Reward  +0.60 | Clip 0.094 | KL 1.1445 | V_loss 0.0013 | LR 0.000030
+Episode  3550 | Steps  1,280,000 | SPS      72 | Reward  +0.64 | Clip 0.094 | KL 1.1842 | V_loss 0.0010 | LR 0.000030
+Episode  3558 | Steps  1,282,048 | SPS      72 | Reward  +0.66 | Clip 0.094 | KL 1.1225 | V_loss 0.0023 | LR 0.000030
+Episode  3566 | Steps  1,284,096 | SPS      72 | Reward  +0.72 | Clip 0.094 | KL 1.2300 | V_loss 0.0012 | LR 0.000030
+Episode  3571 | Steps  1,286,144 | SPS      72 | Reward  +0.70 | Clip 0.094 | KL 1.1519 | V_loss 0.0136 | LR 0.000030
+Episode  3579 | Steps  1,288,192 | SPS      72 | Reward  +0.72 | Clip 0.093 | KL 1.0690 | V_loss 0.0012 | LR 0.000030
+Episode  3587 | Steps  1,290,240 | SPS      72 | Reward  +0.70 | Clip 0.093 | KL 0.7361 | V_loss 0.0100 | LR 0.000030
+Episode  3595 | Steps  1,292,288 | SPS      72 | Reward  +0.72 | Clip 0.092 | KL 1.2964 | V_loss 0.0010 | LR 0.000030
+Episode  3600 | Steps  1,294,336 | SPS      72 | Reward  +0.72 | Clip 0.092 | KL 1.0883 | V_loss 0.0021 | LR 0.000030
+Episode  3605 | Steps  1,296,384 | SPS      72 | Reward  +0.72 | Clip 0.092 | KL 0.9157 | V_loss 0.0014 | LR 0.000030
+Episode  3610 | Steps  1,298,432 | SPS      72 | Reward  +0.70 | Clip 0.092 | KL 0.9366 | V_loss 0.0030 | LR 0.000030
+Episode  3615 | Steps  1,300,480 | SPS      72 | Reward  +0.68 | Clip 0.092 | KL 0.6714 | V_loss 0.0043 | LR 0.000030
+Episode  3623 | Steps  1,302,528 | SPS      72 | Reward  +0.70 | Clip 0.091 | KL 0.9377 | V_loss 0.0093 | LR 0.000030
+Episode  3628 | Steps  1,304,576 | SPS      72 | Reward  +0.68 | Clip 0.091 | KL 0.9669 | V_loss 0.0017 | LR 0.000030
+Episode  3633 | Steps  1,306,624 | SPS      72 | Reward  +0.70 | Clip 0.091 | KL 1.0839 | V_loss 0.0016 | LR 0.000030
+Episode  3638 | Steps  1,308,672 | SPS      72 | Reward  +0.72 | Clip 0.091 | KL 1.0968 | V_loss 0.0024 | LR 0.000030
+Episode  3643 | Steps  1,310,720 | SPS      72 | Reward  +0.72 | Clip 0.091 | KL 1.1697 | V_loss 0.0025 | LR 0.000030
+Episode  3651 | Steps  1,312,768 | SPS      72 | Reward  +0.72 | Clip 0.091 | KL 1.2780 | V_loss 0.0023 | LR 0.000030
+Episode  3659 | Steps  1,314,816 | SPS      72 | Reward  +0.72 | Clip 0.091 | KL 0.9316 | V_loss 0.0021 | LR 0.000030
+Episode  3664 | Steps  1,316,864 | SPS      72 | Reward  +0.70 | Clip 0.091 | KL 0.6629 | V_loss 0.0011 | LR 0.000030
+Episode  3669 | Steps  1,318,912 | SPS      72 | Reward  +0.70 | Clip 0.091 | KL 1.0927 | V_loss 0.0037 | LR 0.000030
+Episode  3677 | Steps  1,320,960 | SPS      72 | Reward  +0.70 | Clip 0.091 | KL 0.8216 | V_loss 0.0064 | LR 0.000030
+Episode  3682 | Steps  1,323,008 | SPS      72 | Reward  +0.70 | Clip 0.091 | KL 0.8965 | V_loss 0.0022 | LR 0.000030
+Episode  3690 | Steps  1,325,056 | SPS      72 | Reward  +0.68 | Clip 0.091 | KL 1.1055 | V_loss 0.0050 | LR 0.000030
+Episode  3698 | Steps  1,327,104 | SPS      72 | Reward  +0.70 | Clip 0.091 | KL 0.9283 | V_loss 0.0023 | LR 0.000030
+Episode  3703 | Steps  1,329,152 | SPS      72 | Reward  +0.68 | Clip 0.091 | KL 0.9610 | V_loss 0.0030 | LR 0.000030
+Episode  3711 | Steps  1,331,200 | SPS      72 | Reward  +0.72 | Clip 0.090 | KL 0.9720 | V_loss 0.0033 | LR 0.000030
+Episode  3719 | Steps  1,333,248 | SPS      72 | Reward  +0.78 | Clip 0.090 | KL 1.0496 | V_loss 0.0055 | LR 0.000030
+Episode  3727 | Steps  1,335,296 | SPS      72 | Reward  +0.76 | Clip 0.090 | KL 1.0674 | V_loss 0.0031 | LR 0.000030
+Episode  3732 | Steps  1,337,344 | SPS      72 | Reward  +0.76 | Clip 0.090 | KL 1.0134 | V_loss 0.0013 | LR 0.000030
+Episode  3740 | Steps  1,339,392 | SPS      72 | Reward  +0.76 | Clip 0.090 | KL 0.8940 | V_loss 0.0018 | LR 0.000030
+Episode  3748 | Steps  1,341,440 | SPS      72 | Reward  +0.76 | Clip 0.090 | KL 1.0357 | V_loss 0.0012 | LR 0.000030
+Episode  3756 | Steps  1,343,488 | SPS      72 | Reward  +0.76 | Clip 0.090 | KL 0.9659 | V_loss 0.0025 | LR 0.000030
+Episode  3764 | Steps  1,345,536 | SPS      72 | Reward  +0.74 | Clip 0.089 | KL 0.8086 | V_loss 0.0042 | LR 0.000030
+Episode  3769 | Steps  1,347,584 | SPS      72 | Reward  +0.74 | Clip 0.089 | KL 1.3705 | V_loss 0.0011 | LR 0.000030
+Episode  3774 | Steps  1,349,632 | SPS      72 | Reward  +0.74 | Clip 0.089 | KL 0.9174 | V_loss 0.0022 | LR 0.000030
+Episode  3779 | Steps  1,351,680 | SPS      72 | Reward  +0.72 | Clip 0.089 | KL 0.9640 | V_loss 0.0044 | LR 0.000030
+Episode  3787 | Steps  1,353,728 | SPS      72 | Reward  +0.76 | Clip 0.089 | KL 0.9812 | V_loss 0.0014 | LR 0.000030
+Episode  3792 | Steps  1,355,776 | SPS      72 | Reward  +0.72 | Clip 0.089 | KL 0.6237 | V_loss 0.0025 | LR 0.000030
+Episode  3797 | Steps  1,357,824 | SPS      72 | Reward  +0.68 | Clip 0.088 | KL 0.6791 | V_loss 0.0023 | LR 0.000030
+Episode  3802 | Steps  1,359,872 | SPS      72 | Reward  +0.66 | Clip 0.088 | KL 0.8790 | V_loss 0.0061 | LR 0.000030
+Episode  3807 | Steps  1,361,920 | SPS      72 | Reward  +0.68 | Clip 0.088 | KL 1.1982 | V_loss 0.0017 | LR 0.000030
+Episode  3812 | Steps  1,363,968 | SPS      72 | Reward  +0.64 | Clip 0.088 | KL 0.8533 | V_loss 0.0024 | LR 0.000030
+Episode  3817 | Steps  1,366,016 | SPS      72 | Reward  +0.60 | Clip 0.087 | KL 0.7996 | V_loss 0.0028 | LR 0.000030
+Episode  3822 | Steps  1,368,064 | SPS      72 | Reward  +0.58 | Clip 0.087 | KL 1.1211 | V_loss 0.0013 | LR 0.000030
+Episode  3827 | Steps  1,370,112 | SPS      72 | Reward  +0.56 | Clip 0.087 | KL 0.8372 | V_loss 0.0041 | LR 0.000030
+Episode  3832 | Steps  1,372,160 | SPS      72 | Reward  +0.56 | Clip 0.087 | KL 0.7525 | V_loss 0.0015 | LR 0.000030
+Episode  3837 | Steps  1,374,208 | SPS      72 | Reward  +0.56 | Clip 0.086 | KL 0.7968 | V_loss 0.0023 | LR 0.000030
+Episode  3845 | Steps  1,376,256 | SPS      72 | Reward  +0.56 | Clip 0.086 | KL 1.0635 | V_loss 0.0066 | LR 0.000030
+Episode  3850 | Steps  1,378,304 | SPS      72 | Reward  +0.54 | Clip 0.086 | KL 1.2041 | V_loss 0.0041 | LR 0.000030
+Episode  3855 | Steps  1,380,352 | SPS      72 | Reward  +0.50 | Clip 0.085 | KL 0.7467 | V_loss 0.0054 | LR 0.000030
+Episode  3863 | Steps  1,382,400 | SPS      72 | Reward  +0.52 | Clip 0.085 | KL 1.0539 | V_loss 0.0014 | LR 0.000030
+Episode  3868 | Steps  1,384,448 | SPS      72 | Reward  +0.54 | Clip 0.085 | KL 1.0068 | V_loss 0.0015 | LR 0.000030
+Episode  3876 | Steps  1,386,496 | SPS      72 | Reward  +0.60 | Clip 0.085 | KL 0.8296 | V_loss 0.0026 | LR 0.000030
+Episode  3884 | Steps  1,388,544 | SPS      72 | Reward  +0.60 | Clip 0.085 | KL 1.0108 | V_loss 0.0025 | LR 0.000030
+Episode  3892 | Steps  1,390,592 | SPS      72 | Reward  +0.62 | Clip 0.084 | KL 0.9292 | V_loss 0.0026 | LR 0.000030
+Episode  3897 | Steps  1,392,640 | SPS      72 | Reward  +0.62 | Clip 0.084 | KL 0.8113 | V_loss 0.0028 | LR 0.000030
+Episode  3905 | Steps  1,394,688 | SPS      72 | Reward  +0.66 | Clip 0.084 | KL 0.7837 | V_loss 0.0015 | LR 0.000030
+Episode  3910 | Steps  1,396,736 | SPS      72 | Reward  +0.68 | Clip 0.084 | KL 0.6890 | V_loss 0.0041 | LR 0.000030
+Episode  3918 | Steps  1,398,784 | SPS      72 | Reward  +0.72 | Clip 0.084 | KL 0.9806 | V_loss 0.0017 | LR 0.000030
+Episode  3923 | Steps  1,400,832 | SPS      72 | Reward  +0.72 | Clip 0.083 | KL 0.9889 | V_loss 0.0025 | LR 0.000030
+Episode  3931 | Steps  1,402,880 | SPS      72 | Reward  +0.74 | Clip 0.083 | KL 1.0441 | V_loss 0.0012 | LR 0.000030
+Episode  3936 | Steps  1,404,928 | SPS      72 | Reward  +0.74 | Clip 0.083 | KL 1.0017 | V_loss 0.0013 | LR 0.000030
+Episode  3941 | Steps  1,406,976 | SPS      72 | Reward  +0.76 | Clip 0.083 | KL 0.8069 | V_loss 0.0014 | LR 0.000030
+Episode  3949 | Steps  1,409,024 | SPS      72 | Reward  +0.78 | Clip 0.082 | KL 1.1003 | V_loss 0.0013 | LR 0.000030
+Episode  3954 | Steps  1,411,072 | SPS      72 | Reward  +0.80 | Clip 0.082 | KL 1.0850 | V_loss 0.0012 | LR 0.000030
+Episode  3959 | Steps  1,413,120 | SPS      72 | Reward  +0.82 | Clip 0.082 | KL 1.0104 | V_loss 0.0016 | LR 0.000030
+Episode  3964 | Steps  1,415,168 | SPS      72 | Reward  +0.80 | Clip 0.082 | KL 0.7554 | V_loss 0.0021 | LR 0.000030
+Episode  3969 | Steps  1,417,216 | SPS      72 | Reward  +0.76 | Clip 0.082 | KL 0.6236 | V_loss 0.0076 | LR 0.000030
+Episode  3974 | Steps  1,419,264 | SPS      72 | Reward  +0.74 | Clip 0.082 | KL 0.5356 | V_loss 0.0056 | LR 0.000030
+Episode  3979 | Steps  1,421,312 | SPS      72 | Reward  +0.72 | Clip 0.082 | KL 0.8162 | V_loss 0.0030 | LR 0.000030
+Episode  3984 | Steps  1,423,360 | SPS      72 | Reward  +0.70 | Clip 0.082 | KL 0.8463 | V_loss 0.0008 | LR 0.000030
+Episode  3992 | Steps  1,425,408 | SPS      72 | Reward  +0.72 | Clip 0.082 | KL 1.2162 | V_loss 0.0009 | LR 0.000030
+Episode  4000 | Steps  1,427,456 | SPS      72 | Reward  +0.74 | Clip 0.082 | KL 0.7603 | V_loss 0.0019 | LR 0.000030
+Episode  4008 | Steps  1,429,504 | SPS      72 | Reward  +0.74 | Clip 0.082 | KL 0.7617 | V_loss 0.0014 | LR 0.000030
+Episode  4013 | Steps  1,431,552 | SPS      72 | Reward  +0.74 | Clip 0.082 | KL 0.8736 | V_loss 0.0011 | LR 0.000030
+Episode  4018 | Steps  1,433,600 | SPS      72 | Reward  +0.76 | Clip 0.082 | KL 0.7712 | V_loss 0.0017 | LR 0.000030
+Episode  4026 | Steps  1,435,648 | SPS      72 | Reward  +0.76 | Clip 0.081 | KL 0.6630 | V_loss 0.0031 | LR 0.000030
+Episode  4034 | Steps  1,437,696 | SPS      72 | Reward  +0.78 | Clip 0.081 | KL 0.9570 | V_loss 0.0019 | LR 0.000030
+Episode  4042 | Steps  1,439,744 | SPS      72 | Reward  +0.82 | Clip 0.081 | KL 0.8575 | V_loss 0.0009 | LR 0.000030
+Episode  4050 | Steps  1,441,792 | SPS      72 | Reward  +0.82 | Clip 0.081 | KL 1.0925 | V_loss 0.0016 | LR 0.000030
+Episode  4055 | Steps  1,443,840 | SPS      72 | Reward  +0.80 | Clip 0.081 | KL 0.7967 | V_loss 0.0031 | LR 0.000030
+Episode  4060 | Steps  1,445,888 | SPS      72 | Reward  +0.80 | Clip 0.080 | KL 1.0001 | V_loss 0.0012 | LR 0.000030
+Episode  4068 | Steps  1,447,936 | SPS      72 | Reward  +0.84 | Clip 0.080 | KL 1.0205 | V_loss 0.0011 | LR 0.000030
+Episode  4073 | Steps  1,449,984 | SPS      72 | Reward  +0.80 | Clip 0.080 | KL 0.6832 | V_loss 0.0016 | LR 0.000030
+Episode  4078 | Steps  1,452,032 | SPS      72 | Reward  +0.84 | Clip 0.080 | KL 0.9414 | V_loss 0.0011 | LR 0.000030
+Episode  4086 | Steps  1,454,080 | SPS      72 | Reward  +0.84 | Clip 0.080 | KL 0.6534 | V_loss 0.0056 | LR 0.000030
+Episode  4094 | Steps  1,456,128 | SPS      72 | Reward  +0.86 | Clip 0.080 | KL 0.7754 | V_loss 0.0025 | LR 0.000030
+Episode  4099 | Steps  1,458,176 | SPS      73 | Reward  +0.84 | Clip 0.079 | KL 0.9175 | V_loss 0.0010 | LR 0.000030
+Episode  4107 | Steps  1,460,224 | SPS      73 | Reward  +0.82 | Clip 0.079 | KL 0.7591 | V_loss 0.0016 | LR 0.000030
+Episode  4115 | Steps  1,462,272 | SPS      73 | Reward  +0.84 | Clip 0.078 | KL 1.0134 | V_loss 0.0021 | LR 0.000030
+Episode  4123 | Steps  1,464,320 | SPS      73 | Reward  +0.86 | Clip 0.078 | KL 0.8102 | V_loss 0.0018 | LR 0.000030
+Episode  4128 | Steps  1,466,368 | SPS      73 | Reward  +0.86 | Clip 0.078 | KL 0.7146 | V_loss 0.0010 | LR 0.000030
+Episode  4136 | Steps  1,468,416 | SPS      73 | Reward  +0.84 | Clip 0.078 | KL 0.7209 | V_loss 0.0115 | LR 0.000030
+Episode  4141 | Steps  1,470,464 | SPS      73 | Reward  +0.84 | Clip 0.078 | KL 0.9170 | V_loss 0.0018 | LR 0.000030
+Episode  4149 | Steps  1,472,512 | SPS      73 | Reward  +0.84 | Clip 0.078 | KL 0.7120 | V_loss 0.0028 | LR 0.000030
+Episode  4157 | Steps  1,474,560 | SPS      73 | Reward  +0.86 | Clip 0.078 | KL 0.7704 | V_loss 0.0013 | LR 0.000030
+Episode  4165 | Steps  1,476,608 | SPS      73 | Reward  +0.88 | Clip 0.077 | KL 0.7475 | V_loss 0.0010 | LR 0.000030
+Episode  4170 | Steps  1,478,656 | SPS      73 | Reward  +0.86 | Clip 0.078 | KL 0.6717 | V_loss 0.0030 | LR 0.000030
+Episode  4175 | Steps  1,480,704 | SPS      73 | Reward  +0.88 | Clip 0.077 | KL 0.9751 | V_loss 0.0010 | LR 0.000030
+Episode  4183 | Steps  1,482,752 | SPS      73 | Reward  +0.90 | Clip 0.077 | KL 0.7174 | V_loss 0.0009 | LR 0.000030
+Episode  4188 | Steps  1,484,800 | SPS      73 | Reward  +0.86 | Clip 0.077 | KL 0.5273 | V_loss 0.0029 | LR 0.000030
+Episode  4194 | Steps  1,486,848 | SPS      73 | Reward  +0.84 | Clip 0.077 | KL 0.8847 | V_loss 0.0052 | LR 0.000030
+Episode  4202 | Steps  1,488,896 | SPS      73 | Reward  +0.84 | Clip 0.077 | KL 0.7658 | V_loss 0.0026 | LR 0.000030
+Episode  4210 | Steps  1,490,944 | SPS      73 | Reward  +0.84 | Clip 0.076 | KL 0.7604 | V_loss 0.0076 | LR 0.000030
+Episode  4218 | Steps  1,492,992 | SPS      73 | Reward  +0.82 | Clip 0.076 | KL 0.7882 | V_loss 0.0081 | LR 0.000030
+Episode  4223 | Steps  1,495,040 | SPS      73 | Reward  +0.80 | Clip 0.076 | KL 0.7645 | V_loss 0.0018 | LR 0.000030
+Episode  4231 | Steps  1,497,088 | SPS      73 | Reward  +0.82 | Clip 0.076 | KL 0.7757 | V_loss 0.0024 | LR 0.000030
+Episode  4239 | Steps  1,499,136 | SPS      73 | Reward  +0.78 | Clip 0.076 | KL 0.7793 | V_loss 0.0073 | LR 0.000030
+Episode  4247 | Steps  1,501,184 | SPS      73 | Reward  +0.78 | Clip 0.076 | KL 0.6620 | V_loss 0.0012 | LR 0.000030
+Checkpoint saved at checkpoints/step_1501184
+Episode  4255 | Steps  1,503,232 | SPS      73 | Reward  +0.76 | Clip 0.075 | KL 0.7340 | V_loss 0.0011 | LR 0.000030
+Episode  4260 | Steps  1,505,280 | SPS      73 | Reward  +0.74 | Clip 0.075 | KL 0.9508 | V_loss 0.0009 | LR 0.000030
+Episode  4268 | Steps  1,507,328 | SPS      73 | Reward  +0.76 | Clip 0.075 | KL 0.8422 | V_loss 0.0022 | LR 0.000030
+Episode  4273 | Steps  1,509,376 | SPS      73 | Reward  +0.76 | Clip 0.075 | KL 0.7003 | V_loss 0.0008 | LR 0.000030
+Episode  4281 | Steps  1,511,424 | SPS      73 | Reward  +0.76 | Clip 0.074 | KL 0.7709 | V_loss 0.0027 | LR 0.000030
+Episode  4289 | Steps  1,513,472 | SPS      73 | Reward  +0.80 | Clip 0.074 | KL 0.7680 | V_loss 0.0006 | LR 0.000030
+Episode  4294 | Steps  1,515,520 | SPS      73 | Reward  +0.78 | Clip 0.073 | KL 0.8604 | V_loss 0.0021 | LR 0.000030
+Episode  4302 | Steps  1,517,568 | SPS      73 | Reward  +0.80 | Clip 0.073 | KL 0.6943 | V_loss 0.0022 | LR 0.000030
+Episode  4310 | Steps  1,519,616 | SPS      73 | Reward  +0.82 | Clip 0.073 | KL 0.4812 | V_loss 0.0014 | LR 0.000030
+Episode  4318 | Steps  1,521,664 | SPS      73 | Reward  +0.84 | Clip 0.073 | KL 0.7521 | V_loss 0.0023 | LR 0.000030
+Episode  4326 | Steps  1,523,712 | SPS      73 | Reward  +0.86 | Clip 0.072 | KL 0.6044 | V_loss 0.0022 | LR 0.000030
+Episode  4334 | Steps  1,525,760 | SPS      73 | Reward  +0.84 | Clip 0.072 | KL 0.6965 | V_loss 0.0102 | LR 0.000030
+Episode  4342 | Steps  1,527,808 | SPS      73 | Reward  +0.86 | Clip 0.072 | KL 0.7139 | V_loss 0.0010 | LR 0.000030
+Episode  4347 | Steps  1,529,856 | SPS      73 | Reward  +0.84 | Clip 0.071 | KL 0.6794 | V_loss 0.0009 | LR 0.000030
+Episode  4352 | Steps  1,531,904 | SPS      73 | Reward  +0.82 | Clip 0.071 | KL 0.7916 | V_loss 0.0014 | LR 0.000030
+Episode  4360 | Steps  1,533,952 | SPS      73 | Reward  +0.84 | Clip 0.071 | KL 0.6625 | V_loss 0.0066 | LR 0.000030
+Episode  4368 | Steps  1,536,000 | SPS      73 | Reward  +0.84 | Clip 0.071 | KL 0.9155 | V_loss 0.0034 | LR 0.000030
+Episode  4376 | Steps  1,538,048 | SPS      73 | Reward  +0.82 | Clip 0.070 | KL 0.8388 | V_loss 0.0011 | LR 0.000030
+Episode  4384 | Steps  1,540,096 | SPS      73 | Reward  +0.82 | Clip 0.070 | KL 0.6171 | V_loss 0.0006 | LR 0.000030
+Episode  4392 | Steps  1,542,144 | SPS      73 | Reward  +0.84 | Clip 0.070 | KL 1.0031 | V_loss 0.0008 | LR 0.000030
+Episode  4400 | Steps  1,544,192 | SPS      73 | Reward  +0.86 | Clip 0.070 | KL 0.8261 | V_loss 0.0009 | LR 0.000030
+Episode  4405 | Steps  1,546,240 | SPS      73 | Reward  +0.86 | Clip 0.069 | KL 0.6836 | V_loss 0.0008 | LR 0.000030
+Episode  4413 | Steps  1,548,288 | SPS      73 | Reward  +0.82 | Clip 0.069 | KL 0.6863 | V_loss 0.0032 | LR 0.000030
+Episode  4418 | Steps  1,550,336 | SPS      73 | Reward  +0.80 | Clip 0.069 | KL 0.4689 | V_loss 0.0034 | LR 0.000030
+Episode  4423 | Steps  1,552,384 | SPS      73 | Reward  +0.78 | Clip 0.069 | KL 0.7757 | V_loss 0.0010 | LR 0.000030
+Episode  4428 | Steps  1,554,432 | SPS      73 | Reward  +0.78 | Clip 0.069 | KL 0.5729 | V_loss 0.0008 | LR 0.000030
+Episode  4436 | Steps  1,556,480 | SPS      73 | Reward  +0.78 | Clip 0.068 | KL 0.6729 | V_loss 0.0007 | LR 0.000030
+Episode  4441 | Steps  1,558,528 | SPS      73 | Reward  +0.76 | Clip 0.068 | KL 0.6884 | V_loss 0.0049 | LR 0.000030
+Episode  4449 | Steps  1,560,576 | SPS      73 | Reward  +0.78 | Clip 0.068 | KL 0.8774 | V_loss 0.0008 | LR 0.000030
+Episode  4457 | Steps  1,562,624 | SPS      73 | Reward  +0.82 | Clip 0.068 | KL 0.6696 | V_loss 0.0010 | LR 0.000030
+Episode  4465 | Steps  1,564,672 | SPS      73 | Reward  +0.82 | Clip 0.067 | KL 0.6949 | V_loss 0.0009 | LR 0.000030
+Episode  4470 | Steps  1,566,720 | SPS      73 | Reward  +0.80 | Clip 0.067 | KL 0.4649 | V_loss 0.0007 | LR 0.000030
+Episode  4478 | Steps  1,568,768 | SPS      73 | Reward  +0.78 | Clip 0.067 | KL 0.4563 | V_loss 0.0041 | LR 0.000030
+Episode  4486 | Steps  1,570,816 | SPS      73 | Reward  +0.80 | Clip 0.067 | KL 0.6353 | V_loss 0.0007 | LR 0.000030
+Episode  4494 | Steps  1,572,864 | SPS      73 | Reward  +0.78 | Clip 0.067 | KL 0.6414 | V_loss 0.0059 | LR 0.000030
+Episode  4502 | Steps  1,574,912 | SPS      73 | Reward  +0.76 | Clip 0.067 | KL 0.6464 | V_loss 0.0024 | LR 0.000030
+Episode  4507 | Steps  1,576,960 | SPS      73 | Reward  +0.76 | Clip 0.066 | KL 0.5724 | V_loss 0.0024 | LR 0.000030
+Episode  4512 | Steps  1,579,008 | SPS      73 | Reward  +0.76 | Clip 0.066 | KL 0.5117 | V_loss 0.0024 | LR 0.000030
+Episode  4517 | Steps  1,581,056 | SPS      73 | Reward  +0.74 | Clip 0.066 | KL 0.4229 | V_loss 0.0034 | LR 0.000030
+Episode  4522 | Steps  1,583,104 | SPS      73 | Reward  +0.74 | Clip 0.066 | KL 0.6286 | V_loss 0.0045 | LR 0.000030
+Episode  4530 | Steps  1,585,152 | SPS      73 | Reward  +0.78 | Clip 0.066 | KL 0.6269 | V_loss 0.0007 | LR 0.000030
+Episode  4538 | Steps  1,587,200 | SPS      73 | Reward  +0.82 | Clip 0.066 | KL 0.4819 | V_loss 0.0009 | LR 0.000030
+Episode  4543 | Steps  1,589,248 | SPS      73 | Reward  +0.80 | Clip 0.065 | KL 0.4834 | V_loss 0.0095 | LR 0.000030
+Episode  4548 | Steps  1,591,296 | SPS      73 | Reward  +0.78 | Clip 0.065 | KL 0.5448 | V_loss 0.0013 | LR 0.000030
+Episode  4556 | Steps  1,593,344 | SPS      73 | Reward  +0.78 | Clip 0.065 | KL 0.7638 | V_loss 0.0010 | LR 0.000030
+Episode  4564 | Steps  1,595,392 | SPS      73 | Reward  +0.78 | Clip 0.065 | KL 0.6251 | V_loss 0.0014 | LR 0.000030
+Episode  4572 | Steps  1,597,440 | SPS      73 | Reward  +0.78 | Clip 0.065 | KL 0.8097 | V_loss 0.0008 | LR 0.000030
+Episode  4580 | Steps  1,599,488 | SPS      73 | Reward  +0.82 | Clip 0.065 | KL 0.6591 | V_loss 0.0010 | LR 0.000030
+Episode  4585 | Steps  1,601,536 | SPS      73 | Reward  +0.80 | Clip 0.065 | KL 0.4974 | V_loss 0.0007 | LR 0.000030
+Episode  4593 | Steps  1,603,584 | SPS      73 | Reward  +0.82 | Clip 0.064 | KL 0.5602 | V_loss 0.0006 | LR 0.000030
+Episode  4598 | Steps  1,605,632 | SPS      73 | Reward  +0.82 | Clip 0.064 | KL 0.6307 | V_loss 0.0021 | LR 0.000030
+Episode  4603 | Steps  1,607,680 | SPS      73 | Reward  +0.78 | Clip 0.064 | KL 0.4891 | V_loss 0.0044 | LR 0.000030
+Episode  4608 | Steps  1,609,728 | SPS      73 | Reward  +0.82 | Clip 0.064 | KL 0.6114 | V_loss 0.0034 | LR 0.000030
+Episode  4616 | Steps  1,611,776 | SPS      73 | Reward  +0.80 | Clip 0.064 | KL 0.5531 | V_loss 0.0028 | LR 0.000030
+Episode  4624 | Steps  1,613,824 | SPS      73 | Reward  +0.84 | Clip 0.064 | KL 0.5951 | V_loss 0.0012 | LR 0.000030
+Episode  4632 | Steps  1,615,872 | SPS      73 | Reward  +0.84 | Clip 0.064 | KL 0.9864 | V_loss 0.0011 | LR 0.000030
+Episode  4637 | Steps  1,617,920 | SPS      73 | Reward  +0.84 | Clip 0.064 | KL 0.6267 | V_loss 0.0019 | LR 0.000030
+Episode  4645 | Steps  1,619,968 | SPS      73 | Reward  +0.86 | Clip 0.064 | KL 0.5231 | V_loss 0.0014 | LR 0.000030
+Episode  4650 | Steps  1,622,016 | SPS      73 | Reward  +0.86 | Clip 0.064 | KL 0.6993 | V_loss 0.0050 | LR 0.000030
+Episode  4655 | Steps  1,624,064 | SPS      73 | Reward  +0.84 | Clip 0.064 | KL 0.5958 | V_loss 0.0029 | LR 0.000030
+Episode  4663 | Steps  1,626,112 | SPS      73 | Reward  +0.84 | Clip 0.063 | KL 0.4759 | V_loss 0.0013 | LR 0.000030
+Episode  4671 | Steps  1,628,160 | SPS      73 | Reward  +0.86 | Clip 0.063 | KL 0.6629 | V_loss 0.0039 | LR 0.000030
+Episode  4679 | Steps  1,630,208 | SPS      73 | Reward  +0.82 | Clip 0.063 | KL 0.5631 | V_loss 0.0021 | LR 0.000030
+Episode  4687 | Steps  1,632,256 | SPS      73 | Reward  +0.84 | Clip 0.063 | KL 0.5032 | V_loss 0.0011 | LR 0.000030
+Episode  4695 | Steps  1,634,304 | SPS      73 | Reward  +0.86 | Clip 0.062 | KL 0.8089 | V_loss 0.0019 | LR 0.000030
+Episode  4700 | Steps  1,636,352 | SPS      73 | Reward  +0.86 | Clip 0.062 | KL 0.6040 | V_loss 0.0009 | LR 0.000030
+Episode  4708 | Steps  1,638,400 | SPS      73 | Reward  +0.88 | Clip 0.062 | KL 0.5074 | V_loss 0.0018 | LR 0.000030
+Episode  4713 | Steps  1,640,448 | SPS      73 | Reward  +0.86 | Clip 0.062 | KL 0.5675 | V_loss 0.0024 | LR 0.000030
+Episode  4721 | Steps  1,642,496 | SPS      73 | Reward  +0.86 | Clip 0.061 | KL 0.5728 | V_loss 0.0023 | LR 0.000030
+Episode  4729 | Steps  1,644,544 | SPS      73 | Reward  +0.86 | Clip 0.061 | KL 0.6605 | V_loss 0.0009 | LR 0.000030
+Episode  4737 | Steps  1,646,592 | SPS      73 | Reward  +0.84 | Clip 0.061 | KL 0.4000 | V_loss 0.0009 | LR 0.000030
+Episode  4742 | Steps  1,648,640 | SPS      73 | Reward  +0.84 | Clip 0.061 | KL 0.6184 | V_loss 0.0010 | LR 0.000030
+Episode  4750 | Steps  1,650,688 | SPS      73 | Reward  +0.86 | Clip 0.061 | KL 0.7040 | V_loss 0.0018 | LR 0.000030
+Episode  4755 | Steps  1,652,736 | SPS      73 | Reward  +0.88 | Clip 0.061 | KL 0.6704 | V_loss 0.0022 | LR 0.000030
+Episode  4760 | Steps  1,654,784 | SPS      73 | Reward  +0.86 | Clip 0.060 | KL 0.4361 | V_loss 0.0009 | LR 0.000030
+Episode  4768 | Steps  1,656,832 | SPS      73 | Reward  +0.84 | Clip 0.060 | KL 0.7274 | V_loss 0.0084 | LR 0.000030
+Episode  4776 | Steps  1,658,880 | SPS      73 | Reward  +0.84 | Clip 0.060 | KL 0.5292 | V_loss 0.0009 | LR 0.000030
+Episode  4784 | Steps  1,660,928 | SPS      73 | Reward  +0.82 | Clip 0.060 | KL 0.3341 | V_loss 0.0050 | LR 0.000030
+Episode  4792 | Steps  1,662,976 | SPS      73 | Reward  +0.80 | Clip 0.060 | KL 0.7255 | V_loss 0.0089 | LR 0.000030
+Episode  4800 | Steps  1,665,024 | SPS      73 | Reward  +0.82 | Clip 0.060 | KL 0.7149 | V_loss 0.0010 | LR 0.000030
+Episode  4805 | Steps  1,667,072 | SPS      73 | Reward  +0.80 | Clip 0.059 | KL 0.3786 | V_loss 0.0028 | LR 0.000030
+Episode  4813 | Steps  1,669,120 | SPS      73 | Reward  +0.84 | Clip 0.059 | KL 0.5597 | V_loss 0.0034 | LR 0.000030
+Episode  4818 | Steps  1,671,168 | SPS      73 | Reward  +0.82 | Clip 0.059 | KL 0.4581 | V_loss 0.0018 | LR 0.000030
+Episode  4823 | Steps  1,673,216 | SPS      73 | Reward  +0.80 | Clip 0.059 | KL 0.6005 | V_loss 0.0072 | LR 0.000030
+Episode  4831 | Steps  1,675,264 | SPS      73 | Reward  +0.78 | Clip 0.059 | KL 0.6633 | V_loss 0.0027 | LR 0.000030
+Episode  4839 | Steps  1,677,312 | SPS      73 | Reward  +0.80 | Clip 0.058 | KL 0.4880 | V_loss 0.0029 | LR 0.000030
+Episode  4844 | Steps  1,679,360 | SPS      73 | Reward  +0.78 | Clip 0.058 | KL 0.5261 | V_loss 0.0015 | LR 0.000030
+Episode  4849 | Steps  1,681,408 | SPS      73 | Reward  +0.74 | Clip 0.058 | KL 0.5278 | V_loss 0.0023 | LR 0.000030
+Episode  4857 | Steps  1,683,456 | SPS      73 | Reward  +0.74 | Clip 0.058 | KL 0.7857 | V_loss 0.0010 | LR 0.000030
+Episode  4865 | Steps  1,685,504 | SPS      73 | Reward  +0.78 | Clip 0.058 | KL 0.4174 | V_loss 0.0027 | LR 0.000030
+Episode  4873 | Steps  1,687,552 | SPS      73 | Reward  +0.76 | Clip 0.057 | KL 0.5684 | V_loss 0.0012 | LR 0.000030
+Episode  4881 | Steps  1,689,600 | SPS      73 | Reward  +0.82 | Clip 0.057 | KL 0.5198 | V_loss 0.0044 | LR 0.000030
+Episode  4886 | Steps  1,691,648 | SPS      73 | Reward  +0.80 | Clip 0.057 | KL 0.6662 | V_loss 0.0012 | LR 0.000030
+Episode  4894 | Steps  1,693,696 | SPS      73 | Reward  +0.82 | Clip 0.057 | KL 0.7966 | V_loss 0.0017 | LR 0.000030
+Episode  4902 | Steps  1,695,744 | SPS      73 | Reward  +0.82 | Clip 0.057 | KL 0.7734 | V_loss 0.0012 | LR 0.000030
+Episode  4907 | Steps  1,697,792 | SPS      73 | Reward  +0.78 | Clip 0.057 | KL 0.5162 | V_loss 0.0098 | LR 0.000030
+Episode  4915 | Steps  1,699,840 | SPS      73 | Reward  +0.80 | Clip 0.057 | KL 0.7597 | V_loss 0.0017 | LR 0.000030
+Episode  4923 | Steps  1,701,888 | SPS      73 | Reward  +0.82 | Clip 0.057 | KL 0.5781 | V_loss 0.0026 | LR 0.000030
+Episode  4928 | Steps  1,703,936 | SPS      73 | Reward  +0.80 | Clip 0.057 | KL 0.7861 | V_loss 0.0013 | LR 0.000030
+Episode  4933 | Steps  1,705,984 | SPS      73 | Reward  +0.80 | Clip 0.057 | KL 0.4922 | V_loss 0.0017 | LR 0.000030
+Episode  4938 | Steps  1,708,032 | SPS      73 | Reward  +0.78 | Clip 0.057 | KL 0.4601 | V_loss 0.0014 | LR 0.000030
+Episode  4946 | Steps  1,710,080 | SPS      73 | Reward  +0.80 | Clip 0.057 | KL 0.6887 | V_loss 0.0010 | LR 0.000030
+Episode  4954 | Steps  1,712,128 | SPS      73 | Reward  +0.82 | Clip 0.057 | KL 0.4312 | V_loss 0.0007 | LR 0.000030
+Episode  4959 | Steps  1,714,176 | SPS      73 | Reward  +0.80 | Clip 0.057 | KL 0.4486 | V_loss 0.0037 | LR 0.000030
+Episode  4964 | Steps  1,716,224 | SPS      73 | Reward  +0.78 | Clip 0.057 | KL 0.5591 | V_loss 0.0013 | LR 0.000030
+Episode  4969 | Steps  1,718,272 | SPS      73 | Reward  +0.76 | Clip 0.057 | KL 0.6052 | V_loss 0.0013 | LR 0.000030
+Episode  4974 | Steps  1,720,320 | SPS      74 | Reward  +0.76 | Clip 0.057 | KL 0.6301 | V_loss 0.0010 | LR 0.000030
+Episode  4979 | Steps  1,722,368 | SPS      74 | Reward  +0.72 | Clip 0.057 | KL 0.5242 | V_loss 0.0115 | LR 0.000030
+Episode  4984 | Steps  1,724,416 | SPS      74 | Reward  +0.70 | Clip 0.057 | KL 0.4525 | V_loss 0.0028 | LR 0.000030
+Episode  4992 | Steps  1,726,464 | SPS      74 | Reward  +0.72 | Clip 0.057 | KL 0.6264 | V_loss 0.0025 | LR 0.000030
+Episode  5000 | Steps  1,728,512 | SPS      74 | Reward  +0.72 | Clip 0.057 | KL 0.8942 | V_loss 0.0009 | LR 0.000030
+Episode  5005 | Steps  1,730,560 | SPS      74 | Reward  +0.74 | Clip 0.057 | KL 0.6137 | V_loss 0.0009 | LR 0.000030
+Episode  5013 | Steps  1,732,608 | SPS      74 | Reward  +0.76 | Clip 0.057 | KL 0.6697 | V_loss 0.0012 | LR 0.000030
+Episode  5021 | Steps  1,734,656 | SPS      74 | Reward  +0.76 | Clip 0.057 | KL 0.7271 | V_loss 0.0012 | LR 0.000030
+Episode  5029 | Steps  1,736,704 | SPS      74 | Reward  +0.78 | Clip 0.057 | KL 0.7962 | V_loss 0.0007 | LR 0.000030
+Episode  5037 | Steps  1,738,752 | SPS      74 | Reward  +0.80 | Clip 0.057 | KL 0.6458 | V_loss 0.0014 | LR 0.000030
+Episode  5045 | Steps  1,740,800 | SPS      74 | Reward  +0.82 | Clip 0.057 | KL 0.5717 | V_loss 0.0010 | LR 0.000030
+Episode  5050 | Steps  1,742,848 | SPS      74 | Reward  +0.80 | Clip 0.057 | KL 0.5340 | V_loss 0.0091 | LR 0.000030
+Episode  5058 | Steps  1,744,896 | SPS      74 | Reward  +0.84 | Clip 0.057 | KL 0.9663 | V_loss 0.0009 | LR 0.000030
+Episode  5066 | Steps  1,746,944 | SPS      74 | Reward  +0.84 | Clip 0.057 | KL 0.5400 | V_loss 0.0029 | LR 0.000030
+Episode  5071 | Steps  1,748,992 | SPS      74 | Reward  +0.82 | Clip 0.057 | KL 0.6343 | V_loss 0.0045 | LR 0.000030
+Episode  5079 | Steps  1,751,040 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.6941 | V_loss 0.0022 | LR 0.000030
+Episode  5087 | Steps  1,753,088 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.4599 | V_loss 0.0010 | LR 0.000030
+Episode  5092 | Steps  1,755,136 | SPS      74 | Reward  +0.84 | Clip 0.056 | KL 0.6319 | V_loss 0.0027 | LR 0.000030
+Episode  5100 | Steps  1,757,184 | SPS      74 | Reward  +0.84 | Clip 0.057 | KL 0.7680 | V_loss 0.0012 | LR 0.000030
+Episode  5105 | Steps  1,759,232 | SPS      74 | Reward  +0.82 | Clip 0.057 | KL 0.5745 | V_loss 0.0075 | LR 0.000030
+Episode  5113 | Steps  1,761,280 | SPS      74 | Reward  +0.82 | Clip 0.057 | KL 0.8608 | V_loss 0.0026 | LR 0.000030
+Episode  5121 | Steps  1,763,328 | SPS      74 | Reward  +0.80 | Clip 0.057 | KL 0.5769 | V_loss 0.0059 | LR 0.000030
+Episode  5126 | Steps  1,765,376 | SPS      74 | Reward  +0.78 | Clip 0.057 | KL 0.8302 | V_loss 0.0011 | LR 0.000030
+Episode  5134 | Steps  1,767,424 | SPS      74 | Reward  +0.78 | Clip 0.057 | KL 0.6580 | V_loss 0.0020 | LR 0.000030
+Episode  5142 | Steps  1,769,472 | SPS      74 | Reward  +0.78 | Clip 0.057 | KL 0.7328 | V_loss 0.0012 | LR 0.000030
+Episode  5150 | Steps  1,771,520 | SPS      74 | Reward  +0.80 | Clip 0.057 | KL 0.5255 | V_loss 0.0012 | LR 0.000030
+Episode  5158 | Steps  1,773,568 | SPS      74 | Reward  +0.80 | Clip 0.057 | KL 0.6884 | V_loss 0.0010 | LR 0.000030
+Episode  5166 | Steps  1,775,616 | SPS      74 | Reward  +0.82 | Clip 0.057 | KL 0.6309 | V_loss 0.0011 | LR 0.000030
+Episode  5174 | Steps  1,777,664 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.6980 | V_loss 0.0010 | LR 0.000030
+Episode  5179 | Steps  1,779,712 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.5566 | V_loss 0.0017 | LR 0.000030
+Episode  5184 | Steps  1,781,760 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.7371 | V_loss 0.0022 | LR 0.000030
+Episode  5192 | Steps  1,783,808 | SPS      74 | Reward  +0.88 | Clip 0.057 | KL 0.7120 | V_loss 0.0009 | LR 0.000030
+Episode  5197 | Steps  1,785,856 | SPS      74 | Reward  +0.84 | Clip 0.057 | KL 0.6361 | V_loss 0.0029 | LR 0.000030
+Episode  5202 | Steps  1,787,904 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.6571 | V_loss 0.0013 | LR 0.000030
+Episode  5210 | Steps  1,789,952 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.8656 | V_loss 0.0012 | LR 0.000030
+Episode  5215 | Steps  1,792,000 | SPS      74 | Reward  +0.84 | Clip 0.057 | KL 0.7571 | V_loss 0.0010 | LR 0.000030
+Episode  5223 | Steps  1,794,048 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.6233 | V_loss 0.0010 | LR 0.000030
+Episode  5228 | Steps  1,796,096 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.6974 | V_loss 0.0013 | LR 0.000030
+Episode  5236 | Steps  1,798,144 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.7805 | V_loss 0.0019 | LR 0.000030
+Episode  5244 | Steps  1,800,192 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.7892 | V_loss 0.0011 | LR 0.000030
+Episode  5252 | Steps  1,802,240 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.5988 | V_loss 0.0016 | LR 0.000030
+Episode  5260 | Steps  1,804,288 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.6982 | V_loss 0.0007 | LR 0.000030
+Episode  5268 | Steps  1,806,336 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.7465 | V_loss 0.0009 | LR 0.000030
+Episode  5276 | Steps  1,808,384 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.8734 | V_loss 0.0025 | LR 0.000030
+Episode  5284 | Steps  1,810,432 | SPS      74 | Reward  +0.90 | Clip 0.057 | KL 0.7144 | V_loss 0.0015 | LR 0.000030
+Episode  5292 | Steps  1,812,480 | SPS      74 | Reward  +0.90 | Clip 0.057 | KL 0.8520 | V_loss 0.0008 | LR 0.000030
+Episode  5297 | Steps  1,814,528 | SPS      74 | Reward  +0.90 | Clip 0.057 | KL 0.6894 | V_loss 0.0031 | LR 0.000030
+Episode  5302 | Steps  1,816,576 | SPS      74 | Reward  +0.88 | Clip 0.057 | KL 0.6351 | V_loss 0.0138 | LR 0.000030
+Episode  5310 | Steps  1,818,624 | SPS      74 | Reward  +0.90 | Clip 0.057 | KL 0.7340 | V_loss 0.0035 | LR 0.000030
+Episode  5315 | Steps  1,820,672 | SPS      74 | Reward  +0.90 | Clip 0.058 | KL 0.3108 | V_loss 0.0084 | LR 0.000030
+Episode  5320 | Steps  1,822,720 | SPS      74 | Reward  +0.90 | Clip 0.058 | KL 0.6570 | V_loss 0.0022 | LR 0.000030
+Episode  5328 | Steps  1,824,768 | SPS      74 | Reward  +0.92 | Clip 0.058 | KL 0.7094 | V_loss 0.0010 | LR 0.000030
+Episode  5336 | Steps  1,826,816 | SPS      74 | Reward  +0.92 | Clip 0.058 | KL 0.7172 | V_loss 0.0022 | LR 0.000030
+Episode  5344 | Steps  1,828,864 | SPS      74 | Reward  +0.92 | Clip 0.057 | KL 0.5708 | V_loss 0.0017 | LR 0.000030
+Episode  5349 | Steps  1,830,912 | SPS      74 | Reward  +0.92 | Clip 0.057 | KL 0.7274 | V_loss 0.0016 | LR 0.000030
+Episode  5357 | Steps  1,832,960 | SPS      74 | Reward  +0.92 | Clip 0.057 | KL 0.7014 | V_loss 0.0010 | LR 0.000030
+Episode  5365 | Steps  1,835,008 | SPS      74 | Reward  +0.92 | Clip 0.057 | KL 0.9670 | V_loss 0.0010 | LR 0.000030
+Episode  5373 | Steps  1,837,056 | SPS      74 | Reward  +0.92 | Clip 0.057 | KL 0.7143 | V_loss 0.0011 | LR 0.000030
+Episode  5381 | Steps  1,839,104 | SPS      74 | Reward  +0.88 | Clip 0.057 | KL 0.5631 | V_loss 0.0103 | LR 0.000030
+Episode  5389 | Steps  1,841,152 | SPS      74 | Reward  +0.88 | Clip 0.057 | KL 0.5648 | V_loss 0.0035 | LR 0.000030
+Episode  5394 | Steps  1,843,200 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.5978 | V_loss 0.0053 | LR 0.000030
+Episode  5399 | Steps  1,845,248 | SPS      74 | Reward  +0.88 | Clip 0.057 | KL 0.7231 | V_loss 0.0022 | LR 0.000030
+Episode  5407 | Steps  1,847,296 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.6264 | V_loss 0.0069 | LR 0.000030
+Episode  5412 | Steps  1,849,344 | SPS      74 | Reward  +0.86 | Clip 0.057 | KL 0.8325 | V_loss 0.0015 | LR 0.000030
+Episode  5420 | Steps  1,851,392 | SPS      74 | Reward  +0.84 | Clip 0.057 | KL 0.6276 | V_loss 0.0012 | LR 0.000030
+Episode  5428 | Steps  1,853,440 | SPS      74 | Reward  +0.82 | Clip 0.057 | KL 0.6252 | V_loss 0.0110 | LR 0.000030
+Episode  5436 | Steps  1,855,488 | SPS      74 | Reward  +0.80 | Clip 0.057 | KL 0.8860 | V_loss 0.0016 | LR 0.000030
+Episode  5444 | Steps  1,857,536 | SPS      74 | Reward  +0.78 | Clip 0.057 | KL 0.7481 | V_loss 0.0037 | LR 0.000030
+Episode  5452 | Steps  1,859,584 | SPS      74 | Reward  +0.78 | Clip 0.057 | KL 0.8406 | V_loss 0.0018 | LR 0.000030
+Episode  5460 | Steps  1,861,632 | SPS      74 | Reward  +0.78 | Clip 0.057 | KL 0.7176 | V_loss 0.0011 | LR 0.000030
+Episode  5466 | Steps  1,863,680 | SPS      74 | Reward  +0.72 | Clip 0.057 | KL 0.6075 | V_loss 0.0045 | LR 0.000030
+Episode  5472 | Steps  1,865,728 | SPS      74 | Reward  +0.70 | Clip 0.057 | KL 0.5658 | V_loss 0.0103 | LR 0.000030
+Episode  5480 | Steps  1,867,776 | SPS      74 | Reward  +0.74 | Clip 0.057 | KL 0.8668 | V_loss 0.0021 | LR 0.000030
+Episode  5488 | Steps  1,869,824 | SPS      74 | Reward  +0.74 | Clip 0.058 | KL 0.9608 | V_loss 0.0016 | LR 0.000030
+Episode  5496 | Steps  1,871,872 | SPS      74 | Reward  +0.78 | Clip 0.058 | KL 0.7361 | V_loss 0.0019 | LR 0.000030
+Episode  5504 | Steps  1,873,920 | SPS      74 | Reward  +0.82 | Clip 0.058 | KL 0.6448 | V_loss 0.0013 | LR 0.000030
+Episode  5509 | Steps  1,875,968 | SPS      74 | Reward  +0.80 | Clip 0.058 | KL 0.5677 | V_loss 0.0020 | LR 0.000030
+Episode  5514 | Steps  1,878,016 | SPS      74 | Reward  +0.82 | Clip 0.058 | KL 0.7674 | V_loss 0.0013 | LR 0.000030
+Episode  5522 | Steps  1,880,064 | SPS      74 | Reward  +0.84 | Clip 0.058 | KL 0.7273 | V_loss 0.0010 | LR 0.000030
+Episode  5530 | Steps  1,882,112 | SPS      74 | Reward  +0.84 | Clip 0.058 | KL 0.8804 | V_loss 0.0012 | LR 0.000030
+Episode  5538 | Steps  1,884,160 | SPS      74 | Reward  +0.86 | Clip 0.058 | KL 0.5980 | V_loss 0.0082 | LR 0.000030
+Episode  5543 | Steps  1,886,208 | SPS      74 | Reward  +0.86 | Clip 0.058 | KL 0.9722 | V_loss 0.0028 | LR 0.000030
+Episode  5551 | Steps  1,888,256 | SPS      74 | Reward  +0.84 | Clip 0.058 | KL 0.5858 | V_loss 0.0072 | LR 0.000030
+Episode  5556 | Steps  1,890,304 | SPS      74 | Reward  +0.82 | Clip 0.059 | KL 0.6608 | V_loss 0.0068 | LR 0.000030
+Episode  5564 | Steps  1,892,352 | SPS      74 | Reward  +0.86 | Clip 0.058 | KL 0.7000 | V_loss 0.0025 | LR 0.000030
+Episode  5569 | Steps  1,894,400 | SPS      74 | Reward  +0.90 | Clip 0.058 | KL 0.7158 | V_loss 0.0029 | LR 0.000030
+Episode  5577 | Steps  1,896,448 | SPS      74 | Reward  +0.90 | Clip 0.059 | KL 0.8230 | V_loss 0.0016 | LR 0.000030
+Episode  5585 | Steps  1,898,496 | SPS      74 | Reward  +0.90 | Clip 0.059 | KL 0.7538 | V_loss 0.0017 | LR 0.000030
+Episode  5593 | Steps  1,900,544 | SPS      74 | Reward  +0.90 | Clip 0.058 | KL 0.7340 | V_loss 0.0034 | LR 0.000030
+Episode  5601 | Steps  1,902,592 | SPS      74 | Reward  +0.90 | Clip 0.058 | KL 0.5391 | V_loss 0.0030 | LR 0.000030
+Episode  5609 | Steps  1,904,640 | SPS      74 | Reward  +0.92 | Clip 0.058 | KL 0.7851 | V_loss 0.0040 | LR 0.000030
+Episode  5617 | Steps  1,906,688 | SPS      74 | Reward  +0.92 | Clip 0.058 | KL 1.0008 | V_loss 0.0011 | LR 0.000030
+Episode  5625 | Steps  1,908,736 | SPS      74 | Reward  +0.90 | Clip 0.058 | KL 0.6782 | V_loss 0.0077 | LR 0.000030
+Episode  5633 | Steps  1,910,784 | SPS      74 | Reward  +0.92 | Clip 0.058 | KL 0.7544 | V_loss 0.0039 | LR 0.000030
+Episode  5641 | Steps  1,912,832 | SPS      74 | Reward  +0.92 | Clip 0.058 | KL 0.6044 | V_loss 0.0018 | LR 0.000030
+Episode  5649 | Steps  1,914,880 | SPS      74 | Reward  +0.94 | Clip 0.058 | KL 0.6269 | V_loss 0.0015 | LR 0.000030
+Episode  5657 | Steps  1,916,928 | SPS      74 | Reward  +0.96 | Clip 0.059 | KL 0.6805 | V_loss 0.0016 | LR 0.000030
+Episode  5662 | Steps  1,918,976 | SPS      74 | Reward  +0.94 | Clip 0.058 | KL 0.8368 | V_loss 0.0010 | LR 0.000030
+Episode  5670 | Steps  1,921,024 | SPS      74 | Reward  +0.90 | Clip 0.059 | KL 0.7967 | V_loss 0.0009 | LR 0.000030
+Episode  5678 | Steps  1,923,072 | SPS      74 | Reward  +0.90 | Clip 0.059 | KL 0.6616 | V_loss 0.0013 | LR 0.000030
+Episode  5683 | Steps  1,925,120 | SPS      74 | Reward  +0.90 | Clip 0.059 | KL 0.6481 | V_loss 0.0018 | LR 0.000030
+Episode  5691 | Steps  1,927,168 | SPS      74 | Reward  +0.88 | Clip 0.059 | KL 0.7647 | V_loss 0.0011 | LR 0.000030
+Episode  5699 | Steps  1,929,216 | SPS      74 | Reward  +0.84 | Clip 0.059 | KL 0.7510 | V_loss 0.0010 | LR 0.000030
+Episode  5707 | Steps  1,931,264 | SPS      74 | Reward  +0.84 | Clip 0.059 | KL 0.5861 | V_loss 0.0008 | LR 0.000030
+Episode  5715 | Steps  1,933,312 | SPS      74 | Reward  +0.84 | Clip 0.058 | KL 0.6123 | V_loss 0.0009 | LR 0.000030
+Episode  5723 | Steps  1,935,360 | SPS      74 | Reward  +0.84 | Clip 0.058 | KL 0.5259 | V_loss 0.0024 | LR 0.000030
+Episode  5731 | Steps  1,937,408 | SPS      74 | Reward  +0.84 | Clip 0.058 | KL 0.5862 | V_loss 0.0053 | LR 0.000030
+Episode  5739 | Steps  1,939,456 | SPS      74 | Reward  +0.82 | Clip 0.058 | KL 0.7355 | V_loss 0.0013 | LR 0.000030
+Episode  5747 | Steps  1,941,504 | SPS      74 | Reward  +0.80 | Clip 0.059 | KL 0.9025 | V_loss 0.0075 | LR 0.000030
+Episode  5752 | Steps  1,943,552 | SPS      74 | Reward  +0.76 | Clip 0.058 | KL 0.5308 | V_loss 0.0050 | LR 0.000030
+Episode  5760 | Steps  1,945,600 | SPS      74 | Reward  +0.72 | Clip 0.059 | KL 0.9400 | V_loss 0.0086 | LR 0.000030
+Episode  5765 | Steps  1,947,648 | SPS      74 | Reward  +0.72 | Clip 0.058 | KL 0.5858 | V_loss 0.0035 | LR 0.000030
+Episode  5770 | Steps  1,949,696 | SPS      74 | Reward  +0.74 | Clip 0.058 | KL 0.7123 | V_loss 0.0032 | LR 0.000030
+Episode  5778 | Steps  1,951,744 | SPS      74 | Reward  +0.74 | Clip 0.058 | KL 0.7509 | V_loss 0.0027 | LR 0.000030
+Episode  5783 | Steps  1,953,792 | SPS      74 | Reward  +0.72 | Clip 0.058 | KL 0.5232 | V_loss 0.0078 | LR 0.000030
+Episode  5791 | Steps  1,955,840 | SPS      74 | Reward  +0.74 | Clip 0.058 | KL 0.5881 | V_loss 0.0020 | LR 0.000030
+Episode  5796 | Steps  1,957,888 | SPS      74 | Reward  +0.74 | Clip 0.058 | KL 0.8144 | V_loss 0.0037 | LR 0.000030
+Episode  5801 | Steps  1,959,936 | SPS      74 | Reward  +0.74 | Clip 0.058 | KL 0.4646 | V_loss 0.0032 | LR 0.000030
+Episode  5809 | Steps  1,961,984 | SPS      74 | Reward  +0.70 | Clip 0.058 | KL 0.7934 | V_loss 0.0117 | LR 0.000030
+Episode  5817 | Steps  1,964,032 | SPS      74 | Reward  +0.66 | Clip 0.058 | KL 0.6314 | V_loss 0.0015 | LR 0.000030
+Episode  5825 | Steps  1,966,080 | SPS      74 | Reward  +0.66 | Clip 0.057 | KL 0.5645 | V_loss 0.0036 | LR 0.000030
+Episode  5833 | Steps  1,968,128 | SPS      74 | Reward  +0.68 | Clip 0.058 | KL 0.6374 | V_loss 0.0044 | LR 0.000030
+Episode  5841 | Steps  1,970,176 | SPS      74 | Reward  +0.72 | Clip 0.058 | KL 0.5971 | V_loss 0.0054 | LR 0.000030
+Episode  5846 | Steps  1,972,224 | SPS      74 | Reward  +0.70 | Clip 0.057 | KL 0.6929 | V_loss 0.0015 | LR 0.000030
+Episode  5851 | Steps  1,974,272 | SPS      74 | Reward  +0.72 | Clip 0.057 | KL 0.6495 | V_loss 0.0028 | LR 0.000030
+Episode  5859 | Steps  1,976,320 | SPS      74 | Reward  +0.78 | Clip 0.057 | KL 0.6930 | V_loss 0.0009 | LR 0.000030
+Episode  5867 | Steps  1,978,368 | SPS      74 | Reward  +0.78 | Clip 0.057 | KL 0.6939 | V_loss 0.0010 | LR 0.000030
+Episode  5875 | Steps  1,980,416 | SPS      74 | Reward  +0.78 | Clip 0.057 | KL 0.3735 | V_loss 0.0046 | LR 0.000030
+Episode  5883 | Steps  1,982,464 | SPS      74 | Reward  +0.80 | Clip 0.057 | KL 0.5972 | V_loss 0.0034 | LR 0.000030
+Episode  5891 | Steps  1,984,512 | SPS      74 | Reward  +0.78 | Clip 0.057 | KL 0.5117 | V_loss 0.0043 | LR 0.000030
+Episode  5899 | Steps  1,986,560 | SPS      74 | Reward  +0.80 | Clip 0.057 | KL 0.6068 | V_loss 0.0020 | LR 0.000030
+Episode  5904 | Steps  1,988,608 | SPS      74 | Reward  +0.82 | Clip 0.057 | KL 0.4695 | V_loss 0.0059 | LR 0.000030
+Episode  5912 | Steps  1,990,656 | SPS      74 | Reward  +0.80 | Clip 0.057 | KL 0.7986 | V_loss 0.0010 | LR 0.000030
+Episode  5920 | Steps  1,992,704 | SPS      74 | Reward  +0.84 | Clip 0.057 | KL 0.6480 | V_loss 0.0042 | LR 0.000030
+Episode  5925 | Steps  1,994,752 | SPS      74 | Reward  +0.82 | Clip 0.057 | KL 0.6382 | V_loss 0.0102 | LR 0.000030
+Episode  5933 | Steps  1,996,800 | SPS      74 | Reward  +0.78 | Clip 0.057 | KL 0.5500 | V_loss 0.0094 | LR 0.000030
+Episode  5938 | Steps  1,998,848 | SPS      74 | Reward  +0.74 | Clip 0.057 | KL 0.5651 | V_loss 0.0061 | LR 0.000030
+Episode  5946 | Steps  2,000,896 | SPS      74 | Reward  +0.74 | Clip 0.057 | KL 0.5350 | V_loss 0.0075 | LR 0.000030
+Checkpoint saved at checkpoints/step_2000896
+
+Training complete! Total steps: 2,000,896

@@ -3,3 +3,8 @@ leader-replays/*
 orbit-wars-data/orbit-wars.zip
 kernels/
 *.pt
+replays/
+replays*
+*.zip
+*.csv
+*.pkl

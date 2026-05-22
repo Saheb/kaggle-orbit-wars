@@ -16,6 +16,7 @@ import torch.nn.functional as F
 NUM_ANGLE_BINS = 72
 NUM_SHIP_BINS = 16
 ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
+SHIP_COUNTS = [1, 2, 3, 5, 8, 13, 20, 30, 45, 65, 90, 120, 160, 200, 250, 300]
 
 
 class TransformerBlock(nn.Module):
@@ -161,7 +162,7 @@ def angle_bin_to_radians(bin_idx):
 
 
 def ship_bin_to_count(bin_idx, max_ships):
-    counts = torch.ceil(torch.pow(2.0, (torch.arange(NUM_SHIP_BINS, device=bin_idx.device).float() + 1) / 2.0)).long()
+    counts = torch.tensor(SHIP_COUNTS, dtype=torch.long, device=bin_idx.device)
     return counts[bin_idx].clamp(max=max_ships.long())
 
 
