@@ -172,13 +172,13 @@ class VecTorchEnv:
 
     # ---------------------------------------------------------------------
     # Step — pure tensor ops, runs all N envs in one pass.
-    # Phase 0 scope: orbital motion + fleet movement only (no launch/combat).
+    # Phase 1 scope: orbital motion + fleet movement + collision/combat.
     # ---------------------------------------------------------------------
 
     def step(self, actions=None) -> dict:
         """Advance all N envs by one tick.
 
-        Phase 0: actions are ignored. Just runs orbital motion + fleet movement.
+        Phase 1: actions still ignored (no launch yet). Adds collision and combat.
         """
         # 1. Production: planet[5] += planet[6] for owned planets (owner != -1)
         owner = self.planets[:, :, 1]
@@ -186,35 +186,170 @@ class VecTorchEnv:
         is_owned = (owner != -1) & self.planet_alive
         self.planets[:, :, 5] = self.planets[:, :, 5] + prod * is_owned.float()
 
-        # 2. Orbital motion — update planet positions
-        # current_angle = initial_angle + angular_velocity * step
-        # new_x = CENTER + orbital_r * cos(current_angle)  if is_orbiting else x
-        step_f = self.step_count.float().unsqueeze(-1)  # (N, 1)
-        ang_vel = self.angular_velocity.unsqueeze(-1)   # (N, 1)
-        cur_angle = self._planet_initial_angle + ang_vel * step_f  # (N, P)
+        # 2. Planet path: compute (old_pos, new_pos) for swept collision.
+        step_f = self.step_count.float().unsqueeze(-1)   # (N, 1)
+        ang_vel = self.angular_velocity.unsqueeze(-1)    # (N, 1)
+        cur_angle = self._planet_initial_angle + ang_vel * step_f   # (N, P)
 
-        new_x = CENTER + self._planet_orbital_r * torch.cos(cur_angle)
-        new_y = CENTER + self._planet_orbital_r * torch.sin(cur_angle)
+        planet_old_x = self.planets[:, :, 2].clone()
+        planet_old_y = self.planets[:, :, 3].clone()
+        planet_new_x = CENTER + self._planet_orbital_r * torch.cos(cur_angle)
+        planet_new_y = CENTER + self._planet_orbital_r * torch.sin(cur_angle)
         is_orb = self._planet_is_orbiting
-        self.planets[:, :, 2] = torch.where(is_orb, new_x, self.planets[:, :, 2])
-        self.planets[:, :, 3] = torch.where(is_orb, new_y, self.planets[:, :, 3])
+        planet_new_x = torch.where(is_orb, planet_new_x, planet_old_x)
+        planet_new_y = torch.where(is_orb, planet_new_y, planet_old_y)
 
-        # 3. Fleet movement — fleet[2,3] += speed * cos/sin(angle)
+        # 3. Fleet movement
         fleet_angle = self.fleets[:, :, 4]
         fleet_ships = self.fleets[:, :, 6]
-        speed = _ship_speed(fleet_ships)  # (N, F)
-        speed = speed * self.fleet_alive.float()  # zero out dead fleets
-        self.fleets[:, :, 2] = self.fleets[:, :, 2] + torch.cos(fleet_angle) * speed
-        self.fleets[:, :, 3] = self.fleets[:, :, 3] + torch.sin(fleet_angle) * speed
+        speed = _ship_speed(fleet_ships)
+        speed = speed * self.fleet_alive.float()
+        fleet_old_x = self.fleets[:, :, 2].clone()
+        fleet_old_y = self.fleets[:, :, 3].clone()
+        fleet_new_x = fleet_old_x + torch.cos(fleet_angle) * speed
+        fleet_new_y = fleet_old_y + torch.sin(fleet_angle) * speed
+        self.fleets[:, :, 2] = fleet_new_x
+        self.fleets[:, :, 3] = fleet_new_y
 
-        # 4. Mark out-of-bounds fleets as dead (no collision yet — Phase 1)
+        # 4. Swept-pair collision detection: (fleet old→new) vs (planet old→new).
+        # Quadratic form: ||A + t·(B-A) - (P0 + t·(P1-P0))||^2 = r^2
+        # Coefficients:
+        #     a = ||dv||^2       where dv = (B-A) - (P1-P0)
+        #     b = 2·(d0 · dv)    where d0 = A - P0
+        #     c = ||d0||^2 - r^2
+        # Hit iff disc >= 0 AND any t in [0,1] satisfies the quadratic <= 0,
+        # i.e. t1 <= 1 and t2 >= 0 where t1,t2 = (-b ± sqrt(disc)) / (2a).
+        # Degenerate case a≈0: hit iff c <= 0 (already overlapping).
+        N, F, _ = self.fleets.shape
+        _, P, _ = self.planets.shape
+
+        # Reshape for broadcast: fleet (N, F, 1), planet (N, 1, P)
+        fx0 = fleet_old_x.unsqueeze(2);  fy0 = fleet_old_y.unsqueeze(2)
+        fx1 = fleet_new_x.unsqueeze(2);  fy1 = fleet_new_y.unsqueeze(2)
+        px0 = planet_old_x.unsqueeze(1); py0 = planet_old_y.unsqueeze(1)
+        px1 = planet_new_x.unsqueeze(1); py1 = planet_new_y.unsqueeze(1)
+        pr  = self.planets[:, :, 4].unsqueeze(1)  # (N, 1, P)
+
+        d0x = fx0 - px0;       d0y = fy0 - py0
+        dvx = (fx1 - fx0) - (px1 - px0)
+        dvy = (fy1 - fy0) - (py1 - py0)
+        a = dvx * dvx + dvy * dvy
+        b = 2.0 * (d0x * dvx + d0y * dvy)
+        c = d0x * d0x + d0y * d0y - pr * pr
+
+        # Numerically safe disc (clamp negative to 0 so sqrt is finite — these
+        # cases get masked out by `disc_ok` below).
+        disc = b * b - 4.0 * a * c
+        disc_ok = disc >= 0
+        sq = torch.sqrt(torch.clamp(disc, min=0.0))
+        safe_a = torch.where(a > 1e-12, a, torch.ones_like(a))
+        t1 = (-b - sq) / (2.0 * safe_a)
+        t2 = (-b + sq) / (2.0 * safe_a)
+        hit_moving = disc_ok & (t2 >= 0.0) & (t1 <= 1.0)
+        hit_degenerate = (a < 1e-12) & (c <= 0.0)
+        hit = (hit_moving & (a >= 1e-12)) | hit_degenerate  # (N, F, P)
+
+        # Mask out dead fleets / dead planets
+        valid = self.fleet_alive.unsqueeze(2) & self.planet_alive.unsqueeze(1)
+        hit = hit & valid                                              # (N, F, P)
+
+        # Each fleet hits at most one planet — pick first true index per (N,F).
+        # If no hit, hit_planet_idx will be 0 but hit_any will be False.
+        hit_any = hit.any(dim=2)                                       # (N, F)
+        # Use argmax on bool-as-int to find first true index along P axis
+        hit_planet_idx = hit.float().argmax(dim=2)                     # (N, F)
+
+        # 5. Sun-crossing: fleet path crosses sun (point-to-segment distance <= SUN_RADIUS).
+        # Project (CENTER, CENTER) onto segment (fleet_old → fleet_new) and check distance.
+        seg_dx = fleet_new_x - fleet_old_x
+        seg_dy = fleet_new_y - fleet_old_y
+        seg_len2 = seg_dx * seg_dx + seg_dy * seg_dy
+        seg_len2_safe = torch.where(seg_len2 > 0, seg_len2, torch.ones_like(seg_len2))
+        t = ((CENTER - fleet_old_x) * seg_dx + (CENTER - fleet_old_y) * seg_dy) / seg_len2_safe
+        t = torch.clamp(t, 0.0, 1.0)
+        proj_x = fleet_old_x + t * seg_dx
+        proj_y = fleet_old_y + t * seg_dy
+        sun_dist = torch.sqrt((proj_x - CENTER) ** 2 + (proj_y - CENTER) ** 2)
+        # Zero-length segments (dead fleets that didn't move): set sun_dist large
+        sun_dist = torch.where(seg_len2 > 0, sun_dist, torch.full_like(sun_dist, 1000.0))
+        crosses_sun = sun_dist < SUN_RADIUS
+
+        # 6. Out-of-bounds removal
         in_bounds = (
-            (self.fleets[:, :, 2] >= 0) & (self.fleets[:, :, 2] <= BOARD_SIZE)
-            & (self.fleets[:, :, 3] >= 0) & (self.fleets[:, :, 3] <= BOARD_SIZE)
+            (fleet_new_x >= 0) & (fleet_new_x <= BOARD_SIZE)
+            & (fleet_new_y >= 0) & (fleet_new_y <= BOARD_SIZE)
         )
-        self.fleet_alive = self.fleet_alive & in_bounds
 
-        # 5. Advance step
+        # Order of removal in kaggle env: planet-hit takes priority, then OOB, then sun.
+        # Combat list contains only fleets that hit a planet (NOT OOB or sun-killed).
+        combat_mask = hit_any & self.fleet_alive  # (N, F)
+        # Fleets that survive this tick: alive, in bounds, no sun, no planet hit
+        survives = (
+            self.fleet_alive
+            & ~combat_mask
+            & in_bounds
+            & ~crosses_sun
+        )
+
+        # 7. Combat resolution.
+        # For each (env, planet), sum ships per owner using scatter_add.
+        # Build (N, P, num_players) tensor of ship contributions.
+        attacker_ships = torch.zeros(N, P, self.num_players, device=self.device)
+        # Fleet contribution: scatter add fleet.ships into attacker_ships[env, hit_planet, owner]
+        fleet_owner_long = self.fleets[:, :, 1].long()                # (N, F)
+        # Clamp owner to [0, num_players) for safety (dead fleets may have 0)
+        fleet_owner_long = torch.clamp(fleet_owner_long, 0, self.num_players - 1)
+        ships_contrib = self.fleets[:, :, 6] * combat_mask.float()    # (N, F)
+
+        # Flatten (N, F) → indices into (N*P*num_players) for scatter_add
+        env_idx = torch.arange(N, device=self.device).unsqueeze(1).expand(N, F)
+        flat_idx = (env_idx * P + hit_planet_idx) * self.num_players + fleet_owner_long
+        attacker_ships = attacker_ships.view(-1).scatter_add(
+            0, flat_idx[combat_mask].view(-1),
+            ships_contrib[combat_mask].view(-1),
+        ).view(N, P, self.num_players)
+
+        # Top owner per (N, P): top_ships, top_owner; second_ships
+        top_ships, top_owner = attacker_ships.max(dim=2)               # (N, P)
+        # Zero out the top to find second
+        attacker_minus_top = attacker_ships.clone()
+        attacker_minus_top.scatter_(2, top_owner.unsqueeze(2), 0.0)
+        second_ships = attacker_minus_top.max(dim=2).values            # (N, P)
+
+        tie = (top_ships == second_ships) & (top_ships > 0)
+        survivor_ships = torch.where(tie, torch.zeros_like(top_ships), top_ships - second_ships)
+        any_combat = top_ships > 0
+
+        # Apply to planet ownership
+        planet_owner = self.planets[:, :, 1]
+        planet_ships = self.planets[:, :, 5]
+
+        # If survivor_owner == planet_owner: reinforce (planet.ships += survivor)
+        # Else: attack (planet.ships -= survivor; if < 0, flip ownership to abs)
+        same_owner = (top_owner.float() == planet_owner) & any_combat & ~tie
+        diff_owner = (top_owner.float() != planet_owner) & any_combat & ~tie
+
+        new_ships = torch.where(same_owner, planet_ships + survivor_ships, planet_ships)
+        # Attack case
+        new_ships_attack = planet_ships - survivor_ships
+        flipped = new_ships_attack < 0
+        do_flip = diff_owner & flipped
+        new_ships = torch.where(diff_owner, new_ships_attack.abs(), new_ships)
+        new_owner = torch.where(do_flip, top_owner.float(), planet_owner)
+
+        # Only update alive planets
+        update_mask = self.planet_alive & any_combat
+        self.planets[:, :, 5] = torch.where(update_mask, new_ships, planet_ships)
+        self.planets[:, :, 1] = torch.where(update_mask, new_owner, planet_owner)
+
+        # 8. Apply planet new positions (after collision detection used old pos)
+        self.planets[:, :, 2] = planet_new_x
+        self.planets[:, :, 3] = planet_new_y
+
+        # 9. Update fleet alive flags
+        self.fleet_alive = survives
+
+        # 10. Advance step
         self.step_count = self.step_count + 1
         return self._state_dict()
 
