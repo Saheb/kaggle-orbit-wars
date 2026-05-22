@@ -25,22 +25,32 @@ while true; do
     ITER=$((ITER + 1))
     TS=$(date '+%Y-%m-%d %H:%M:%S')
 
-    # Pull checkpoints (--mkpath ensures dir exists; size-only is fast)
-    rsync -az --partial \
-      -e "ssh -i $KEY -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+    # Pull checkpoints — capture errors instead of swallowing them
+    ckpt_err=$(rsync -az --partial \
+      -e "ssh -i $KEY -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=5" \
       ${REMOTE_USER}@${PUB_IP}:~/orbit_wars_rl/checkpoints/ \
-      "$LOCAL_DIR/checkpoints/" 2>/dev/null
+      "$LOCAL_DIR/checkpoints/" 2>&1 >/dev/null)
+    ckpt_rc=$?
 
     # Pull the training log
-    rsync -az --partial \
-      -e "ssh -i $KEY -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+    log_err=$(rsync -az --partial \
+      -e "ssh -i $KEY -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=5" \
       ${REMOTE_USER}@${PUB_IP}:~/orbit_wars_rl/train_gpu.log \
-      "$LOCAL_DIR/logs/" 2>/dev/null
+      "$LOCAL_DIR/logs/" 2>&1 >/dev/null)
+    log_rc=$?
 
     # Print last iter line
     last=$(grep -E "^iter|^  ★|Early stop|Training complete" "$LOCAL_DIR/logs/train_gpu.log" 2>/dev/null | tail -1)
     n_ckpt=$(ls "$LOCAL_DIR/checkpoints"/*.pt 2>/dev/null | wc -l | xargs)
-    echo "[$TS] iter $ITER  ckpts_local=$n_ckpt  last: $last"
+    if [ $ckpt_rc -ne 0 ] || [ $log_rc -ne 0 ]; then
+        # rsync failed — surface the error loudly so we notice silent breakages
+        # (e.g. SSH blocked by security group when local IP changes)
+        echo "[$TS] iter $ITER  ⚠ SYNC FAILED  ckpt_rc=$ckpt_rc  log_rc=$log_rc"
+        echo "    ckpt_err: $ckpt_err"
+        echo "    log_err:  $log_err"
+    else
+        echo "[$TS] iter $ITER  ckpts_local=$n_ckpt  last: $last"
+    fi
 
     # Stop condition: log contains "Training complete" or "Early stop:" near the end
     if grep -qE "Training complete|Early stop:" "$LOCAL_DIR/logs/train_gpu.log" 2>/dev/null; then
