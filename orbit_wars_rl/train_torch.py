@@ -103,6 +103,7 @@ def train(args):
     cfg = Config()
     cfg.ppo.total_env_steps = args.total_steps
     cfg.device = args.device
+    cfg.ppo.num_minibatches = args.num_minibatches
 
     env = VecTorchEnv(num_envs=args.num_envs, num_players=2,
                       device=device, episode_steps=500)
@@ -141,26 +142,28 @@ def train(args):
     N = args.num_envs
     P = 2  # num players
 
-    # Pre-allocate rollout buffers (one set for player 0, the perspective we train on)
+    # Pre-allocate rollout buffers on CPU to keep GPU memory free for the model.
+    # Each minibatch is moved to GPU just-in-time inside the PPO update.
+    storage_dev = torch.device("cpu")
     storage = {
-        "planet_features": torch.zeros(rollout_T, N, 48, 18, device=device),
-        "fleet_features":  torch.zeros(rollout_T, N, 128, 9, device=device),
-        "global_features": torch.zeros(rollout_T, N, 10, device=device),
-        "planet_mask":     torch.zeros(rollout_T, N, 48, dtype=torch.bool, device=device),
-        "fleet_mask":      torch.zeros(rollout_T, N, 128, dtype=torch.bool, device=device),
-        "fire_mask":       torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.bool, device=device),
-        "angle_mask":      torch.zeros(rollout_T, N, MAX_OWNED, NUM_ANGLE_BINS, dtype=torch.bool, device=device),
-        "slot_valid":      torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.bool, device=device),
-        "owned_indices":   torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.long, device=device),
-        "fire_a":     torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.long, device=device),
-        "angle_a":    torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.long, device=device),
-        "ship_a":     torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.long, device=device),
-        "lp_fire":    torch.zeros(rollout_T, N, MAX_OWNED, device=device),
-        "lp_angle":   torch.zeros(rollout_T, N, MAX_OWNED, device=device),
-        "lp_ship":    torch.zeros(rollout_T, N, MAX_OWNED, device=device),
-        "values":     torch.zeros(rollout_T, N, device=device),
-        "rewards":    torch.zeros(rollout_T, N, device=device),
-        "dones":      torch.zeros(rollout_T, N, dtype=torch.bool, device=device),
+        "planet_features": torch.zeros(rollout_T, N, 48, 18, device=storage_dev),
+        "fleet_features":  torch.zeros(rollout_T, N, 128, 9, device=storage_dev),
+        "global_features": torch.zeros(rollout_T, N, 10, device=storage_dev),
+        "planet_mask":     torch.zeros(rollout_T, N, 48, dtype=torch.bool, device=storage_dev),
+        "fleet_mask":      torch.zeros(rollout_T, N, 128, dtype=torch.bool, device=storage_dev),
+        "fire_mask":       torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.bool, device=storage_dev),
+        "angle_mask":      torch.zeros(rollout_T, N, MAX_OWNED, NUM_ANGLE_BINS, dtype=torch.bool, device=storage_dev),
+        "slot_valid":      torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.bool, device=storage_dev),
+        "owned_indices":   torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.long, device=storage_dev),
+        "fire_a":     torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.long, device=storage_dev),
+        "angle_a":    torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.long, device=storage_dev),
+        "ship_a":     torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.long, device=storage_dev),
+        "lp_fire":    torch.zeros(rollout_T, N, MAX_OWNED, device=storage_dev),
+        "lp_angle":   torch.zeros(rollout_T, N, MAX_OWNED, device=storage_dev),
+        "lp_ship":    torch.zeros(rollout_T, N, MAX_OWNED, device=storage_dev),
+        "values":     torch.zeros(rollout_T, N, device=storage_dev),
+        "rewards":    torch.zeros(rollout_T, N, device=storage_dev),
+        "dones":      torch.zeros(rollout_T, N, dtype=torch.bool, device=storage_dev),
     }
 
     def forward_player(player: int):
@@ -192,22 +195,23 @@ def train(args):
             fire0, angle0, ship0, lpf0, lpa0, lps0 = sample_action_batched(
                 outs_p0, feats_p0["fire_mask"], feats_p0["angle_mask"]
             )
-            storage["planet_features"][t] = feats_p0["planet_features"]
-            storage["fleet_features"][t]  = feats_p0["fleet_features"]
-            storage["global_features"][t] = feats_p0["global_features"]
-            storage["planet_mask"][t]     = feats_p0["planet_mask"]
-            storage["fleet_mask"][t]      = feats_p0["fleet_mask"]
-            storage["fire_mask"][t]       = feats_p0["fire_mask"]
-            storage["angle_mask"][t]      = feats_p0["angle_mask"]
-            storage["slot_valid"][t]      = feats_p0["slot_valid"]
-            storage["owned_indices"][t]   = feats_p0["owned_indices"]
-            storage["fire_a"][t]   = fire0
-            storage["angle_a"][t]  = angle0
-            storage["ship_a"][t]   = ship0
-            storage["lp_fire"][t]  = lpf0
-            storage["lp_angle"][t] = lpa0
-            storage["lp_ship"][t]  = lps0
-            storage["values"][t]   = outs_p0["value"].squeeze(-1)
+            # Copy to CPU storage (async, non-blocking)
+            storage["planet_features"][t].copy_(feats_p0["planet_features"], non_blocking=True)
+            storage["fleet_features"][t].copy_(feats_p0["fleet_features"], non_blocking=True)
+            storage["global_features"][t].copy_(feats_p0["global_features"], non_blocking=True)
+            storage["planet_mask"][t].copy_(feats_p0["planet_mask"], non_blocking=True)
+            storage["fleet_mask"][t].copy_(feats_p0["fleet_mask"], non_blocking=True)
+            storage["fire_mask"][t].copy_(feats_p0["fire_mask"], non_blocking=True)
+            storage["angle_mask"][t].copy_(feats_p0["angle_mask"], non_blocking=True)
+            storage["slot_valid"][t].copy_(feats_p0["slot_valid"], non_blocking=True)
+            storage["owned_indices"][t].copy_(feats_p0["owned_indices"], non_blocking=True)
+            storage["fire_a"][t].copy_(fire0, non_blocking=True)
+            storage["angle_a"][t].copy_(angle0, non_blocking=True)
+            storage["ship_a"][t].copy_(ship0, non_blocking=True)
+            storage["lp_fire"][t].copy_(lpf0, non_blocking=True)
+            storage["lp_angle"][t].copy_(lpa0, non_blocking=True)
+            storage["lp_ship"][t].copy_(lps0, non_blocking=True)
+            storage["values"][t].copy_(outs_p0["value"].squeeze(-1), non_blocking=True)
 
             # Player 1 — sample only (no storage). Reuse computed features.
             feats_p1, outs_p1 = forward_player(1)
@@ -220,8 +224,8 @@ def train(args):
                 1: torch.stack([fire1, angle1, ship1], dim=-1),
             }
             _, rewards, done = env.step(actions)
-            storage["rewards"][t] = rewards[:, 0]   # reward for player 0
-            storage["dones"][t]   = done
+            storage["rewards"][t].copy_(rewards[:, 0], non_blocking=True)
+            storage["dones"][t].copy_(done, non_blocking=True)
 
             for r in rewards[:, 0][done].tolist():
                 reward_history.append(r)
@@ -241,10 +245,10 @@ def train(args):
             )
             next_value = outs_final["value"].squeeze(-1)
 
-        # --- GAE ------------------------------------------------------------
+        # --- GAE (run on CPU since storage is on CPU) -----------------------
         advantages, returns = compute_gae(
             storage["rewards"], storage["values"], storage["dones"],
-            next_value, gamma=cfg.ppo.gamma, lam=cfg.ppo.gae_lambda,
+            next_value.cpu(), gamma=cfg.ppo.gamma, lam=cfg.ppo.gae_lambda,
         )
 
         # --- Flatten (T, N, ...) → (T*N, ...) for PPO update ----------------
@@ -282,8 +286,9 @@ def train(args):
             "old_values": flat["values"],
         }
 
-        # Minibatches: split TN into num_minibatches chunks (random shuffle)
-        idx = torch.randperm(TN, device=device)
+        # Minibatches: split TN into num_minibatches chunks. Build on CPU then
+        # move each minibatch to GPU just-in-time inside PPOLearner.update.
+        idx = torch.randperm(TN)
         mb_size = TN // cfg.ppo.num_minibatches
         minibatches = []
         for mb in range(cfg.ppo.num_minibatches):
@@ -291,9 +296,9 @@ def train(args):
             sub = {}
             for k, v in batch.items():
                 if isinstance(v, torch.Tensor):
-                    sub[k] = v[mi]
+                    sub[k] = v[mi].to(device, non_blocking=True)
                 elif isinstance(v, dict):
-                    sub[k] = {kk: vv[mi] for kk, vv in v.items()}
+                    sub[k] = {kk: vv[mi].to(device, non_blocking=True) for kk, vv in v.items()}
                 elif isinstance(v, list):
                     sub[k] = [v[i] for i in mi.tolist()]
             minibatches.append(sub)
@@ -346,6 +351,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-envs", type=int, default=256)
     parser.add_argument("--rollout-steps", type=int, default=64)
+    parser.add_argument("--num-minibatches", type=int, default=4,
+                        help="Split PPO update batch into this many minibatches "
+                             "(increase if hitting CUDA OOM in attention)")
     parser.add_argument("--total-steps", type=int, default=10_000_000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="")
