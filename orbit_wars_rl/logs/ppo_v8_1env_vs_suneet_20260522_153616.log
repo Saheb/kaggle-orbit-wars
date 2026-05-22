@@ -1,0 +1,119 @@
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+Opponent agent loaded from: ../candidate_suneet_lb1200.py
+Training on device: mps
+Model params: 307,482
+Resumed model weights from checkpoints/bc_warmstart_v2.pt
+Collecting 12 teacher games for PPO BC regularization...
+BC regularization samples: 448
+
+Starting training: 3,000,000 env steps
+Batch size: 2048, Minibatches: 4
+Self-play pool: 8 snapshots
+Shaping coef: 0.02
+Parallel envs: 1
+Opponent policy: <function agent at 0x11a458a90>
+Env backend: fast
+Rollout inference device: cpu
+Uniform exploration epsilon: 0.1 -> 0.02
+BC regularization: coef=0.01 samples=448 agent=../main.py
+
+Episode    15 | Steps      2,128 | SPS      51 | Reward  -1.00 | Clip 0.058 | KL 0.1503 | V_loss 0.0641 | LR 0.000000 | BC 4.9833
+Episode    30 | Steps      4,193 | SPS      51 | Reward  -1.00 | Clip 0.059 | KL 0.1588 | V_loss 0.0667 | LR 0.000000 | BC 4.9883
+Episode    45 | Steps      6,370 | SPS      50 | Reward  -1.00 | Clip 0.055 | KL 0.1607 | V_loss 0.0634 | LR 0.000001 | BC 4.9858
+Episode    60 | Steps      8,477 | SPS      52 | Reward  -1.00 | Clip 0.055 | KL 0.1605 | V_loss 0.0648 | LR 0.000001 | BC 4.8431
+  ★ Best checkpoint updated: reward=-1.0000 @ 8,477 steps
+Episode    75 | Steps     10,550 | SPS      53 | Reward  -1.00 | Clip 0.056 | KL 0.1631 | V_loss 0.0655 | LR 0.000001 | BC 4.9306
+Episode    91 | Steps     12,702 | SPS      54 | Reward  -1.00 | Clip 0.057 | KL 0.1553 | V_loss 0.0658 | LR 0.000001 | BC 5.0436
+Episode   106 | Steps     14,881 | SPS      54 | Reward  -1.00 | Clip 0.057 | KL 0.1845 | V_loss 0.0625 | LR 0.000002 | BC 5.0301
+Episode   121 | Steps     16,943 | SPS      55 | Reward  -1.00 | Clip 0.057 | KL 0.2031 | V_loss 0.0664 | LR 0.000002 | BC 4.8343
+Episode   136 | Steps     19,075 | SPS      56 | Reward  -1.00 | Clip 0.057 | KL 0.1852 | V_loss 0.0647 | LR 0.000002 | BC 4.8239
+Episode   151 | Steps     21,130 | SPS      56 | Reward  -1.00 | Clip 0.057 | KL 0.1584 | V_loss 0.0658 | LR 0.000002 | BC 4.9596
+Episode   166 | Steps     23,300 | SPS      57 | Reward  -1.00 | Clip 0.056 | KL 0.0986 | V_loss 0.0624 | LR 0.000003 | BC 5.3655
+Episode   181 | Steps     25,411 | SPS      57 | Reward  -1.00 | Clip 0.056 | KL 0.1636 | V_loss 0.0622 | LR 0.000003 | BC 5.4615
+Episode   196 | Steps     27,478 | SPS      58 | Reward  -1.00 | Clip 0.056 | KL 0.1616 | V_loss 0.0647 | LR 0.000003 | BC 4.8071
+Episode   211 | Steps     29,569 | SPS      58 | Reward  -1.00 | Clip 0.056 | KL 0.1556 | V_loss 0.0632 | LR 0.000003 | BC 5.0872
+Episode   227 | Steps     31,726 | SPS      58 | Reward  -1.00 | Clip 0.056 | KL 0.1889 | V_loss 0.0645 | LR 0.000004 | BC 5.1038
+Episode   242 | Steps     33,855 | SPS      59 | Reward  -1.00 | Clip 0.056 | KL 0.1324 | V_loss 0.0608 | LR 0.000004 | BC 4.8611
+Episode   257 | Steps     35,975 | SPS      59 | Reward  -1.00 | Clip 0.056 | KL 0.1593 | V_loss 0.0600 | LR 0.000004 | BC 4.8605
+Episode   273 | Steps     38,143 | SPS      59 | Reward  -1.00 | Clip 0.056 | KL 0.1767 | V_loss 0.0614 | LR 0.000004 | BC 4.9619
+Episode   289 | Steps     40,327 | SPS      60 | Reward  -1.00 | Clip 0.057 | KL 0.1414 | V_loss 0.0614 | LR 0.000005 | BC 4.8060
+Episode   305 | Steps     42,420 | SPS      60 | Reward  -1.00 | Clip 0.056 | KL 0.1297 | V_loss 0.0633 | LR 0.000005 | BC 4.9023
+Episode   320 | Steps     44,476 | SPS      60 | Reward  -1.00 | Clip 0.056 | KL 0.1395 | V_loss 0.0605 | LR 0.000005 | BC 4.9490
+Episode   336 | Steps     46,663 | SPS      61 | Reward  -1.00 | Clip 0.056 | KL 0.1180 | V_loss 0.0602 | LR 0.000005 | BC 5.3565
+Episode   351 | Steps     48,728 | SPS      61 | Reward  -1.00 | Clip 0.056 | KL 0.1169 | V_loss 0.0583 | LR 0.000006 | BC 5.0592
+Episode   367 | Steps     50,888 | SPS      61 | Reward  -1.00 | Clip 0.055 | KL 0.1540 | V_loss 0.0576 | LR 0.000006 | BC 4.9491
+Episode   382 | Steps     52,962 | SPS      62 | Reward  -1.00 | Clip 0.056 | KL 0.1801 | V_loss 0.0570 | LR 0.000006 | BC 5.3018
+Episode   398 | Steps     55,121 | SPS      62 | Reward  -1.00 | Clip 0.055 | KL 0.1611 | V_loss 0.0589 | LR 0.000006 | BC 5.3630
+Episode   414 | Steps     57,282 | SPS      62 | Reward  -1.00 | Clip 0.055 | KL 0.1440 | V_loss 0.0559 | LR 0.000006 | BC 5.3476
+Episode   430 | Steps     59,443 | SPS      61 | Reward  -1.00 | Clip 0.055 | KL 0.1751 | V_loss 0.0552 | LR 0.000007 | BC 5.2270
+Episode   445 | Steps     61,526 | SPS      61 | Reward  -1.00 | Clip 0.055 | KL 0.1518 | V_loss 0.0540 | LR 0.000007 | BC 5.4345
+Episode   460 | Steps     63,639 | SPS      61 | Reward  -1.00 | Clip 0.055 | KL 0.1619 | V_loss 0.0519 | LR 0.000007 | BC 5.1259
+Episode   476 | Steps     65,783 | SPS      61 | Reward  -1.00 | Clip 0.055 | KL 0.1525 | V_loss 0.0538 | LR 0.000007 | BC 4.9841
+Episode   491 | Steps     67,877 | SPS      61 | Reward  -1.00 | Clip 0.055 | KL 0.1500 | V_loss 0.0499 | LR 0.000008 | BC 4.9311
+Episode   507 | Steps     70,009 | SPS      61 | Reward  -1.00 | Clip 0.055 | KL 0.1408 | V_loss 0.0517 | LR 0.000008 | BC 5.2133
+Episode   522 | Steps     72,064 | SPS      61 | Reward  -1.00 | Clip 0.055 | KL 0.1725 | V_loss 0.0495 | LR 0.000008 | BC 4.9401
+Episode   538 | Steps     74,131 | SPS      61 | Reward  -1.00 | Clip 0.055 | KL 0.1829 | V_loss 0.0534 | LR 0.000008 | BC 5.0865
+Episode   553 | Steps     76,196 | SPS      61 | Reward  -1.00 | Clip 0.055 | KL 0.1962 | V_loss 0.0474 | LR 0.000009 | BC 4.6539
+Episode   568 | Steps     78,253 | SPS      61 | Reward  -1.00 | Clip 0.055 | KL 0.1511 | V_loss 0.0471 | LR 0.000009 | BC 4.8459
+Episode   584 | Steps     80,406 | SPS      61 | Reward  -1.00 | Clip 0.055 | KL 0.1728 | V_loss 0.0473 | LR 0.000009 | BC 5.1482
+Episode   600 | Steps     82,482 | SPS      61 | Reward  -1.00 | Clip 0.055 | KL 0.1610 | V_loss 0.0493 | LR 0.000009 | BC 4.9647
+Episode   608 | Steps     84,850 | SPS      62 | Reward  -0.94 | Clip 0.056 | KL 1.4514 | V_loss 0.0444 | LR 0.000010 | BC 4.9630
+  ★ Best checkpoint updated: reward=-0.9400 @ 84,850 steps
+Episode   619 | Steps     87,039 | SPS      62 | Reward  -0.90 | Clip 0.056 | KL 0.8081 | V_loss 0.0512 | LR 0.000010 | BC 4.8655
+  ★ Best checkpoint updated: reward=-0.9000 @ 87,039 steps
+Episode   628 | Steps     89,111 | SPS      63 | Reward  -0.88 | Clip 0.057 | KL 0.7979 | V_loss 0.0336 | LR 0.000010 | BC 4.9789
+Episode   640 | Steps     91,170 | SPS      63 | Reward  -0.88 | Clip 0.057 | KL 0.4788 | V_loss 0.0358 | LR 0.000010 | BC 4.8426
+Episode   649 | Steps     93,514 | SPS      63 | Reward  -0.86 | Clip 0.058 | KL 1.0610 | V_loss 0.0342 | LR 0.000011 | BC 4.9804
+  ★ Best checkpoint updated: reward=-0.8600 @ 93,514 steps
+Episode   662 | Steps     95,712 | SPS      63 | Reward  -0.84 | Clip 0.058 | KL 0.5732 | V_loss 0.0400 | LR 0.000011 | BC 4.9827
+Episode   677 | Steps     97,824 | SPS      63 | Reward  -0.84 | Clip 0.058 | KL 0.1740 | V_loss 0.0392 | LR 0.000011 | BC 4.7379
+Episode   689 | Steps    100,283 | SPS      63 | Reward  -0.82 | Clip 0.058 | KL 0.5112 | V_loss 0.0328 | LR 0.000011 | BC 5.2128
+  ★ Best checkpoint updated: reward=-0.8200 @ 100,283 steps
+Episode   700 | Steps    102,515 | SPS      64 | Reward  -0.80 | Clip 0.058 | KL 0.7630 | V_loss 0.0372 | LR 0.000012 | BC 4.9321
+Episode   710 | Steps    104,897 | SPS      64 | Reward  -0.86 | Clip 0.059 | KL 0.6899 | V_loss 0.0309 | LR 0.000012 | BC 4.8458
+Episode   719 | Steps    107,248 | SPS      64 | Reward  -0.86 | Clip 0.059 | KL 0.8275 | V_loss 0.0350 | LR 0.000012 | BC 4.8949
+Episode   727 | Steps    109,365 | SPS      65 | Reward  -0.86 | Clip 0.059 | KL 0.8295 | V_loss 0.0354 | LR 0.000012 | BC 5.4382
+Episode   739 | Steps    111,692 | SPS      65 | Reward  -0.84 | Clip 0.060 | KL 0.6889 | V_loss 0.0392 | LR 0.000012 | BC 5.0216
+Episode   749 | Steps    113,785 | SPS      65 | Reward  -0.84 | Clip 0.060 | KL 0.7874 | V_loss 0.0345 | LR 0.000013 | BC 4.8411
+Episode   758 | Steps    116,250 | SPS      65 | Reward  -0.82 | Clip 0.061 | KL 1.3860 | V_loss 0.0367 | LR 0.000013 | BC 5.3113
+Episode   767 | Steps    118,415 | SPS      66 | Reward  -0.80 | Clip 0.061 | KL 0.6477 | V_loss 0.0306 | LR 0.000013 | BC 4.9109
+Episode   774 | Steps    120,814 | SPS      66 | Reward  -0.78 | Clip 0.061 | KL 0.9413 | V_loss 0.0271 | LR 0.000013 | BC 5.2147
+  ★ Best checkpoint updated: reward=-0.7800 @ 120,814 steps
+Episode   786 | Steps    122,875 | SPS      66 | Reward  -0.78 | Clip 0.061 | KL 0.5952 | V_loss 0.0344 | LR 0.000014 | BC 5.2698
+Episode   793 | Steps    124,925 | SPS      67 | Reward  -0.76 | Clip 0.062 | KL 0.9066 | V_loss 0.0308 | LR 0.000014 | BC 4.9740
+Episode   801 | Steps    127,090 | SPS      67 | Reward  -0.78 | Clip 0.062 | KL 0.4985 | V_loss 0.0231 | LR 0.000014 | BC 4.8639
+Episode   813 | Steps    129,224 | SPS      67 | Reward  -0.80 | Clip 0.062 | KL 0.4374 | V_loss 0.0348 | LR 0.000014 | BC 4.7381
+Episode   821 | Steps    131,387 | SPS      67 | Reward  -0.74 | Clip 0.062 | KL 1.4351 | V_loss 0.0434 | LR 0.000015 | BC 4.8044
+  ★ Best checkpoint updated: reward=-0.7400 @ 131,387 steps
+Episode   828 | Steps    133,450 | SPS      67 | Reward  -0.74 | Clip 0.063 | KL 0.8631 | V_loss 0.0259 | LR 0.000015 | BC 4.9307
+Episode   836 | Steps    135,613 | SPS      67 | Reward  -0.72 | Clip 0.063 | KL 0.8428 | V_loss 0.0280 | LR 0.000015 | BC 5.1867
+Episode   847 | Steps    137,876 | SPS      68 | Reward  -0.74 | Clip 0.063 | KL 0.3874 | V_loss 0.0311 | LR 0.000015 | BC 4.7901
+Episode   860 | Steps    140,007 | SPS      68 | Reward  -0.78 | Clip 0.063 | KL 0.5938 | V_loss 0.0418 | LR 0.000016 | BC 4.8394
+Episode   867 | Steps    142,057 | SPS      68 | Reward  -0.76 | Clip 0.063 | KL 0.7291 | V_loss 0.0227 | LR 0.000016 | BC 4.7766
+Episode   877 | Steps    144,481 | SPS      68 | Reward  -0.76 | Clip 0.063 | KL 0.6738 | V_loss 0.0300 | LR 0.000016 | BC 5.3173

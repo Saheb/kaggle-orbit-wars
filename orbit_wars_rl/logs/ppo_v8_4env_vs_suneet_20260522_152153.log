@@ -1,0 +1,230 @@
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+Opponent agent loaded from: ../candidate_suneet_lb1200.py
+Training on device: mps
+Model params: 307,482
+Resumed model weights from checkpoints/bc_warmstart_v2.pt
+Collecting 12 teacher games for PPO BC regularization...
+BC regularization samples: 482
+
+Starting training: 3,000,000 env steps
+Batch size: 2048, Minibatches: 4
+Self-play pool: 8 snapshots
+Shaping coef: 0.02
+Parallel envs: 4
+Opponent policy: <function agent at 0x119fc4a90>
+Env backend: fast
+Rollout inference device: cpu
+Uniform exploration epsilon: 0.1 -> 0.02
+BC regularization: coef=0.01 samples=482 agent=../main.py
+
+Spawning 4 environment workers...
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+Episode    17 | Steps      2,048 | SPS      36 | Reward  -1.00 | Clip 0.064 | KL 0.1956 | V_loss 0.0703 | LR 0.000000 | BC 4.8966
+Episode    34 | Steps      4,096 | SPS      37 | Reward  -1.00 | Clip 0.062 | KL 0.1491 | V_loss 0.0704 | LR 0.000000 | BC 4.9112
+Episode    50 | Steps      6,144 | SPS      40 | Reward  -1.00 | Clip 0.062 | KL 0.1693 | V_loss 0.0681 | LR 0.000001 | BC 4.7006
+  ★ Best checkpoint updated: reward=-1.0000 @ 6,144 steps
+Episode    67 | Steps      8,192 | SPS      39 | Reward  -1.00 | Clip 0.059 | KL 0.1503 | V_loss 0.0703 | LR 0.000001 | BC 4.8206
+Episode    84 | Steps     10,240 | SPS      38 | Reward  -1.00 | Clip 0.059 | KL 0.1611 | V_loss 0.0709 | LR 0.000001 | BC 4.9441
+Episode   101 | Steps     12,288 | SPS      37 | Reward  -1.00 | Clip 0.059 | KL 0.1709 | V_loss 0.0701 | LR 0.000001 | BC 4.6974
+Episode   117 | Steps     14,336 | SPS      38 | Reward  -1.00 | Clip 0.058 | KL 0.1407 | V_loss 0.0656 | LR 0.000002 | BC 5.0328
+Episode   133 | Steps     16,384 | SPS      38 | Reward  -1.00 | Clip 0.058 | KL 0.2027 | V_loss 0.0658 | LR 0.000002 | BC 4.8548
+Episode   149 | Steps     18,432 | SPS      38 | Reward  -1.00 | Clip 0.058 | KL 0.1863 | V_loss 0.0648 | LR 0.000002 | BC 5.0118
+Episode   164 | Steps     20,480 | SPS      39 | Reward  -1.00 | Clip 0.058 | KL 0.2277 | V_loss 0.0608 | LR 0.000002 | BC 4.8482
+Episode   180 | Steps     22,528 | SPS      39 | Reward  -1.00 | Clip 0.059 | KL 0.1672 | V_loss 0.0649 | LR 0.000003 | BC 5.0013
+Episode   197 | Steps     24,576 | SPS      38 | Reward  -1.00 | Clip 0.059 | KL 0.2284 | V_loss 0.0715 | LR 0.000003 | BC 4.7341
+Episode   213 | Steps     26,624 | SPS      38 | Reward  -1.00 | Clip 0.060 | KL 0.1793 | V_loss 0.0641 | LR 0.000003 | BC 4.9343
+Episode   230 | Steps     28,672 | SPS      38 | Reward  -1.00 | Clip 0.059 | KL 0.1252 | V_loss 0.0684 | LR 0.000003 | BC 4.9934
+Episode   247 | Steps     30,720 | SPS      38 | Reward  -1.00 | Clip 0.059 | KL 0.1465 | V_loss 0.0686 | LR 0.000004 | BC 5.0198
+Process SpawnProcess-4:
+Process SpawnProcess-3:
+Process SpawnProcess-2:
+Traceback (most recent call last):
+Traceback (most recent call last):
+Traceback (most recent call last):
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/process.py", line 320, in _bootstrap
+    self.run()
+    ~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/vec_env.py", line 123, in _worker_fn
+    conn.send(("ok", step_data))
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/connection.py", line 213, in send
+    self._send_bytes(_ForkingPickler.dumps(obj))
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/connection.py", line 445, in _send_bytes
+    self._send(header + buf)
+    ~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/connection.py", line 401, in _send
+    n = write(self._handle, buf)
+BrokenPipeError: [Errno 32] Broken pipe
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/process.py", line 320, in _bootstrap
+    self.run()
+    ~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/vec_env.py", line 123, in _worker_fn
+    conn.send(("ok", step_data))
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/connection.py", line 213, in send
+    self._send_bytes(_ForkingPickler.dumps(obj))
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/connection.py", line 445, in _send_bytes
+    self._send(header + buf)
+    ~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/connection.py", line 401, in _send
+    n = write(self._handle, buf)
+BrokenPipeError: [Errno 32] Broken pipe
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/process.py", line 320, in _bootstrap
+    self.run()
+    ~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/vec_env.py", line 123, in _worker_fn
+    conn.send(("ok", step_data))
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/connection.py", line 213, in send
+    self._send_bytes(_ForkingPickler.dumps(obj))
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/connection.py", line 445, in _send_bytes
+    self._send(header + buf)
+    ~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/connection.py", line 401, in _send
+    n = write(self._handle, buf)
+BrokenPipeError: [Errno 32] Broken pipe

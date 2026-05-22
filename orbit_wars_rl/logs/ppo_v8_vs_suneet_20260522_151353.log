@@ -1,0 +1,57 @@
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+Opponent agent loaded from: ../candidate_suneet_lb1200.py
+Training on device: mps
+Model params: 307,482
+Resumed model weights from checkpoints/bc_warmstart_v2.pt
+Collecting 12 teacher games for PPO BC regularization...
+BC regularization samples: 471
+
+Starting training: 3,000,000 env steps
+Batch size: 2048, Minibatches: 4
+Self-play pool: 8 snapshots
+Shaping coef: 0.02
+Parallel envs: 1
+Opponent policy: <function agent at 0x11b964a90>
+Env backend: fast
+Rollout inference device: cpu
+Uniform exploration epsilon: 0.1 -> 0.02
+BC regularization: coef=0.01 samples=471 agent=../main.py
+
+Episode    15 | Steps      2,141 | SPS      37 | Reward  -1.00 | Clip 0.055 | KL 0.1974 | V_loss 0.0650 | LR 0.000000 | BC 4.9414
+Episode    30 | Steps      4,280 | SPS      35 | Reward  -1.00 | Clip 0.051 | KL 0.1233 | V_loss 0.0629 | LR 0.000000 | BC 4.9605
+Episode    45 | Steps      6,361 | SPS      34 | Reward  -1.00 | Clip 0.052 | KL 0.1496 | V_loss 0.0652 | LR 0.000001 | BC 4.9131
+Episode    60 | Steps      8,479 | SPS      39 | Reward  -1.00 | Clip 0.052 | KL 0.1409 | V_loss 0.0655 | LR 0.000001 | BC 5.0476
+  ★ Best checkpoint updated: reward=-1.0000 @ 8,479 steps
+Episode    75 | Steps     10,550 | SPS      44 | Reward  -1.00 | Clip 0.052 | KL 0.1670 | V_loss 0.0657 | LR 0.000001 | BC 4.8635
+Episode    90 | Steps     12,719 | SPS      47 | Reward  -1.00 | Clip 0.053 | KL 0.2112 | V_loss 0.0610 | LR 0.000001 | BC 4.8200
+Episode   106 | Steps     14,881 | SPS      50 | Reward  -1.00 | Clip 0.053 | KL 0.1523 | V_loss 0.0680 | LR 0.000002 | BC 4.9261
+Episode   121 | Steps     16,949 | SPS      52 | Reward  -1.00 | Clip 0.052 | KL 0.1269 | V_loss 0.0658 | LR 0.000002 | BC 4.8995
+Episode   136 | Steps     19,044 | SPS      53 | Reward  -1.00 | Clip 0.052 | KL 0.1169 | V_loss 0.0637 | LR 0.000002 | BC 4.9009
+Episode   151 | Steps     21,145 | SPS      54 | Reward  -1.00 | Clip 0.051 | KL 0.1226 | V_loss 0.0635 | LR 0.000002 | BC 4.7467
+Episode   166 | Steps     23,230 | SPS      55 | Reward  -1.00 | Clip 0.052 | KL 0.1347 | V_loss 0.0639 | LR 0.000003 | BC 4.8055
