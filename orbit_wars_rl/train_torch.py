@@ -15,15 +15,19 @@ Targets:
 from __future__ import annotations
 
 import argparse
+import copy
 import os
+import random
 import time
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 import torch
 
 from config import Config
 from model import EntityTransformer, count_params
+from opponent_pool import OpponentPool, PoolMember
 from ppo import PPOLearner
 from torch_env import VecTorchEnv, MAX_OWNED, NUM_ANGLE_BINS, NUM_SHIP_BINS
 
@@ -246,7 +250,8 @@ def train(args):
     print(f"Training on device: {device}")
     print(f"Parallel envs: {args.num_envs}")
     print(f"Rollout steps: {args.rollout_steps}")
-    print(f"Batch per update: {args.num_envs * args.rollout_steps}")
+    print(f"Batch per update: {args.num_envs * args.rollout_steps * 2}  "
+          f"(T={args.rollout_steps} x N={args.num_envs} x P=2 players)")
 
     torch.manual_seed(args.seed)
 
@@ -275,28 +280,82 @@ def train(args):
 
     learner = PPOLearner(model, cfg, device=device)
 
-    # LR scheduler: warmup + cosine decay over total updates
+    # LR scheduler: warmup + cosine decay over total updates.
+    # On --resume, skip warmup by default (the model is already trained — no
+    # reason to ramp LR from 0). User can force warmup with --with-warmup.
     updates_per_batch = cfg.ppo.ppo_epochs * cfg.ppo.num_minibatches
     total_updates = (args.total_steps // (args.num_envs * args.rollout_steps)) * updates_per_batch
-    warmup = cfg.ppo.lr_warmup_steps
+    skip_warmup = (args.resume and not args.with_warmup) or args.skip_warmup
+    warmup = 0 if skip_warmup else cfg.ppo.lr_warmup_steps
     def lr_lambda(step):
         if step < warmup:
             return (step + 1) / max(warmup, 1)
         progress = (step - warmup) / max(total_updates - warmup, 1)
         return 0.5 * (1.0 + np.cos(np.pi * progress))
     scheduler = torch.optim.lr_scheduler.LambdaLR(learner.optimizer, lr_lambda)
+    print(f"LR schedule: warmup={warmup} updates (skip_warmup={skip_warmup}), "
+          f"total_updates={total_updates}, peak_lr={cfg.ppo.learning_rate}")
 
     # Freeze a snapshot of the initial policy for periodic eval.
     # As training proceeds, current vs frozen-initial win rate should rise.
-    import copy
     baseline_model = copy.deepcopy(model).to(device)
     baseline_model.eval()
     print("Baseline policy snapshotted for periodic eval.\n")
 
+    # ----------------------------------------------------------------------
+    # Opponent pool setup (PFSP self-play with optional external heuristics)
+    # ----------------------------------------------------------------------
+    pool: OpponentPool | None = None
+    pool_opp_model: EntityTransformer | None = None  # reusable frozen model for 'self' opponents
+    rng = random.Random(args.seed)
+    if args.pool_mode != "none":
+        # If --resume points to a checkpoint with a sibling pool file (e.g.
+        # checkpoints/pool_step_<N>.pt next to torch_step_<N>.pt), reload it.
+        resumed_pool_path = None
+        if args.resume:
+            stem = Path(args.resume).stem  # torch_step_<N>
+            candidate = Path(args.resume).parent / f"pool_{stem.replace('torch_', '')}.pt"
+            if candidate.exists():
+                resumed_pool_path = str(candidate)
+
+        if resumed_pool_path:
+            pool = OpponentPool.load(resumed_pool_path)
+            print(f"Pool resumed from {resumed_pool_path}: {len(pool)} members")
+        else:
+            pool = OpponentPool(
+                max_self_members=args.pool_max_size,
+                pfsp_alpha=args.pool_pfsp_alpha,
+                mastered_winrate=args.pool_mastered_threshold,
+                mastered_min_games=args.pool_mastered_min_games,
+            )
+            # Seed pool with the starting weights so it isn't empty on iteration 1
+            pool.add_self_checkpoint(0, model.state_dict())
+
+        # External opponents come from CLI flag — appended even on resume so
+        # the user can add new externals without modifying the pool file.
+        if args.pool_mode == "mixed" and args.external_opponents:
+            existing_ext_names = {m.name for m in pool.members if m.kind == "external_heuristic"}
+            for path in args.external_opponents.split(","):
+                path = path.strip()
+                if not path: continue
+                name = Path(path).stem
+                if name in existing_ext_names:
+                    print(f"  pool external already present from resume: {name}")
+                    continue
+                pool.add_external_heuristic(name, path)
+                print(f"  pool external loaded: {name} ({path})")
+        # Pre-allocate a frozen model for 'self' opponents (loaded with state_dict per rollout)
+        pool_opp_model = copy.deepcopy(model).to(device)
+        pool_opp_model.eval()
+        print(f"Pool initialised: mode={args.pool_mode}, members={len(pool)}, "
+              f"fraction={args.pool_fraction}, snapshot_every={args.pool_checkpoint_interval:,} steps\n")
+    last_pool_snapshot_step = 0
+
     total_env_steps = 0
     iter_count = 0
     start = time.perf_counter()
-    reward_history = deque(maxlen=200)
+    reward_history = deque(maxlen=200)     # p0 episode rewards
+    reward_history_p1 = deque(maxlen=200)  # p1 episode rewards (should mirror p0)
     clipfrac_history = deque(maxlen=50)
     best_avg_reward = float("-inf")
     last_log = start
@@ -308,31 +367,86 @@ def train(args):
 
     rollout_T = args.rollout_steps
     N = args.num_envs
-    P = 2  # num players
+    P = 2  # num players — both players' transitions are collected and used for PPO
 
     # Pre-allocate rollout buffers on CPU to keep GPU memory free for the model.
-    # Each minibatch is moved to GPU just-in-time inside the PPO update.
+    # Shape leading dims: (T, N, P) so player 0 and player 1 each contribute a
+    # full trajectory per env step. Effective PPO batch size = T*N*P.
     storage_dev = torch.device("cpu")
     storage = {
-        "planet_features": torch.zeros(rollout_T, N, 48, 18, device=storage_dev),
-        "fleet_features":  torch.zeros(rollout_T, N, 128, 9, device=storage_dev),
-        "global_features": torch.zeros(rollout_T, N, 10, device=storage_dev),
-        "planet_mask":     torch.zeros(rollout_T, N, 48, dtype=torch.bool, device=storage_dev),
-        "fleet_mask":      torch.zeros(rollout_T, N, 128, dtype=torch.bool, device=storage_dev),
-        "fire_mask":       torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.bool, device=storage_dev),
-        "angle_mask":      torch.zeros(rollout_T, N, MAX_OWNED, NUM_ANGLE_BINS, dtype=torch.bool, device=storage_dev),
-        "slot_valid":      torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.bool, device=storage_dev),
-        "owned_indices":   torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.long, device=storage_dev),
-        "fire_a":     torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.long, device=storage_dev),
-        "angle_a":    torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.long, device=storage_dev),
-        "ship_a":     torch.zeros(rollout_T, N, MAX_OWNED, dtype=torch.long, device=storage_dev),
-        "lp_fire":    torch.zeros(rollout_T, N, MAX_OWNED, device=storage_dev),
-        "lp_angle":   torch.zeros(rollout_T, N, MAX_OWNED, device=storage_dev),
-        "lp_ship":    torch.zeros(rollout_T, N, MAX_OWNED, device=storage_dev),
-        "values":     torch.zeros(rollout_T, N, device=storage_dev),
-        "rewards":    torch.zeros(rollout_T, N, device=storage_dev),
-        "dones":      torch.zeros(rollout_T, N, dtype=torch.bool, device=storage_dev),
+        "planet_features": torch.zeros(rollout_T, N, P, 48, 18, device=storage_dev),
+        "fleet_features":  torch.zeros(rollout_T, N, P, 128, 9, device=storage_dev),
+        "global_features": torch.zeros(rollout_T, N, P, 10, device=storage_dev),
+        "planet_mask":     torch.zeros(rollout_T, N, P, 48, dtype=torch.bool, device=storage_dev),
+        "fleet_mask":      torch.zeros(rollout_T, N, P, 128, dtype=torch.bool, device=storage_dev),
+        "fire_mask":       torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev),
+        "angle_mask":      torch.zeros(rollout_T, N, P, MAX_OWNED, NUM_ANGLE_BINS, dtype=torch.bool, device=storage_dev),
+        "slot_valid":      torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev),
+        "owned_indices":   torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
+        "fire_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
+        "angle_a":    torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
+        "ship_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
+        "lp_fire":    torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
+        "lp_angle":   torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
+        "lp_ship":    torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
+        "values":     torch.zeros(rollout_T, N, P, device=storage_dev),
+        "rewards":    torch.zeros(rollout_T, N, P, device=storage_dev),
+        "dones":      torch.zeros(rollout_T, N, P, dtype=torch.bool, device=storage_dev),
+        # train_mask[t, e, p] = True if (env=e, player=p) is OUR current policy at
+        # step t. Pool-opponent slots are False so PPO won't train on them.
+        "train_mask": torch.ones(rollout_T, N, P, dtype=torch.bool, device=storage_dev),
     }
+
+    def compute_pool_actions(opp: PoolMember, player: int, env_slice: slice) -> torch.Tensor:
+        """Return action tensor (N_pool, MAX_OWNED, 3) for the opponent playing
+        `player` in envs `env_slice`. Supports 'self' (frozen RL model on GPU)
+        and 'external_heuristic' (.py agent via legacy Python obs)."""
+        if opp.kind == "self":
+            # Load opp weights into the reusable frozen model
+            pool_opp_model.load_state_dict(opp.state_dict)
+            feats = env.get_features(player, max_planets=48, max_fleets=128)
+            with torch.no_grad():
+                outs = pool_opp_model(
+                    feats["planet_features"], feats["fleet_features"],
+                    feats["global_features"], feats["planet_mask"],
+                    feats["fleet_mask"],
+                    fire_mask=feats["fire_mask"], angle_mask=feats["angle_mask"],
+                    slot_valid=feats["slot_valid"], owned_indices=feats["owned_indices"],
+                    owned_count=feats["owned_count"],
+                )
+            fire_a, angle_a, ship_a, *_ = sample_action_batched(
+                outs, feats["fire_mask"], feats["angle_mask"]
+            )
+            return torch.stack([fire_a, angle_a, ship_a], dim=-1)[env_slice]
+
+        if opp.kind == "external_heuristic":
+            from torch_env import to_legacy_obs
+            start, stop = env_slice.start or 0, env_slice.stop or N
+            moves_per_env = []
+            for e in range(start, stop):
+                obs = to_legacy_obs(env, env_idx=e, player=player)
+                try:
+                    moves = opp.agent_fn(obs) or []
+                except Exception:
+                    moves = []
+                moves_per_env.append(moves)
+            # Build action tensor with the same converter the cloud eval uses,
+            # but only over the env slice. _heuristic_moves_to_action_tensor
+            # expects N rows so we build over the slice and return.
+            class _SliceView:
+                """Minimal view-like adapter so _heuristic_moves_to_action_tensor
+                sees just the slice it should write into."""
+                def __init__(self, env, slc):
+                    self.num_envs = stop - start
+                    self.planets = env.planets[slc]
+                    self._env = env; self._slc = slc
+                def owned_indices_for(self, player):
+                    oi, sv = env.owned_indices_for(player)
+                    return oi[self._slc], sv[self._slc]
+            view = _SliceView(env, env_slice)
+            return _heuristic_moves_to_action_tensor(moves_per_env, view, player, device)
+
+        raise ValueError(f"unknown opponent kind: {opp.kind}")
 
     def forward_player(player: int):
         """Run model forward for given player, return outputs + features dict."""
@@ -355,77 +469,130 @@ def train(args):
     print("=" * 70)
 
     while total_env_steps < args.total_steps:
+        # --- Per-rollout opponent assignment --------------------------------
+        # If a pool is configured, dedicate `pool_fraction` of envs to play
+        # current-vs-(sampled pool opponent). The remaining envs do P=2
+        # symmetric self-play. The pool opponent is sampled ONCE per rollout
+        # (not per env) — keeps pool-opponent forward cheap.
+        pool_opp: PoolMember | None = None
+        N_self, N_pool = N, 0
+        current_seat = 0
+        if pool is not None and len(pool) > 0 and args.pool_fraction > 0:
+            pool_opp = pool.sample(rng)
+            N_pool = int(N * args.pool_fraction)
+            N_self = N - N_pool
+            current_seat = rng.randint(0, 1)  # alternate so current sees both seats
+        opp_seat = 1 - current_seat
+        pool_slice = slice(N_self, N) if N_pool > 0 else slice(0, 0)
+        # Reset train_mask: all True by default, mark opp's slots False below
+        storage["train_mask"].fill_(True)
+
         # --- Rollout collection (no grad) -----------------------------------
         model.eval()
         for t in range(rollout_T):
-            # Player 0 — store features, sample, record log_probs + value
-            feats_p0, outs_p0 = forward_player(0)
-            fire0, angle0, ship0, lpf0, lpa0, lps0 = sample_action_batched(
-                outs_p0, feats_p0["fire_mask"], feats_p0["angle_mask"]
-            )
-            # Copy to CPU storage (async, non-blocking)
-            storage["planet_features"][t].copy_(feats_p0["planet_features"], non_blocking=True)
-            storage["fleet_features"][t].copy_(feats_p0["fleet_features"], non_blocking=True)
-            storage["global_features"][t].copy_(feats_p0["global_features"], non_blocking=True)
-            storage["planet_mask"][t].copy_(feats_p0["planet_mask"], non_blocking=True)
-            storage["fleet_mask"][t].copy_(feats_p0["fleet_mask"], non_blocking=True)
-            storage["fire_mask"][t].copy_(feats_p0["fire_mask"], non_blocking=True)
-            storage["angle_mask"][t].copy_(feats_p0["angle_mask"], non_blocking=True)
-            storage["slot_valid"][t].copy_(feats_p0["slot_valid"], non_blocking=True)
-            storage["owned_indices"][t].copy_(feats_p0["owned_indices"], non_blocking=True)
-            storage["fire_a"][t].copy_(fire0, non_blocking=True)
-            storage["angle_a"][t].copy_(angle0, non_blocking=True)
-            storage["ship_a"][t].copy_(ship0, non_blocking=True)
-            storage["lp_fire"][t].copy_(lpf0, non_blocking=True)
-            storage["lp_angle"][t].copy_(lpa0, non_blocking=True)
-            storage["lp_ship"][t].copy_(lps0, non_blocking=True)
-            storage["values"][t].copy_(outs_p0["value"].squeeze(-1), non_blocking=True)
+            actions_per_player = {}
+            for p in range(P):
+                feats_p, outs_p = forward_player(p)
+                fire_p, angle_p, ship_p, lpf_p, lpa_p, lps_p = sample_action_batched(
+                    outs_p, feats_p["fire_mask"], feats_p["angle_mask"]
+                )
+                storage["planet_features"][t, :, p].copy_(feats_p["planet_features"], non_blocking=True)
+                storage["fleet_features"][t, :, p].copy_(feats_p["fleet_features"], non_blocking=True)
+                storage["global_features"][t, :, p].copy_(feats_p["global_features"], non_blocking=True)
+                storage["planet_mask"][t, :, p].copy_(feats_p["planet_mask"], non_blocking=True)
+                storage["fleet_mask"][t, :, p].copy_(feats_p["fleet_mask"], non_blocking=True)
+                storage["fire_mask"][t, :, p].copy_(feats_p["fire_mask"], non_blocking=True)
+                storage["angle_mask"][t, :, p].copy_(feats_p["angle_mask"], non_blocking=True)
+                storage["slot_valid"][t, :, p].copy_(feats_p["slot_valid"], non_blocking=True)
+                storage["owned_indices"][t, :, p].copy_(feats_p["owned_indices"], non_blocking=True)
+                storage["fire_a"][t, :, p].copy_(fire_p, non_blocking=True)
+                storage["angle_a"][t, :, p].copy_(angle_p, non_blocking=True)
+                storage["ship_a"][t, :, p].copy_(ship_p, non_blocking=True)
+                storage["lp_fire"][t, :, p].copy_(lpf_p, non_blocking=True)
+                storage["lp_angle"][t, :, p].copy_(lpa_p, non_blocking=True)
+                storage["lp_ship"][t, :, p].copy_(lps_p, non_blocking=True)
+                storage["values"][t, :, p].copy_(outs_p["value"].squeeze(-1), non_blocking=True)
+                actions_per_player[p] = torch.stack([fire_p, angle_p, ship_p], dim=-1)
 
-            # Player 1 — sample only (no storage). Reuse computed features.
-            feats_p1, outs_p1 = forward_player(1)
-            fire1, angle1, ship1, _, _, _ = sample_action_batched(
-                outs_p1, feats_p1["fire_mask"], feats_p1["angle_mask"]
-            )
+            # Pool opponent override: in pool envs, replace `opp_seat`'s action
+            # with the pool member's action, and mark its storage slot as
+            # not-trainable so PPO ignores it.
+            if pool_opp is not None and N_pool > 0:
+                opp_action = compute_pool_actions(pool_opp, opp_seat, pool_slice)
+                actions_per_player[opp_seat][pool_slice] = opp_action
+                storage["train_mask"][t, pool_slice, opp_seat] = False
 
-            actions = {
-                0: torch.stack([fire0, angle0, ship0], dim=-1),  # (N, MAX_OWNED, 3)
-                1: torch.stack([fire1, angle1, ship1], dim=-1),
-            }
-            _, rewards, done = env.step(actions)
-            storage["rewards"][t].copy_(rewards[:, 0], non_blocking=True)
-            storage["dones"][t].copy_(done, non_blocking=True)
+            _, rewards, done = env.step(actions_per_player)
+            # rewards: (N, P); done: (N,) shared across players.
+            storage["rewards"][t].copy_(rewards[:, :P], non_blocking=True)
+            storage["dones"][t, :, 0].copy_(done, non_blocking=True)
+            storage["dones"][t, :, 1].copy_(done, non_blocking=True)
 
+            # Log both seats so symmetry is visible at a glance — with P=2
+            # training they should mirror (avg p0 ≈ -avg p1, both near 0).
             for r in rewards[:, 0][done].tolist():
                 reward_history.append(r)
+            for r in rewards[:, 1][done].tolist():
+                reward_history_p1.append(r)
 
-        # Bootstrap value at end of rollout
+            # Track pool opponent win/loss for PFSP weighting — only count
+            # finished pool envs (current is in `current_seat`).
+            if pool_opp is not None and N_pool > 0:
+                done_pool = done[pool_slice]
+                if done_pool.any():
+                    r_cur = rewards[pool_slice, current_seat]
+                    r_opp = rewards[pool_slice, opp_seat]
+                    for cur_r, opp_r, d in zip(r_cur.tolist(), r_opp.tolist(), done_pool.tolist()):
+                        if not d: continue
+                        if cur_r > opp_r:   pool.record_result(pool_opp, "win")
+                        elif opp_r > cur_r: pool.record_result(pool_opp, "loss")
+                        else:               pool.record_result(pool_opp, "draw")
+
+        # Bootstrap value at end of rollout — for both players
+        next_value_p = torch.zeros(N, P, device=storage_dev)
         with torch.no_grad():
-            feats_final = env.get_features(0)
-            outs_final = model(
-                feats_final["planet_features"], feats_final["fleet_features"],
-                feats_final["global_features"], feats_final["planet_mask"],
-                feats_final["fleet_mask"],
-                fire_mask=feats_final["fire_mask"],
-                angle_mask=feats_final["angle_mask"],
-                slot_valid=feats_final["slot_valid"],
-                owned_indices=feats_final["owned_indices"],
-                owned_count=feats_final["owned_count"],
-            )
-            next_value = outs_final["value"].squeeze(-1)
+            for p in range(P):
+                feats_final = env.get_features(p)
+                outs_final = model(
+                    feats_final["planet_features"], feats_final["fleet_features"],
+                    feats_final["global_features"], feats_final["planet_mask"],
+                    feats_final["fleet_mask"],
+                    fire_mask=feats_final["fire_mask"],
+                    angle_mask=feats_final["angle_mask"],
+                    slot_valid=feats_final["slot_valid"],
+                    owned_indices=feats_final["owned_indices"],
+                    owned_count=feats_final["owned_count"],
+                )
+                next_value_p[:, p] = outs_final["value"].squeeze(-1).cpu()
 
         # --- GAE (run on CPU since storage is on CPU) -----------------------
+        # Fold P into the env axis so each player-stream is an independent
+        # trajectory: (T, N, P) -> (T, N*P).
+        rewards_flat = storage["rewards"].reshape(rollout_T, N * P)
+        values_flat  = storage["values"].reshape(rollout_T, N * P)
+        dones_flat   = storage["dones"].reshape(rollout_T, N * P)
+        next_v_flat  = next_value_p.reshape(N * P)
         advantages, returns = compute_gae(
-            storage["rewards"], storage["values"], storage["dones"],
-            next_value.cpu(), gamma=cfg.ppo.gamma, lam=cfg.ppo.gae_lambda,
+            rewards_flat, values_flat, dones_flat,
+            next_v_flat, gamma=cfg.ppo.gamma, lam=cfg.ppo.gae_lambda,
         )
 
-        # --- Flatten (T, N, ...) → (T*N, ...) for PPO update ----------------
-        TN = rollout_T * N
+        # --- Flatten (T, N, P, ...) → (T*N*P, ...) for PPO update -----------
+        # Pool-opponent slots have train_mask=False — drop them so PPO only
+        # learns from samples where current model picked the action.
+        TN = rollout_T * N * P
         flat = {}
         for k, v in storage.items():
-            flat[k] = v.reshape(TN, *v.shape[2:])
+            flat[k] = v.reshape(TN, *v.shape[3:])
         flat_adv  = advantages.reshape(TN)
         flat_ret  = returns.reshape(TN)
+        train_idx = torch.nonzero(flat["train_mask"], as_tuple=False).squeeze(-1)
+        if train_idx.numel() < TN:
+            for k, v in list(flat.items()):
+                flat[k] = v[train_idx]
+            flat_adv = flat_adv[train_idx]
+            flat_ret = flat_ret[train_idx]
+        TN = flat_adv.numel()
 
         # Build PPOLearner-compatible batch (matches make_batch in self_play.py)
         batch = {
@@ -485,13 +652,17 @@ def train(args):
         elapsed = now - start
         sps = total_env_steps / elapsed if elapsed > 0 else 0
         avg_r = float(np.mean(reward_history)) if reward_history else 0.0
+        avg_r1 = float(np.mean(reward_history_p1)) if reward_history_p1 else 0.0
         avg_cf = float(np.mean(clipfrac_history)) if clipfrac_history else 0.0
         if now - last_log >= 5.0 or iter_count == 1:
             last_log = now
             print(
                 f"iter {iter_count:5d} | steps {total_env_steps:>11,} | "
-                f"SPS {sps:>7,.0f} | reward {avg_r:+.3f} | "
+                f"SPS {sps:>7,.0f} | r_p0 {avg_r:+.3f} r_p1 {avg_r1:+.3f} | "
                 f"clip_frac {avg_cf:.3f} | KL {metrics.get('approx_kl', 0):.4f} | "
+                f"H_fire {metrics.get('fire_entropy', 0):.3f} "
+                f"H_ang {metrics.get('angle_entropy', 0):.2f} "
+                f"H_ship {metrics.get('ship_entropy', 0):.2f} | "
                 f"V_loss {metrics.get('value_loss', 0):.4f} | "
                 f"LR {metrics['learning_rate']:.6f} | "
                 f"early_stop={metrics.get('kl_early_stop', 0):.0f}"
@@ -511,6 +682,24 @@ def train(args):
             path = f"checkpoints/torch_step_{total_env_steps}.pt"
             torch.save(learner.state_dict(), path)
             print(f"  saved {path}")
+            # Persist pool alongside the disk checkpoint so spot interrupts
+            # don't lose pool diversity. Naming mirrors the checkpoint stem.
+            if pool is not None:
+                pool_path = f"checkpoints/pool_step_{total_env_steps}.pt"
+                pool.save(pool_path)
+                print(f"  saved {pool_path} ({len(pool)} members)")
+
+        # Pool snapshot (much more frequent than full checkpoint): adds the
+        # current weights to the opponent pool for PFSP sampling. Also evict
+        # any external opponent we've mastered, and print a pool summary.
+        if pool is not None and total_env_steps - last_pool_snapshot_step >= args.pool_checkpoint_interval:
+            last_pool_snapshot_step = total_env_steps
+            pool.add_self_checkpoint(total_env_steps, model.state_dict())
+            evicted = pool.maybe_evict_mastered()
+            if evicted:
+                print(f"  pool: mastered & evicted external opponents: {evicted}")
+            print(f"  pool snapshot @ step {total_env_steps:,}")
+            print(pool.summary())
 
         # Periodic eval vs frozen baseline (and optionally heuristic)
         if args.eval_interval > 0 and total_env_steps - last_eval_step >= args.eval_interval:
@@ -594,6 +783,34 @@ if __name__ == "__main__":
                         help="Override PPO learning rate (default: cfg.ppo.learning_rate=3e-4)")
     parser.add_argument("--ppo-epochs", type=int, default=None,
                         help="Override PPO epochs per rollout (default: 4)")
+    # Opponent pool (PFSP self-play with optional external heuristics) ----
+    parser.add_argument("--pool-mode", choices=["none", "self", "mixed"], default="none",
+                        help="none: pure current-vs-current self-play (default). "
+                             "self: pool of past-self checkpoints only. "
+                             "mixed: self-checkpoints + external heuristics from --external-opponents.")
+    parser.add_argument("--pool-fraction", type=float, default=0.5,
+                        help="Fraction of envs that play current-vs-pool-opponent. "
+                             "The rest do P=2 symmetric self-play.")
+    parser.add_argument("--pool-checkpoint-interval", type=int, default=1_000_000,
+                        help="Snapshot current weights into the pool every N env steps. "
+                             "Should be much smaller than --checkpoint-interval.")
+    parser.add_argument("--pool-max-size", type=int, default=20,
+                        help="Max past-self checkpoints in the pool (FIFO eviction).")
+    parser.add_argument("--pool-pfsp-alpha", type=float, default=2.0,
+                        help="PFSP sampling exponent: weight = (1 - win_rate)^alpha.")
+    parser.add_argument("--pool-mastered-threshold", type=float, default=0.9,
+                        help="Win-rate above this triggers eviction of an external opponent.")
+    parser.add_argument("--pool-mastered-min-games", type=int, default=50,
+                        help="Minimum games against an external before mastery-eviction is considered.")
+    parser.add_argument("--external-opponents", type=str, default="",
+                        help="Comma-separated paths to .py heuristic agents (e.g. "
+                             "'../candidate_suneet_lb1200.py,../candidate_zach_public.py'). "
+                             "Only used when --pool-mode=mixed.")
+    parser.add_argument("--skip-warmup", action="store_true",
+                        help="Skip the LR warmup phase. Auto-enabled when "
+                             "--resume is set (use --with-warmup to override).")
+    parser.add_argument("--with-warmup", action="store_true",
+                        help="Force LR warmup even on --resume.")
     parser.add_argument("--terminate-on-done", action="store_true",
                         help="Run 'sudo shutdown -h +1' after training. Combined "
                              "with EC2 InstanceInitiatedShutdownBehavior=terminate "
