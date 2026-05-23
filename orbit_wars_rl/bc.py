@@ -213,11 +213,25 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
 
     total = fire_loss + angle_loss + ship_loss
 
+    # Normalized losses (entropy-reduction fraction vs uniform baseline).
+    # Gate for Phase A → Phase B: angle_red ≥ 0.40 means head is learning; below
+    # that, features are the bottleneck and need fixing before PPO.
+    import math as _m
+    fire_uniform = _m.log(2)
+    angle_uniform = _m.log(NUM_ANGLE_BINS)
+    ship_uniform = _m.log(NUM_SHIP_BINS)
+    fire_red = 1.0 - fire_loss.item() / fire_uniform
+    angle_red = 1.0 - angle_loss.item() / angle_uniform
+    ship_red = 1.0 - ship_loss.item() / ship_uniform
+
     metrics = {
         "fire_loss": fire_loss.item(),
         "angle_loss": angle_loss.item(),
         "ship_loss": ship_loss.item(),
         "loss": total.item(),
+        "fire_red": fire_red,
+        "angle_red": angle_red,
+        "ship_red": ship_red,
     }
     return total, metrics
 
@@ -296,9 +310,10 @@ def train_bc(
             if step % 100 == 0:
                 lr_now = optimizer.param_groups[0]["lr"]
                 print(f"  step {step:4d} | loss {metrics['loss']:.4f} | "
-                      f"fire {metrics['fire_loss']:.4f} | "
-                      f"angle {metrics['angle_loss']:.4f} | "
-                      f"ship {metrics['ship_loss']:.4f} | lr {lr_now:.2e}")
+                      f"fire {metrics['fire_loss']:.4f} (red {metrics['fire_red']:+.2f}) | "
+                      f"angle {metrics['angle_loss']:.4f} (red {metrics['angle_red']:+.2f}) | "
+                      f"ship {metrics['ship_loss']:.4f} (red {metrics['ship_red']:+.2f}) | "
+                      f"lr {lr_now:.2e}")
 
         # End-of-epoch validation for early stopping
         model.eval()
@@ -357,6 +372,15 @@ def train_bc(
 
     val_metrics = {f"val_{k}": v / max(n_val_batches, 1) for k, v in val_metrics_sum.items()}
     print(f"\nBC validation: {val_metrics}")
+    # Phase-A gate: angle-head entropy reduction. ≥ 0.40 → features OK, proceed.
+    # Below → features are the bottleneck; add pairwise (src, tgt) features
+    # before PPO. Prior 72-bin run hit 0.14 — the comparison point.
+    ang_red = val_metrics.get("val_angle_red", 0.0)
+    ship_red = val_metrics.get("val_ship_red", 0.0)
+    fire_red = val_metrics.get("val_fire_red", 0.0)
+    gate = "PASS" if ang_red >= 0.40 else "FAIL"
+    print(f"\nPhase-A feature gate: angle_red={ang_red:+.2f}  ship_red={ship_red:+.2f}  "
+          f"fire_red={fire_red:+.2f}  → {gate} (gate: angle_red ≥ 0.40)")
     return val_metrics
 
 
