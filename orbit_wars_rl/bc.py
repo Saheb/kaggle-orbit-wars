@@ -154,6 +154,7 @@ def trajectory_to_training_sample(traj: dict, max_owned: int = 10) -> dict | Non
         "fire_target": fire_target,                       # (max_owned,)
         "angle_target": angle_target,                     # (max_owned,)
         "ship_target": ship_target,                       # (max_owned,)
+        "pairwise_features": features["pairwise_features"],  # (max_owned, max_planets, F_pair)
     }
 
 
@@ -168,6 +169,7 @@ def _collate(samples: list[dict], device) -> dict:
         "planet_mask", "fleet_mask", "fire_mask", "angle_mask",
         "slot_valid", "owned_indices",
         "fire_target", "angle_target", "ship_target",
+        "pairwise_features",
     ]
     batch = {}
     for k in keys_to_stack:
@@ -295,6 +297,7 @@ def train_bc(
                 angle_mask=batch["angle_mask"],
                 slot_valid=batch["slot_valid"],
                 owned_indices=batch["owned_indices"],
+                pairwise_features=batch["pairwise_features"],
             )
 
             loss, metrics = bc_loss(outputs, batch)
@@ -327,6 +330,7 @@ def train_bc(
                     vbatch["planet_mask"], vbatch["fleet_mask"],
                     fire_mask=vbatch["fire_mask"], angle_mask=vbatch["angle_mask"],
                     slot_valid=vbatch["slot_valid"], owned_indices=vbatch["owned_indices"],
+                    pairwise_features=vbatch["pairwise_features"],
                 )
                 _, vm = bc_loss(vout, vbatch)
                 ep_val_loss += vm["loss"]
@@ -364,6 +368,7 @@ def train_bc(
                 angle_mask=batch["angle_mask"],
                 slot_valid=batch["slot_valid"],
                 owned_indices=batch["owned_indices"],
+                pairwise_features=batch["pairwise_features"],
             )
             _, m = bc_loss(outputs, batch)
             for k, v in m.items():

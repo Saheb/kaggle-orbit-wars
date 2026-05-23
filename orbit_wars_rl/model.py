@@ -59,6 +59,17 @@ class EntityTransformer(nn.Module):
             for _ in range(cfg.num_layers)
         ])
 
+        # Pairwise cross-attention: for each owned slot, attend to all planets using
+        # explicit (src, tgt) geometric features. Closes the trig gap exposed by the
+        # prior BC angle-head failure (0.08 reduction vs 0.40 gate).
+        F_pair = getattr(cfg, "pairwise_feature_dim", 0)
+        self.use_pairwise = F_pair > 0
+        if self.use_pairwise:
+            self.pair_kv = nn.Linear(D + F_pair, 2 * D)
+            self.pair_q = nn.Linear(D, D)
+            self.pair_out = nn.Linear(D, D)
+            self.pair_ln = nn.LayerNorm(D)
+
         # Action heads (per owned planet)
         self.fire_head = nn.Linear(D, 1)
         self.angle_head = nn.Linear(D, NUM_ANGLE_BINS)
@@ -71,7 +82,8 @@ class EntityTransformer(nn.Module):
 
     def forward(self, planet_features, fleet_features, global_features,
                 planet_mask, fleet_mask, fire_mask=None, angle_mask=None,
-                slot_valid=None, owned_indices=None, owned_count=None):
+                slot_valid=None, owned_indices=None, owned_count=None,
+                pairwise_features=None):
         """
         Args:
             planet_features: (B, N_p, D_p)
@@ -125,10 +137,32 @@ class EntityTransformer(nn.Module):
         batch_idx = torch.arange(B, device=x.device).unsqueeze(1).expand(-1, max_owned)
         owned_entities = x[batch_idx, full_indices]  # (B, max_owned, D)
 
+        # Pairwise cross-attention: enrich each slot with explicit (src, tgt) geometry.
+        # K, V are per-(slot, target) — built from broadcast planet_emb + pairwise feats.
+        if self.use_pairwise and pairwise_features is not None:
+            # planet_emb_post_transformer = x[:, 1:1+N_p, :]  (skip the global token)
+            N_p = planet_features.shape[1]
+            planet_emb_post = x[:, 1:1 + N_p, :]  # (B, N_p, D)
+            # Broadcast to per-slot: (B, MO, N_p, D)
+            planet_per_slot = planet_emb_post.unsqueeze(1).expand(-1, max_owned, -1, -1)
+            kv_input = torch.cat([planet_per_slot, pairwise_features], dim=-1)  # (B, MO, N_p, D+F)
+            kv = self.pair_kv(kv_input)                                         # (B, MO, N_p, 2D)
+            k, v = kv.chunk(2, dim=-1)                                          # each (B, MO, N_p, D)
+            q = self.pair_q(owned_entities).unsqueeze(2)                        # (B, MO, 1, D)
+
+            scale = D ** -0.5
+            scores = (q @ k.transpose(-2, -1)).squeeze(2) * scale               # (B, MO, N_p)
+            # Mask invalid targets (padded planet slots)
+            tgt_valid = planet_mask.unsqueeze(1).expand(-1, max_owned, -1)      # (B, MO, N_p)
+            scores = scores.masked_fill(~tgt_valid, -1e4)
+            attn = F.softmax(scores, dim=-1).unsqueeze(2)                        # (B, MO, 1, N_p)
+            enriched = (attn @ v).squeeze(2)                                     # (B, MO, D)
+            owned_entities = self.pair_ln(owned_entities + self.pair_out(enriched))
+
         # Action heads
         fire_logits = self.fire_head(owned_entities).squeeze(-1)  # (B, max_owned)
-        angle_logits = self.angle_head(owned_entities)  # (B, max_owned, 72)
-        ship_logits = self.ship_head(owned_entities)  # (B, max_owned, 16)
+        angle_logits = self.angle_head(owned_entities)  # (B, max_owned, 144)
+        ship_logits = self.ship_head(owned_entities)  # (B, max_owned, 32)
 
         # Apply masks (-100 is safe in float16 on MPS; -1e9 overflows)
         if fire_mask is not None:

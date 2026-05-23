@@ -189,6 +189,10 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128)
         mode_4p,
     ], dtype=np.float32)
 
+    pairwise = compute_pairwise_features(
+        planets, owned_indices, owned_count, player, max_planets=max_planets,
+    )
+
     return {
         "planet_features": torch.from_numpy(planet_feats),
         "fleet_features": torch.from_numpy(fleet_feats),
@@ -197,4 +201,83 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128)
         "fleet_mask": torch.from_numpy(fleet_mask_arr),
         "owned_indices": torch.from_numpy(owned_indices),
         "owned_count": owned_count,
+        "pairwise_features": torch.from_numpy(pairwise),
     }
+
+
+# Number of pairwise features per (owned-slot, target-planet) pair.
+# Keep in sync with compute_pairwise_features() and ModelConfig.pairwise_feature_dim.
+PAIRWISE_FEATURE_DIM = 10
+
+# Typical fleet size used to estimate an ETA prior (matches teacher MIN_SHIP_FLOOR ~ 10
+# but in practice ETA varies modestly with size since speed is log-shaped).
+_ETA_PROBE_SHIPS = 20
+_ETA_PROBE_SPEED = 1.0 + (MAX_SPEED - 1.0) * (math.log(_ETA_PROBE_SHIPS) / math.log(1000.0)) ** 1.5
+
+
+def compute_pairwise_features(planets, owned_indices, owned_count, player,
+                              max_planets: int = 48, max_owned: int = 10):
+    """For each (owned-slot, target-planet) pair return geometric + ownership features.
+
+    These are exactly the quantities the model cannot easily compute from raw (x, y)
+    via attention: angle direction (sin/cos), distance, ETA-at-typical-ships, and
+    sun-cross flag. Prior BC angle-head failure (0.08 reduction vs 0.40 gate) was
+    driven by the model trying to learn trig from gradients; this fills the gap.
+
+    Output: (max_owned, max_planets, PAIRWISE_FEATURE_DIM) float32 numpy array.
+    Invalid (slot, target) entries are zero.
+    """
+    out = np.zeros((max_owned, max_planets, PAIRWISE_FEATURE_DIM), dtype=np.float32)
+    if owned_count == 0 or len(planets) == 0:
+        return out
+
+    # Vectorize over targets once
+    n_p = min(len(planets), max_planets)
+    tgt_x = np.array([planets[j][2] for j in range(n_p)], dtype=np.float32)
+    tgt_y = np.array([planets[j][3] for j in range(n_p)], dtype=np.float32)
+    tgt_radius = np.array([planets[j][4] for j in range(n_p)], dtype=np.float32)
+    tgt_owner = np.array([planets[j][1] for j in range(n_p)], dtype=np.int32)
+    tgt_prod = np.array([planets[j][6] for j in range(n_p)], dtype=np.float32)
+
+    is_mine = (tgt_owner == player).astype(np.float32)
+    is_enemy = ((tgt_owner != player) & (tgt_owner >= 0)).astype(np.float32)
+    is_neutral = (tgt_owner == -1).astype(np.float32)
+
+    for slot in range(min(owned_count, max_owned)):
+        src_idx = int(owned_indices[slot])
+        if src_idx >= len(planets):
+            continue
+        src = planets[src_idx]
+        sx, sy = float(src[2]), float(src[3])
+
+        dx = tgt_x - sx
+        dy = tgt_y - sy
+        dist = np.sqrt(dx * dx + dy * dy)
+        # Avoid div-by-zero for self-pair (slot's own planet)
+        dist_safe = np.maximum(dist, 1e-6)
+        sin_a = dy / dist_safe
+        cos_a = dx / dist_safe
+        # ETA at typical ship count
+        eta = np.maximum(1.0, np.ceil(dist / _ETA_PROBE_SPEED))
+
+        # Sun-cross: point (CENTER, CENTER) to segment (src → tgt) distance
+        seg_len2 = np.maximum(dx * dx + dy * dy, 1e-9)
+        t = ((CENTER - sx) * dx + (CENTER - sy) * dy) / seg_len2
+        t = np.clip(t, 0.0, 1.0)
+        proj_x = sx + t * dx
+        proj_y = sy + t * dy
+        sun_d = np.sqrt((proj_x - CENTER) ** 2 + (proj_y - CENTER) ** 2)
+        sun_safe = (sun_d >= SUN_RADIUS).astype(np.float32)
+
+        out[slot, :n_p, 0] = sin_a
+        out[slot, :n_p, 1] = cos_a
+        out[slot, :n_p, 2] = dist / BOARD_SIZE
+        out[slot, :n_p, 3] = 1.0 / (eta + 1.0)            # close-fast preference
+        out[slot, :n_p, 4] = sun_safe
+        out[slot, :n_p, 5] = is_mine
+        out[slot, :n_p, 6] = is_enemy
+        out[slot, :n_p, 7] = is_neutral
+        out[slot, :n_p, 8] = tgt_prod / 5.0
+        out[slot, :n_p, 9] = 1.0                            # target valid flag
+
+    return out

@@ -30,6 +30,7 @@ class ModelConfig:
     mlp_expansion: int = 3
     num_angle_bins: int = 144
     num_ship_bins: int = 32
+    pairwise_feature_dim: int = 10   # see features.PAIRWISE_FEATURE_DIM
     dropout: float = 0.0
 
 
