@@ -331,6 +331,26 @@ def train(args):
             # Seed pool with the starting weights so it isn't empty on iteration 1
             pool.add_self_checkpoint(0, model.state_dict())
 
+        # Preseed pool from a directory of .pt checkpoints (appended as 'self'
+        # members). Lets us dilute the heuristic share from iter 1 by populating
+        # the pool with prior-run snapshots instead of waiting for organic
+        # snapshots to accumulate.
+        if args.preseed_pool:
+            import re
+            preseed_dir = Path(args.preseed_pool)
+            existing_self_steps = {m.step_saved for m in pool.members if m.kind == "self"}
+            added = 0
+            for pt_file in sorted(preseed_dir.glob("*.pt")):
+                m = re.search(r"step_(\d+)", pt_file.stem)
+                if not m: continue
+                step = int(m.group(1))
+                if step in existing_self_steps: continue
+                sd = torch.load(pt_file, map_location="cpu", weights_only=False)
+                if "model" in sd: sd = sd["model"]
+                pool.add_self_checkpoint(step, sd)
+                added += 1
+            print(f"  pool preseeded: {added} self-checkpoints from {preseed_dir}")
+
         # External opponents come from CLI flag — appended even on resume so
         # the user can add new externals without modifying the pool file.
         if args.pool_mode == "mixed" and args.external_opponents:
@@ -802,6 +822,12 @@ if __name__ == "__main__":
                         help="Win-rate above this triggers eviction of an external opponent.")
     parser.add_argument("--pool-mastered-min-games", type=int, default=50,
                         help="Minimum games against an external before mastery-eviction is considered.")
+    parser.add_argument("--preseed-pool", type=str, default="",
+                        help="Directory of .pt checkpoints to preseed the pool "
+                             "with as 'self' members. Step is parsed from filename "
+                             "(e.g. torch_step_5013504.pt -> step=5013504). Useful "
+                             "for diluting the heuristic-share early in training "
+                             "and for resuming pool diversity across runs.")
     parser.add_argument("--external-opponents", type=str, default="",
                         help="Comma-separated paths to .py heuristic agents (e.g. "
                              "'../candidate_suneet_lb1200.py,../candidate_zach_public.py'). "

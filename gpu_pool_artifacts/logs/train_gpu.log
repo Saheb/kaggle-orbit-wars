@@ -1,0 +1,294 @@
+/opt/pytorch/lib/python3.12/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+Training on device: cuda
+Parallel envs: 512
+Rollout steps: 64
+Batch per update: 65536  (T=64 x N=512 x P=2 players)
+PPO config: lr=0.0001, ppo_epochs=2, num_minibatches=64, kl_target=0.05
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 24.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game_arena
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+Model params: 307,482
+Resumed from checkpoints/torch_step_10027008.pt
+LR schedule: warmup=0 updates (skip_warmup=True), total_updates=390528, peak_lr=0.0001
+Baseline policy snapshotted for periodic eval.
+
+  pool preseeded: 6 self-checkpoints from /home/ubuntu/preseed
+  pool external loaded: candidate_suneet_lb1200 (/home/ubuntu/candidate_suneet_lb1200.py)
+  pool external loaded: candidate_zach_public (/home/ubuntu/candidate_zach_public.py)
+Pool initialised: mode=mixed, members=9, fraction=0.5, snapshot_every=1,000,000 steps
+
+
+Starting self-play training (target 100,000,000 env steps)
+======================================================================
+iter     1 | steps      32,768 | SPS     640 | r_p0 +0.000 r_p1 +0.000 | clip_frac 0.138 | KL 0.0112 | H_fire 0.036 H_ang 4.18 H_ship 2.63 | V_loss 0.0011 | LR 0.000100 | early_stop=0
+iter     2 | steps      65,536 | SPS     639 | r_p0 +0.333 r_p1 -0.333 | clip_frac 0.177 | KL 0.0110 | H_fire 0.127 H_ang 4.18 H_ship 2.62 | V_loss 0.0010 | LR 0.000100 | early_stop=0
+iter     3 | steps      98,304 | SPS     637 | r_p0 +0.333 r_p1 -0.333 | clip_frac 0.233 | KL 0.0164 | H_fire 0.282 H_ang 4.19 H_ship 2.64 | V_loss 0.0011 | LR 0.000100 | early_stop=0
+iter     4 | steps     131,072 | SPS     635 | r_p0 +0.333 r_p1 -0.333 | clip_frac 0.278 | KL 0.0189 | H_fire 0.377 H_ang 4.19 H_ship 2.63 | V_loss 0.0012 | LR 0.000100 | early_stop=0
+iter     5 | steps     163,840 | SPS     634 | r_p0 +0.238 r_p1 -0.238 | clip_frac 0.311 | KL 0.0251 | H_fire 0.394 H_ang 4.18 H_ship 2.57 | V_loss 0.0015 | LR 0.000100 | early_stop=0
+iter     6 | steps     196,608 | SPS     634 | r_p0 +0.214 r_p1 -0.214 | clip_frac 0.333 | KL 0.0276 | H_fire 0.354 H_ang 4.16 H_ship 2.46 | V_loss 0.0017 | LR 0.000100 | early_stop=0
+iter     7 | steps     229,376 | SPS     634 | r_p0 +0.188 r_p1 -0.188 | clip_frac 0.341 | KL 0.0320 | H_fire 0.288 H_ang 4.13 H_ship 2.36 | V_loss 0.0027 | LR 0.000100 | early_stop=0
+iter     8 | steps     262,144 | SPS     623 | r_p0 +0.260 r_p1 -0.260 | clip_frac 0.335 | KL 0.0239 | H_fire 0.164 H_ang 4.14 H_ship 2.44 | V_loss 0.0046 | LR 0.000100 | early_stop=0
+  ★ best updated: reward=+0.260
+iter     9 | steps     294,912 | SPS     625 | r_p0 +0.250 r_p1 -0.250 | clip_frac 0.317 | KL 0.0144 | H_fire 0.072 H_ang 4.19 H_ship 2.65 | V_loss 0.0012 | LR 0.000100 | early_stop=0
+iter    10 | steps     327,680 | SPS     202 | r_p0 +0.240 r_p1 -0.240 | clip_frac 0.308 | KL 0.0163 | H_fire 0.164 H_ang 4.18 H_ship 2.61 | V_loss 0.0020 | LR 0.000100 | early_stop=0
+iter    11 | steps     360,448 | SPS     127 | r_p0 +0.240 r_p1 -0.240 | clip_frac 0.304 | KL 0.0143 | H_fire 0.236 H_ang 4.19 H_ship 2.60 | V_loss 0.0013 | LR 0.000100 | early_stop=0
+iter    12 | steps     393,216 | SPS     104 | r_p0 -0.020 r_p1 +0.020 | clip_frac 0.311 | KL 0.0245 | H_fire 0.416 H_ang 4.20 H_ship 2.61 | V_loss 0.0017 | LR 0.000100 | early_stop=0
+iter    13 | steps     425,984 | SPS     111 | r_p0 -0.140 r_p1 +0.140 | clip_frac 0.317 | KL 0.0377 | H_fire 0.285 H_ang 4.15 H_ship 2.51 | V_loss 0.0018 | LR 0.000100 | early_stop=0
+iter    14 | steps     458,752 | SPS     117 | r_p0 -0.180 r_p1 +0.180 | clip_frac 0.321 | KL 0.0285 | H_fire 0.325 H_ang 4.17 H_ship 2.46 | V_loss 0.0031 | LR 0.000100 | early_stop=0
+iter    15 | steps     491,520 | SPS     124 | r_p0 -0.140 r_p1 +0.140 | clip_frac 0.318 | KL 0.0197 | H_fire 0.245 H_ang 4.16 H_ship 2.42 | V_loss 0.0023 | LR 0.000100 | early_stop=0
+iter    16 | steps     524,288 | SPS     131 | r_p0 -0.640 r_p1 +0.640 | clip_frac 0.312 | KL 0.0231 | H_fire 0.145 H_ang 4.16 H_ship 2.50 | V_loss 0.0059 | LR 0.000100 | early_stop=0
+iter    17 | steps     557,056 | SPS     137 | r_p0 -0.660 r_p1 +0.660 | clip_frac 0.304 | KL 0.0129 | H_fire 0.108 H_ang 4.17 H_ship 2.62 | V_loss 0.0011 | LR 0.000100 | early_stop=0
+iter    18 | steps     589,824 | SPS     143 | r_p0 -0.670 r_p1 +0.670 | clip_frac 0.303 | KL 0.0139 | H_fire 0.220 H_ang 4.18 H_ship 2.62 | V_loss 0.0010 | LR 0.000100 | early_stop=0
+iter    19 | steps     622,592 | SPS     148 | r_p0 -0.630 r_p1 +0.630 | clip_frac 0.306 | KL 0.0190 | H_fire 0.297 H_ang 4.19 H_ship 2.64 | V_loss 0.0019 | LR 0.000100 | early_stop=0
+iter    20 | steps     655,360 | SPS     154 | r_p0 -0.100 r_p1 +0.100 | clip_frac 0.312 | KL 0.0221 | H_fire 0.314 H_ang 4.19 H_ship 2.62 | V_loss 0.0020 | LR 0.000100 | early_stop=0
+iter    21 | steps     688,128 | SPS     158 | r_p0 +0.190 r_p1 -0.190 | clip_frac 0.316 | KL 0.0251 | H_fire 0.315 H_ang 4.17 H_ship 2.56 | V_loss 0.0025 | LR 0.000100 | early_stop=0
+iter    22 | steps     720,896 | SPS     164 | r_p0 +0.590 r_p1 -0.590 | clip_frac 0.320 | KL 0.0284 | H_fire 0.309 H_ang 4.15 H_ship 2.44 | V_loss 0.0026 | LR 0.000100 | early_stop=0
+  ★ best updated: reward=+0.590
+iter    23 | steps     753,664 | SPS     169 | r_p0 +0.780 r_p1 -0.780 | clip_frac 0.321 | KL 0.0239 | H_fire 0.275 H_ang 4.13 H_ship 2.42 | V_loss 0.0029 | LR 0.000100 | early_stop=0
+  ★ best updated: reward=+0.780
+iter    24 | steps     786,432 | SPS     173 | r_p0 +0.200 r_p1 -0.200 | clip_frac 0.318 | KL 0.0239 | H_fire 0.158 H_ang 4.16 H_ship 2.55 | V_loss 0.0066 | LR 0.000100 | early_stop=0
+iter    25 | steps     819,200 | SPS     177 | r_p0 +0.100 r_p1 -0.100 | clip_frac 0.313 | KL 0.0136 | H_fire 0.113 H_ang 4.18 H_ship 2.63 | V_loss 0.0046 | LR 0.000100 | early_stop=0
+iter    26 | steps     851,968 | SPS     182 | r_p0 -0.510 r_p1 +0.510 | clip_frac 0.313 | KL 0.0200 | H_fire 0.283 H_ang 4.17 H_ship 2.61 | V_loss 0.0030 | LR 0.000100 | early_stop=0
+iter    27 | steps     884,736 | SPS     156 | r_p0 -0.730 r_p1 +0.730 | clip_frac 0.315 | KL 0.0217 | H_fire 0.318 H_ang 4.18 H_ship 2.60 | V_loss 0.0032 | LR 0.000100 | early_stop=0
+iter    28 | steps     917,504 | SPS     160 | r_p0 -0.670 r_p1 +0.670 | clip_frac 0.317 | KL 0.0186 | H_fire 0.315 H_ang 4.18 H_ship 2.57 | V_loss 0.0015 | LR 0.000100 | early_stop=0
+iter    29 | steps     950,272 | SPS     165 | r_p0 -0.460 r_p1 +0.460 | clip_frac 0.318 | KL 0.0203 | H_fire 0.294 H_ang 4.17 H_ship 2.52 | V_loss 0.0015 | LR 0.000100 | early_stop=0
+iter    30 | steps     983,040 | SPS     168 | r_p0 -0.290 r_p1 +0.290 | clip_frac 0.319 | KL 0.0215 | H_fire 0.332 H_ang 4.15 H_ship 2.45 | V_loss 0.0047 | LR 0.000100 | early_stop=0
+iter    31 | steps   1,015,808 | SPS     172 | r_p0 -0.220 r_p1 +0.220 | clip_frac 0.320 | KL 0.0221 | H_fire 0.302 H_ang 4.14 H_ship 2.40 | V_loss 0.0022 | LR 0.000100 | early_stop=0
+  saved checkpoints/torch_step_1015808.pt
+  saved checkpoints/pool_step_1015808.pt (9 members)
+  pool snapshot @ step 1,015,808
+  pool size=10  alpha=2.0
+    self                 self_step_15040512             wr=0.37 (n=189)  pfsp_w=0.396
+    external_heuristic   candidate_zach_public          wr=0.40 (n=174)  pfsp_w=0.364
+    self                 self_step_25067520             wr=0.47 (n=311)  pfsp_w=0.285
+    self                 self_step_1015808              wr=0.50 (n=0)  pfsp_w=0.250
+    self                 self_step_0                    wr=0.72 (n=215)  pfsp_w=0.078
+    external_heuristic   candidate_suneet_lb1200        wr=0.85 (n=95)  pfsp_w=0.022
+    self                 self_step_20054016             wr=0.97 (n=97)  pfsp_w=0.001
+    self                 self_step_10027008             wr=1.00 (n=2)  pfsp_w=0.000
+iter    32 | steps   1,048,576 | SPS     176 | r_p0 +0.170 r_p1 -0.170 | clip_frac 0.318 | KL 0.0194 | H_fire 0.195 H_ang 4.17 H_ship 2.54 | V_loss 0.0038 | LR 0.000100 | early_stop=0
+iter    33 | steps   1,081,344 | SPS     180 | r_p0 +0.160 r_p1 -0.160 | clip_frac 0.315 | KL 0.0171 | H_fire 0.196 H_ang 4.17 H_ship 2.58 | V_loss 0.0014 | LR 0.000100 | early_stop=0
+iter    34 | steps   1,114,112 | SPS     183 | r_p0 +0.390 r_p1 -0.390 | clip_frac 0.315 | KL 0.0168 | H_fire 0.271 H_ang 4.17 H_ship 2.57 | V_loss 0.0017 | LR 0.000100 | early_stop=0
+iter    35 | steps   1,146,880 | SPS     186 | r_p0 +0.390 r_p1 -0.390 | clip_frac 0.316 | KL 0.0236 | H_fire 0.284 H_ang 4.16 H_ship 2.58 | V_loss 0.0042 | LR 0.000100 | early_stop=0
+iter    36 | steps   1,179,648 | SPS     189 | r_p0 +0.230 r_p1 -0.230 | clip_frac 0.317 | KL 0.0175 | H_fire 0.288 H_ang 4.17 H_ship 2.57 | V_loss 0.0024 | LR 0.000100 | early_stop=0
+iter    37 | steps   1,212,416 | SPS     192 | r_p0 -0.060 r_p1 +0.060 | clip_frac 0.320 | KL 0.0245 | H_fire 0.323 H_ang 4.16 H_ship 2.51 | V_loss 0.0029 | LR 0.000100 | early_stop=0
+iter    38 | steps   1,245,184 | SPS     196 | r_p0 -0.140 r_p1 +0.140 | clip_frac 0.321 | KL 0.0258 | H_fire 0.305 H_ang 4.14 H_ship 2.45 | V_loss 0.0029 | LR 0.000100 | early_stop=0
+iter    39 | steps   1,277,952 | SPS     199 | r_p0 +0.080 r_p1 -0.080 | clip_frac 0.322 | KL 0.0250 | H_fire 0.276 H_ang 4.14 H_ship 2.42 | V_loss 0.0047 | LR 0.000100 | early_stop=0
+iter    40 | steps   1,310,720 | SPS     203 | r_p0 +0.080 r_p1 -0.080 | clip_frac 0.320 | KL 0.0146 | H_fire 0.159 H_ang 4.19 H_ship 2.62 | V_loss 0.0013 | LR 0.000100 | early_stop=0
+iter    41 | steps   1,343,488 | SPS     206 | r_p0 +0.070 r_p1 -0.070 | clip_frac 0.319 | KL 0.0149 | H_fire 0.221 H_ang 4.18 H_ship 2.59 | V_loss 0.0016 | LR 0.000100 | early_stop=0
+iter    42 | steps   1,376,256 | SPS     209 | r_p0 +0.010 r_p1 -0.010 | clip_frac 0.319 | KL 0.0157 | H_fire 0.287 H_ang 4.17 H_ship 2.57 | V_loss 0.0020 | LR 0.000100 | early_stop=0
+iter    43 | steps   1,409,024 | SPS     213 | r_p0 -0.020 r_p1 +0.020 | clip_frac 0.321 | KL 0.0214 | H_fire 0.319 H_ang 4.17 H_ship 2.58 | V_loss 0.0018 | LR 0.000100 | early_stop=0
+iter    44 | steps   1,441,792 | SPS     214 | r_p0 +0.070 r_p1 -0.070 | clip_frac 0.323 | KL 0.0221 | H_fire 0.313 H_ang 4.16 H_ship 2.55 | V_loss 0.0035 | LR 0.000100 | early_stop=0
+iter    45 | steps   1,474,560 | SPS     217 | r_p0 +0.250 r_p1 -0.250 | clip_frac 0.324 | KL 0.0214 | H_fire 0.277 H_ang 4.16 H_ship 2.50 | V_loss 0.0028 | LR 0.000100 | early_stop=0
+iter    46 | steps   1,507,328 | SPS     221 | r_p0 +0.400 r_p1 -0.400 | clip_frac 0.325 | KL 0.0222 | H_fire 0.308 H_ang 4.15 H_ship 2.45 | V_loss 0.0030 | LR 0.000100 | early_stop=0
+iter    47 | steps   1,540,096 | SPS     222 | r_p0 +0.140 r_p1 -0.140 | clip_frac 0.326 | KL 0.0220 | H_fire 0.247 H_ang 4.15 H_ship 2.47 | V_loss 0.0067 | LR 0.000100 | early_stop=0
+iter    48 | steps   1,572,864 | SPS     225 | r_p0 +0.060 r_p1 -0.060 | clip_frac 0.324 | KL 0.0142 | H_fire 0.148 H_ang 4.18 H_ship 2.60 | V_loss 0.0021 | LR 0.000100 | early_stop=0
+iter    49 | steps   1,605,632 | SPS     228 | r_p0 +0.050 r_p1 -0.050 | clip_frac 0.323 | KL 0.0180 | H_fire 0.205 H_ang 4.18 H_ship 2.59 | V_loss 0.0017 | LR 0.000100 | early_stop=0
+iter    50 | steps   1,638,400 | SPS     231 | r_p0 +0.010 r_p1 -0.010 | clip_frac 0.325 | KL 0.0171 | H_fire 0.277 H_ang 4.19 H_ship 2.62 | V_loss 0.0017 | LR 0.000100 | early_stop=0
+iter    51 | steps   1,671,168 | SPS     233 | r_p0 -0.070 r_p1 +0.070 | clip_frac 0.331 | KL 0.0195 | H_fire 0.299 H_ang 4.19 H_ship 2.61 | V_loss 0.0025 | LR 0.000100 | early_stop=0
+iter    52 | steps   1,703,936 | SPS     236 | r_p0 +0.120 r_p1 -0.120 | clip_frac 0.335 | KL 0.0175 | H_fire 0.273 H_ang 4.18 H_ship 2.58 | V_loss 0.0028 | LR 0.000100 | early_stop=0
+iter    53 | steps   1,736,704 | SPS     237 | r_p0 +0.160 r_p1 -0.160 | clip_frac 0.337 | KL 0.0245 | H_fire 0.285 H_ang 4.16 H_ship 2.53 | V_loss 0.0053 | LR 0.000100 | early_stop=0
+iter    54 | steps   1,769,472 | SPS     240 | r_p0 +0.080 r_p1 -0.080 | clip_frac 0.336 | KL 0.0219 | H_fire 0.262 H_ang 4.16 H_ship 2.49 | V_loss 0.0024 | LR 0.000100 | early_stop=0
+iter    55 | steps   1,802,240 | SPS     243 | r_p0 +0.000 r_p1 +0.000 | clip_frac 0.333 | KL 0.0177 | H_fire 0.231 H_ang 4.17 H_ship 2.54 | V_loss 0.0039 | LR 0.000100 | early_stop=0
+iter    56 | steps   1,835,008 | SPS     245 | r_p0 +0.020 r_p1 -0.020 | clip_frac 0.331 | KL 0.0171 | H_fire 0.199 H_ang 4.18 H_ship 2.61 | V_loss 0.0018 | LR 0.000100 | early_stop=0
+iter    57 | steps   1,867,776 | SPS     248 | r_p0 +0.090 r_p1 -0.090 | clip_frac 0.331 | KL 0.0139 | H_fire 0.255 H_ang 4.18 H_ship 2.61 | V_loss 0.0022 | LR 0.000100 | early_stop=0
+iter    58 | steps   1,900,544 | SPS     251 | r_p0 +0.030 r_p1 -0.030 | clip_frac 0.334 | KL 0.0161 | H_fire 0.290 H_ang 4.18 H_ship 2.58 | V_loss 0.0032 | LR 0.000100 | early_stop=0
+iter    59 | steps   1,933,312 | SPS     253 | r_p0 +0.140 r_p1 -0.140 | clip_frac 0.339 | KL 0.0181 | H_fire 0.332 H_ang 4.18 H_ship 2.57 | V_loss 0.0022 | LR 0.000100 | early_stop=0
+iter    60 | steps   1,966,080 | SPS     256 | r_p0 +0.040 r_p1 -0.040 | clip_frac 0.342 | KL 0.0207 | H_fire 0.326 H_ang 4.16 H_ship 2.52 | V_loss 0.0024 | LR 0.000100 | early_stop=0
+iter    61 | steps   1,998,848 | SPS     221 | r_p0 +0.030 r_p1 -0.030 | clip_frac 0.344 | KL 0.0213 | H_fire 0.296 H_ang 4.15 H_ship 2.48 | V_loss 0.0047 | LR 0.000100 | early_stop=0
+iter    62 | steps   2,031,616 | SPS     223 | r_p0 -0.030 r_p1 +0.030 | clip_frac 0.344 | KL 0.0207 | H_fire 0.341 H_ang 4.16 H_ship 2.48 | V_loss 0.0028 | LR 0.000100 | early_stop=0
+  saved checkpoints/torch_step_2031616.pt
+  saved checkpoints/pool_step_2031616.pt (10 members)
+  pool snapshot @ step 2,031,616
+  pool size=11  alpha=2.0
+    self                 self_step_1015808              wr=0.37 (n=411)  pfsp_w=0.400
+    self                 self_step_15040512             wr=0.44 (n=540)  pfsp_w=0.313
+    self                 self_step_25067520             wr=0.46 (n=498)  pfsp_w=0.287
+    self                 self_step_2031616              wr=0.50 (n=0)  pfsp_w=0.250
+    external_heuristic   candidate_zach_public          wr=0.54 (n=395)  pfsp_w=0.208
+    self                 self_step_0                    wr=0.72 (n=215)  pfsp_w=0.078
+    external_heuristic   candidate_suneet_lb1200        wr=0.74 (n=117)  pfsp_w=0.066
+    self                 self_step_20054016             wr=0.97 (n=97)  pfsp_w=0.001
+iter    63 | steps   2,064,384 | SPS     225 | r_p0 +0.080 r_p1 -0.080 | clip_frac 0.341 | KL 0.0181 | H_fire 0.197 H_ang 4.17 H_ship 2.54 | V_loss 0.0044 | LR 0.000100 | early_stop=0
+iter    64 | steps   2,097,152 | SPS     227 | r_p0 +0.090 r_p1 -0.090 | clip_frac 0.339 | KL 0.0173 | H_fire 0.197 H_ang 4.17 H_ship 2.57 | V_loss 0.0013 | LR 0.000100 | early_stop=0
+iter    65 | steps   2,129,920 | SPS     228 | r_p0 +0.030 r_p1 -0.030 | clip_frac 0.339 | KL 0.0152 | H_fire 0.247 H_ang 4.17 H_ship 2.59 | V_loss 0.0023 | LR 0.000100 | early_stop=0
+iter    66 | steps   2,162,688 | SPS     230 | r_p0 -0.270 r_p1 +0.270 | clip_frac 0.343 | KL 0.0197 | H_fire 0.370 H_ang 4.18 H_ship 2.58 | V_loss 0.0033 | LR 0.000100 | early_stop=0
+iter    67 | steps   2,195,456 | SPS     232 | r_p0 -0.390 r_p1 +0.390 | clip_frac 0.346 | KL 0.0194 | H_fire 0.345 H_ang 4.18 H_ship 2.57 | V_loss 0.0027 | LR 0.000100 | early_stop=0
+iter    68 | steps   2,228,224 | SPS     234 | r_p0 -0.470 r_p1 +0.470 | clip_frac 0.348 | KL 0.0228 | H_fire 0.313 H_ang 4.17 H_ship 2.54 | V_loss 0.0033 | LR 0.000100 | early_stop=0
+iter    69 | steps   2,260,992 | SPS     236 | r_p0 -0.360 r_p1 +0.360 | clip_frac 0.347 | KL 0.0207 | H_fire 0.284 H_ang 4.15 H_ship 2.48 | V_loss 0.0033 | LR 0.000100 | early_stop=0
+iter    70 | steps   2,293,760 | SPS     239 | r_p0 -0.220 r_p1 +0.220 | clip_frac 0.347 | KL 0.0286 | H_fire 0.294 H_ang 4.15 H_ship 2.47 | V_loss 0.0032 | LR 0.000100 | early_stop=0
+iter    71 | steps   2,326,528 | SPS     241 | r_p0 +0.080 r_p1 -0.080 | clip_frac 0.344 | KL 0.0191 | H_fire 0.212 H_ang 4.18 H_ship 2.59 | V_loss 0.0044 | LR 0.000100 | early_stop=0
+iter    72 | steps   2,359,296 | SPS     243 | r_p0 +0.050 r_p1 -0.050 | clip_frac 0.342 | KL 0.0179 | H_fire 0.240 H_ang 4.17 H_ship 2.58 | V_loss 0.0022 | LR 0.000100 | early_stop=0
+iter    73 | steps   2,392,064 | SPS     245 | r_p0 +0.080 r_p1 -0.080 | clip_frac 0.342 | KL 0.0193 | H_fire 0.293 H_ang 4.17 H_ship 2.59 | V_loss 0.0020 | LR 0.000100 | early_stop=0
+iter    74 | steps   2,424,832 | SPS     247 | r_p0 +0.100 r_p1 -0.100 | clip_frac 0.345 | KL 0.0205 | H_fire 0.311 H_ang 4.17 H_ship 2.56 | V_loss 0.0022 | LR 0.000100 | early_stop=0
+iter    75 | steps   2,457,600 | SPS     249 | r_p0 +0.150 r_p1 -0.150 | clip_frac 0.349 | KL 0.0202 | H_fire 0.304 H_ang 4.18 H_ship 2.59 | V_loss 0.0030 | LR 0.000100 | early_stop=0
+iter    76 | steps   2,490,368 | SPS     251 | r_p0 +0.240 r_p1 -0.240 | clip_frac 0.352 | KL 0.0218 | H_fire 0.281 H_ang 4.17 H_ship 2.54 | V_loss 0.0033 | LR 0.000100 | early_stop=0
+iter    77 | steps   2,523,136 | SPS     253 | r_p0 +0.110 r_p1 -0.110 | clip_frac 0.353 | KL 0.0213 | H_fire 0.300 H_ang 4.17 H_ship 2.53 | V_loss 0.0024 | LR 0.000100 | early_stop=0
+iter    78 | steps   2,555,904 | SPS     255 | r_p0 +0.080 r_p1 -0.080 | clip_frac 0.353 | KL 0.0219 | H_fire 0.302 H_ang 4.17 H_ship 2.52 | V_loss 0.0058 | LR 0.000100 | early_stop=0
+iter    79 | steps   2,588,672 | SPS     257 | r_p0 +0.130 r_p1 -0.130 | clip_frac 0.352 | KL 0.0141 | H_fire 0.215 H_ang 4.19 H_ship 2.62 | V_loss 0.0019 | LR 0.000100 | early_stop=0
+iter    80 | steps   2,621,440 | SPS     258 | r_p0 +0.080 r_p1 -0.080 | clip_frac 0.352 | KL 0.0213 | H_fire 0.258 H_ang 4.18 H_ship 2.59 | V_loss 0.0023 | LR 0.000100 | early_stop=0
+iter    81 | steps   2,654,208 | SPS     260 | r_p0 +0.010 r_p1 -0.010 | clip_frac 0.353 | KL 0.0189 | H_fire 0.306 H_ang 4.18 H_ship 2.58 | V_loss 0.0020 | LR 0.000100 | early_stop=0
+iter    82 | steps   2,686,976 | SPS     261 | r_p0 -0.060 r_p1 +0.060 | clip_frac 0.356 | KL 0.0312 | H_fire 0.301 H_ang 4.18 H_ship 2.58 | V_loss 0.0058 | LR 0.000100 | early_stop=0
+iter    83 | steps   2,719,744 | SPS     261 | r_p0 -0.260 r_p1 +0.260 | clip_frac 0.359 | KL 0.0229 | H_fire 0.252 H_ang 4.19 H_ship 2.60 | V_loss 0.0053 | LR 0.000100 | early_stop=0
+iter    84 | steps   2,752,512 | SPS     263 | r_p0 -0.650 r_p1 +0.650 | clip_frac 0.359 | KL 0.0185 | H_fire 0.236 H_ang 4.19 H_ship 2.58 | V_loss 0.0027 | LR 0.000100 | early_stop=0
+iter    85 | steps   2,785,280 | SPS     265 | r_p0 -0.680 r_p1 +0.680 | clip_frac 0.358 | KL 0.0149 | H_fire 0.254 H_ang 4.17 H_ship 2.54 | V_loss 0.0024 | LR 0.000100 | early_stop=0
+iter    86 | steps   2,818,048 | SPS     267 | r_p0 -0.170 r_p1 +0.170 | clip_frac 0.357 | KL 0.0172 | H_fire 0.260 H_ang 4.17 H_ship 2.55 | V_loss 0.0029 | LR 0.000100 | early_stop=0
+iter    87 | steps   2,850,816 | SPS     239 | r_p0 -0.110 r_p1 +0.110 | clip_frac 0.355 | KL 0.0288 | H_fire 0.232 H_ang 4.19 H_ship 2.61 | V_loss 0.0024 | LR 0.000100 | early_stop=0
+iter    88 | steps   2,883,584 | SPS     240 | r_p0 -0.050 r_p1 +0.050 | clip_frac 0.355 | KL 0.0246 | H_fire 0.315 H_ang 4.18 H_ship 2.58 | V_loss 0.0032 | LR 0.000100 | early_stop=0
+iter    89 | steps   2,916,352 | SPS     217 | r_p0 +0.000 r_p1 +0.000 | clip_frac 0.356 | KL 0.0218 | H_fire 0.289 H_ang 4.17 H_ship 2.54 | V_loss 0.0025 | LR 0.000100 | early_stop=0
+iter    90 | steps   2,949,120 | SPS     219 | r_p0 -0.030 r_p1 +0.030 | clip_frac 0.359 | KL 0.0206 | H_fire 0.272 H_ang 4.17 H_ship 2.55 | V_loss 0.0021 | LR 0.000100 | early_stop=0
+iter    91 | steps   2,981,888 | SPS     220 | r_p0 +0.090 r_p1 -0.090 | clip_frac 0.362 | KL 0.0230 | H_fire 0.313 H_ang 4.18 H_ship 2.53 | V_loss 0.0027 | LR 0.000100 | early_stop=0
+iter    92 | steps   3,014,656 | SPS     222 | r_p0 +0.470 r_p1 -0.470 | clip_frac 0.362 | KL 0.0179 | H_fire 0.232 H_ang 4.17 H_ship 2.54 | V_loss 0.0026 | LR 0.000100 | early_stop=0
+iter    93 | steps   3,047,424 | SPS     223 | r_p0 +0.480 r_p1 -0.480 | clip_frac 0.361 | KL 0.0216 | H_fire 0.248 H_ang 4.17 H_ship 2.54 | V_loss 0.0019 | LR 0.000100 | early_stop=0
+  saved checkpoints/torch_step_3047424.pt
+  saved checkpoints/pool_step_3047424.pt (11 members)
+  pool snapshot @ step 3,047,424
+  pool size=12  alpha=2.0
+    self                 self_step_15040512             wr=0.36 (n=999)  pfsp_w=0.410
+    self                 self_step_1015808              wr=0.43 (n=723)  pfsp_w=0.322
+    self                 self_step_25067520             wr=0.45 (n=543)  pfsp_w=0.307
+    self                 self_step_3047424              wr=0.50 (n=0)  pfsp_w=0.250
+    external_heuristic   candidate_zach_public          wr=0.52 (n=586)  pfsp_w=0.228
+    self                 self_step_2031616              wr=0.67 (n=81)  pfsp_w=0.111
+    external_heuristic   candidate_suneet_lb1200        wr=0.70 (n=149)  pfsp_w=0.087
+    self                 self_step_0                    wr=0.73 (n=261)  pfsp_w=0.074
+iter    94 | steps   3,080,192 | SPS     207 | r_p0 +0.260 r_p1 -0.260 | clip_frac 0.360 | KL 0.0199 | H_fire 0.237 H_ang 4.18 H_ship 2.56 | V_loss 0.0036 | LR 0.000100 | early_stop=0
+iter    95 | steps   3,112,960 | SPS     208 | r_p0 +0.230 r_p1 -0.230 | clip_frac 0.359 | KL 0.0169 | H_fire 0.196 H_ang 4.17 H_ship 2.57 | V_loss 0.0014 | LR 0.000100 | early_stop=0
+iter    96 | steps   3,145,728 | SPS     209 | r_p0 +0.180 r_p1 -0.180 | clip_frac 0.360 | KL 0.0231 | H_fire 0.314 H_ang 4.19 H_ship 2.59 | V_loss 0.0015 | LR 0.000100 | early_stop=0
+iter    97 | steps   3,178,496 | SPS     211 | r_p0 +0.110 r_p1 -0.110 | clip_frac 0.360 | KL 0.0193 | H_fire 0.238 H_ang 4.17 H_ship 2.54 | V_loss 0.0015 | LR 0.000100 | early_stop=0
+iter    98 | steps   3,211,264 | SPS     212 | r_p0 -0.100 r_p1 +0.100 | clip_frac 0.362 | KL 0.0189 | H_fire 0.241 H_ang 4.17 H_ship 2.53 | V_loss 0.0023 | LR 0.000100 | early_stop=0
+iter    99 | steps   3,244,032 | SPS     213 | r_p0 -0.530 r_p1 +0.530 | clip_frac 0.364 | KL 0.0175 | H_fire 0.221 H_ang 4.17 H_ship 2.55 | V_loss 0.0038 | LR 0.000100 | early_stop=0
+iter   100 | steps   3,276,800 | SPS     214 | r_p0 -0.650 r_p1 +0.650 | clip_frac 0.364 | KL 0.0213 | H_fire 0.279 H_ang 4.17 H_ship 2.54 | V_loss 0.0028 | LR 0.000100 | early_stop=0
+iter   101 | steps   3,309,568 | SPS     215 | r_p0 -0.650 r_p1 +0.650 | clip_frac 0.362 | KL 0.0148 | H_fire 0.226 H_ang 4.17 H_ship 2.56 | V_loss 0.0043 | LR 0.000100 | early_stop=0
+iter   102 | steps   3,342,336 | SPS     216 | r_p0 -0.300 r_p1 +0.300 | clip_frac 0.359 | KL 0.0181 | H_fire 0.182 H_ang 4.19 H_ship 2.61 | V_loss 0.0047 | LR 0.000100 | early_stop=0
+iter   103 | steps   3,375,104 | SPS     218 | r_p0 -0.770 r_p1 +0.770 | clip_frac 0.355 | KL 0.0116 | H_fire 0.174 H_ang 4.19 H_ship 2.61 | V_loss 0.0027 | LR 0.000100 | early_stop=0
+iter   104 | steps   3,407,872 | SPS     219 | r_p0 -0.820 r_p1 +0.820 | clip_frac 0.354 | KL 0.0147 | H_fire 0.226 H_ang 4.18 H_ship 2.59 | V_loss 0.0020 | LR 0.000100 | early_stop=0
+iter   105 | steps   3,440,640 | SPS     220 | r_p0 -0.760 r_p1 +0.760 | clip_frac 0.355 | KL 0.0195 | H_fire 0.306 H_ang 4.17 H_ship 2.59 | V_loss 0.0016 | LR 0.000100 | early_stop=0
+iter   106 | steps   3,473,408 | SPS     222 | r_p0 -0.510 r_p1 +0.510 | clip_frac 0.356 | KL 0.0182 | H_fire 0.314 H_ang 4.17 H_ship 2.57 | V_loss 0.0017 | LR 0.000100 | early_stop=0
+iter   107 | steps   3,506,176 | SPS     223 | r_p0 -0.330 r_p1 +0.330 | clip_frac 0.357 | KL 0.0198 | H_fire 0.282 H_ang 4.16 H_ship 2.54 | V_loss 0.0021 | LR 0.000100 | early_stop=0
+iter   108 | steps   3,538,944 | SPS     224 | r_p0 -0.140 r_p1 +0.140 | clip_frac 0.357 | KL 0.0243 | H_fire 0.272 H_ang 4.16 H_ship 2.54 | V_loss 0.0052 | LR 0.000100 | early_stop=0
+iter   109 | steps   3,571,712 | SPS     225 | r_p0 +0.040 r_p1 -0.040 | clip_frac 0.356 | KL 0.0224 | H_fire 0.235 H_ang 4.15 H_ship 2.51 | V_loss 0.0038 | LR 0.000100 | early_stop=0
+iter   110 | steps   3,604,480 | SPS     226 | r_p0 +0.240 r_p1 -0.240 | clip_frac 0.354 | KL 0.0172 | H_fire 0.196 H_ang 4.16 H_ship 2.55 | V_loss 0.0035 | LR 0.000100 | early_stop=0
+iter   111 | steps   3,637,248 | SPS     228 | r_p0 +0.300 r_p1 -0.300 | clip_frac 0.353 | KL 0.0158 | H_fire 0.201 H_ang 4.17 H_ship 2.58 | V_loss 0.0029 | LR 0.000100 | early_stop=0
+iter   112 | steps   3,670,016 | SPS     229 | r_p0 +0.360 r_p1 -0.360 | clip_frac 0.353 | KL 0.0204 | H_fire 0.252 H_ang 4.17 H_ship 2.58 | V_loss 0.0021 | LR 0.000100 | early_stop=0
+iter   113 | steps   3,702,784 | SPS     230 | r_p0 +0.360 r_p1 -0.360 | clip_frac 0.358 | KL 0.0171 | H_fire 0.291 H_ang 4.17 H_ship 2.57 | V_loss 0.0022 | LR 0.000100 | early_stop=0
+iter   114 | steps   3,735,552 | SPS     232 | r_p0 +0.180 r_p1 -0.180 | clip_frac 0.361 | KL 0.0200 | H_fire 0.305 H_ang 4.17 H_ship 2.57 | V_loss 0.0035 | LR 0.000100 | early_stop=0
+iter   115 | steps   3,768,320 | SPS     233 | r_p0 +0.170 r_p1 -0.170 | clip_frac 0.363 | KL 0.0199 | H_fire 0.270 H_ang 4.16 H_ship 2.55 | V_loss 0.0022 | LR 0.000100 | early_stop=0
+iter   116 | steps   3,801,088 | SPS     234 | r_p0 +0.080 r_p1 -0.080 | clip_frac 0.364 | KL 0.0217 | H_fire 0.269 H_ang 4.15 H_ship 2.50 | V_loss 0.0027 | LR 0.000100 | early_stop=0
+iter   117 | steps   3,833,856 | SPS     235 | r_p0 +0.210 r_p1 -0.210 | clip_frac 0.366 | KL 0.0273 | H_fire 0.272 H_ang 4.15 H_ship 2.48 | V_loss 0.0034 | LR 0.000100 | early_stop=0
+iter   118 | steps   3,866,624 | SPS     237 | r_p0 +0.240 r_p1 -0.240 | clip_frac 0.366 | KL 0.0216 | H_fire 0.224 H_ang 4.17 H_ship 2.56 | V_loss 0.0021 | LR 0.000100 | early_stop=0
+iter   119 | steps   3,899,392 | SPS     237 | r_p0 +0.050 r_p1 -0.050 | clip_frac 0.366 | KL 0.0221 | H_fire 0.214 H_ang 4.17 H_ship 2.57 | V_loss 0.0034 | LR 0.000100 | early_stop=0
+iter   120 | steps   3,932,160 | SPS     239 | r_p0 -0.060 r_p1 +0.060 | clip_frac 0.365 | KL 0.0164 | H_fire 0.222 H_ang 4.17 H_ship 2.56 | V_loss 0.0026 | LR 0.000100 | early_stop=0
+iter   121 | steps   3,964,928 | SPS     239 | r_p0 -0.290 r_p1 +0.290 | clip_frac 0.366 | KL 0.0183 | H_fire 0.237 H_ang 4.17 H_ship 2.56 | V_loss 0.0029 | LR 0.000100 | early_stop=0
+iter   122 | steps   3,997,696 | SPS     240 | r_p0 -0.520 r_p1 +0.520 | clip_frac 0.368 | KL 0.0168 | H_fire 0.319 H_ang 4.18 H_ship 2.56 | V_loss 0.0045 | LR 0.000100 | early_stop=0
+iter   123 | steps   4,030,464 | SPS     241 | r_p0 -0.430 r_p1 +0.430 | clip_frac 0.369 | KL 0.0168 | H_fire 0.255 H_ang 4.17 H_ship 2.57 | V_loss 0.0020 | LR 0.000100 | early_stop=0
+iter   124 | steps   4,063,232 | SPS     243 | r_p0 -0.330 r_p1 +0.330 | clip_frac 0.369 | KL 0.0200 | H_fire 0.252 H_ang 4.17 H_ship 2.54 | V_loss 0.0027 | LR 0.000100 | early_stop=0
+  saved checkpoints/torch_step_4063232.pt
+  saved checkpoints/pool_step_4063232.pt (12 members)
+  pool snapshot @ step 4,063,232
+  pool size=13  alpha=2.0
+    self                 self_step_15040512             wr=0.33 (n=1321)  pfsp_w=0.444
+    external_heuristic   candidate_zach_public          wr=0.45 (n=938)  pfsp_w=0.307
+    self                 self_step_25067520             wr=0.46 (n=781)  pfsp_w=0.289
+    self                 self_step_3047424              wr=0.47 (n=158)  pfsp_w=0.283
+    self                 self_step_1015808              wr=0.47 (n=839)  pfsp_w=0.279
+    self                 self_step_4063232              wr=0.50 (n=0)  pfsp_w=0.250
+    self                 self_step_2031616              wr=0.59 (n=107)  pfsp_w=0.169
+    external_heuristic   candidate_suneet_lb1200        wr=0.72 (n=165)  pfsp_w=0.078
+iter   125 | steps   4,096,000 | SPS     244 | r_p0 -0.060 r_p1 +0.060 | clip_frac 0.368 | KL 0.0163 | H_fire 0.268 H_ang 4.16 H_ship 2.55 | V_loss 0.0029 | LR 0.000100 | early_stop=0
+iter   126 | steps   4,128,768 | SPS     245 | r_p0 -0.070 r_p1 +0.070 | clip_frac 0.366 | KL 0.0129 | H_fire 0.242 H_ang 4.17 H_ship 2.58 | V_loss 0.0025 | LR 0.000100 | early_stop=0
+iter   127 | steps   4,161,536 | SPS     246 | r_p0 -0.120 r_p1 +0.120 | clip_frac 0.366 | KL 0.0203 | H_fire 0.259 H_ang 4.16 H_ship 2.57 | V_loss 0.0019 | LR 0.000100 | early_stop=0
+iter   128 | steps   4,194,304 | SPS     246 | r_p0 -0.020 r_p1 +0.020 | clip_frac 0.366 | KL 0.0384 | H_fire 0.266 H_ang 4.17 H_ship 2.56 | V_loss 0.0063 | LR 0.000100 | early_stop=0
+iter   129 | steps   4,227,072 | SPS     248 | r_p0 -0.110 r_p1 +0.110 | clip_frac 0.368 | KL 0.0192 | H_fire 0.247 H_ang 4.17 H_ship 2.55 | V_loss 0.0030 | LR 0.000100 | early_stop=0
+iter   130 | steps   4,259,840 | SPS     249 | r_p0 -0.210 r_p1 +0.210 | clip_frac 0.368 | KL 0.0171 | H_fire 0.236 H_ang 4.17 H_ship 2.54 | V_loss 0.0027 | LR 0.000100 | early_stop=0
+iter   131 | steps   4,292,608 | SPS     249 | r_p0 -0.260 r_p1 +0.260 | clip_frac 0.367 | KL 0.0212 | H_fire 0.227 H_ang 4.17 H_ship 2.56 | V_loss 0.0039 | LR 0.000100 | early_stop=0
+iter   132 | steps   4,325,376 | SPS     250 | r_p0 -0.390 r_p1 +0.390 | clip_frac 0.365 | KL 0.0187 | H_fire 0.214 H_ang 4.17 H_ship 2.55 | V_loss 0.0022 | LR 0.000100 | early_stop=0
+iter   133 | steps   4,358,144 | SPS     252 | r_p0 -0.220 r_p1 +0.220 | clip_frac 0.365 | KL 0.0179 | H_fire 0.273 H_ang 4.18 H_ship 2.57 | V_loss 0.0021 | LR 0.000100 | early_stop=0
+iter   134 | steps   4,390,912 | SPS     253 | r_p0 -0.230 r_p1 +0.230 | clip_frac 0.366 | KL 0.0173 | H_fire 0.255 H_ang 4.18 H_ship 2.59 | V_loss 0.0016 | LR 0.000100 | early_stop=0
+iter   135 | steps   4,423,680 | SPS     254 | r_p0 -0.160 r_p1 +0.160 | clip_frac 0.367 | KL 0.0173 | H_fire 0.277 H_ang 4.17 H_ship 2.58 | V_loss 0.0019 | LR 0.000100 | early_stop=0
+iter   136 | steps   4,456,448 | SPS     255 | r_p0 -0.140 r_p1 +0.140 | clip_frac 0.369 | KL 0.0164 | H_fire 0.273 H_ang 4.17 H_ship 2.56 | V_loss 0.0017 | LR 0.000100 | early_stop=0
+iter   137 | steps   4,489,216 | SPS     256 | r_p0 -0.210 r_p1 +0.210 | clip_frac 0.372 | KL 0.0194 | H_fire 0.281 H_ang 4.17 H_ship 2.56 | V_loss 0.0026 | LR 0.000100 | early_stop=0
+iter   138 | steps   4,521,984 | SPS     257 | r_p0 -0.170 r_p1 +0.170 | clip_frac 0.371 | KL 0.0153 | H_fire 0.265 H_ang 4.18 H_ship 2.55 | V_loss 0.0020 | LR 0.000099 | early_stop=0
+iter   139 | steps   4,554,752 | SPS     258 | r_p0 -0.110 r_p1 +0.110 | clip_frac 0.371 | KL 0.0164 | H_fire 0.260 H_ang 4.18 H_ship 2.56 | V_loss 0.0021 | LR 0.000099 | early_stop=0
+iter   140 | steps   4,587,520 | SPS     259 | r_p0 +0.090 r_p1 -0.090 | clip_frac 0.373 | KL 0.0181 | H_fire 0.261 H_ang 4.18 H_ship 2.57 | V_loss 0.0025 | LR 0.000099 | early_stop=0
+iter   141 | steps   4,620,288 | SPS     260 | r_p0 +0.150 r_p1 -0.150 | clip_frac 0.371 | KL 0.0197 | H_fire 0.237 H_ang 4.19 H_ship 2.59 | V_loss 0.0031 | LR 0.000099 | early_stop=0
+iter   142 | steps   4,653,056 | SPS     262 | r_p0 +0.190 r_p1 -0.190 | clip_frac 0.372 | KL 0.0140 | H_fire 0.240 H_ang 4.18 H_ship 2.58 | V_loss 0.0020 | LR 0.000099 | early_stop=0
+iter   143 | steps   4,685,824 | SPS     263 | r_p0 +0.190 r_p1 -0.190 | clip_frac 0.373 | KL 0.0144 | H_fire 0.265 H_ang 4.18 H_ship 2.57 | V_loss 0.0027 | LR 0.000099 | early_stop=0
+iter   144 | steps   4,718,592 | SPS     264 | r_p0 +0.190 r_p1 -0.190 | clip_frac 0.375 | KL 0.0188 | H_fire 0.288 H_ang 4.17 H_ship 2.57 | V_loss 0.0023 | LR 0.000099 | early_stop=0
+iter   145 | steps   4,751,360 | SPS     264 | r_p0 +0.270 r_p1 -0.270 | clip_frac 0.378 | KL 0.0302 | H_fire 0.279 H_ang 4.18 H_ship 2.57 | V_loss 0.0046 | LR 0.000099 | early_stop=0
+iter   146 | steps   4,784,128 | SPS     265 | r_p0 +0.290 r_p1 -0.290 | clip_frac 0.378 | KL 0.0220 | H_fire 0.266 H_ang 4.18 H_ship 2.57 | V_loss 0.0031 | LR 0.000099 | early_stop=0
+iter   147 | steps   4,816,896 | SPS     266 | r_p0 +0.400 r_p1 -0.400 | clip_frac 0.379 | KL 0.0166 | H_fire 0.236 H_ang 4.17 H_ship 2.56 | V_loss 0.0023 | LR 0.000099 | early_stop=0
+iter   148 | steps   4,849,664 | SPS     267 | r_p0 +0.250 r_p1 -0.250 | clip_frac 0.381 | KL 0.0187 | H_fire 0.258 H_ang 4.18 H_ship 2.57 | V_loss 0.0019 | LR 0.000099 | early_stop=0
+iter   149 | steps   4,882,432 | SPS     268 | r_p0 +0.140 r_p1 -0.140 | clip_frac 0.382 | KL 0.0195 | H_fire 0.228 H_ang 4.18 H_ship 2.60 | V_loss 0.0023 | LR 0.000099 | early_stop=0
+iter   150 | steps   4,915,200 | SPS     269 | r_p0 +0.080 r_p1 -0.080 | clip_frac 0.381 | KL 0.0181 | H_fire 0.261 H_ang 4.17 H_ship 2.60 | V_loss 0.0017 | LR 0.000099 | early_stop=0
+iter   151 | steps   4,947,968 | SPS     270 | r_p0 +0.080 r_p1 -0.080 | clip_frac 0.383 | KL 0.0187 | H_fire 0.271 H_ang 4.17 H_ship 2.59 | V_loss 0.0024 | LR 0.000099 | early_stop=0
+iter   152 | steps   4,980,736 | SPS     271 | r_p0 +0.100 r_p1 -0.100 | clip_frac 0.386 | KL 0.0291 | H_fire 0.272 H_ang 4.17 H_ship 2.58 | V_loss 0.0044 | LR 0.000099 | early_stop=0
+iter   153 | steps   5,013,504 | SPS     271 | r_p0 +0.300 r_p1 -0.300 | clip_frac 0.391 | KL 0.0290 | H_fire 0.282 H_ang 4.17 H_ship 2.57 | V_loss 0.0070 | LR 0.000099 | early_stop=0
+  ★ EVAL @ step 5,013,504: vs initial = 54.7% (64 games)  | vs heuristic: 0.0% (16 games) [best=0.0%, no_improve=0]
+iter   154 | steps   5,046,272 | SPS     269 | r_p0 +0.280 r_p1 -0.280 | clip_frac 0.393 | KL 0.0159 | H_fire 0.226 H_ang 4.17 H_ship 2.57 | V_loss 0.0032 | LR 0.000099 | early_stop=0
+iter   155 | steps   5,079,040 | SPS     269 | r_p0 +0.090 r_p1 -0.090 | clip_frac 0.393 | KL 0.0244 | H_fire 0.272 H_ang 4.18 H_ship 2.58 | V_loss 0.0052 | LR 0.000099 | early_stop=0
+  saved checkpoints/torch_step_5079040.pt
+  saved checkpoints/pool_step_5079040.pt (13 members)
+  pool snapshot @ step 5,079,040
+  pool size=14  alpha=2.0
+    self                 self_step_15040512             wr=0.34 (n=1522)  pfsp_w=0.434
+    self                 self_step_1015808              wr=0.46 (n=907)  pfsp_w=0.287
+    external_heuristic   candidate_zach_public          wr=0.47 (n=1177)  pfsp_w=0.285
+    self                 self_step_25067520             wr=0.49 (n=897)  pfsp_w=0.260
+    self                 self_step_5079040              wr=0.50 (n=0)  pfsp_w=0.250
+    self                 self_step_4063232              wr=0.50 (n=241)  pfsp_w=0.248
+    self                 self_step_3047424              wr=0.53 (n=257)  pfsp_w=0.222
+    self                 self_step_2031616              wr=0.58 (n=186)  pfsp_w=0.180
+iter   156 | steps   5,111,808 | SPS     270 | r_p0 +0.090 r_p1 -0.090 | clip_frac 0.394 | KL 0.0219 | H_fire 0.262 H_ang 4.18 H_ship 2.58 | V_loss 0.0045 | LR 0.000099 | early_stop=0
+iter   157 | steps   5,144,576 | SPS     271 | r_p0 +0.190 r_p1 -0.190 | clip_frac 0.393 | KL 0.0200 | H_fire 0.231 H_ang 4.19 H_ship 2.61 | V_loss 0.0034 | LR 0.000099 | early_stop=0
+iter   158 | steps   5,177,344 | SPS     272 | r_p0 +0.070 r_p1 -0.070 | clip_frac 0.393 | KL 0.0141 | H_fire 0.244 H_ang 4.19 H_ship 2.61 | V_loss 0.0023 | LR 0.000099 | early_stop=0
+iter   159 | steps   5,210,112 | SPS     273 | r_p0 +0.010 r_p1 -0.010 | clip_frac 0.393 | KL 0.0182 | H_fire 0.261 H_ang 4.18 H_ship 2.59 | V_loss 0.0021 | LR 0.000099 | early_stop=0
+iter   160 | steps   5,242,880 | SPS     274 | r_p0 -0.020 r_p1 +0.020 | clip_frac 0.396 | KL 0.0175 | H_fire 0.275 H_ang 4.18 H_ship 2.58 | V_loss 0.0023 | LR 0.000099 | early_stop=0
+iter   161 | steps   5,275,648 | SPS     274 | r_p0 +0.170 r_p1 -0.170 | clip_frac 0.398 | KL 0.0221 | H_fire 0.255 H_ang 4.18 H_ship 2.60 | V_loss 0.0040 | LR 0.000099 | early_stop=0
+iter   162 | steps   5,308,416 | SPS     275 | r_p0 +0.430 r_p1 -0.430 | clip_frac 0.397 | KL 0.0164 | H_fire 0.268 H_ang 4.18 H_ship 2.57 | V_loss 0.0028 | LR 0.000099 | early_stop=0
+iter   163 | steps   5,341,184 | SPS     276 | r_p0 +0.550 r_p1 -0.550 | clip_frac 0.396 | KL 0.0196 | H_fire 0.255 H_ang 4.18 H_ship 2.57 | V_loss 0.0027 | LR 0.000099 | early_stop=0
+iter   164 | steps   5,373,952 | SPS     277 | r_p0 +0.370 r_p1 -0.370 | clip_frac 0.395 | KL 0.0171 | H_fire 0.246 H_ang 4.18 H_ship 2.58 | V_loss 0.0022 | LR 0.000099 | early_stop=0
+iter   165 | steps   5,406,720 | SPS     278 | r_p0 +0.350 r_p1 -0.350 | clip_frac 0.394 | KL 0.0166 | H_fire 0.238 H_ang 4.19 H_ship 2.61 | V_loss 0.0016 | LR 0.000099 | early_stop=0
+iter   166 | steps   5,439,488 | SPS     279 | r_p0 +0.260 r_p1 -0.260 | clip_frac 0.392 | KL 0.0184 | H_fire 0.248 H_ang 4.17 H_ship 2.58 | V_loss 0.0021 | LR 0.000099 | early_stop=0
+iter   167 | steps   5,472,256 | SPS     280 | r_p0 +0.290 r_p1 -0.290 | clip_frac 0.391 | KL 0.0219 | H_fire 0.274 H_ang 4.16 H_ship 2.58 | V_loss 0.0017 | LR 0.000099 | early_stop=0
+iter   168 | steps   5,505,024 | SPS     281 | r_p0 +0.310 r_p1 -0.310 | clip_frac 0.393 | KL 0.0251 | H_fire 0.298 H_ang 4.17 H_ship 2.55 | V_loss 0.0025 | LR 0.000099 | early_stop=0
+iter   169 | steps   5,537,792 | SPS     281 | r_p0 +0.380 r_p1 -0.380 | clip_frac 0.394 | KL 0.0230 | H_fire 0.274 H_ang 4.17 H_ship 2.55 | V_loss 0.0024 | LR 0.000099 | early_stop=0
+iter   170 | steps   5,570,560 | SPS     266 | r_p0 +0.280 r_p1 -0.280 | clip_frac 0.394 | KL 0.0187 | H_fire 0.250 H_ang 4.17 H_ship 2.56 | V_loss 0.0040 | LR 0.000099 | early_stop=0
+iter   171 | steps   5,603,328 | SPS     267 | r_p0 +0.140 r_p1 -0.140 | clip_frac 0.393 | KL 0.0229 | H_fire 0.227 H_ang 4.17 H_ship 2.55 | V_loss 0.0027 | LR 0.000099 | early_stop=0
+iter   172 | steps   5,636,096 | SPS     268 | r_p0 +0.140 r_p1 -0.140 | clip_frac 0.394 | KL 0.0199 | H_fire 0.272 H_ang 4.19 H_ship 2.60 | V_loss 0.0036 | LR 0.000099 | early_stop=0
+iter   173 | steps   5,668,864 | SPS     269 | r_p0 +0.090 r_p1 -0.090 | clip_frac 0.392 | KL 0.0154 | H_fire 0.204 H_ang 4.18 H_ship 2.58 | V_loss 0.0017 | LR 0.000099 | early_stop=0
+iter   174 | steps   5,701,632 | SPS     269 | r_p0 +0.080 r_p1 -0.080 | clip_frac 0.390 | KL 0.0165 | H_fire 0.226 H_ang 4.17 H_ship 2.56 | V_loss 0.0013 | LR 0.000099 | early_stop=0
+iter   175 | steps   5,734,400 | SPS     255 | r_p0 +0.120 r_p1 -0.120 | clip_frac 0.390 | KL 0.0230 | H_fire 0.297 H_ang 4.19 H_ship 2.59 | V_loss 0.0024 | LR 0.000099 | early_stop=0
+iter   176 | steps   5,767,168 | SPS     256 | r_p0 +0.020 r_p1 -0.020 | clip_frac 0.391 | KL 0.0191 | H_fire 0.273 H_ang 4.18 H_ship 2.58 | V_loss 0.0021 | LR 0.000099 | early_stop=0
+iter   177 | steps   5,799,936 | SPS     257 | r_p0 -0.180 r_p1 +0.180 | clip_frac 0.390 | KL 0.0185 | H_fire 0.235 H_ang 4.18 H_ship 2.56 | V_loss 0.0018 | LR 0.000099 | early_stop=0
+iter   178 | steps   5,832,704 | SPS     258 | r_p0 -0.180 r_p1 +0.180 | clip_frac 0.388 | KL 0.0172 | H_fire 0.220 H_ang 4.17 H_ship 2.55 | V_loss 0.0019 | LR 0.000099 | early_stop=0
+iter   179 | steps   5,865,472 | SPS     258 | r_p0 +0.110 r_p1 -0.110 | clip_frac 0.388 | KL 0.0227 | H_fire 0.267 H_ang 4.18 H_ship 2.57 | V_loss 0.0018 | LR 0.000099 | early_stop=0
+iter   180 | steps   5,898,240 | SPS     259 | r_p0 +0.420 r_p1 -0.420 | clip_frac 0.388 | KL 0.0240 | H_fire 0.208 H_ang 4.17 H_ship 2.58 | V_loss 0.0019 | LR 0.000099 | early_stop=0
+iter   181 | steps   5,931,008 | SPS     260 | r_p0 +0.440 r_p1 -0.440 | clip_frac 0.388 | KL 0.0193 | H_fire 0.223 H_ang 4.17 H_ship 2.58 | V_loss 0.0027 | LR 0.000099 | early_stop=0
+iter   182 | steps   5,963,776 | SPS     261 | r_p0 +0.390 r_p1 -0.390 | clip_frac 0.388 | KL 0.0153 | H_fire 0.243 H_ang 4.17 H_ship 2.59 | V_loss 0.0027 | LR 0.000099 | early_stop=0
+iter   183 | steps   5,996,544 | SPS     262 | r_p0 +0.430 r_p1 -0.430 | clip_frac 0.388 | KL 0.0175 | H_fire 0.256 H_ang 4.17 H_ship 2.57 | V_loss 0.0021 | LR 0.000099 | early_stop=0
