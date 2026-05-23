@@ -1,0 +1,77 @@
+Training on device: cpu
+Parallel envs: 128
+Rollout steps: 32
+Batch per update: 4096
+Loading environment cabt failed: dlopen(/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/home/kaggle-orbit-wars/orbit_wars_rl/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 23.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+Model params: 307,482
+
+Starting self-play training (target 1,000,000 env steps)
+======================================================================
+iter     1 | steps       4,096 | SPS      41 | reward +0.000 | clip_frac 0.000 | KL 0.0000 | V_loss 0.0000 | LR 0.000001 | early_stop=0
+iter     2 | steps       8,192 | SPS      43 | reward +0.000 | clip_frac 0.000 | KL 0.0004 | V_loss 0.0000 | LR 0.000002 | early_stop=0
+iter     3 | steps      12,288 | SPS      45 | reward +0.000 | clip_frac 0.000 | KL 0.0001 | V_loss 0.0000 | LR 0.000003 | early_stop=0
+iter     4 | steps      16,384 | SPS      46 | reward +0.000 | clip_frac 0.000 | KL 0.0007 | V_loss 0.0000 | LR 0.000004 | early_stop=0
+iter     5 | steps      20,480 | SPS      46 | reward +1.000 | clip_frac 0.001 | KL 0.0008 | V_loss 0.0010 | LR 0.000005 | early_stop=0
+iter     6 | steps      24,576 | SPS      46 | reward +1.000 | clip_frac 0.002 | KL 0.0005 | V_loss 0.0000 | LR 0.000006 | early_stop=0
+iter     7 | steps      28,672 | SPS      47 | reward +1.000 | clip_frac 0.005 | KL 0.0052 | V_loss 0.0000 | LR 0.000007 | early_stop=0
+iter     8 | steps      32,768 | SPS      48 | reward +1.000 | clip_frac 0.005 | KL -0.0002 | V_loss 0.0008 | LR 0.000008 | early_stop=0
+iter     9 | steps      36,864 | SPS      48 | reward +1.000 | clip_frac 0.004 | KL 0.0001 | V_loss 0.0022 | LR 0.000009 | early_stop=0
+iter    10 | steps      40,960 | SPS      47 | reward +1.000 | clip_frac 0.007 | KL 0.0012 | V_loss 0.0000 | LR 0.000010 | early_stop=0
+iter    11 | steps      45,056 | SPS      47 | reward +1.000 | clip_frac 0.008 | KL 0.0021 | V_loss 0.0000 | LR 0.000011 | early_stop=0
+iter    12 | steps      49,152 | SPS      46 | reward +1.000 | clip_frac 0.008 | KL 0.0000 | V_loss 0.0016 | LR 0.000012 | early_stop=0
+iter    13 | steps      53,248 | SPS      46 | reward +1.000 | clip_frac 0.009 | KL 0.0032 | V_loss 0.0000 | LR 0.000013 | early_stop=0
+iter    14 | steps      57,344 | SPS      46 | reward +1.000 | clip_frac 0.010 | KL 0.0029 | V_loss 0.0000 | LR 0.000013 | early_stop=0
+iter    15 | steps      61,440 | SPS      47 | reward +1.000 | clip_frac 0.011 | KL 0.0028 | V_loss 0.0000 | LR 0.000014 | early_stop=0
+iter    16 | steps      65,536 | SPS      46 | reward -0.062 | clip_frac 0.011 | KL -0.0002 | V_loss 0.2516 | LR 0.000015 | early_stop=0
+  ★ best updated: reward=-0.062
+iter    17 | steps      69,632 | SPS      45 | reward -0.062 | clip_frac 0.011 | KL 0.0014 | V_loss 0.0000 | LR 0.000016 | early_stop=0
+iter    18 | steps      73,728 | SPS      45 | reward -0.070 | clip_frac 0.010 | KL 0.0002 | V_loss 0.0022 | LR 0.000017 | early_stop=0
+iter    19 | steps      77,824 | SPS      45 | reward -0.070 | clip_frac 0.010 | KL 0.0027 | V_loss 0.0000 | LR 0.000018 | early_stop=0
+iter    20 | steps      81,920 | SPS      44 | reward -0.062 | clip_frac 0.010 | KL 0.0004 | V_loss 0.0022 | LR 0.000019 | early_stop=0
+iter    21 | steps      86,016 | SPS      44 | reward -0.062 | clip_frac 0.010 | KL 0.0019 | V_loss 0.0000 | LR 0.000020 | early_stop=0
+iter    22 | steps      90,112 | SPS      44 | reward -0.062 | clip_frac 0.009 | KL -0.0006 | V_loss 0.0000 | LR 0.000021 | early_stop=0
+iter    23 | steps      94,208 | SPS      44 | reward -0.069 | clip_frac 0.009 | KL 0.0001 | V_loss 0.0021 | LR 0.000022 | early_stop=0
+iter    24 | steps      98,304 | SPS      44 | reward -0.076 | clip_frac 0.009 | KL 0.0002 | V_loss 0.0006 | LR 0.000023 | early_stop=0
+iter    25 | steps     102,400 | SPS      43 | reward -0.083 | clip_frac 0.009 | KL 0.0001 | V_loss 0.0018 | LR 0.000024 | early_stop=0
+iter    26 | steps     106,496 | SPS      43 | reward -0.083 | clip_frac 0.008 | KL 0.0010 | V_loss 0.0000 | LR 0.000025 | early_stop=0
+iter    27 | steps     110,592 | SPS      43 | reward -0.075 | clip_frac 0.009 | KL 0.0019 | V_loss 0.0023 | LR 0.000026 | early_stop=0
+iter    28 | steps     114,688 | SPS      43 | reward -0.081 | clip_frac 0.008 | KL -0.0001 | V_loss 0.0022 | LR 0.000027 | early_stop=0
+iter    29 | steps     118,784 | SPS      42 | reward -0.081 | clip_frac 0.008 | KL 0.0005 | V_loss 0.0000 | LR 0.000028 | early_stop=0
+iter    30 | steps     122,880 | SPS      42 | reward -0.081 | clip_frac 0.009 | KL 0.0040 | V_loss 0.0000 | LR 0.000029 | early_stop=0
+iter    31 | steps     126,976 | SPS      42 | reward -0.088 | clip_frac 0.009 | KL 0.0002 | V_loss 0.0022 | LR 0.000030 | early_stop=0
+iter    32 | steps     131,072 | SPS      43 | reward -0.070 | clip_frac 0.009 | KL -0.0001 | V_loss 0.1332 | LR 0.000031 | early_stop=0
+iter    33 | steps     135,168 | SPS      43 | reward -0.070 | clip_frac 0.008 | KL 0.0006 | V_loss 0.0000 | LR 0.000032 | early_stop=0
+iter    34 | steps     139,264 | SPS      43 | reward -0.070 | clip_frac 0.008 | KL -0.0000 | V_loss 0.0018 | LR 0.000033 | early_stop=0
+iter    35 | steps     143,360 | SPS      42 | reward -0.070 | clip_frac 0.008 | KL 0.0003 | V_loss 0.0000 | LR 0.000034 | early_stop=0
+iter    36 | steps     147,456 | SPS      42 | reward -0.070 | clip_frac 0.008 | KL 0.0000 | V_loss 0.0015 | LR 0.000035 | early_stop=0
+iter    37 | steps     151,552 | SPS      42 | reward -0.070 | clip_frac 0.008 | KL 0.0004 | V_loss 0.0000 | LR 0.000036 | early_stop=0
+iter    38 | steps     155,648 | SPS      43 | reward -0.070 | clip_frac 0.008 | KL 0.0000 | V_loss 0.0000 | LR 0.000037 | early_stop=0
+iter    39 | steps     159,744 | SPS      43 | reward -0.070 | clip_frac 0.007 | KL 0.0000 | V_loss 0.0035 | LR 0.000037 | early_stop=0
+iter    40 | steps     163,840 | SPS      43 | reward -0.070 | clip_frac 0.007 | KL -0.0001 | V_loss 0.0000 | LR 0.000038 | early_stop=0
+iter    41 | steps     167,936 | SPS      43 | reward -0.080 | clip_frac 0.007 | KL 0.0005 | V_loss 0.0002 | LR 0.000039 | early_stop=0

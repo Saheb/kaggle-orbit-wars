@@ -8,4 +8,4 @@ replays*
 *.zip
 *.csv
 *.pkl
-gpu_run_artifacts/
+gpu_run_artifacts/checkpoints/
