@@ -28,8 +28,8 @@ class ModelConfig:
     num_heads: int = 4
     num_layers: int = 3
     mlp_expansion: int = 3
-    num_angle_bins: int = 72
-    num_ship_bins: int = 16
+    num_angle_bins: int = 144
+    num_ship_bins: int = 32
     dropout: float = 0.0
 
 

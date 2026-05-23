@@ -40,10 +40,10 @@ MAX_FLEETS = 256
 MAX_OWNED = 10
 
 # Discrete action bins (match action_mask.py / model.py)
-NUM_ANGLE_BINS = 72
+NUM_ANGLE_BINS = 144
 ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
-NUM_SHIP_BINS = 16
-SHIP_COUNTS = [1, 2, 3, 5, 8, 13, 20, 30, 45, 65, 90, 120, 160, 200, 250, 300]
+NUM_SHIP_BINS = 32
+SHIP_COUNTS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 19, 22, 26, 30, 35, 42, 50, 60, 72, 86, 102, 122, 145, 173, 206, 245, 290, 350, 420]
 
 
 def _ship_speed(ships: torch.Tensor) -> torch.Tensor:

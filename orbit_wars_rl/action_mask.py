@@ -13,7 +13,7 @@ import math
 import numpy as np
 import torch
 
-NUM_ANGLE_BINS = 72
+NUM_ANGLE_BINS = 144
 ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
 CENTER = 50.0
 SUN_RADIUS = 10.0
@@ -166,7 +166,7 @@ def actions_from_sampled_policy(fire_action, angle_action, ship_action, masks, o
     return moves
 
 
-SHIP_COUNTS = [1, 2, 3, 5, 8, 13, 20, 30, 45, 65, 90, 120, 160, 200, 250, 300]
+SHIP_COUNTS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 19, 22, 26, 30, 35, 42, 50, 60, 72, 86, 102, 122, 145, 173, 206, 245, 290, 350, 420]
 
 
 def _ship_bin_to_count(bin_idx, max_ships):

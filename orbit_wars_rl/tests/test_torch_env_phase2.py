@@ -58,8 +58,8 @@ def policy_tensor_format(env: VecTorchEnv, player: int) -> torch.Tensor:
     angle_pos = torch.where(angle < 0, angle + 2 * math.pi, angle)
     angle_bin = (angle_pos / ANGLE_BIN_WIDTH).long().clamp(0, NUM_ANGLE_BINS - 1)
 
-    # Ship bin closest to 5 (= bin 3 in [1,2,3,5,8,13,...])
-    ship_bin = 3  # value 5
+    # Ship bin == value 5 (lookup since SHIP_COUNTS layout can change)
+    ship_bin = SHIP_COUNTS.index(5)
 
     fire = slot_valid & (src_ships >= 5)
 

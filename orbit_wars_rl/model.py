@@ -13,10 +13,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-NUM_ANGLE_BINS = 72
-NUM_SHIP_BINS = 16
+NUM_ANGLE_BINS = 144
+NUM_SHIP_BINS = 32
 ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
-SHIP_COUNTS = [1, 2, 3, 5, 8, 13, 20, 30, 45, 65, 90, 120, 160, 200, 250, 300]
+SHIP_COUNTS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 19, 22, 26, 30, 35, 42, 50, 60, 72, 86, 102, 122, 145, 173, 206, 245, 290, 350, 420]
 
 
 class TransformerBlock(nn.Module):
