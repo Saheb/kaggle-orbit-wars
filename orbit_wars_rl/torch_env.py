@@ -378,6 +378,14 @@ class VecTorchEnv:
         # Per-env owned_count for the model
         owned_count = slot_valid.long().sum(dim=1).tolist()
 
+        # ----- Pairwise (src, tgt) features for the model's cross-attention -----
+        # Matches features.compute_pairwise_features() in the kaggle path.
+        # Output: (N, MAX_OWNED, P, 10) — same channel order as features.py.
+        pairwise = self._compute_pairwise(
+            planets=planets, planet_alive=planet_alive, P=P,
+            owned_idx=owned_idx, slot_valid=slot_valid, player=player,
+        )
+
         return {
             "planet_features": pf,
             "fleet_features":  ff,
@@ -390,7 +398,86 @@ class VecTorchEnv:
             "owned_indices":   owned_idx,
             "max_ships":       max_ships,
             "owned_count":     owned_count,
+            "pairwise_features": pairwise,
         }
+
+    def _compute_pairwise(self, planets, planet_alive, P, owned_idx, slot_valid, player):
+        """Vectorized counterpart of features.compute_pairwise_features().
+
+        Returns (N, MAX_OWNED, P, 10) float32 on self.device. Channel order:
+          0 sin(angle src→tgt)
+          1 cos(angle src→tgt)
+          2 distance / BOARD_SIZE
+          3 1 / (eta@~20ships + 1)
+          4 sun-safe flag
+          5 target is mine
+          6 target is enemy
+          7 target is neutral
+          8 target production / 5
+          9 valid flag (slot_valid AND target_alive)
+        """
+        N = self.num_envs
+        device = self.device
+
+        # Source positions per (env, slot): gather along the planet axis
+        gather_idx = owned_idx.unsqueeze(-1).expand(-1, -1, 7)  # (N, MO, 7)
+        src = self.planets[:, :, :].gather(1, gather_idx)        # (N, MO, 7)
+        sx = src[:, :, 2]                                        # (N, MO)
+        sy = src[:, :, 3]
+
+        # All target positions: (N, 1, P) broadcastable against (N, MO, 1)
+        tx = planets[:, :, 2].unsqueeze(1)                       # (N, 1, P)
+        ty = planets[:, :, 3].unsqueeze(1)                       # (N, 1, P)
+        owner_t = planets[:, :, 1].unsqueeze(1).long()           # (N, 1, P)
+        prod_t = planets[:, :, 6].unsqueeze(1)                   # (N, 1, P)
+        alive_t = planet_alive.unsqueeze(1)                      # (N, 1, P)
+
+        sx_b = sx.unsqueeze(-1)                                  # (N, MO, 1)
+        sy_b = sy.unsqueeze(-1)
+
+        dx = tx - sx_b                                           # (N, MO, P)
+        dy = ty - sy_b
+        dist2 = dx * dx + dy * dy
+        dist = torch.sqrt(dist2.clamp(min=1e-9))
+        sin_a = dy / dist
+        cos_a = dx / dist
+
+        # ETA@~20 ships → use the matching speed constant
+        ETA_SPEED = 1.0 + (MAX_SHIP_SPEED - 1.0) * (math.log(20.0) / math.log(1000.0)) ** 1.5
+        eta = (dist / ETA_SPEED).ceil().clamp(min=1.0)
+
+        # Sun-cross check: point-to-segment distance from (CENTER, CENTER) to src→tgt
+        seg_len2 = dist2.clamp(min=1e-9)
+        t_param = ((CENTER - sx_b) * dx + (CENTER - sy_b) * dy) / seg_len2
+        t_param = t_param.clamp(0.0, 1.0)
+        proj_x = sx_b + t_param * dx
+        proj_y = sy_b + t_param * dy
+        sun_d = torch.sqrt((proj_x - CENTER) ** 2 + (proj_y - CENTER) ** 2)
+        sun_safe = (sun_d >= SUN_RADIUS).float()
+
+        is_mine_t = (owner_t == player).float() * alive_t.float()        # (N, 1, P)
+        is_enemy_t = ((owner_t != player) & (owner_t != -1)).float() * alive_t.float()
+        is_neutral_t = (owner_t == -1).float() * alive_t.float()
+
+        # Broadcast scalar / 1-along-MO channels to (N, MO, P)
+        MO = owned_idx.shape[1]
+        is_mine_b = is_mine_t.expand(-1, MO, -1)
+        is_enemy_b = is_enemy_t.expand(-1, MO, -1)
+        is_neutral_b = is_neutral_t.expand(-1, MO, -1)
+        prod_b = (prod_t / 5.0).expand(-1, MO, -1)
+        valid_b = alive_t.float().expand(-1, MO, -1)
+
+        # Stack channels
+        out = torch.stack([
+            sin_a, cos_a, dist / BOARD_SIZE, 1.0 / (eta + 1.0),
+            sun_safe, is_mine_b, is_enemy_b, is_neutral_b, prod_b, valid_b,
+        ], dim=-1)  # (N, MO, P, 10)
+
+        # Zero out invalid owned slots AND invalid target planets (match kaggle path)
+        slot_valid_b = slot_valid.unsqueeze(-1).unsqueeze(-1).float()    # (N, MO, 1, 1)
+        target_valid_b = alive_t.float().expand(-1, MO, -1).unsqueeze(-1)  # (N, MO, P, 1)
+        out = out * slot_valid_b * target_valid_b
+        return out
 
     # ---------------------------------------------------------------------
     # Owned-planet indices per player — vectorized.

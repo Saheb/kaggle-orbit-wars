@@ -51,6 +51,8 @@ def build_agent_fn(model: EntityTransformer, device: torch.device, fire_threshol
                 slot_valid=masks["slot_valid"].to(device),
                 owned_indices=masks["owned_indices"].to(device),
                 owned_count=masks["owned_count"],
+                pairwise_features=features["pairwise_features"].unsqueeze(0).to(device)
+                    if "pairwise_features" in features else None,
             )
 
         return actions_from_policy(

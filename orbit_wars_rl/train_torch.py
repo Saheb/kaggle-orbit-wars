@@ -105,6 +105,7 @@ def _act_deterministic(model, env, player):
             fire_mask=feats["fire_mask"], angle_mask=feats["angle_mask"],
             slot_valid=feats["slot_valid"], owned_indices=feats["owned_indices"],
             owned_count=feats["owned_count"],
+            pairwise_features=feats.get("pairwise_features"),
         )
     fl = out["fire_logits"].masked_fill(~feats["fire_mask"], -1e9)
     al = out["angle_logits"].masked_fill(~feats["angle_mask"], -1e9)
@@ -403,6 +404,7 @@ def train(args):
         "angle_mask":      torch.zeros(rollout_T, N, P, MAX_OWNED, NUM_ANGLE_BINS, dtype=torch.bool, device=storage_dev),
         "slot_valid":      torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev),
         "owned_indices":   torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
+        "pairwise_features": torch.zeros(rollout_T, N, P, MAX_OWNED, 48, 10, device=storage_dev),
         "fire_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "angle_a":    torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "ship_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
@@ -433,6 +435,7 @@ def train(args):
                     fire_mask=feats["fire_mask"], angle_mask=feats["angle_mask"],
                     slot_valid=feats["slot_valid"], owned_indices=feats["owned_indices"],
                     owned_count=feats["owned_count"],
+                    pairwise_features=feats.get("pairwise_features"),
                 )
             fire_a, angle_a, ship_a, *_ = sample_action_batched(
                 outs, feats["fire_mask"], feats["angle_mask"]
@@ -482,6 +485,7 @@ def train(args):
                 slot_valid=feats["slot_valid"],
                 owned_indices=feats["owned_indices"],
                 owned_count=owned_count,
+                pairwise_features=feats.get("pairwise_features"),
             )
         return feats, outs
 
@@ -525,6 +529,8 @@ def train(args):
                 storage["angle_mask"][t, :, p].copy_(feats_p["angle_mask"], non_blocking=True)
                 storage["slot_valid"][t, :, p].copy_(feats_p["slot_valid"], non_blocking=True)
                 storage["owned_indices"][t, :, p].copy_(feats_p["owned_indices"], non_blocking=True)
+                if "pairwise_features" in feats_p:
+                    storage["pairwise_features"][t, :, p].copy_(feats_p["pairwise_features"], non_blocking=True)
                 storage["fire_a"][t, :, p].copy_(fire_p, non_blocking=True)
                 storage["angle_a"][t, :, p].copy_(angle_p, non_blocking=True)
                 storage["ship_a"][t, :, p].copy_(ship_p, non_blocking=True)
@@ -582,6 +588,7 @@ def train(args):
                     slot_valid=feats_final["slot_valid"],
                     owned_indices=feats_final["owned_indices"],
                     owned_count=feats_final["owned_count"],
+                    pairwise_features=feats_final.get("pairwise_features"),
                 )
                 next_value_p[:, p] = outs_final["value"].squeeze(-1).cpu()
 
@@ -625,6 +632,7 @@ def train(args):
             "angle_mask":      flat["angle_mask"],
             "slot_valid":      flat["slot_valid"],
             "owned_indices":   flat["owned_indices"],
+            "pairwise_features": flat["pairwise_features"],
             "owned_count":     flat["slot_valid"].sum(dim=1).tolist(),
             "actions": {
                 "fire":  flat["fire_a"],

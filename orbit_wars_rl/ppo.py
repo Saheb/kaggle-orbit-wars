@@ -60,12 +60,16 @@ class PPOLearner:
 
         slot_valid_2d = to_dev(batch["slot_valid"])  # (B, max_owned) bool
 
+        pairwise = batch.get("pairwise_features")
+        if pairwise is not None:
+            pairwise = to_dev(pairwise)
         outputs = self.model(
             planet_features, fleet_features, global_features,
             planet_mask, fleet_mask,
             fire_mask=fire_mask, angle_mask=angle_mask,
             slot_valid=slot_valid_2d, owned_indices=owned_indices,
             owned_count=batch.get("owned_count"),
+            pairwise_features=pairwise,
         )
 
         fire_logits = outputs["fire_logits"]
@@ -185,6 +189,9 @@ class PPOLearner:
                 bc_loss_val = 0.0
                 if bc_batch is not None and cfg.bc_coef > 0:
                     from bc import bc_loss as _bc_loss
+                    bc_pairwise = bc_batch.get("pairwise_features")
+                    if bc_pairwise is not None:
+                        bc_pairwise = bc_pairwise.to(self.device)
                     bc_out = self.model(
                         bc_batch["planet_features"].to(self.device),
                         bc_batch["fleet_features"].to(self.device),
@@ -195,6 +202,7 @@ class PPOLearner:
                         angle_mask=bc_batch["angle_mask"].to(self.device),
                         slot_valid=bc_batch["slot_valid"].to(self.device),
                         owned_indices=bc_batch["owned_indices"],
+                        pairwise_features=bc_pairwise,
                     )
                     bc_loss_tensor, bc_m = _bc_loss(bc_out, {
                         k: v.to(self.device) for k, v in bc_batch.items()
