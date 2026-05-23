@@ -31,6 +31,7 @@ class ModelConfig:
     num_angle_bins: int = 144
     num_ship_bins: int = 32
     pairwise_feature_dim: int = 10   # see features.PAIRWISE_FEATURE_DIM
+    max_planets: int = 48            # for target_head output size; matches EnvConfig
     dropout: float = 0.0
 
 

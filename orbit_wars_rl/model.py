@@ -74,6 +74,12 @@ class EntityTransformer(nn.Module):
         self.fire_head = nn.Linear(D, 1)
         self.angle_head = nn.Linear(D, NUM_ANGLE_BINS)
         self.ship_head = nn.Linear(D, NUM_SHIP_BINS)
+        # Target-index head: which planet to attack. The angle bin is a coordinate
+        # *consequence* of choosing a target; predicting target directly is the
+        # semantic action. Used by BC; at inference, target → angle is derived
+        # deterministically. Prior 0.08-twice angle_red showed bin softmax is the
+        # wrong frame for this problem.
+        self.target_head = nn.Linear(D, cfg.max_planets if hasattr(cfg, "max_planets") else 48)
 
         # Value head
         self.value_fc1 = nn.Linear(D, D)
@@ -163,6 +169,19 @@ class EntityTransformer(nn.Module):
         fire_logits = self.fire_head(owned_entities).squeeze(-1)  # (B, max_owned)
         angle_logits = self.angle_head(owned_entities)  # (B, max_owned, 144)
         ship_logits = self.ship_head(owned_entities)  # (B, max_owned, 32)
+        target_logits = self.target_head(owned_entities)  # (B, max_owned, max_planets)
+        # Mask out invalid planet slots (padded) so target softmax only sees real planets
+        if planet_mask is not None:
+            tgt_mask = planet_mask.unsqueeze(1).expand(-1, max_owned, -1)  # (B, MO, N_p)
+            # If max_planets in model > N_p in obs, pad the mask to model width
+            mp = target_logits.shape[-1]
+            np_obs = tgt_mask.shape[-1]
+            if mp > np_obs:
+                pad = torch.zeros(B, max_owned, mp - np_obs, dtype=torch.bool, device=tgt_mask.device)
+                tgt_mask = torch.cat([tgt_mask, pad], dim=-1)
+            elif mp < np_obs:
+                tgt_mask = tgt_mask[..., :mp]
+            target_logits = target_logits.masked_fill(~tgt_mask, -100.0)
 
         # Apply masks (-100 is safe in float16 on MPS; -1e9 overflows)
         if fire_mask is not None:
@@ -173,6 +192,7 @@ class EntityTransformer(nn.Module):
             fire_logits = fire_logits.masked_fill(~slot_valid, -100.0)
             angle_logits = angle_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
             ship_logits = ship_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
+            target_logits = target_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
         # Value head: mean-pool valid entities
         valid_float = (~attn_mask).float()  # (B, N) 1=valid, 0=pad
@@ -183,6 +203,7 @@ class EntityTransformer(nn.Module):
             "fire_logits": fire_logits,
             "angle_logits": angle_logits,
             "ship_logits": ship_logits,
+            "target_logits": target_logits,
             "value": value,
         }
 
