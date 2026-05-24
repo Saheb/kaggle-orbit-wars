@@ -259,7 +259,15 @@ class PPOLearner:
                     scheduler.step()
 
                 for k, v in metrics.items():
-                    sum_metrics[k] = sum_metrics.get(k, 0.0) + v
+                    if isinstance(v, list):
+                        # Element-wise sum for list-valued metrics (per-slot etc.)
+                        existing = sum_metrics.get(k)
+                        if existing is None:
+                            sum_metrics[k] = list(v)
+                        else:
+                            sum_metrics[k] = [a + b for a, b in zip(existing, v)]
+                    else:
+                        sum_metrics[k] = sum_metrics.get(k, 0.0) + v
                 epoch_kl += metrics.get("approx_kl", 0.0)
                 n_updates += 1
 
@@ -270,7 +278,10 @@ class PPOLearner:
                 break
 
         n = max(n_updates, 1)
-        avg_metrics = {k: v / n for k, v in sum_metrics.items()}
+        avg_metrics = {
+            k: ([x / n for x in v] if isinstance(v, list) else v / n)
+            for k, v in sum_metrics.items()
+        }
         avg_metrics["learning_rate"] = self.optimizer.param_groups[0]["lr"]
         avg_metrics["kl_early_stop"] = float(early_stopped)
         self.update_count += n_updates
