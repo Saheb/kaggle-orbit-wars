@@ -51,6 +51,15 @@ class PPOConfig:
     entropy_coef_angle: float = 0.02
     entropy_coef_ships: float = 0.01
     bc_coef: float = 0.0
+    # IL regularization: KL penalty between current policy and a frozen
+    # reference (typically the BC warmstart). Computed on PPO rollout states.
+    # Anchors the policy to teacher competence — prevents drift to degenerate
+    # local optima in self-play. Decays linearly to 0 over training so the
+    # policy can eventually exceed the teacher.
+    #   il_lambda:        peak coefficient (0 = disabled)
+    #   il_decay_frac:    fraction of training over which lambda decays to 0
+    il_lambda: float = 0.0
+    il_decay_frac: float = 0.8
     kl_target: float = 0.05   # KL early-stop threshold per epoch; inf = disabled
     value_coef: float = 0.5
     shaping_coef: float = 0.01

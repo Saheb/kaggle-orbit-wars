@@ -222,12 +222,33 @@ def train(args):
         cfg.ppo.learning_rate = args.learning_rate
     if args.ppo_epochs is not None:
         cfg.ppo.ppo_epochs = args.ppo_epochs
+    if args.il_lambda is not None:
+        cfg.ppo.il_lambda = args.il_lambda
+    if args.il_decay_frac is not None:
+        cfg.ppo.il_decay_frac = args.il_decay_frac
     print(f"PPO config: lr={cfg.ppo.learning_rate}, ppo_epochs={cfg.ppo.ppo_epochs}, "
           f"num_minibatches={cfg.ppo.num_minibatches}, kl_target={cfg.ppo.kl_target}")
 
     env = VecTorchEnv(num_envs=args.num_envs, num_players=2,
                       device=device, episode_steps=500)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
+
+    # Honor num_ship_bins saved in the checkpoint (fraction-head BC uses 10
+    # bins, default model has 32). Inspect ship_head.weight shape if present.
+    if args.resume:
+        _ckpt_peek = torch.load(args.resume, map_location="cpu", weights_only=False)
+        ckpt_cfg = _ckpt_peek.get("config", {}) if isinstance(_ckpt_peek, dict) else {}
+        if "num_ship_bins" in ckpt_cfg:
+            cfg.model.num_ship_bins = int(ckpt_cfg["num_ship_bins"])
+            print(f"Checkpoint declares num_ship_bins={cfg.model.num_ship_bins}")
+        else:
+            sd_peek = _ckpt_peek.get("model", _ckpt_peek)
+            if "ship_head.weight" in sd_peek:
+                n = int(sd_peek["ship_head.weight"].shape[0])
+                if n != cfg.model.num_ship_bins:
+                    cfg.model.num_ship_bins = n
+                    print(f"Checkpoint ship_head implies num_ship_bins={n}")
+        del _ckpt_peek
 
     model = EntityTransformer(cfg.model).to(device)
     print(f"Model params: {count_params(model):,}")
@@ -237,7 +258,29 @@ def train(args):
         model.load_state_dict(sd)
         print(f"Resumed from {args.resume}")
 
-    learner = PPOLearner(model, cfg, device=device)
+    # IL regularization: load frozen reference policy if requested
+    frozen_il_model = None
+    if args.il_ref:
+        frozen_il_model = EntityTransformer(cfg.model).to(device)
+        sd = torch.load(args.il_ref, map_location="cpu", weights_only=False)
+        if "model" in sd: sd = sd["model"]
+        frozen_il_model.load_state_dict(sd)
+        frozen_il_model.eval()
+        print(f"IL reference loaded from {args.il_ref}  (lambda={cfg.ppo.il_lambda}, "
+              f"decay_frac={cfg.ppo.il_decay_frac})")
+    elif cfg.ppo.il_lambda > 0:
+        # If --resume is set and no separate ref, default to the resume checkpoint
+        if args.resume:
+            frozen_il_model = EntityTransformer(cfg.model).to(device)
+            sd = torch.load(args.resume, map_location="cpu", weights_only=False)
+            if "model" in sd: sd = sd["model"]
+            frozen_il_model.load_state_dict(sd)
+            frozen_il_model.eval()
+            print(f"IL reference defaulted to --resume checkpoint  (lambda={cfg.ppo.il_lambda})")
+        else:
+            print("WARNING: il_lambda > 0 but no --il-ref and no --resume — IL disabled")
+
+    learner = PPOLearner(model, cfg, device=device, frozen_il_model=frozen_il_model)
 
     # LR scheduler: warmup + cosine decay over total updates.
     # On --resume, skip warmup by default (the model is already trained — no
@@ -628,6 +671,14 @@ def train(args):
                     sub[k] = [v[i] for i in mi.tolist()]
             minibatches.append(sub)
 
+        # IL coefficient schedule: linear decay from il_lambda → 0 over
+        # il_decay_frac of total training. Held at 0 thereafter so PPO can
+        # eventually exceed the teacher.
+        if learner.frozen_il_model is not None and cfg.ppo.il_lambda > 0:
+            progress = total_env_steps / max(args.total_steps, 1)
+            decay = max(0.0, 1.0 - progress / max(cfg.ppo.il_decay_frac, 1e-6))
+            learner.set_il_coef(cfg.ppo.il_lambda * decay)
+
         # PPO update
         model.train()
         metrics = learner.update(minibatches, scheduler=scheduler,
@@ -665,6 +716,9 @@ def train(args):
                 f"srcs_multi={metrics.get('avg_sources_multi', 0):.2f} "
                 f"ship0={metrics.get('ship_bin0_rate', 0):.2f} "
                 f"meanshipbin={metrics.get('mean_ship_bin', 0):.1f}"
+                + (f" | il_kl={metrics.get('il_kl', 0):.3f} "
+                   f"il_coef={metrics.get('il_coef', 0):.3f}"
+                   if metrics.get('il_coef', 0) > 0 else "")
             )
             # Collapse warnings — flag early instead of finding via replay at 10M
             if iter_count > 20:  # skip BC-resume noise
@@ -750,6 +804,18 @@ if __name__ == "__main__":
                         help="Override PPO learning rate (default: cfg.ppo.learning_rate=3e-4)")
     parser.add_argument("--ppo-epochs", type=int, default=None,
                         help="Override PPO epochs per rollout (default: 4)")
+    # IL regularization (KL-to-frozen-BC penalty) ------------------------
+    parser.add_argument("--il-lambda", type=float, default=None,
+                        help="Peak coef for KL(current||frozen_BC) penalty. "
+                             "0 = disabled. Typical: 0.1–1.0. Decays linearly "
+                             "to 0 over --il-decay-frac of training.")
+    parser.add_argument("--il-decay-frac", type=float, default=None,
+                        help="Fraction of total training over which il_lambda "
+                             "decays to 0 (default cfg: 0.8).")
+    parser.add_argument("--il-ref", type=str, default="",
+                        help="Path to a separate frozen reference .pt for IL. "
+                             "Default behaviour: when il_lambda>0 and --resume is "
+                             "set, the resume checkpoint is used as the reference.")
     # Opponent pool (PFSP self-play with optional external heuristics) ----
     parser.add_argument("--pool-mode", choices=["none", "self", "mixed"], default="none",
                         help="none: pure current-vs-current self-play (default). "

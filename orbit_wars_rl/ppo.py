@@ -19,10 +19,20 @@ from config import Config
 
 
 class PPOLearner:
-    def __init__(self, model, cfg, device="cpu"):
+    def __init__(self, model, cfg, device="cpu", frozen_il_model=None):
         self.model = model.to(device)
         self.cfg = cfg
         self.device = device
+        # Frozen reference policy for IL regularization (KL-to-BC penalty).
+        # Held in eval mode, no gradients. Set via training entrypoint when
+        # cfg.ppo.il_lambda > 0.
+        self.frozen_il_model = frozen_il_model
+        if self.frozen_il_model is not None:
+            self.frozen_il_model.to(device).eval()
+            for p in self.frozen_il_model.parameters():
+                p.requires_grad_(False)
+        # Current IL coefficient — schedule updated externally each iter
+        self.il_coef = float(getattr(cfg.ppo, "il_lambda", 0.0)) if frozen_il_model is not None else 0.0
 
         self.optimizer = torch.optim.Adam(
             model.parameters(),
@@ -31,6 +41,62 @@ class PPOLearner:
         )
         self.total_steps = 0
         self.update_count = 0
+
+    def set_il_coef(self, coef: float) -> None:
+        """Update the IL coefficient (typically called per iter for schedule)."""
+        self.il_coef = float(coef)
+
+    def _il_kl_penalty(self, batch, current_outputs) -> torch.Tensor:
+        """KL(π_current || π_frozen_BC) summed across heads, masked to valid
+        slots/actions. Returns scalar tensor; 0.0 if no frozen ref."""
+        if self.frozen_il_model is None or self.il_coef <= 0:
+            return torch.zeros((), device=self.device)
+
+        def to_dev(x):
+            return x.to(self.device) if isinstance(x, torch.Tensor) else x
+
+        with torch.no_grad():
+            pairwise = batch.get("pairwise_features")
+            if pairwise is not None:
+                pairwise = to_dev(pairwise)
+            frozen_out = self.frozen_il_model(
+                to_dev(batch["planet_features"]),
+                to_dev(batch["fleet_features"]),
+                to_dev(batch["global_features"]),
+                to_dev(batch["planet_mask"]),
+                to_dev(batch["fleet_mask"]),
+                fire_mask=to_dev(batch["fire_mask"]),
+                angle_mask=to_dev(batch["angle_mask"]),
+                slot_valid=to_dev(batch["slot_valid"]),
+                owned_indices=batch["owned_indices"],
+                pairwise_features=pairwise,
+            )
+
+        slot_valid = to_dev(batch["slot_valid"]).float()    # (B, MO)
+        sv_sum = slot_valid.sum().clamp(min=1)
+
+        # Fire: Bernoulli KL per slot, averaged over valid slots.
+        # KL(Bern(p) || Bern(q)) = p log(p/q) + (1-p) log((1-p)/(1-q))
+        p_curr = torch.sigmoid(current_outputs["fire_logits"]).clamp(1e-6, 1 - 1e-6)
+        p_froz = torch.sigmoid(frozen_out["fire_logits"]).clamp(1e-6, 1 - 1e-6)
+        fire_kl = (p_curr * (p_curr / p_froz).log()
+                   + (1 - p_curr) * ((1 - p_curr) / (1 - p_froz)).log())
+        fire_kl = (fire_kl * slot_valid).sum() / sv_sum
+
+        # Angle / ship / target: Categorical KL on logits, only for valid slots.
+        # Build per-(B, MO) mean by summing across action dim then masking.
+        def cat_kl(curr_logits, froz_logits, slot_mask):
+            log_curr = torch.log_softmax(curr_logits, dim=-1)
+            log_froz = torch.log_softmax(froz_logits, dim=-1)
+            p_curr_ = log_curr.exp()
+            kl_per = (p_curr_ * (log_curr - log_froz)).sum(dim=-1)  # (B, MO)
+            return (kl_per * slot_mask).sum() / slot_mask.sum().clamp(min=1)
+
+        angle_kl = cat_kl(current_outputs["angle_logits"], frozen_out["angle_logits"], slot_valid)
+        ship_kl = cat_kl(current_outputs["ship_logits"], frozen_out["ship_logits"], slot_valid)
+        target_kl = cat_kl(current_outputs["target_logits"], frozen_out["target_logits"], slot_valid)
+
+        return fire_kl + angle_kl + ship_kl + target_kl
 
     def compute_loss(self, batch, return_metrics=False):
         """Compute PPO clipped loss on a batch.
@@ -132,13 +198,19 @@ class PPOLearner:
         angle_entropy = angle_dist.entropy().mean()
         ship_entropy = ship_dist.entropy().mean()
 
+        # IL regularization: KL(π_current || π_frozen_BC) on rollout states.
+        # Anchors policy to teacher competence. Coefficient (self.il_coef) is
+        # set externally per iter via set_il_coef() — supports linear decay.
+        il_kl = self._il_kl_penalty(batch, outputs)
+
         # Note: BC regularization is handled in update() via a separate forward
         # pass combined into the same backward. compute_loss() handles PPO only.
         loss = (policy_loss
                 + cfg.value_coef * value_loss
                 - cfg.entropy_coef_fire * fire_entropy
                 - cfg.entropy_coef_angle * angle_entropy
-                - cfg.entropy_coef_ships * ship_entropy)
+                - cfg.entropy_coef_ships * ship_entropy
+                + self.il_coef * il_kl)
 
         if return_metrics:
             clip_frac = ((ratio - 1.0).abs() > cfg.clip_eps).float().mean()
@@ -189,6 +261,9 @@ class PPOLearner:
                 "avg_sources_multi": avg_sources_when_multi.item(),
                 "ship_bin0_rate": ship_bin0_rate.item(),
                 "mean_ship_bin": mean_ship_bin.item(),
+                # IL regularization diagnostics
+                "il_kl": il_kl.item() if isinstance(il_kl, torch.Tensor) else float(il_kl),
+                "il_coef": self.il_coef,
                 # Per-slot fire probs — store as tensor; logger reads slot 0 + max(slots 1+)
                 "per_slot_fire_probs": per_slot_fire.detach().cpu().tolist(),
             }
