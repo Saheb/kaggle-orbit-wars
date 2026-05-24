@@ -125,8 +125,107 @@ def evaluate_against_baseline(
     }
 
 
+def evaluate_panel(
+    model: EntityTransformer,
+    device: torch.device,
+    opponent: str,
+    fire_threshold: float = 0.5,
+) -> dict:
+    """Stratified eval over the 128-seed community panel, playing both seats.
+
+    256 games per opponent (128 seeds × 2 seats). Aggregates wins per
+    archetype (8 games per cell = 4 seeds × 2 seats) and per seat, so a
+    +5pp overall regression hidden by an asymmetric or board-shape-specific
+    weakness is visible.
+    """
+    from kaggle_environments import make
+    from eval_panel import BY_ARCHETYPE
+
+    agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold)
+
+    per_arch: dict[str, dict] = {arch: {"wins": 0, "total": 0,
+                                        "wins_seat0": 0, "wins_seat1": 0,
+                                        "total_seat0": 0, "total_seat1": 0,
+                                        "material_sum": 0}
+                                 for arch in BY_ARCHETYPE}
+    overall = {"wins": 0, "total": 0, "wins_seat0": 0, "wins_seat1": 0,
+               "total_seat0": 0, "total_seat1": 0}
+    game_idx = 0
+    total_games = sum(len(seeds) for seeds in BY_ARCHETYPE.values()) * 2
+
+    for archetype, seeds in BY_ARCHETYPE.items():
+        for seed in seeds:
+            for my_seat in (0, 1):
+                agents = [agent_fn, opponent] if my_seat == 0 else [opponent, agent_fn]
+                env = make("orbit_wars", configuration={"seed": seed}, debug=False)
+                env.run(agents)
+                final = env.steps[-1]
+                rewards = [s.reward if s.reward is not None else 0.0 for s in final]
+                my_reward = rewards[my_seat]
+                opp_reward = rewards[1 - my_seat]
+                is_win = my_reward > opp_reward
+                # Material on the model's side
+                obs = final[0].observation
+                material = sum(p[5] for p in obs.planets if p[1] == my_seat)
+                material += sum(f[6] for f in obs.fleets if f[1] == my_seat)
+
+                c = per_arch[archetype]
+                c["wins"] += int(is_win); c["total"] += 1
+                c[f"wins_seat{my_seat}"] += int(is_win)
+                c[f"total_seat{my_seat}"] += 1
+                c["material_sum"] += material
+                overall["wins"] += int(is_win); overall["total"] += 1
+                overall[f"wins_seat{my_seat}"] += int(is_win)
+                overall[f"total_seat{my_seat}"] += 1
+                game_idx += 1
+                if game_idx % 16 == 0 or game_idx == total_games:
+                    print(f"  panel progress: {game_idx}/{total_games}  "
+                          f"overall {overall['wins']}/{overall['total']} "
+                          f"({100*overall['wins']/max(overall['total'],1):.1f}%)")
+
+    return {"overall": overall, "per_archetype": per_arch}
+
+
+def print_panel_report(result: dict, opponent: str) -> None:
+    """Pretty-print panel results."""
+    o = result["overall"]
+    print()
+    print("=" * 78)
+    print(f"Panel eval vs {opponent}")
+    print("=" * 78)
+    print(f"Overall:   {o['wins']}/{o['total']}  ({100*o['wins']/max(o['total'],1):.1f}%)")
+    s0 = 100 * o['wins_seat0'] / max(o['total_seat0'], 1)
+    s1 = 100 * o['wins_seat1'] / max(o['total_seat1'], 1)
+    print(f"  seat 0:  {o['wins_seat0']}/{o['total_seat0']}  ({s0:.1f}%)")
+    print(f"  seat 1:  {o['wins_seat1']}/{o['total_seat1']}  ({s1:.1f}%)")
+    asym = s0 - s1
+    print(f"  asymmetry (seat0 − seat1): {asym:+.1f}pp")
+    print()
+    print("Per archetype  (8 games each = 4 seeds × 2 seats):")
+    print(f"  {'archetype':<48s}  {'WR':>6s}  {'s0/s1':>10s}  {'mat':>8s}")
+    rows = []
+    for arch, c in result["per_archetype"].items():
+        wr = 100 * c["wins"] / max(c["total"], 1)
+        s0 = 100 * c["wins_seat0"] / max(c["total_seat0"], 1)
+        s1 = 100 * c["wins_seat1"] / max(c["total_seat1"], 1)
+        mat = c["material_sum"] / max(c["total"], 1)
+        rows.append((wr, arch, c, s0, s1, mat))
+    # sort by winrate descending so worst cells stand out at the bottom
+    rows.sort(key=lambda r: -r[0])
+    for wr, arch, c, s0, s1, mat in rows:
+        print(f"  {arch:<48s}  {wr:>5.1f}%  {s0:>4.0f}/{s1:>3.0f}  {mat:>8.0f}")
+    # quick diagnostic
+    worst = min(rows, key=lambda r: r[0])
+    best = max(rows, key=lambda r: r[0])
+    print()
+    print(f"Best:  {best[1]}  ({best[0]:.1f}%)")
+    print(f"Worst: {worst[1]}  ({worst[0]:.1f}%)")
+    print(f"Spread: {best[0] - worst[0]:.1f}pp")
+
+
 def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
-                        opponent: str = "random", fire_threshold: float = 0.5):
+                        opponent: str = "random", fire_threshold: float = 0.5,
+                        panel: bool = False):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
     model = EntityTransformer(cfg.model).to(device)
@@ -139,6 +238,12 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         state_dict = state_dict["model"]
     model.load_state_dict(state_dict)
     model.eval()
+
+    if panel:
+        results = evaluate_panel(model, device, opponent=opponent,
+                                 fire_threshold=fire_threshold)
+        print_panel_report(results, opponent)
+        return results
 
     results = evaluate_against_baseline(
         model, device,
@@ -167,6 +272,9 @@ if __name__ == "__main__":
                         help="'random' or path to agent .py file")
     parser.add_argument("--num-players", type=int, choices=[2, 4], default=2)
     parser.add_argument("--fire-threshold", type=float, default=0.5)
+    parser.add_argument("--panel", action="store_true",
+                        help="Use 128-seed community panel with both-seat eval "
+                             "(256 games, per-archetype breakdown).")
     args = parser.parse_args()
 
     cfg = Config()
@@ -177,4 +285,5 @@ if __name__ == "__main__":
         num_games=args.games,
         opponent=args.opponent,
         fire_threshold=args.fire_threshold,
+        panel=args.panel,
     )
