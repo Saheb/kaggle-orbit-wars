@@ -100,6 +100,62 @@ def compute_gae(rewards: torch.Tensor, values: torch.Tensor,
 # convert external-heuristic Python moves into the action tensor format.
 
 
+# ----------------------------------------------------------------------------
+# Multiprocessing pool for external heuristic opponents.
+#
+# Without this, a pool rollout serializes N agent_fn(obs) calls on one CPU.
+# Suneet (3239 LoC forward-search) at 51 envs × 64 steps drops SPS from
+# ~1500 to ~260 on g5.2xlarge. Each call is independent and stateless across
+# turns, so we fan them out to a worker pool that pre-loads the agent module
+# once via fork — Suneet's per-call cost is unchanged but parallelism scales
+# with vCPUs. Expected gain: ~5-7× on 8 vCPUs.
+# ----------------------------------------------------------------------------
+
+import multiprocessing as _mp
+
+_WORKER_AGENT_FN = None  # populated per-worker in _heur_worker_init
+
+
+def _heur_worker_init(agent_path: str):
+    """Each worker fork loads the agent module once and stashes its agent fn."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("worker_agent", agent_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    global _WORKER_AGENT_FN
+    _WORKER_AGENT_FN = mod.agent
+
+
+def _heur_worker_call(obs):
+    """Run the worker's agent on one obs. Swallows exceptions to a no-op."""
+    try:
+        return _WORKER_AGENT_FN(obs) or []
+    except Exception:
+        return []
+
+
+class HeuristicWorkerPool:
+    """Persistent process pool around one external heuristic agent."""
+    def __init__(self, agent_path: str, num_workers: int):
+        # Force 'fork' so child inherits already-imported torch_env etc. and
+        # the initializer can re-load the agent module cheaply.
+        ctx = _mp.get_context("fork")
+        self.pool = ctx.Pool(
+            processes=num_workers,
+            initializer=_heur_worker_init,
+            initargs=(agent_path,),
+        )
+        self.num_workers = num_workers
+        self.agent_path = agent_path
+
+    def map(self, obs_list):
+        return self.pool.map(_heur_worker_call, obs_list)
+
+    def close(self):
+        self.pool.close()
+        self.pool.join()
+
+
 def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device):
     """Convert list-of-lists [[from_pid, angle_rad, ships], ...] per env into
     a (num_envs, MAX_OWNED, 3) action tensor."""
@@ -261,6 +317,15 @@ def train(args):
                     continue
                 pool.add_external_heuristic(name, path)
                 print(f"  pool external loaded: {name} ({path})")
+        # Create one worker pool per external heuristic. Keyed by member name
+        # so compute_pool_actions can dispatch by opp.name.
+        heur_worker_pools: dict[str, HeuristicWorkerPool] = {}
+        nw = args.heuristic_workers if args.heuristic_workers > 0 else max(1, (os.cpu_count() or 2) - 1)
+        for m in pool.members:
+            if m.kind == "external_heuristic":
+                src = getattr(m, "_source_path", None) or args.external_opponents.split(",")[0].strip()
+                heur_worker_pools[m.name] = HeuristicWorkerPool(src, nw)
+                print(f"  heuristic worker pool: {m.name} × {nw} workers")
         # Pre-allocate a frozen model for 'self' opponents (loaded with state_dict per rollout)
         pool_opp_model = copy.deepcopy(model).to(device)
         pool_opp_model.eval()
@@ -337,14 +402,19 @@ def train(args):
         if opp.kind == "external_heuristic":
             from torch_env import to_legacy_obs
             start, stop = env_slice.start or 0, env_slice.stop or N
-            moves_per_env = []
-            for e in range(start, stop):
-                obs = to_legacy_obs(env, env_idx=e, player=player)
-                try:
-                    moves = opp.agent_fn(obs) or []
-                except Exception:
-                    moves = []
-                moves_per_env.append(moves)
+            obs_list = [to_legacy_obs(env, env_idx=e, player=player)
+                        for e in range(start, stop)]
+            wp = heur_worker_pools.get(opp.name)
+            if wp is not None:
+                moves_per_env = wp.map(obs_list)
+            else:
+                # Fallback: serial path (no worker pool registered)
+                moves_per_env = []
+                for obs in obs_list:
+                    try:
+                        moves_per_env.append(opp.agent_fn(obs) or [])
+                    except Exception:
+                        moves_per_env.append([])
             # Build action tensor with the same converter the cloud eval uses,
             # but only over the env slice. _heuristic_moves_to_action_tensor
             # expects N rows so we build over the slice and return.
@@ -630,6 +700,14 @@ def train(args):
     os.makedirs("checkpoints", exist_ok=True)
     torch.save(learner.state_dict(), f"checkpoints/torch_step_{total_env_steps}_final.pt")
 
+    # Shut down external heuristic worker pools
+    if 'heur_worker_pools' in dir():
+        for wp in heur_worker_pools.values():
+            try:
+                wp.close()
+            except Exception:
+                pass
+
     # Auto-terminate the host (cost control). Set
     # InstanceInitiatedShutdownBehavior=terminate on the EC2 instance and this
     # command will tear down the VM, ending billing.
@@ -668,6 +746,9 @@ if __name__ == "__main__":
                              "Should be much smaller than --checkpoint-interval.")
     parser.add_argument("--pool-max-size", type=int, default=20,
                         help="Max past-self checkpoints in the pool (FIFO eviction).")
+    parser.add_argument("--heuristic-workers", type=int, default=0,
+                        help="Number of worker processes per external heuristic. "
+                             "0 = auto (cpu_count - 1). Used by pool-mode=mixed.")
     parser.add_argument("--pool-pfsp-alpha", type=float, default=2.0,
                         help="PFSP sampling exponent: weight = (1 - win_rate)^alpha.")
     parser.add_argument("--pool-mastered-threshold", type=float, default=0.9,
