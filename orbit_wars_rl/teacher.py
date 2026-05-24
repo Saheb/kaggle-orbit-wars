@@ -41,7 +41,13 @@ MIN_SHIP_FLOOR = 5                 # speed(5) ≈ 1.56x speed(1); avoids 1-ship 
 CAPTURE_MARGIN_FRAC = 0.15         # 15% extra over exact need
 CAPTURE_MARGIN_MIN = 3
 CAPTURE_MARGIN_MAX = 50
-DEFENSE_BUFFER = 0                 # rely entirely on forecast inbound; no flat reserve
+DEFENSE_BUFFER = 0                 # legacy: rely on forecast inbound for dynamic reserve
+# Option A: static defense reserve. Reserve a minimum fraction of source ships
+# regardless of inbound enemies. Forces fractional sends architecturally —
+# a 50-ship source can send at most 35, even if the attack would benefit from
+# 50. Trade: less raw firepower per attack, but prevents teacher from going
+# all-in everywhere (which empirically produced 96% bin=1.0 BC labels).
+STATIC_RESERVE_FRAC = 0.30
 MIN_COVERAGE_FRAC = 0.30           # skip launches that contribute <30% of capture need
 MAX_FLEETS_PER_TURN = 10           # = MAX_OWNED, one launch per source max
 
@@ -233,13 +239,22 @@ def agent(obs) -> List[List]:
 
     # P1 + P8: build (src, tgt) candidate list with score = prod / (eta + k)
     source_budget: Dict[int, int] = {pid: int(p[5]) for pid, p in owned}
-    committed_to: Dict[int, int] = {}   # this-turn commits to each target (P9 self side)
+    committed_to: Dict[int, int] = {}   # this-turn commits to each target
+
+    # Option A: static defense reserve. Total reserve is max(dynamic_inbound,
+    # STATIC_RESERVE_FRAC * source_ships). Forces fractional sends naturally.
+    def _available_for(src_pid: int) -> int:
+        ships = source_budget[src_pid]
+        dyn_reserve = reserves.get(src_pid, 0)
+        static_reserve = int(STATIC_RESERVE_FRAC * ships)
+        total_reserve = max(dyn_reserve, static_reserve)
+        return max(0, ships - total_reserve)
 
     candidates: List[Tuple[float, int, int, int, float]] = []
 
     for src_pid, src_p in owned:
         sx, sy, src_radius = float(src_p[2]), float(src_p[3]), float(src_p[4])
-        available = source_budget[src_pid] - reserves.get(src_pid, 0)
+        available = _available_for(src_pid)
         if available < MIN_SHIP_FLOOR:
             continue
 
@@ -266,8 +281,6 @@ def agent(obs) -> List[List]:
             )
 
             # P6: refine cost at the actual ETA, less anything we've already committed.
-            # Under-launches are allowed (multi-wave attacks are how real agents play);
-            # MIN_COVERAGE_FRAC stops us wasting tiny fleets on huge targets.
             need = _capture_cost(tgt_ships, tgt_prod, tgt_owner, eta)
             need = max(MIN_SHIP_FLOOR, need - committed_to.get(tgt_pid, 0))
             ships_final = min(available, need)
@@ -300,7 +313,7 @@ def agent(obs) -> List[List]:
             break
         if src_pid in launched_from:
             continue
-        available = source_budget[src_pid] - reserves.get(src_pid, 0)
+        available = _available_for(src_pid)
         ships = min(ships, available)
         if ships < MIN_SHIP_FLOOR:
             continue

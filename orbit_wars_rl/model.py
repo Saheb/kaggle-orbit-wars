@@ -73,7 +73,10 @@ class EntityTransformer(nn.Module):
         # Action heads (per owned planet)
         self.fire_head = nn.Linear(D, 1)
         self.angle_head = nn.Linear(D, NUM_ANGLE_BINS)
-        self.ship_head = nn.Linear(D, NUM_SHIP_BINS)
+        # Ship head: bin count is configurable so the fraction-head experiment
+        # can swap to 10 fraction bins. Default 32 = legacy absolute counts.
+        self.num_ship_bins = getattr(cfg, "num_ship_bins", NUM_SHIP_BINS)
+        self.ship_head = nn.Linear(D, self.num_ship_bins)
         # Target-index head. When pairwise features are available we score each
         # (slot, target) pair from per-target inputs — see docs/bugs.md (target-head
         # collapse). When pairwise is disabled we fall back to a slot-only Linear.

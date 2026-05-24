@@ -571,10 +571,46 @@ def validate_bc(cfg: Config, agent_path: str, save_path: str = "", verbose: bool
     return val_metrics
 
 
+def validate_bc_from_samples(cfg: Config, sample_pkls: list[str],
+                             save_path: str = "") -> dict:
+    """BC training from one or more pre-extracted sample .pkl files.
+
+    Used by the replay-mining pipeline (replay_bc_v2.py emits these pkls).
+    Multiple pkls are concatenated — combine teacher + replay samples this way.
+    """
+    import pickle
+    device = torch.device(cfg.device)
+    samples = []
+    for path in sample_pkls:
+        with open(path, "rb") as f:
+            chunk = pickle.load(f)
+        print(f"Loaded {len(chunk)} samples from {path}")
+        samples.extend(chunk)
+    print(f"Total samples: {len(samples)}")
+    if not samples:
+        print("ERROR: No samples loaded.")
+        return {}
+
+    model = EntityTransformer(cfg.model)
+    val_metrics = train_bc(model, samples, cfg.bc, device)
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        torch.save({"model": model.state_dict()}, save_path)
+        print(f"BC model saved → {save_path}")
+
+    print("\nBC validation complete!")
+    print(f"  Final val loss: {val_metrics.get('val_loss', float('nan')):.4f}")
+    return val_metrics
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--agent", default="../main.py",
-                        help="Path to heuristic agent file")
+    parser.add_argument("--agent", default="",
+                        help="Path to heuristic agent file (collect trajectories on-the-fly)")
+    parser.add_argument("--samples", action="append", default=[],
+                        help="Path to pre-extracted samples .pkl. Repeatable: "
+                             "--samples teacher.pkl --samples replays.pkl to mix.")
     parser.add_argument("--num-games", type=int, default=100)
     parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=42)
@@ -587,4 +623,9 @@ if __name__ == "__main__":
     cfg.bc.num_trajectories = args.num_games
     cfg.bc.num_steps = args.steps
 
-    validate_bc(cfg, agent_path=args.agent, save_path=args.save)
+    if args.samples:
+        validate_bc_from_samples(cfg, args.samples, save_path=args.save)
+    else:
+        if not args.agent:
+            raise SystemExit("--agent or --samples required")
+        validate_bc(cfg, agent_path=args.agent, save_path=args.save)
