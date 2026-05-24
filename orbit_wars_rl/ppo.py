@@ -142,6 +142,36 @@ class PPOLearner:
 
         if return_metrics:
             clip_frac = ((ratio - 1.0).abs() > cfg.clip_eps).float().mean()
+            # ---- per-slot / per-bin diagnostics --------------------------
+            # Aggregate H_fire/H_ship can hide collapse: slot 0 always fires
+            # while slots 1+ never do (10M run failure — see docs/bugs.md).
+            # These metrics let us detect that early.
+            with torch.no_grad():
+                sv = slot_valid_2d.float()                              # (B, MO)
+                sv_sum = sv.sum().clamp(min=1)
+                fire_probs = torch.sigmoid(fire_logits)                 # (B, MO)
+                # Per-slot mean fire-probability, weighted by validity.
+                # NaN-safe: divide by per-slot valid counts.
+                slot_valid_count = sv.sum(dim=0).clamp(min=1)           # (MO,)
+                per_slot_fire = (fire_probs * sv).sum(dim=0) / slot_valid_count  # (MO,)
+                # Fraction of valid slots whose fire_prob > 0.5 → "would fire"
+                fired_mask = (fire_probs > 0.5).float() * sv
+                fire_rate_overall = fired_mask.sum() / sv_sum
+                # Per-state count of firing slots (multi-source measure)
+                fires_per_state = fired_mask.sum(dim=-1)                # (B,)
+                # Only count states with ≥2 owned slots — single-owned is forced
+                multi_owned = (sv.sum(dim=-1) >= 2).float()
+                multi_owned_sum = multi_owned.sum().clamp(min=1)
+                avg_sources_when_multi = (fires_per_state * multi_owned).sum() / multi_owned_sum
+
+                # Ship-bin mode distribution: count where each ship-bin is argmax
+                ship_argmax = ship_logits.argmax(dim=-1)                # (B, MO)
+                # Weight by valid slots that fire (only fired slots contribute a real action)
+                weighted = (ship_argmax == 0).float() * fired_mask
+                ship_bin0_rate = weighted.sum() / fired_mask.sum().clamp(min=1)
+                # Mean ship bin across fired slots
+                mean_ship_bin = (ship_argmax.float() * fired_mask).sum() / fired_mask.sum().clamp(min=1)
+
             metrics = {
                 "loss": loss.item(),
                 "policy_loss": policy_loss.item(),
@@ -154,6 +184,13 @@ class PPOLearner:
                 "mean_advantage": advantages.mean().item(),
                 "mean_value": values.mean().item(),
                 "mean_return": returns.mean().item(),
+                # ---- diagnostics ----
+                "fire_rate_overall": fire_rate_overall.item(),
+                "avg_sources_multi": avg_sources_when_multi.item(),
+                "ship_bin0_rate": ship_bin0_rate.item(),
+                "mean_ship_bin": mean_ship_bin.item(),
+                # Per-slot fire probs — store as tensor; logger reads slot 0 + max(slots 1+)
+                "per_slot_fire_probs": per_slot_fire.detach().cpu().tolist(),
             }
             return loss, metrics
 

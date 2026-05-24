@@ -646,6 +646,11 @@ def train(args):
         avg_cf = float(np.mean(clipfrac_history)) if clipfrac_history else 0.0
         if now - last_log >= 5.0 or iter_count == 1:
             last_log = now
+            # Per-slot diagnostics — surface slot-0-only firing + ship-bin-0 collapse
+            # that the aggregate H_fire metric was masking (see docs/bugs.md).
+            psf = metrics.get("per_slot_fire_probs") or [0.0]
+            slot0 = psf[0] if len(psf) > 0 else 0.0
+            slot_rest_max = max(psf[1:]) if len(psf) > 1 else 0.0
             print(
                 f"iter {iter_count:5d} | steps {total_env_steps:>11,} | "
                 f"SPS {sps:>7,.0f} | r_p0 {avg_r:+.3f} r_p1 {avg_r1:+.3f} | "
@@ -655,8 +660,20 @@ def train(args):
                 f"H_ship {metrics.get('ship_entropy', 0):.2f} | "
                 f"V_loss {metrics.get('value_loss', 0):.4f} | "
                 f"LR {metrics['learning_rate']:.6f} | "
-                f"early_stop={metrics.get('kl_early_stop', 0):.0f}"
+                f"early_stop={metrics.get('kl_early_stop', 0):.0f} | "
+                f"fire[0]={slot0:.2f} fire[rest_max]={slot_rest_max:.2f} "
+                f"srcs_multi={metrics.get('avg_sources_multi', 0):.2f} "
+                f"ship0={metrics.get('ship_bin0_rate', 0):.2f} "
+                f"meanshipbin={metrics.get('mean_ship_bin', 0):.1f}"
             )
+            # Collapse warnings — flag early instead of finding via replay at 10M
+            if iter_count > 20:  # skip BC-resume noise
+                if slot0 > 0.8 and slot_rest_max < 0.1:
+                    print("  ⚠ slot-0-only firing: slot 0 fire_prob>0.8 while all "
+                          "other slots <0.1 — fire-head is collapsing to one source")
+                if metrics.get("ship_bin0_rate", 0) > 0.5:
+                    print(f"  ⚠ ship-bin-0 collapse: {metrics['ship_bin0_rate']:.0%} of fires "
+                          f"argmax to bin 0 (1 ship). 1-ship fleets can't capture neutrals.")
 
         # Checkpoint best by reward
         if len(reward_history) >= 100 and avg_r > best_avg_reward + 0.02:
