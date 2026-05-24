@@ -85,3 +85,56 @@ enrichment of `owned_entities` is kept for fire/angle/ship heads. When
 - Multiple failed BC iterations all showing the same +0.07–0.08 reduction on
   per-target heads is a structural signal, not a data signal. Audit the model
   architecture before iterating on features or teacher.
+
+---
+
+## 2. Misleading in-training eval — `train_torch.py` (removed 2026-05-24)
+
+### Where
+`orbit_wars_rl/train_torch.py`, `eval_vs_baseline` (current model vs frozen
+snapshot of initial policy) and the early-stop / "★ improved" logging built
+around it.
+
+### How we noticed
+Several pure-self-play runs reported steadily rising `vs initial` win rates
+(e.g. 60% → 75% → 80% over 15M+ steps) while replay inspection of the same
+checkpoints showed the policy had collapsed to a degenerate behavior — median
+fleet size = 1 ship, ~5 planets captured per 5 games vs Suneet's ~40. Local
+eval (`eval.py`) against raw Suneet/Zach/Rahul confirmed no real improvement.
+
+### Root cause
+`eval_vs_baseline` plays the current policy against a deep-copy of the *initial*
+policy (snapshotted at training start). In mirror self-play where "do almost
+nothing" is locally safe, the current policy can drift to a degenerate behavior
+that still beats the unchanged initial policy via small asymmetric advantages
+(or via the initial policy's own degeneracies being slightly worse). The
+metric goes up while real strength goes down.
+
+This also drove `best_eval_winrate`, the `★ improved` flag, the
+`torch_eval_best.pt` checkpoint selection, and the `--early-stop-patience`
+logic — so a false-positive eval cascaded into "the best checkpoint" being
+the most degenerate one.
+
+### Fix
+Removed entirely:
+- `eval_vs_baseline`, `eval_vs_heuristic`, `_act_deterministic`,
+  `_heuristic_moves_to_action_tensor`, `_load_heuristic`.
+- `baseline_model = copy.deepcopy(model)` snapshot.
+- The in-loop eval block, `best_eval_winrate`, `no_improve_evals`,
+  `eval_history`, `--eval-interval`, `--eval-games`, `--eval-heuristic`,
+  `--eval-heuristic-games`, `--early-stop-patience` CLI flags.
+
+The source of truth for "is the policy actually better" is now local
+`eval.py` on downloaded checkpoints against raw Suneet/Zach/Rahul.
+Checkpointing still happens at `--checkpoint-interval` so every artefact
+is downloadable for offline eval.
+
+### Lessons
+- Vs-frozen-initial is not a strength metric in mirror self-play. Any
+  in-training proxy must hit an *independent* opponent (a strong heuristic
+  or a held-out pool member with known strength).
+- An eval that doesn't catch policy collapse is worse than no eval — it
+  manufactures confidence. Default to fewer, stronger signals over more,
+  weaker ones.
+- Don't let an unvalidated metric drive checkpoint selection or early stop.
+  If you can't trust it for a green light, don't trust it for those either.
