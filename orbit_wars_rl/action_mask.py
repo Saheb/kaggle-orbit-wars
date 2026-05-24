@@ -100,8 +100,14 @@ def _point_segment_distance_array(px, py, ax_arr, ay_arr, bx_arr, by_arr):
     return np.sqrt((px - proj_x) ** 2 + (py - proj_y) ** 2)
 
 
-def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, player, fire_threshold=0.5):
+def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, player,
+                        fire_threshold=0.5, sample: bool = False):
     """Convert policy outputs to environment action format.
+
+    sample=False (default): fire by threshold, angle/ship by argmax (mode).
+    sample=True: fire by Bernoulli sample, angle/ship by Categorical sample.
+      Useful when training-time distribution is multi-modal and the mode
+      collapses to a useless bin while majority mass is on competent bins.
 
     Returns: list of [from_planet_id, angle_radians, ship_count]
     """
@@ -110,9 +116,17 @@ def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, playe
     owned_indices = masks["owned_indices"].cpu().numpy()
     max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
 
-    fire_decisions = (torch.sigmoid(fire_probs) > fire_threshold).cpu().numpy().squeeze(0)
-    angle_bins = torch.argmax(angle_logits, dim=-1).cpu().numpy().squeeze(0)
-    ship_bins = torch.argmax(ship_logits, dim=-1).cpu().numpy().squeeze(0)
+    if sample:
+        fire_dist = torch.distributions.Bernoulli(logits=fire_probs)
+        angle_dist = torch.distributions.Categorical(logits=angle_logits)
+        ship_dist = torch.distributions.Categorical(logits=ship_logits)
+        fire_decisions = (fire_dist.sample() > 0.5).cpu().numpy().squeeze(0)
+        angle_bins = angle_dist.sample().cpu().numpy().squeeze(0)
+        ship_bins = ship_dist.sample().cpu().numpy().squeeze(0)
+    else:
+        fire_decisions = (torch.sigmoid(fire_probs) > fire_threshold).cpu().numpy().squeeze(0)
+        angle_bins = torch.argmax(angle_logits, dim=-1).cpu().numpy().squeeze(0)
+        ship_bins = torch.argmax(ship_logits, dim=-1).cpu().numpy().squeeze(0)
 
     moves = []
     max_moves = 8

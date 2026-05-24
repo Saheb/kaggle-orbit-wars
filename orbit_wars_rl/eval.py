@@ -15,8 +15,14 @@ from features import extract_features
 from action_mask import compute_action_masks, actions_from_policy
 
 
-def build_agent_fn(model: EntityTransformer, device: torch.device, fire_threshold: float = 0.5):
-    """Return a kaggle_environments-compatible agent function wrapping the model."""
+def build_agent_fn(model: EntityTransformer, device: torch.device,
+                   fire_threshold: float = 0.5, sample: bool = False):
+    """Return a kaggle_environments-compatible agent function wrapping the model.
+
+    sample=True uses Bernoulli/Categorical sampling instead of threshold/argmax —
+    helps when the training-time distribution is multi-modal but the mode is
+    degenerate (e.g. 1-ship-fleet trap).
+    """
     model.eval()
 
     def agent_fn(obs):
@@ -62,6 +68,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device, fire_threshol
             {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()},
             obs, player,
             fire_threshold=fire_threshold,
+            sample=sample,
         )
 
     return agent_fn
@@ -75,6 +82,7 @@ def evaluate_against_baseline(
     opponent: str = "random",
     num_players: int = 2,
     fire_threshold: float = 0.5,
+    sample: bool = False,
 ) -> dict:
     """Evaluate trained policy against a baseline using kaggle_environments.
 
@@ -84,7 +92,7 @@ def evaluate_against_baseline(
     """
     from kaggle_environments import make
 
-    agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold)
+    agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample)
     opponents = [opponent] * (num_players - 1)
     agents = [agent_fn] + opponents
 
@@ -130,6 +138,7 @@ def evaluate_panel(
     device: torch.device,
     opponent: str,
     fire_threshold: float = 0.5,
+    sample: bool = False,
 ) -> dict:
     """Stratified eval over the 128-seed community panel, playing both seats.
 
@@ -141,7 +150,7 @@ def evaluate_panel(
     from kaggle_environments import make
     from eval_panel import BY_ARCHETYPE
 
-    agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold)
+    agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample)
 
     per_arch: dict[str, dict] = {arch: {"wins": 0, "total": 0,
                                         "wins_seat0": 0, "wins_seat1": 0,
@@ -225,7 +234,7 @@ def print_panel_report(result: dict, opponent: str) -> None:
 
 def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         opponent: str = "random", fire_threshold: float = 0.5,
-                        panel: bool = False):
+                        panel: bool = False, sample: bool = False):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
     model = EntityTransformer(cfg.model).to(device)
@@ -241,7 +250,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
 
     if panel:
         results = evaluate_panel(model, device, opponent=opponent,
-                                 fire_threshold=fire_threshold)
+                                 fire_threshold=fire_threshold, sample=sample)
         print_panel_report(results, opponent)
         return results
 
@@ -251,6 +260,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         opponent=opponent,
         num_players=cfg.env.num_players,
         fire_threshold=fire_threshold,
+        sample=sample,
     )
 
     print(f"Win rate vs {opponent}: {results['win_rate']:.2%}  "
@@ -275,6 +285,10 @@ if __name__ == "__main__":
     parser.add_argument("--panel", action="store_true",
                         help="Use 128-seed community panel with both-seat eval "
                              "(256 games, per-archetype breakdown).")
+    parser.add_argument("--sample", action="store_true",
+                        help="Sample from policy distribution instead of argmax. "
+                             "Use when the mode is degenerate but distribution mass "
+                             "is on competent bins (1-ship-fleet trap).")
     args = parser.parse_args()
 
     cfg = Config()
@@ -286,4 +300,5 @@ if __name__ == "__main__":
         opponent=args.opponent,
         fire_threshold=args.fire_threshold,
         panel=args.panel,
+        sample=args.sample,
     )
