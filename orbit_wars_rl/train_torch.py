@@ -95,6 +95,53 @@ def compute_gae(rewards: torch.Tensor, values: torch.Tensor,
 # (degenerate policies "improved" over the unchanged baseline). Source of
 # truth is local eval (eval.py) on downloaded checkpoints against raw
 # Suneet/Zach/Rahul. See docs/bugs.md.
+#
+# _heuristic_moves_to_action_tensor is kept — pool-mode=mixed uses it to
+# convert external-heuristic Python moves into the action tensor format.
+
+
+def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device):
+    """Convert list-of-lists [[from_pid, angle_rad, ships], ...] per env into
+    a (num_envs, MAX_OWNED, 3) action tensor."""
+    from torch_env import MAX_OWNED, NUM_ANGLE_BINS, ANGLE_BIN_WIDTH, SHIP_COUNTS
+    import math as _math
+
+    N = env.num_envs
+    owned_idx, slot_valid = env.owned_indices_for(player)   # (N, MAX_OWNED)
+    fire = torch.zeros(N, MAX_OWNED, dtype=torch.long)
+    angle_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
+    ship_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
+
+    gather_idx = owned_idx.unsqueeze(-1).expand(-1, -1, 7).cpu()
+    planets_cpu = env.planets.cpu()
+    src = planets_cpu.gather(1, gather_idx)
+    sv_cpu = slot_valid.cpu()
+
+    for e in range(N):
+        moves = moves_per_env[e]
+        if not moves:
+            continue
+        pid_to_slot = {}
+        for k in range(MAX_OWNED):
+            if sv_cpu[e, k].item():
+                pid_to_slot[int(src[e, k, 0].item())] = k
+        for mv in moves:
+            if not isinstance(mv, (list, tuple)) or len(mv) < 3:
+                continue
+            slot = pid_to_slot.get(int(mv[0]))
+            if slot is None:
+                continue
+            ang = float(mv[1]) % (2 * _math.pi)
+            ab = int(ang / ANGLE_BIN_WIDTH) % NUM_ANGLE_BINS
+            ships = int(mv[2])
+            best, best_diff = 0, 10**9
+            for b, c in enumerate(SHIP_COUNTS):
+                if abs(c - ships) < best_diff:
+                    best_diff, best = abs(c - ships), b
+            fire[e, slot] = 1
+            angle_bin[e, slot] = ab
+            ship_bin[e, slot] = best
+    return torch.stack([fire, angle_bin, ship_bin], dim=-1).to(device)
 
 
 # ----------------------------------------------------------------------------
