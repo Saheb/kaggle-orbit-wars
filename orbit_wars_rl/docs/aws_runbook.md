@@ -6,12 +6,24 @@ relearn it next time.
 
 ## Instance spec
 
-- **Type:** `g5.2xlarge` — NVIDIA A10G, 24 GB VRAM, 8 vCPU, 32 GB RAM, ~$1.21/hr on-demand.
-- **AMI:** AWS Deep Learning AMI (Ubuntu). PyTorch + CUDA + NVIDIA drivers preinstalled — no manual CUDA setup.
-- **Pricing model:** on-demand. Spot would be cheaper but interruptible; current
-  training loop doesn't auto-resume from S3 checkpoints, so on-demand is the
-  safer default.
-- **Region:** whichever has g5 capacity for your account.
+- **Type:** `g5.2xlarge` — NVIDIA A10G, 24 GB VRAM, 8 vCPU, 32 GB RAM.
+  - On-demand: ~$1.21/hr. Spot (us-east-1): ~$0.56/hr.
+- **AMI (us-east-1, current):** `ami-0b9c99b766a895d68` — Deep Learning OSS Nvidia
+  Driver AMI GPU PyTorch 2.10 (Ubuntu 24.04). PyTorch + CUDA + NVIDIA drivers
+  preinstalled. The DLAMI PyTorch venv lives at `/opt/pytorch`.
+  - To refresh: `aws ec2 describe-images --owners amazon --filters
+    "Name=name,Values=Deep Learning OSS Nvidia Driver AMI GPU PyTorch*Ubuntu*"
+    --query 'reverse(sort_by(Images,&CreationDate))[0].[ImageId,Name]'`
+- **Security group:** `sg-07f813c351bb5e011` (default VPC SG). Keep ingress
+  TCP 22 restricted to your current IP only — rotate when your IP changes:
+  `aws ec2 authorize-security-group-ingress --group-id sg-07f813c351bb5e011
+  --protocol tcp --port 22 --cidr $(curl -s https://checkip.amazonaws.com)/32`.
+- **Key pair:** `samosa-key` (private key `~/.ssh/samosa-key.pem`, mode 600).
+- **Pricing model:** **spot** by default. Checkpoints land every
+  `--checkpoint-interval` env steps; `watch_gpu_run.sh` rsyncs them locally so
+  an interruption costs at most one checkpoint interval of work. Use on-demand
+  only if you've explicitly disabled checkpoint sync.
+- **Region:** `us-east-1`.
 
 ## One-time setup (per instance)
 
@@ -22,15 +34,16 @@ relearn it next time.
    - **Shutdown behavior: Terminate** (under "Advanced details" at launch, or via CLI flag below). This is what makes `--terminate-on-done` end billing instead of just stopping the box.
    - Root volume: 100 GB gp3 is plenty.
 
-   CLI equivalent (substitute the AMI ID for your region):
+   CLI (spot, us-east-1, current AMI):
 
    ```bash
    aws ec2 run-instances \
      --instance-type g5.2xlarge \
-     --image-id ami-XXXXXXXX \
+     --image-id ami-0b9c99b766a895d68 \
      --key-name samosa-key \
-     --security-group-ids sg-XXXXXXXX \
+     --security-group-ids sg-07f813c351bb5e011 \
      --instance-initiated-shutdown-behavior terminate \
+     --instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}' \
      --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=100,VolumeType=gp3}' \
      --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=orbit-wars-train}]'
    ```
@@ -76,14 +89,14 @@ On the instance, inside a `tmux`/`screen` session so an SSH drop doesn't kill it
 
 ```bash
 tmux new -s train
-cd ~/orbit_wars_rl && source .venv/bin/activate
+cd ~/orbit_wars_rl && source /opt/pytorch/bin/activate
 PYTHONUNBUFFERED=1 python train_torch.py \
   --resume checkpoints/<latest>.pt \
   --total-steps 100_000_000 \
   --num-envs 512 --rollout-steps 64 --num-minibatches 32 \
   --ppo-epochs 2 --learning-rate 0.0001 \
-  --eval-interval 5_000_000 --eval-heuristic ~/main.py \
-  --early-stop-patience 999 \
+  --checkpoint-interval 5_000_000 \
+  --pool-mode none \
   --terminate-on-done \
   2>&1 | tee train_gpu.log
 # Detach: Ctrl-b d
@@ -92,9 +105,13 @@ PYTHONUNBUFFERED=1 python train_torch.py \
 Notes:
 - `--terminate-on-done` runs `sudo shutdown -h +1` at the end. Combined with the
   instance's `terminate` shutdown behavior, this ends billing automatically.
-- `--early-stop-patience 999` effectively disables eval-based early stop (the
-  default of 3 killed the previous run at 25 % of budget — see ADR / project memory).
+- **No in-training eval flag** — the prior `--eval-interval` + frozen-baseline
+  probe gave false positives (see docs/bugs.md #2). Source of truth is local
+  `eval.py` on rsynced checkpoints against raw Suneet/Zach/Rahul.
 - Resume auto-skips LR warmup; pass `--with-warmup` to force it back on.
+- Stop criterion: watch local eval at each checkpoint. Kill manually when two
+  consecutive checkpoints (10M apart) plateau within ±2pp, or when win rate
+  regresses >5pp from running max.
 
 ## Watch + sync from laptop
 
@@ -166,6 +183,8 @@ aws ec2 terminate-instances --instance-ids <id>
   model + feature dims. If a future change doubles batch again, double
   `--num-minibatches` first, *then* run. As a last resort,
   `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` can reduce fragmentation.
-- **Early-stop-patience 3 + noisy self-play winrate** terminated at 25 M of 100 M
-  steps. Use 999 unless you've changed the eval signal to something monotonic.
+- **Early-stop on vs-frozen-initial probe was misleading and is removed.**
+  Both `eval_vs_baseline` and the `--early-stop-patience` flag are gone — they
+  reported steady "improvement" while replays showed policy collapse. See
+  `docs/bugs.md` #2. Use local `eval.py` on synced checkpoints to decide stop.
 - **LR warmup re-runs on resume** — fixed; warmup auto-skipped when `--resume` is set.
