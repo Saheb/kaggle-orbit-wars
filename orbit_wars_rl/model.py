@@ -74,12 +74,22 @@ class EntityTransformer(nn.Module):
         self.fire_head = nn.Linear(D, 1)
         self.angle_head = nn.Linear(D, NUM_ANGLE_BINS)
         self.ship_head = nn.Linear(D, NUM_SHIP_BINS)
-        # Target-index head: which planet to attack. The angle bin is a coordinate
-        # *consequence* of choosing a target; predicting target directly is the
-        # semantic action. Used by BC; at inference, target → angle is derived
-        # deterministically. Prior 0.08-twice angle_red showed bin softmax is the
-        # wrong frame for this problem.
-        self.target_head = nn.Linear(D, cfg.max_planets if hasattr(cfg, "max_planets") else 48)
+        # Target-index head. When pairwise features are available we score each
+        # (slot, target) pair from per-target inputs — see docs/bugs.md (target-head
+        # collapse). When pairwise is disabled we fall back to a slot-only Linear.
+        self.max_planets = cfg.max_planets if hasattr(cfg, "max_planets") else 48
+        if self.use_pairwise:
+            self.tgt_q = nn.Linear(D, D)
+            self.tgt_k = nn.Linear(D, D)
+            tgt_in = D + D + F_pair
+            tgt_hidden = D
+            self.target_scorer = nn.Sequential(
+                nn.Linear(tgt_in, tgt_hidden),
+                nn.GELU(),
+                nn.Linear(tgt_hidden, 1),
+            )
+        else:
+            self.target_head = nn.Linear(D, self.max_planets)
 
         # Value head
         self.value_fc1 = nn.Linear(D, D)
@@ -143,33 +153,51 @@ class EntityTransformer(nn.Module):
         batch_idx = torch.arange(B, device=x.device).unsqueeze(1).expand(-1, max_owned)
         owned_entities = x[batch_idx, full_indices]  # (B, max_owned, D)
 
-        # Pairwise cross-attention: enrich each slot with explicit (src, tgt) geometry.
-        # K, V are per-(slot, target) — built from broadcast planet_emb + pairwise feats.
+        # Pairwise cross-attention: enrich each slot with explicit (src, tgt) geometry
+        # for fire/angle/ship heads. Target head scores per-(slot, target) directly
+        # from the same per-target inputs — see docs/bugs.md.
+        target_logits = None
         if self.use_pairwise and pairwise_features is not None:
-            # planet_emb_post_transformer = x[:, 1:1+N_p, :]  (skip the global token)
             N_p = planet_features.shape[1]
-            planet_emb_post = x[:, 1:1 + N_p, :]  # (B, N_p, D)
-            # Broadcast to per-slot: (B, MO, N_p, D)
+            planet_emb_post = x[:, 1:1 + N_p, :]                                # (B, N_p, D)
             planet_per_slot = planet_emb_post.unsqueeze(1).expand(-1, max_owned, -1, -1)
             kv_input = torch.cat([planet_per_slot, pairwise_features], dim=-1)  # (B, MO, N_p, D+F)
             kv = self.pair_kv(kv_input)                                         # (B, MO, N_p, 2D)
-            k, v = kv.chunk(2, dim=-1)                                          # each (B, MO, N_p, D)
+            k, v = kv.chunk(2, dim=-1)
             q = self.pair_q(owned_entities).unsqueeze(2)                        # (B, MO, 1, D)
-
             scale = D ** -0.5
             scores = (q @ k.transpose(-2, -1)).squeeze(2) * scale               # (B, MO, N_p)
-            # Mask invalid targets (padded planet slots)
-            tgt_valid = planet_mask.unsqueeze(1).expand(-1, max_owned, -1)      # (B, MO, N_p)
+            tgt_valid = planet_mask.unsqueeze(1).expand(-1, max_owned, -1)
             scores = scores.masked_fill(~tgt_valid, -1e4)
-            attn = F.softmax(scores, dim=-1).unsqueeze(2)                        # (B, MO, 1, N_p)
-            enriched = (attn @ v).squeeze(2)                                     # (B, MO, D)
+            attn = F.softmax(scores, dim=-1).unsqueeze(2)
+            enriched = (attn @ v).squeeze(2)
             owned_entities = self.pair_ln(owned_entities + self.pair_out(enriched))
+
+            # Per-target scoring head: each (slot, target) gets its own logit from
+            # [q_slot, k_target, pair_features]. This is the fix for the collapse
+            # documented in docs/bugs.md — the prior Linear(D, max_planets) head
+            # had no per-target conditioning, capping target_top1 near random.
+            q_tgt = self.tgt_q(owned_entities).unsqueeze(2).expand(-1, -1, N_p, -1)
+            k_tgt = self.tgt_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
+            scorer_in = torch.cat([q_tgt, k_tgt, pairwise_features], dim=-1)
+            tgt_scores = self.target_scorer(scorer_in).squeeze(-1)              # (B, MO, N_p)
+            # Pad to max_planets width if needed
+            if N_p < self.max_planets:
+                pad = torch.full(
+                    (B, max_owned, self.max_planets - N_p),
+                    -100.0, device=tgt_scores.device, dtype=tgt_scores.dtype,
+                )
+                tgt_scores = torch.cat([tgt_scores, pad], dim=-1)
+            elif N_p > self.max_planets:
+                tgt_scores = tgt_scores[..., :self.max_planets]
+            target_logits = tgt_scores
 
         # Action heads
         fire_logits = self.fire_head(owned_entities).squeeze(-1)  # (B, max_owned)
         angle_logits = self.angle_head(owned_entities)  # (B, max_owned, 144)
         ship_logits = self.ship_head(owned_entities)  # (B, max_owned, 32)
-        target_logits = self.target_head(owned_entities)  # (B, max_owned, max_planets)
+        if target_logits is None:
+            target_logits = self.target_head(owned_entities)  # (B, max_owned, max_planets)
         # Mask out invalid planet slots (padded) so target softmax only sees real planets
         if planet_mask is not None:
             tgt_mask = planet_mask.unsqueeze(1).expand(-1, max_owned, -1)  # (B, MO, N_p)
