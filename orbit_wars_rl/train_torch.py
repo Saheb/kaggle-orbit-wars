@@ -20,6 +20,7 @@ import os
 import random
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -444,6 +445,8 @@ def train(args):
     total_env_steps = 0
     iter_count = 0
     start = time.perf_counter()
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    print(f"Run timestamp: {run_ts}")
     reward_history = deque(maxlen=200)     # p0 episode rewards
     reward_history_p1 = deque(maxlen=200)  # p1 episode rewards (should mirror p0)
     clipfrac_history = deque(maxlen=50)
@@ -852,20 +855,20 @@ def train(args):
         if len(reward_history) >= 100 and avg_r > best_avg_reward + 0.02:
             best_avg_reward = avg_r
             os.makedirs("checkpoints", exist_ok=True)
-            torch.save(learner.state_dict(), "checkpoints/torch_best.pt")
+            torch.save(learner.state_dict(), f"checkpoints/torch_best_{run_ts}.pt")
             print(f"  ★ best updated: reward={avg_r:+.3f}")
 
         # Periodic checkpoint by fixed step interval
         if total_env_steps - last_ckpt_step >= args.checkpoint_interval:
             last_ckpt_step = total_env_steps
             os.makedirs("checkpoints", exist_ok=True)
-            path = f"checkpoints/torch_step_{total_env_steps}.pt"
+            path = f"checkpoints/torch_step_{total_env_steps}_{run_ts}.pt"
             torch.save(learner.state_dict(), path)
             print(f"  saved {path}")
             # Persist pool alongside the disk checkpoint so spot interrupts
             # don't lose pool diversity. Naming mirrors the checkpoint stem.
             if pool is not None:
-                pool_path = f"checkpoints/pool_step_{total_env_steps}.pt"
+                pool_path = f"checkpoints/pool_step_{total_env_steps}_{run_ts}.pt"
                 pool.save(pool_path)
                 print(f"  saved {pool_path} ({len(pool)} members)")
 
@@ -888,7 +891,7 @@ def train(args):
 
     # Final checkpoint
     os.makedirs("checkpoints", exist_ok=True)
-    torch.save(learner.state_dict(), f"checkpoints/torch_step_{total_env_steps}_final.pt")
+    torch.save(learner.state_dict(), f"checkpoints/torch_step_{total_env_steps}_{run_ts}_final.pt")
 
     # Shut down external heuristic worker pools
     if 'heur_worker_pools' in dir():
