@@ -101,7 +101,8 @@ def _point_segment_distance_array(px, py, ax_arr, ay_arr, bx_arr, by_arr):
 
 
 def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, player,
-                        fire_threshold=0.5, sample: bool = False):
+                        fire_threshold=0.5, sample: bool = False,
+                        ship_bin_mode: str = "absolute"):
     """Convert policy outputs to environment action format.
 
     sample=False (default): fire by threshold, angle/ship by argmax (mode).
@@ -142,14 +143,15 @@ def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, playe
         from_id = int(planets[pidx][0])
 
         angle = float(angle_bins[slot] * ANGLE_BIN_WIDTH + ANGLE_BIN_WIDTH / 2)
-        ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]))
+        ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
         if ships > 0 and planets[pidx][5] > ships:
             moves.append([from_id, angle, ships])
 
     return moves
 
 
-def actions_from_sampled_policy(fire_action, angle_action, ship_action, masks, obs, player):
+def actions_from_sampled_policy(fire_action, angle_action, ship_action, masks, obs, player,
+                                ship_bin_mode: str = "absolute"):
     """Convert sampled policy action tensors to environment action format."""
     planets = obs["planets"]
     owned_indices = masks["owned_indices"].cpu().numpy()
@@ -173,7 +175,7 @@ def actions_from_sampled_policy(fire_action, angle_action, ship_action, masks, o
         from_id = int(planets[pidx][0])
 
         angle = float(int(angle_bins[slot]) * ANGLE_BIN_WIDTH + ANGLE_BIN_WIDTH / 2)
-        ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]))
+        ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
         if ships > 0 and planets[pidx][5] > ships:
             moves.append([from_id, angle, ships])
 
@@ -181,7 +183,26 @@ def actions_from_sampled_policy(fire_action, angle_action, ship_action, masks, o
 
 
 SHIP_COUNTS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 19, 22, 26, 30, 35, 42, 50, 60, 72, 86, 102, 122, 145, 173, 206, 245, 290, 350, 420]
+# Fraction-bin values for ship_bin_mode="fraction" (10 bins on (0,1]):
+# bin i → (i+1)/10 fraction of source's max_ships.
+FRACTION_BIN_VALUES = [(i + 1) / 10 for i in range(10)]
 
 
-def _ship_bin_to_count(bin_idx, max_ships):
-    return min(SHIP_COUNTS[bin_idx], max(1, max_ships))
+def _ship_bin_to_count(bin_idx, max_ships, mode: str = "absolute"):
+    """Convert a ship-bin index to an absolute ship count.
+
+    mode:
+      "absolute" — bin_idx indexes the 32-entry SHIP_COUNTS lookup
+      "fraction" — bin_idx indexes the 10-entry FRACTION_BIN_VALUES; the
+                   returned count is round(frac * max_ships), floored to 1
+                   so the fleet is always non-empty.
+    """
+    max_ships = max(1, int(max_ships))
+    if mode == "fraction":
+        n = len(FRACTION_BIN_VALUES)
+        b = max(0, min(int(bin_idx), n - 1))
+        frac = FRACTION_BIN_VALUES[b]
+        ships = int(round(frac * max_ships))
+        return max(1, min(ships, max_ships))
+    # absolute (legacy)
+    return min(SHIP_COUNTS[bin_idx], max_ships)

@@ -226,15 +226,15 @@ def train(args):
         cfg.ppo.il_lambda = args.il_lambda
     if args.il_decay_frac is not None:
         cfg.ppo.il_decay_frac = args.il_decay_frac
+    if args.bc_coef is not None:
+        cfg.ppo.bc_coef = args.bc_coef
+    if args.min_ship_bin is not None:
+        cfg.model.min_ship_bin = args.min_ship_bin
     print(f"PPO config: lr={cfg.ppo.learning_rate}, ppo_epochs={cfg.ppo.ppo_epochs}, "
           f"num_minibatches={cfg.ppo.num_minibatches}, kl_target={cfg.ppo.kl_target}")
 
-    env = VecTorchEnv(num_envs=args.num_envs, num_players=2,
-                      device=device, episode_steps=500)
-    env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
-
-    # Honor num_ship_bins saved in the checkpoint (fraction-head BC uses 10
-    # bins, default model has 32). Inspect ship_head.weight shape if present.
+    # Honor model-config fields saved in the checkpoint (num_ship_bins,
+    # ship_bin_mode, min_ship_bin) BEFORE creating env or model.
     if args.resume:
         _ckpt_peek = torch.load(args.resume, map_location="cpu", weights_only=False)
         ckpt_cfg = _ckpt_peek.get("config", {}) if isinstance(_ckpt_peek, dict) else {}
@@ -248,7 +248,17 @@ def train(args):
                 if n != cfg.model.num_ship_bins:
                     cfg.model.num_ship_bins = n
                     print(f"Checkpoint ship_head implies num_ship_bins={n}")
+        if "ship_bin_mode" in ckpt_cfg:
+            cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
+            print(f"Checkpoint declares ship_bin_mode={cfg.model.ship_bin_mode}")
+        if "min_ship_bin" in ckpt_cfg:
+            cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
         del _ckpt_peek
+
+    env = VecTorchEnv(num_envs=args.num_envs, num_players=2,
+                      device=device, episode_steps=500,
+                      ship_bin_mode=cfg.model.ship_bin_mode)
+    env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
 
     model = EntityTransformer(cfg.model).to(device)
     print(f"Model params: {count_params(model):,}")
@@ -281,6 +291,18 @@ def train(args):
             print("WARNING: il_lambda > 0 but no --il-ref and no --resume — IL disabled")
 
     learner = PPOLearner(model, cfg, device=device, frozen_il_model=frozen_il_model)
+
+    # BC auxiliary supervision: load teacher samples once, sample a minibatch
+    # per PPO update. Cross-entropy on teacher's actions directly penalizes
+    # argmax-drift away from teacher — fixes the failure mode where KL-on-
+    # distributions (il_lambda) keeps distributions close but argmax flips.
+    bc_samples_for_aux = None
+    if args.bc_samples and cfg.ppo.bc_coef > 0:
+        import pickle as _pkl
+        with open(args.bc_samples, "rb") as f:
+            bc_samples_for_aux = _pkl.load(f)
+        print(f"BC auxiliary samples: {len(bc_samples_for_aux)} from {args.bc_samples} "
+              f"(bc_coef={cfg.ppo.bc_coef})")
 
     # LR scheduler: warmup + cosine decay over total updates.
     # On --resume, skip warmup by default (the model is already trained — no
@@ -679,10 +701,21 @@ def train(args):
             decay = max(0.0, 1.0 - progress / max(cfg.ppo.il_decay_frac, 1e-6))
             learner.set_il_coef(cfg.ppo.il_lambda * decay)
 
+        # Sample a BC minibatch for auxiliary supervision (if enabled)
+        bc_batch = None
+        if bc_samples_for_aux is not None:
+            from bc import _collate as _bc_collate
+            bc_idx = np.random.choice(len(bc_samples_for_aux),
+                                       size=min(cfg.bc.batch_size, len(bc_samples_for_aux)),
+                                       replace=False)
+            bc_subset = [bc_samples_for_aux[i] for i in bc_idx]
+            bc_batch = _bc_collate(bc_subset, device)
+
         # PPO update
         model.train()
         metrics = learner.update(minibatches, scheduler=scheduler,
-                                 kl_target=cfg.ppo.kl_target)
+                                 kl_target=cfg.ppo.kl_target,
+                                 bc_batch=bc_batch)
 
         total_env_steps += rollout_T * N
         iter_count += 1
@@ -816,6 +849,19 @@ if __name__ == "__main__":
                         help="Path to a separate frozen reference .pt for IL. "
                              "Default behaviour: when il_lambda>0 and --resume is "
                              "set, the resume checkpoint is used as the reference.")
+    # BC auxiliary supervision (cross-entropy on teacher actions during PPO).
+    # Unlike il_lambda (KL on distributions), this directly penalizes argmax
+    # drift via supervised loss on teacher's labels.
+    parser.add_argument("--bc-coef", type=float, default=None,
+                        help="Coefficient on auxiliary BC loss during PPO. "
+                             "Requires --bc-samples. Typical: 0.5–2.0.")
+    parser.add_argument("--bc-samples", type=str, default="",
+                        help="Path to .pkl of teacher samples (produced by "
+                             "extract_teacher_samples.py or bc_frac.py cache).")
+    parser.add_argument("--min-ship-bin", type=int, default=None,
+                        help="Mask ship bins < this index to -inf (never sampled). "
+                             "For fraction-head 10-bin model, set 1 to remove the "
+                             "10%%-of-source bin that PPO collapses to in cold-start.")
     # Opponent pool (PFSP self-play with optional external heuristics) ----
     parser.add_argument("--pool-mode", choices=["none", "self", "mixed"], default="none",
                         help="none: pure current-vs-current self-play (default). "

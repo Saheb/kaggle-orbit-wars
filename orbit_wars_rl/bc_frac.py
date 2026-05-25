@@ -48,14 +48,21 @@ NUM_FRACTION_BINS = 10
 FRACTION_BIN_VALUES = [(i + 1) / NUM_FRACTION_BINS for i in range(NUM_FRACTION_BINS)]
 
 
-def fraction_to_bin(fraction: float) -> int:
-    """Bin index for a fraction in (0, 1]. bin (i+1)/10 means 'send (i+1)*10%'."""
+def fraction_to_bin(fraction: float, min_bin: int = 0) -> int:
+    """Bin index for a fraction in (0, 1]. bin (i+1)/10 means 'send (i+1)*10%'.
+
+    min_bin: lower clamp to skip masked bins (e.g. when training will be paired
+    with --min-ship-bin 1, label bin 0 would be unreachable at inference and
+    PPO would penalize the CE loss with log(softmax(-100)) ≈ 100). Clamping
+    labels at min_bin avoids that mismatch.
+    """
     f = max(0.0, min(1.0, float(fraction)))
     b = int(round(f * NUM_FRACTION_BINS)) - 1
-    return max(0, min(NUM_FRACTION_BINS - 1, b))
+    return max(min_bin, min(NUM_FRACTION_BINS - 1, b))
 
 
-def trajectory_to_fraction_sample(traj: dict, max_owned: int = 10, max_planets: int = 48) -> dict | None:
+def trajectory_to_fraction_sample(traj: dict, max_owned: int = 10, max_planets: int = 48,
+                                  min_ship_bin: int = 0) -> dict | None:
     """Like bc.trajectory_to_training_sample but emits a fraction-bin ship_target.
 
     Fraction = ship_count / max(source_ships - 1, 1) (matches env's "keep 1
@@ -107,7 +114,7 @@ def trajectory_to_fraction_sample(traj: dict, max_owned: int = 10, max_planets: 
 
         fire_target[slot] = 1
         angle_target[slot] = _find_angle_bin(angle_rad)
-        ship_target[slot] = fraction_to_bin(fraction)
+        ship_target[slot] = fraction_to_bin(fraction, min_bin=min_ship_bin)
 
         src_p = planets[src_idx]
         tgt_idx = _find_target_planet_index(
@@ -146,12 +153,17 @@ def main():
     p.add_argument("--save", required=True)
     p.add_argument("--cache-samples", default="",
                    help="Optional path to save/load fraction-labeled samples")
+    p.add_argument("--min-ship-bin", type=int, default=0,
+                   help="Clamp ship_target labels >= this bin. Use with PPO's "
+                        "--min-ship-bin to keep BC labels reachable at inference.")
     args = p.parse_args()
 
     cfg = Config()
     cfg.bc.num_steps = args.steps
-    # Tell the model to use a 10-output ship head
+    # Tell the model to use a 10-output ship head with fraction-decode semantics
     cfg.model.num_ship_bins = NUM_FRACTION_BINS
+    cfg.model.ship_bin_mode = "fraction"
+    cfg.model.min_ship_bin = args.min_ship_bin
 
     # ---- extract or load samples ----
     if args.cache_samples and os.path.exists(args.cache_samples):
@@ -165,7 +177,7 @@ def main():
         print(f"  {len(trajs)} raw transitions")
         samples = []
         for t in trajs:
-            s = trajectory_to_fraction_sample(t)
+            s = trajectory_to_fraction_sample(t, min_ship_bin=args.min_ship_bin)
             if s is not None:
                 samples.append(s)
         print(f"  {len(samples)} usable samples (with fraction labels)")
@@ -202,7 +214,9 @@ def main():
     os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
     torch.save({"model": model.state_dict(),
                 "config": {"num_ship_bins": NUM_FRACTION_BINS,
-                           "fraction_bin_values": FRACTION_BIN_VALUES}},
+                           "fraction_bin_values": FRACTION_BIN_VALUES,
+                           "ship_bin_mode": "fraction",
+                           "min_ship_bin": args.min_ship_bin}},
                args.save)
     print(f"Saved → {args.save}")
     print(f"\nNote: ship_red in the gate is on FRACTION bins (uniform = 1/10), "

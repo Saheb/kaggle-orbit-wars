@@ -16,7 +16,8 @@ from action_mask import compute_action_masks, actions_from_policy
 
 
 def build_agent_fn(model: EntityTransformer, device: torch.device,
-                   fire_threshold: float = 0.5, sample: bool = False):
+                   fire_threshold: float = 0.5, sample: bool = False,
+                   ship_bin_mode: str = "absolute"):
     """Return a kaggle_environments-compatible agent function wrapping the model.
 
     sample=True uses Bernoulli/Categorical sampling instead of threshold/argmax —
@@ -69,6 +70,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
             obs, player,
             fire_threshold=fire_threshold,
             sample=sample,
+            ship_bin_mode=ship_bin_mode,
         )
 
     return agent_fn
@@ -83,6 +85,7 @@ def evaluate_against_baseline(
     num_players: int = 2,
     fire_threshold: float = 0.5,
     sample: bool = False,
+    ship_bin_mode: str = "absolute",
 ) -> dict:
     """Evaluate trained policy against a baseline using kaggle_environments.
 
@@ -92,7 +95,8 @@ def evaluate_against_baseline(
     """
     from kaggle_environments import make
 
-    agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample)
+    agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
+                              ship_bin_mode=ship_bin_mode)
     opponents = [opponent] * (num_players - 1)
     agents = [agent_fn] + opponents
 
@@ -139,6 +143,7 @@ def evaluate_panel(
     opponent: str,
     fire_threshold: float = 0.5,
     sample: bool = False,
+    ship_bin_mode: str = "absolute",
 ) -> dict:
     """Stratified eval over the 128-seed community panel, playing both seats.
 
@@ -150,7 +155,8 @@ def evaluate_panel(
     from kaggle_environments import make
     from eval_panel import BY_ARCHETYPE
 
-    agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample)
+    agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
+                              ship_bin_mode=ship_bin_mode)
 
     per_arch: dict[str, dict] = {arch: {"wins": 0, "total": 0,
                                         "wins_seat0": 0, "wins_seat1": 0,
@@ -237,25 +243,42 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         panel: bool = False, sample: bool = False):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
-    model = EntityTransformer(cfg.model).to(device)
 
+    # Auto-detect num_ship_bins from checkpoint (fraction-head uses 10, default 32).
+    # Also auto-detect min_ship_bin from saved config if present.
     try:
         state_dict = torch.load(params_path, map_location="cpu", weights_only=True)
     except Exception:
         state_dict = torch.load(params_path, map_location="cpu", weights_only=False)
+    ckpt_cfg = state_dict.get("config", {}) if isinstance(state_dict, dict) else {}
     if "model" in state_dict:
         state_dict = state_dict["model"]
+    if "num_ship_bins" in ckpt_cfg:
+        cfg.model.num_ship_bins = int(ckpt_cfg["num_ship_bins"])
+    elif "ship_head.weight" in state_dict:
+        n = int(state_dict["ship_head.weight"].shape[0])
+        if n != cfg.model.num_ship_bins:
+            cfg.model.num_ship_bins = n
+    if "min_ship_bin" in ckpt_cfg:
+        cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
+    if "ship_bin_mode" in ckpt_cfg:
+        cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
+        print(f"Checkpoint ship_bin_mode={cfg.model.ship_bin_mode}")
+
+    model = EntityTransformer(cfg.model).to(device)
     model.load_state_dict(state_dict)
     model.eval()
 
     if panel:
         results = evaluate_panel(model, device, opponent=opponent,
-                                 fire_threshold=fire_threshold, sample=sample)
+                                 fire_threshold=fire_threshold, sample=sample,
+                                 ship_bin_mode=cfg.model.ship_bin_mode)
         print_panel_report(results, opponent)
         return results
 
     results = evaluate_against_baseline(
         model, device,
+        ship_bin_mode=cfg.model.ship_bin_mode,
         num_games=num_games,
         opponent=opponent,
         num_players=cfg.env.num_players,

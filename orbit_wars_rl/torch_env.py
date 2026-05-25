@@ -44,6 +44,8 @@ NUM_ANGLE_BINS = 144
 ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
 NUM_SHIP_BINS = 32
 SHIP_COUNTS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 19, 22, 26, 30, 35, 42, 50, 60, 72, 86, 102, 122, 145, 173, 206, 245, 290, 350, 420]
+# Fraction-mode decode (10 bins): bin i → (i+1)/10 * src_ships
+FRACTION_BIN_VALUES = [(i + 1) / 10 for i in range(10)]
 
 
 def _ship_speed(ships: torch.Tensor) -> torch.Tensor:
@@ -67,11 +69,15 @@ class VecTorchEnv:
         num_players: int = 2,
         device: str | torch.device = "cpu",
         episode_steps: int = 500,
+        ship_bin_mode: str = "absolute",
     ):
         self.num_envs = num_envs
         self.num_players = num_players
         self.episode_steps = episode_steps
         self.device = torch.device(device)
+        # See ModelConfig.ship_bin_mode. "absolute" uses SHIP_COUNTS lookup;
+        # "fraction" uses round(FRAC_VALUES[bin] * src_ships).
+        self.ship_bin_mode = ship_bin_mode
 
         # State tensors — allocated in reset()
         self.planets: torch.Tensor = None       # (N, P, 7)
@@ -516,17 +522,29 @@ class VecTorchEnv:
         # Decode action components
         fire = actions[:, :, 0].bool() & slot_valid                # (N, MAX_OWNED)
         angle_bin = actions[:, :, 1].long().clamp(0, NUM_ANGLE_BINS - 1)
-        ship_bin = actions[:, :, 2].long().clamp(0, NUM_SHIP_BINS - 1)
-        ship_counts_t = torch.tensor(SHIP_COUNTS, dtype=torch.float32, device=self.device)
-        ship_count = ship_counts_t[ship_bin]                      # (N, MAX_OWNED)
-        # angle uses BIN center (matches actions_from_policy convention)
-        angle = (angle_bin.float() + 0.5) * ANGLE_BIN_WIDTH       # (N, MAX_OWNED)
 
-        # Gather source planet state: (N, MAX_OWNED, 7)
+        # Gather source planet state: (N, MAX_OWNED, 7). Done early so the
+        # fraction-mode decode can scale by src_ships.
         gather_idx = owned_idx.unsqueeze(-1).expand(-1, -1, 7)
         src = self.planets.gather(1, gather_idx)                  # (N, MAX_OWNED, 7)
         src_x = src[:, :, 2]; src_y = src[:, :, 3]; src_r = src[:, :, 4]
         src_ships = src[:, :, 5]; src_owner = src[:, :, 1].long()
+
+        # Decode ship_bin → ship count. "absolute" uses fixed table; "fraction"
+        # scales by src_ships at decode time.
+        if self.ship_bin_mode == "fraction":
+            num_bins = len(FRACTION_BIN_VALUES)
+            ship_bin = actions[:, :, 2].long().clamp(0, num_bins - 1)
+            frac_t = torch.tensor(FRACTION_BIN_VALUES, dtype=torch.float32, device=self.device)
+            frac = frac_t[ship_bin]                                # (N, MAX_OWNED)
+            ship_count = torch.round(frac * src_ships).clamp(min=1.0)
+        else:
+            ship_bin = actions[:, :, 2].long().clamp(0, NUM_SHIP_BINS - 1)
+            ship_counts_t = torch.tensor(SHIP_COUNTS, dtype=torch.float32, device=self.device)
+            ship_count = ship_counts_t[ship_bin]                  # (N, MAX_OWNED)
+
+        # angle uses BIN center (matches actions_from_policy convention)
+        angle = (angle_bin.float() + 0.5) * ANGLE_BIN_WIDTH       # (N, MAX_OWNED)
 
         # Validate: planet still owned by this player AND has enough ships
         valid_owner = (src_owner == owner_id) & slot_valid

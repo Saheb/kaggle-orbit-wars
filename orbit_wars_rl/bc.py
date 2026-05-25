@@ -349,10 +349,12 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
         top3_acc = (match_top3.sum() / n_valid_tgt).item()
 
     # Normalized losses (entropy-reduction fraction vs uniform baseline).
+    # Use the actual head widths from the model output, not the legacy constants
+    # — fraction-head BC uses ship_logits.shape[-1]=10, not NUM_SHIP_BINS=32.
     import math as _m
     fire_uniform = _m.log(2)
-    angle_uniform = _m.log(NUM_ANGLE_BINS)
-    ship_uniform = _m.log(NUM_SHIP_BINS)
+    angle_uniform = _m.log(max(2, angle_logits.shape[-1]))
+    ship_uniform = _m.log(max(2, ship_logits.shape[-1]))
     target_uniform = _m.log(MP)
     fire_red = 1.0 - fire_loss.item() / fire_uniform
     angle_red = 1.0 - angle_loss.item() / angle_uniform

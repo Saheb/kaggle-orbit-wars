@@ -30,6 +30,16 @@ class ModelConfig:
     mlp_expansion: int = 3
     num_angle_bins: int = 144
     num_ship_bins: int = 32
+    # Mask ship bins below this index to -inf in model forward (never sampled).
+    # For fraction-head (10 bins on [0.1..1.0]), set to 1 to remove the
+    # "10%-of-source" bin that PPO collapses to in cold-start self-play.
+    min_ship_bin: int = 0
+    # How to decode a ship-bin index into an absolute ship count:
+    #   "absolute" — bin → SHIP_COUNTS[bin]  (32-entry hybrid linear-log table)
+    #   "fraction" — bin → round(FRACTION_BIN_VALUES[bin] * max_ships)
+    # MUST match the BC label scheme that produced the checkpoint.
+    # Default "absolute" preserves legacy checkpoint behaviour.
+    ship_bin_mode: str = "absolute"
     pairwise_feature_dim: int = 10   # see features.PAIRWISE_FEATURE_DIM
     max_planets: int = 48            # for target_head output size; matches EnvConfig
     dropout: float = 0.0

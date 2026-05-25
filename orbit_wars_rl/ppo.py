@@ -366,11 +366,22 @@ class PPOLearner:
         return self.optimizer.param_groups[0]["lr"]
 
     def state_dict(self):
+        # Save model-arch config alongside weights so loaders can rebuild the
+        # right shape (num_ship_bins for fraction-head, min_ship_bin for mask).
+        model_cfg = getattr(self.cfg, "model", None)
+        cfg_blob = {}
+        if model_cfg is not None:
+            cfg_blob = {
+                "num_ship_bins": int(getattr(model_cfg, "num_ship_bins", 32)),
+                "min_ship_bin": int(getattr(model_cfg, "min_ship_bin", 0)),
+                "ship_bin_mode": str(getattr(model_cfg, "ship_bin_mode", "absolute")),
+            }
         return {
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "total_steps": self.total_steps,
             "update_count": self.update_count,
+            "config": cfg_blob,
         }
 
     def load_state_dict(self, state_dict):
