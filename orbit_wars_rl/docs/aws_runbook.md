@@ -90,6 +90,7 @@ On the instance, inside a `tmux`/`screen` session so an SSH drop doesn't kill it
 ```bash
 tmux new -s train
 cd ~/orbit_wars_rl && source /opt/pytorch/bin/activate
+LOG=train_gpu_$(date +%Y%m%d_%H%M%S).log
 PYTHONUNBUFFERED=1 python train_torch.py \
   --resume checkpoints/<latest>.pt \
   --total-steps 100_000_000 \
@@ -98,7 +99,7 @@ PYTHONUNBUFFERED=1 python train_torch.py \
   --checkpoint-interval 5_000_000 \
   --pool-mode none \
   --terminate-on-done \
-  2>&1 | tee train_gpu.log
+  2>&1 | tee $LOG
 # Detach: Ctrl-b d
 ```
 
