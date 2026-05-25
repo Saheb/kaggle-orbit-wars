@@ -188,3 +188,55 @@ aws ec2 terminate-instances --instance-ids <id>
   reported steady "improvement" while replays showed policy collapse. See
   `docs/bugs.md` #2. Use local `eval.py` on synced checkpoints to decide stop.
 - **LR warmup re-runs on resume** — fixed; warmup auto-skipped when `--resume` is set.
+- **Spot reliability is poor for g5.2xlarge in us-east-1 (2026-05-24/25):** 4
+  interrupts in one session, average run length under 2h before reclaim. For
+  pool training (which doesn't tolerate frequent restarts cleanly), use
+  on-demand. For pure self-play runs that save checkpoints every 5M, spot is
+  still fine — accept losing up to a checkpoint of work.
+- **Fraction-head decode is mode-aware (2026-05-25):** every checkpoint now
+  carries `ship_bin_mode` in its `config` blob — either `"absolute"` (legacy
+  32-bin SHIP_COUNTS lookup) or `"fraction"` (10-bin [0.1..1.0] × source).
+  `train_torch.py` reads this BEFORE creating the env, so `VecTorchEnv` and
+  `actions_from_policy` decode consistently. Loading a fraction-head .pt
+  without `ship_bin_mode` set will silently default to "absolute" and give
+  nonsense behaviour (this is what tonight's "maskbin0 95% Zach" results
+  measured — see docs/bugs.md). Always confirm the line
+  `Checkpoint declares ship_bin_mode=<mode>` appears in the log.
+
+## New CLI flags (2026-05-25)
+
+  --bc-coef            float; coefficient on auxiliary BC cross-entropy loss
+                       during PPO. Requires --bc-samples. Typical 0.5–2.0.
+                       Anchors policy to teacher's actions via supervised
+                       gradient (alternative to il-lambda).
+  --bc-samples         path to .pkl from extract_teacher_samples.py or the
+                       cache from bc_frac.py.
+  --il-lambda          float; KL-to-frozen-policy penalty coefficient.
+                       Decays linearly to 0 over --il-decay-frac of training.
+                       Note: KL-on-distributions can keep KL small while
+                       argmax flips — not a strong-enough anchor in
+                       practice. Prefer --bc-coef.
+  --il-decay-frac      default 0.8
+  --il-ref             optional separate frozen reference .pt; defaults to
+                       the --resume checkpoint.
+  --min-ship-bin       int; mask ship bins < this to -inf in model forward.
+                       For fraction-head (10 bins), set to 1 to remove the
+                       10%-of-source bin that PPO collapsed to in cold-start
+                       (still not a complete fix — see docs/bugs.md).
+  --heuristic-workers  int; size of multiproc worker pool for external
+                       heuristic opponents in pool-mode=mixed. Default 0
+                       = (cpu_count - 1). Gives ~2.5× SPS on g5.2xlarge
+                       when external is Suneet.
+
+## Pool tuning notes
+
+- `--pool-fraction 0.1` keeps SPS at ~600 with Suneet but the asymmetric
+  seat assignment in pool envs broke the seat symmetry the BC checkpoint had
+  (Zach winrate dropped 92% → 65%, seat asymmetry +64pp). Suneet 0% didn't
+  budge in 5M of pool.
+- `--pool-fraction 0.3` → ~290 SPS, more Suneet gradient per minute. Not
+  yet validated end-to-end (interrupted runs).
+- Always panel-eval after pool training: pool envs assign the learner to
+  one seat per env, so a single-seat eval will look great while panel
+  exposes seat asymmetry. The 128-seed panel (`eval.py --panel`) is the
+  required diagnostic, not optional.
