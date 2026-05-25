@@ -29,7 +29,14 @@ from config import Config
 from model import EntityTransformer, count_params
 from opponent_pool import OpponentPool, PoolMember
 from ppo import PPOLearner
-from torch_env import VecTorchEnv, MAX_OWNED, NUM_ANGLE_BINS, NUM_SHIP_BINS
+from torch_env import (
+    VecTorchEnv,
+    MAX_OWNED,
+    NUM_ANGLE_BINS,
+    NUM_SHIP_BINS,
+    SHIP_COUNTS,
+    FRACTION_BIN_VALUES,
+)
 
 
 # ----------------------------------------------------------------------------
@@ -76,6 +83,19 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
         lp_angle = torch.zeros_like(lp_angle)
 
     return fire_a.long(), angle_a, ship_a, target_a, lp_fire, lp_angle, lp_ship, lp_target
+
+
+def decode_ship_bins(ship_bins: torch.Tensor, max_ships: torch.Tensor, ship_bin_mode: str) -> torch.Tensor:
+    """Decode sampled ship bins to ship counts using the same semantics as VecTorchEnv."""
+    if ship_bin_mode == "fraction":
+        frac_t = torch.tensor(FRACTION_BIN_VALUES, dtype=torch.float32, device=ship_bins.device)
+        idx = ship_bins.long().clamp(0, len(FRACTION_BIN_VALUES) - 1)
+        max_sendable = (max_ships.to(ship_bins.device).float() - 1.0).clamp(min=1.0)
+        return torch.round(frac_t[idx] * max_sendable).clamp(min=1.0)
+
+    counts_t = torch.tensor(SHIP_COUNTS, dtype=torch.float32, device=ship_bins.device)
+    idx = ship_bins.long().clamp(0, len(SHIP_COUNTS) - 1)
+    return counts_t[idx]
 
 
 def compute_gae(rewards: torch.Tensor, values: torch.Tensor,
@@ -454,6 +474,7 @@ def train(args):
         "fire_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "angle_a":    torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "ship_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
+        "ship_count_a": torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
         "target_a":   torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "lp_fire":    torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
         "lp_angle":   torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
@@ -586,6 +607,7 @@ def train(args):
                     outs_p, feats_p["fire_mask"], feats_p["angle_mask"],
                     feats_p.get("target_mask"), args.action_decode
                 )
+                ship_count_p = decode_ship_bins(ship_p, feats_p["max_ships"], cfg.model.ship_bin_mode)
                 storage["planet_features"][t, :, p].copy_(feats_p["planet_features"], non_blocking=True)
                 storage["fleet_features"][t, :, p].copy_(feats_p["fleet_features"], non_blocking=True)
                 storage["global_features"][t, :, p].copy_(feats_p["global_features"], non_blocking=True)
@@ -601,6 +623,7 @@ def train(args):
                 storage["fire_a"][t, :, p].copy_(fire_p, non_blocking=True)
                 storage["angle_a"][t, :, p].copy_(angle_p, non_blocking=True)
                 storage["ship_a"][t, :, p].copy_(ship_p, non_blocking=True)
+                storage["ship_count_a"][t, :, p].copy_(ship_count_p, non_blocking=True)
                 storage["target_a"][t, :, p].copy_(target_p, non_blocking=True)
                 storage["lp_fire"][t, :, p].copy_(lpf_p, non_blocking=True)
                 storage["lp_angle"][t, :, p].copy_(lpa_p, non_blocking=True)
@@ -693,6 +716,14 @@ def train(args):
             flat_ret = flat_ret[train_idx]
         TN = flat_adv.numel()
 
+        fired_train_slots = flat["fire_a"].float() * flat["slot_valid"].float()
+        fired_count = fired_train_slots.sum().clamp(min=1.0)
+        avg_fleet_size = (flat["ship_count_a"] * fired_train_slots).sum() / fired_count
+        fleet_size_p90 = torch.quantile(
+            flat["ship_count_a"][fired_train_slots.bool()],
+            0.9,
+        ) if fired_train_slots.bool().any() else torch.tensor(0.0)
+
         # Build PPOLearner-compatible batch (matches make_batch in self_play.py)
         batch = {
             "planet_features": flat["planet_features"],
@@ -767,6 +798,8 @@ def train(args):
         metrics = learner.update(minibatches, scheduler=scheduler,
                                  kl_target=cfg.ppo.kl_target,
                                  bc_batch=bc_batch)
+        metrics["avg_fleet_size"] = float(avg_fleet_size.item())
+        metrics["p90_fleet_size"] = float(fleet_size_p90.item())
 
         total_env_steps += rollout_T * N
         iter_count += 1
@@ -799,7 +832,9 @@ def train(args):
                 f"fire[0]={slot0:.2f} fire[rest_max]={slot_rest_max:.2f} "
                 f"srcs_multi={metrics.get('avg_sources_multi', 0):.2f} "
                 f"ship0={metrics.get('ship_bin0_rate', 0):.2f} "
-                f"meanshipbin={metrics.get('mean_ship_bin', 0):.1f}"
+                f"meanshipbin={metrics.get('mean_ship_bin', 0):.1f} "
+                f"avgfleet={metrics.get('avg_fleet_size', 0):.1f} "
+                f"p90fleet={metrics.get('p90_fleet_size', 0):.1f}"
                 + (f" | il_kl={metrics.get('il_kl', 0):.3f} "
                    f"il_coef={metrics.get('il_coef', 0):.3f}"
                    if metrics.get('il_coef', 0) > 0 else "")

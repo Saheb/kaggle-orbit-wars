@@ -181,18 +181,48 @@ def main():
     p.add_argument("--out", default="replays_inspect")
     p.add_argument("--device", default="cpu")
     p.add_argument("--fire-threshold", type=float, default=0.5)
+    p.add_argument("--action-decode", choices=["auto", "angle", "target"], default="auto",
+                   help="Decode mode for model actions. auto uses checkpoint config.")
     args = p.parse_args()
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
 
     cfg = Config()
     device = torch.device(args.device)
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    ckpt_cfg = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
+    state_dict = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+
+    if "num_ship_bins" in ckpt_cfg:
+        cfg.model.num_ship_bins = int(ckpt_cfg["num_ship_bins"])
+    elif "ship_head.weight" in state_dict:
+        cfg.model.num_ship_bins = int(state_dict["ship_head.weight"].shape[0])
+    if "angle_head.weight" in state_dict:
+        cfg.model.num_angle_bins = int(state_dict["angle_head.weight"].shape[0])
+    if "pair_kv.weight" not in state_dict:
+        cfg.model.pairwise_feature_dim = 0
+    if "min_ship_bin" in ckpt_cfg:
+        cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
+    if "ship_bin_mode" in ckpt_cfg:
+        cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
+
+    action_decode = str(ckpt_cfg.get("action_decode", "angle"))
+    if args.action_decode != "auto":
+        action_decode = args.action_decode
+
     model = EntityTransformer(cfg.model).to(device)
-    sd = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    if "model" in sd: sd = sd["model"]
-    model.load_state_dict(sd)
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
-    agent_fn = build_agent_fn(model, device, fire_threshold=args.fire_threshold)
+    agent_fn = build_agent_fn(
+        model,
+        device,
+        fire_threshold=args.fire_threshold,
+        ship_bin_mode=cfg.model.ship_bin_mode,
+        target_decode=(action_decode == "target"),
+    )
+    print(f"checkpoint={args.checkpoint}")
+    print(f"ship_bin_mode={cfg.model.ship_bin_mode} num_ship_bins={cfg.model.num_ship_bins} "
+          f"action_decode={action_decode}")
 
     for seed in args.seed:
         record, text = inspect_game(agent_fn, args.opponent, seed)
