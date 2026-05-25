@@ -599,13 +599,20 @@ class VecTorchEnv:
         angle = (angle_bin.float() + 0.5) * ANGLE_BIN_WIDTH       # (N, MAX_OWNED)
         target_valid = torch.ones_like(fire, dtype=torch.bool)
         if self.action_decode == "target" and actions.shape[-1] >= 4:
-            target_idx = actions[:, :, 3].long().clamp(0, self.planets.shape[1] - 1)
+            raw_target_idx = actions[:, :, 3].long()
+            use_target_decode = raw_target_idx >= 0
+            target_idx = raw_target_idx.clamp(0, self.planets.shape[1] - 1)
             target_gather = target_idx.unsqueeze(-1).expand(-1, -1, 7)
             tgt = self.planets.gather(1, target_gather)
             target_owner = tgt[:, :, 1].long()
             target_alive = self.planet_alive.gather(1, target_idx)
-            target_valid = target_alive & (target_owner != owner_id)
-            angle = self._target_intercept_angle(src_x, src_y, ship_count, target_idx)
+            target_valid = torch.where(
+                use_target_decode,
+                target_alive & (target_owner != owner_id),
+                torch.ones_like(target_alive, dtype=torch.bool),
+            )
+            target_angle = self._target_intercept_angle(src_x, src_y, ship_count, target_idx)
+            angle = torch.where(use_target_decode, target_angle, angle)
 
         # Validate: planet still owned by this player AND has enough ships
         valid_owner = (src_owner == owner_id) & slot_valid

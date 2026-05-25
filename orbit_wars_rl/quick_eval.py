@@ -30,6 +30,8 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--games", type=int, default=8)
     parser.add_argument("--sample", action="store_true")
+    parser.add_argument("--action-decode", choices=["auto", "angle", "target"], default="auto",
+                        help="Decode mode for eval. auto uses checkpoint config.")
     args = parser.parse_args()
 
     # Load checkpoint — mirrors evaluate_checkpoint logic
@@ -51,6 +53,8 @@ def main():
     if "ship_bin_mode" in ckpt_cfg:
         cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
     action_decode = str(ckpt_cfg.get("action_decode", "angle"))
+    if args.action_decode != "auto":
+        action_decode = args.action_decode
 
     print(f"Checkpoint: {args.checkpoint}")
     print(f"  ship_bin_mode={cfg.model.ship_bin_mode}  "
@@ -69,7 +73,7 @@ def main():
     from kaggle_environments import make
     agent_fn = build_agent_fn(model, device,
                               ship_bin_mode=cfg.model.ship_bin_mode,
-                              action_decode=action_decode,
+                              target_decode=(action_decode == "target"),
                               sample=args.sample)
     move_log = []
     def logging_agent(obs):
@@ -96,7 +100,7 @@ def main():
             num_games=args.games,
             opponent=path,
             ship_bin_mode=cfg.model.ship_bin_mode,
-            action_decode=action_decode,
+            target_decode=(action_decode == "target"),
             sample=args.sample,
         )
         elapsed = time.perf_counter() - t0

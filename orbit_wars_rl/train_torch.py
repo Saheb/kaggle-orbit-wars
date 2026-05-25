@@ -275,6 +275,7 @@ def train(args):
     # 0 when resuming from a BC checkpoint saved with min_ship_bin=0.
     if args.min_ship_bin is not None:
         cfg.model.min_ship_bin = args.min_ship_bin
+    cfg.model.action_decode = args.action_decode
 
     env = VecTorchEnv(num_envs=args.num_envs, num_players=2,
                       device=device, episode_steps=500,
@@ -524,7 +525,12 @@ def train(args):
             view = _SliceView(env, env_slice)
             act = _heuristic_moves_to_action_tensor(moves_per_env, view, player, device)
             if args.action_decode == "target":
-                pad_target = torch.zeros(act.shape[:-1] + (1,), dtype=act.dtype, device=act.device)
+                # External heuristics already emit explicit angles. Use -1 as a
+                # sentinel so VecTorchEnv keeps angle-bin decoding for these rows
+                # even when the learned policy uses target decoding.
+                pad_target = torch.full(
+                    act.shape[:-1] + (1,), -1, dtype=act.dtype, device=act.device
+                )
                 act = torch.cat([act, pad_target], dim=-1)
             return act
 

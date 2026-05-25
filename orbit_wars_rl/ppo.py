@@ -399,6 +399,7 @@ class PPOLearner:
                 "num_ship_bins": int(getattr(model_cfg, "num_ship_bins", 32)),
                 "min_ship_bin": int(getattr(model_cfg, "min_ship_bin", 0)),
                 "ship_bin_mode": str(getattr(model_cfg, "ship_bin_mode", "absolute")),
+                "action_decode": str(getattr(model_cfg, "action_decode", "angle")),
             }
         return {
             "model": self.model.state_dict(),
