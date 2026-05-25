@@ -269,6 +269,7 @@ def train(args):
     print(f"PPO config: lr={cfg.ppo.learning_rate}, ppo_epochs={cfg.ppo.ppo_epochs}, "
           f"num_minibatches={cfg.ppo.num_minibatches}, kl_target={cfg.ppo.kl_target}")
     print(f"Action decode: {args.action_decode}")
+    print(f"Win margin coeff: {args.win_margin_coeff}")
 
     # Honor model-config fields saved in the checkpoint (num_ship_bins,
     # ship_bin_mode, min_ship_bin) BEFORE creating env or model.
@@ -301,7 +302,8 @@ def train(args):
     env = VecTorchEnv(num_envs=args.num_envs, num_players=2,
                       device=device, episode_steps=500,
                       ship_bin_mode=cfg.model.ship_bin_mode,
-                      action_decode=args.action_decode)
+                      action_decode=args.action_decode,
+                      win_margin_coeff=args.win_margin_coeff)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
 
     model = EntityTransformer(cfg.model).to(device)
@@ -906,7 +908,7 @@ def train(args):
     # command will tear down the VM, ending billing.
     if args.terminate_on_done:
         print("\n--terminate-on-done: powering off the instance...")
-        os.system("sudo shutdown -h +1 'training complete, auto-terminating'")
+        os.system("sudo shutdown -h +5 'training complete, auto-terminating'")
 
 
 if __name__ == "__main__":
@@ -956,6 +958,9 @@ if __name__ == "__main__":
                              "angle keeps the legacy free angle-bin action; target "
                              "samples target_logits and converts the target planet "
                              "to an intercept angle in VecTorchEnv.")
+    parser.add_argument("--win-margin-coeff", type=float, default=0.0,
+                        help="Terminal bonus coefficient α: winner gets +1 + α*(my_score/total_score). "
+                             "0 = pure ±1 reward (default). Suggested start: 0.5.")
     # Opponent pool (PFSP self-play with optional external heuristics) ----
     parser.add_argument("--pool-mode", choices=["none", "self", "mixed"], default="none",
                         help="none: pure current-vs-current self-play (default). "

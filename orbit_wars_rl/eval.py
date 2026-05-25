@@ -288,6 +288,10 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     if "ship_bin_mode" in ckpt_cfg:
         cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
         print(f"Checkpoint ship_bin_mode={cfg.model.ship_bin_mode}")
+    # Auto-detect action_decode from checkpoint config; CLI --target-decode overrides.
+    if not target_decode and ckpt_cfg.get("action_decode") == "target":
+        target_decode = True
+        print("Checkpoint action_decode=target  →  enabling target_decode automatically")
 
     model = EntityTransformer(cfg.model).to(device)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)

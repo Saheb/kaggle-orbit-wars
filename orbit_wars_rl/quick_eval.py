@@ -11,18 +11,31 @@ Run this before any full panel eval — see eval_runbook.md §1.
 from __future__ import annotations
 import argparse
 import time
+from pathlib import Path
+
 import torch
 from config import Config
 from model import EntityTransformer
 from eval import build_agent_fn, evaluate_against_baseline
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 OPPONENTS = [
     ("random",     "random"),
-    ("sniper",     "../candidate_sniper.py"),
-    ("zach",       "../candidate_zach_public.py"),
-    ("hellburner", "../candidate_hellburner.py"),
-    ("suneet",     "../candidate_suneet_lb1200.py"),
+    ("sniper",     "candidate_sniper.py"),
+    ("zach",       "candidate_zach_public.py"),
+    ("hellburner", "candidate_hellburner.py"),
+    ("suneet",     "candidate_suneet_lb1200.py"),
 ]
+
+
+def resolve_opponent(path: str) -> str:
+    if path == "random":
+        return path
+    p = Path(path)
+    if not p.is_absolute():
+        p = REPO_ROOT / p
+    return str(p)
 
 
 def main():
@@ -98,7 +111,7 @@ def main():
         r = evaluate_against_baseline(
             model, device,
             num_games=args.games,
-            opponent=path,
+            opponent=resolve_opponent(path),
             ship_bin_mode=cfg.model.ship_bin_mode,
             target_decode=(action_decode == "target"),
             sample=args.sample,

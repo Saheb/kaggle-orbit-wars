@@ -71,6 +71,7 @@ class VecTorchEnv:
         episode_steps: int = 500,
         ship_bin_mode: str = "absolute",
         action_decode: str = "angle",
+        win_margin_coeff: float = 0.0,
     ):
         self.num_envs = num_envs
         self.num_players = num_players
@@ -82,6 +83,9 @@ class VecTorchEnv:
         if action_decode not in {"angle", "target"}:
             raise ValueError(f"unknown action_decode={action_decode!r}")
         self.action_decode = action_decode
+        # Terminal bonus for winners: +win_margin_coeff * (my_score / total_score).
+        # 0.0 = pure ±1 reward (default, backward-compatible).
+        self.win_margin_coeff = float(win_margin_coeff)
 
         # State tensors — allocated in reset()
         self.planets: torch.Tensor = None       # (N, P, 7)
@@ -900,6 +904,13 @@ class VecTorchEnv:
         max_score, _ = scores.max(dim=1, keepdim=True)  # (N, 1)
         wins = (scores == max_score) & (max_score > 0)
         rewards = torch.where(wins, torch.ones_like(scores), -torch.ones_like(scores))
+        # Optional win-margin bonus: winner gets +α*(my_score/total_score).
+        # Losers stay at -1; coefficient 0 = pure ±1 (default).
+        if self.win_margin_coeff != 0.0:
+            total_score = scores.sum(dim=1, keepdim=True).clamp(min=1.0)
+            margin = scores / total_score          # (N, P) fraction in [0, 1]
+            bonus = self.win_margin_coeff * margin
+            rewards = torch.where(wins, rewards + bonus, rewards)
         # Only return rewards for newly-done envs; zero otherwise
         rewards = rewards * newly_done.unsqueeze(1).float()
         self.rewards = torch.where(newly_done.unsqueeze(1), rewards, self.rewards)

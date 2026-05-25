@@ -15,6 +15,7 @@ class EnvConfig:
     rotation_radius_limit: float = 50.0
     num_players: int = 2
     max_moves_per_turn: int = 8
+    win_margin_coeff: float = 0.0   # terminal bonus: winner gets +1 + α*(my_score/total_score)
 
 
 @dataclass
