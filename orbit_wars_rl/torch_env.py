@@ -70,6 +70,7 @@ class VecTorchEnv:
         device: str | torch.device = "cpu",
         episode_steps: int = 500,
         ship_bin_mode: str = "absolute",
+        action_decode: str = "angle",
     ):
         self.num_envs = num_envs
         self.num_players = num_players
@@ -78,6 +79,9 @@ class VecTorchEnv:
         # See ModelConfig.ship_bin_mode. "absolute" uses SHIP_COUNTS lookup;
         # "fraction" uses round(FRAC_VALUES[bin] * src_ships).
         self.ship_bin_mode = ship_bin_mode
+        if action_decode not in {"angle", "target"}:
+            raise ValueError(f"unknown action_decode={action_decode!r}")
+        self.action_decode = action_decode
 
         # State tensors — allocated in reset()
         self.planets: torch.Tensor = None       # (N, P, 7)
@@ -206,6 +210,7 @@ class VecTorchEnv:
             fleet_mask:       (N, max_fleets) bool
             fire_mask:        (N, MAX_OWNED) bool — can fire (owned planet)
             angle_mask:       (N, MAX_OWNED, NUM_ANGLE_BINS) bool — all True for now
+            target_mask:      (N, MAX_OWNED, max_planets) bool — legal target planets
             slot_valid:       (N, MAX_OWNED) bool
             owned_indices:    (N, MAX_OWNED) long
             max_ships:        (N, MAX_OWNED) float — ships available
@@ -381,6 +386,11 @@ class VecTorchEnv:
         fire_mask = slot_valid & (max_ships >= 1.0)
         # Angle mask: all angles legal (no sun-blocking for now)
         angle_mask = torch.ones(N, MAX_OWNED, NUM_ANGLE_BINS, dtype=torch.bool, device=self.device)
+        # Target mask: target-conditioned rollouts should sample a live planet
+        # that is not already ours. Per-source mask keeps padded owned slots off.
+        target_owner = owner.unsqueeze(1).expand(-1, MAX_OWNED, -1)
+        target_alive = planet_alive.unsqueeze(1).expand(-1, MAX_OWNED, -1)
+        target_mask = target_alive & (target_owner != player) & slot_valid.unsqueeze(-1)
         # Per-env owned_count for the model
         owned_count = slot_valid.long().sum(dim=1).tolist()
 
@@ -400,6 +410,7 @@ class VecTorchEnv:
             "fleet_mask":      fleet_alive,
             "fire_mask":       fire_mask,
             "angle_mask":      angle_mask,
+            "target_mask":     target_mask,
             "slot_valid":      slot_valid,
             "owned_indices":   owned_idx,
             "max_ships":       max_ships,
@@ -509,8 +520,45 @@ class VecTorchEnv:
         return owned_idx, slot_valid
 
     # ---------------------------------------------------------------------
+    def _target_intercept_angle(
+        self,
+        src_x: torch.Tensor,
+        src_y: torch.Tensor,
+        ship_count: torch.Tensor,
+        target_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        """Vectorized target-to-angle decode with a short fixed-point ETA solve."""
+        P = self.planets.shape[1]
+        target_idx = target_idx.long().clamp(0, P - 1)
+        gather_idx = target_idx.unsqueeze(-1).expand(-1, -1, 7)
+        tgt = self.planets.gather(1, gather_idx)
+        tx = tgt[:, :, 2]
+        ty = tgt[:, :, 3]
+
+        init_ang = self._planet_initial_angle.gather(1, target_idx)
+        orb_r = self._planet_orbital_r.gather(1, target_idx)
+        is_orb = self._planet_is_orbiting.gather(1, target_idx)
+        speed = _ship_speed(ship_count)
+        step_f = self.step_count.float().unsqueeze(1)
+        ang_vel = self.angular_velocity.unsqueeze(1)
+
+        aim_x = tx
+        aim_y = ty
+        for _ in range(4):
+            dist = torch.sqrt((aim_x - src_x) ** 2 + (aim_y - src_y) ** 2).clamp(min=1e-6)
+            eta = torch.ceil(dist / speed).clamp(min=1.0)
+            future_ang = init_ang + ang_vel * (step_f + eta)
+            orbit_x = CENTER + orb_r * torch.cos(future_ang)
+            orbit_y = CENTER + orb_r * torch.sin(future_ang)
+            aim_x = torch.where(is_orb, orbit_x, tx)
+            aim_y = torch.where(is_orb, orbit_y, ty)
+
+        return torch.atan2(aim_y - src_y, aim_x - src_x) % (2 * math.pi)
+
+    # ---------------------------------------------------------------------
     # Apply actions for one player. Launches fleets from owned planets.
     # actions: (N, MAX_OWNED, 3) int — [fire, angle_bin, ship_bin]
+    #      or (N, MAX_OWNED, 4) int — [fire, angle_bin, ship_bin, target_idx]
     # ---------------------------------------------------------------------
 
     def _apply_actions(self, actions: torch.Tensor, owner_id: int):
@@ -530,26 +578,39 @@ class VecTorchEnv:
         src_x = src[:, :, 2]; src_y = src[:, :, 3]; src_r = src[:, :, 4]
         src_ships = src[:, :, 5]; src_owner = src[:, :, 1].long()
 
-        # Decode ship_bin → ship count. "absolute" uses fixed table; "fraction"
-        # scales by src_ships at decode time.
+        # Decode ship_bin -> ship count. "absolute" uses fixed table; "fraction"
+        # scales by max sendable ships, matching compute_action_masks() and
+        # bc_frac.py labels: keep one ship behind when possible.
         if self.ship_bin_mode == "fraction":
             num_bins = len(FRACTION_BIN_VALUES)
             ship_bin = actions[:, :, 2].long().clamp(0, num_bins - 1)
             frac_t = torch.tensor(FRACTION_BIN_VALUES, dtype=torch.float32, device=self.device)
             frac = frac_t[ship_bin]                                # (N, MAX_OWNED)
-            ship_count = torch.round(frac * src_ships).clamp(min=1.0)
+            max_sendable = (src_ships - 1.0).clamp(min=1.0)
+            ship_count = torch.round(frac * max_sendable).clamp(min=1.0)
         else:
             ship_bin = actions[:, :, 2].long().clamp(0, NUM_SHIP_BINS - 1)
             ship_counts_t = torch.tensor(SHIP_COUNTS, dtype=torch.float32, device=self.device)
             ship_count = ship_counts_t[ship_bin]                  # (N, MAX_OWNED)
 
-        # angle uses BIN center (matches actions_from_policy convention)
+        # Angle-bin mode uses BIN center (matches actions_from_policy).
+        # Target mode executes the target head by converting target_idx to an
+        # intercept angle while keeping angle_bin in storage for compatibility.
         angle = (angle_bin.float() + 0.5) * ANGLE_BIN_WIDTH       # (N, MAX_OWNED)
+        target_valid = torch.ones_like(fire, dtype=torch.bool)
+        if self.action_decode == "target" and actions.shape[-1] >= 4:
+            target_idx = actions[:, :, 3].long().clamp(0, self.planets.shape[1] - 1)
+            target_gather = target_idx.unsqueeze(-1).expand(-1, -1, 7)
+            tgt = self.planets.gather(1, target_gather)
+            target_owner = tgt[:, :, 1].long()
+            target_alive = self.planet_alive.gather(1, target_idx)
+            target_valid = target_alive & (target_owner != owner_id)
+            angle = self._target_intercept_angle(src_x, src_y, ship_count, target_idx)
 
         # Validate: planet still owned by this player AND has enough ships
         valid_owner = (src_owner == owner_id) & slot_valid
         valid_ships = src_ships >= ship_count
-        can_fire = fire & valid_owner & valid_ships & (ship_count > 0)  # (N, MAX_OWNED)
+        can_fire = fire & valid_owner & valid_ships & target_valid & (ship_count > 0)  # (N, MAX_OWNED)
 
         # Compute launch positions (just outside planet radius along angle)
         start_x = src_x + torch.cos(angle) * (src_r + 0.1)

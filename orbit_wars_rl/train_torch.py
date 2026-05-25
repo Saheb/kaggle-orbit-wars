@@ -37,19 +37,29 @@ from torch_env import VecTorchEnv, MAX_OWNED, NUM_ANGLE_BINS, NUM_SHIP_BINS
 # ----------------------------------------------------------------------------
 
 def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
-                          angle_mask: torch.Tensor):
+                          angle_mask: torch.Tensor,
+                          target_mask: torch.Tensor | None = None,
+                          action_decode: str = "angle"):
     """Sample fire/angle/ship for a batch of envs. Returns actions + log_probs."""
     fire_logits  = outputs["fire_logits"].masked_fill(~fire_mask, -1e9)
     angle_logits = outputs["angle_logits"].masked_fill(~angle_mask, -1e9)
     ship_logits  = outputs["ship_logits"]
+    target_logits = outputs.get("target_logits")
+    if target_logits is not None and target_mask is not None:
+        target_logits = target_logits.masked_fill(~target_mask, -1e9)
 
     fire_dist  = torch.distributions.Bernoulli(logits=fire_logits)
     angle_dist = torch.distributions.Categorical(logits=angle_logits)
     ship_dist  = torch.distributions.Categorical(logits=ship_logits)
+    target_dist = (
+        torch.distributions.Categorical(logits=target_logits)
+        if target_logits is not None else None
+    )
 
     fire_a  = fire_dist.sample()                 # (N, MAX_OWNED)
     angle_a = angle_dist.sample()                # (N, MAX_OWNED)
     ship_a  = ship_dist.sample()                 # (N, MAX_OWNED)
+    target_a = target_dist.sample() if target_dist is not None else torch.zeros_like(angle_a)
 
     # log_probs only for valid slots / fired actions
     slot_valid = fire_mask  # already equivalent for our usage
@@ -57,8 +67,15 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
     fired = (fire_a > 0.5).float() * slot_valid.float()
     lp_angle = angle_dist.log_prob(angle_a) * fired
     lp_ship  = ship_dist.log_prob(ship_a)  * fired
+    lp_target = (
+        target_dist.log_prob(target_a) * fired
+        if target_dist is not None else torch.zeros_like(lp_angle)
+    )
 
-    return fire_a.long(), angle_a, ship_a, lp_fire, lp_angle, lp_ship
+    if action_decode == "target":
+        lp_angle = torch.zeros_like(lp_angle)
+
+    return fire_a.long(), angle_a, ship_a, target_a, lp_fire, lp_angle, lp_ship, lp_target
 
 
 def compute_gae(rewards: torch.Tensor, values: torch.Tensor,
@@ -228,10 +245,9 @@ def train(args):
         cfg.ppo.il_decay_frac = args.il_decay_frac
     if args.bc_coef is not None:
         cfg.ppo.bc_coef = args.bc_coef
-    if args.min_ship_bin is not None:
-        cfg.model.min_ship_bin = args.min_ship_bin
     print(f"PPO config: lr={cfg.ppo.learning_rate}, ppo_epochs={cfg.ppo.ppo_epochs}, "
           f"num_minibatches={cfg.ppo.num_minibatches}, kl_target={cfg.ppo.kl_target}")
+    print(f"Action decode: {args.action_decode}")
 
     # Honor model-config fields saved in the checkpoint (num_ship_bins,
     # ship_bin_mode, min_ship_bin) BEFORE creating env or model.
@@ -255,9 +271,15 @@ def train(args):
             cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
         del _ckpt_peek
 
+    # CLI overrides checkpoint metadata. This lets a run deliberately mask bin
+    # 0 when resuming from a BC checkpoint saved with min_ship_bin=0.
+    if args.min_ship_bin is not None:
+        cfg.model.min_ship_bin = args.min_ship_bin
+
     env = VecTorchEnv(num_envs=args.num_envs, num_players=2,
                       device=device, episode_steps=500,
-                      ship_bin_mode=cfg.model.ship_bin_mode)
+                      ship_bin_mode=cfg.model.ship_bin_mode,
+                      action_decode=args.action_decode)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
 
     model = EntityTransformer(cfg.model).to(device)
@@ -425,14 +447,17 @@ def train(args):
         "fire_mask":       torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev),
         "angle_mask":      torch.zeros(rollout_T, N, P, MAX_OWNED, NUM_ANGLE_BINS, dtype=torch.bool, device=storage_dev),
         "slot_valid":      torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev),
+        "target_mask":     torch.zeros(rollout_T, N, P, MAX_OWNED, 48, dtype=torch.bool, device=storage_dev),
         "owned_indices":   torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "pairwise_features": torch.zeros(rollout_T, N, P, MAX_OWNED, 48, 10, device=storage_dev),
         "fire_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "angle_a":    torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "ship_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
+        "target_a":   torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "lp_fire":    torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
         "lp_angle":   torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
         "lp_ship":    torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
+        "lp_target":  torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
         "values":     torch.zeros(rollout_T, N, P, device=storage_dev),
         "rewards":    torch.zeros(rollout_T, N, P, device=storage_dev),
         "dones":      torch.zeros(rollout_T, N, P, dtype=torch.bool, device=storage_dev),
@@ -459,9 +484,12 @@ def train(args):
                     owned_count=feats["owned_count"],
                     pairwise_features=feats.get("pairwise_features"),
                 )
-            fire_a, angle_a, ship_a, *_ = sample_action_batched(
-                outs, feats["fire_mask"], feats["angle_mask"]
+            fire_a, angle_a, ship_a, target_a, *_ = sample_action_batched(
+                outs, feats["fire_mask"], feats["angle_mask"],
+                feats.get("target_mask"), args.action_decode
             )
+            if args.action_decode == "target":
+                return torch.stack([fire_a, angle_a, ship_a, target_a], dim=-1)[env_slice]
             return torch.stack([fire_a, angle_a, ship_a], dim=-1)[env_slice]
 
         if opp.kind == "external_heuristic":
@@ -494,7 +522,11 @@ def train(args):
                     oi, sv = env.owned_indices_for(player)
                     return oi[self._slc], sv[self._slc]
             view = _SliceView(env, env_slice)
-            return _heuristic_moves_to_action_tensor(moves_per_env, view, player, device)
+            act = _heuristic_moves_to_action_tensor(moves_per_env, view, player, device)
+            if args.action_decode == "target":
+                pad_target = torch.zeros(act.shape[:-1] + (1,), dtype=act.dtype, device=act.device)
+                act = torch.cat([act, pad_target], dim=-1)
+            return act
 
         raise ValueError(f"unknown opponent kind: {opp.kind}")
 
@@ -544,8 +576,9 @@ def train(args):
             actions_per_player = {}
             for p in range(P):
                 feats_p, outs_p = forward_player(p)
-                fire_p, angle_p, ship_p, lpf_p, lpa_p, lps_p = sample_action_batched(
-                    outs_p, feats_p["fire_mask"], feats_p["angle_mask"]
+                fire_p, angle_p, ship_p, target_p, lpf_p, lpa_p, lps_p, lpt_p = sample_action_batched(
+                    outs_p, feats_p["fire_mask"], feats_p["angle_mask"],
+                    feats_p.get("target_mask"), args.action_decode
                 )
                 storage["planet_features"][t, :, p].copy_(feats_p["planet_features"], non_blocking=True)
                 storage["fleet_features"][t, :, p].copy_(feats_p["fleet_features"], non_blocking=True)
@@ -555,17 +588,23 @@ def train(args):
                 storage["fire_mask"][t, :, p].copy_(feats_p["fire_mask"], non_blocking=True)
                 storage["angle_mask"][t, :, p].copy_(feats_p["angle_mask"], non_blocking=True)
                 storage["slot_valid"][t, :, p].copy_(feats_p["slot_valid"], non_blocking=True)
+                storage["target_mask"][t, :, p].copy_(feats_p["target_mask"], non_blocking=True)
                 storage["owned_indices"][t, :, p].copy_(feats_p["owned_indices"], non_blocking=True)
                 if "pairwise_features" in feats_p:
                     storage["pairwise_features"][t, :, p].copy_(feats_p["pairwise_features"], non_blocking=True)
                 storage["fire_a"][t, :, p].copy_(fire_p, non_blocking=True)
                 storage["angle_a"][t, :, p].copy_(angle_p, non_blocking=True)
                 storage["ship_a"][t, :, p].copy_(ship_p, non_blocking=True)
+                storage["target_a"][t, :, p].copy_(target_p, non_blocking=True)
                 storage["lp_fire"][t, :, p].copy_(lpf_p, non_blocking=True)
                 storage["lp_angle"][t, :, p].copy_(lpa_p, non_blocking=True)
                 storage["lp_ship"][t, :, p].copy_(lps_p, non_blocking=True)
+                storage["lp_target"][t, :, p].copy_(lpt_p, non_blocking=True)
                 storage["values"][t, :, p].copy_(outs_p["value"].squeeze(-1), non_blocking=True)
-                actions_per_player[p] = torch.stack([fire_p, angle_p, ship_p], dim=-1)
+                if args.action_decode == "target":
+                    actions_per_player[p] = torch.stack([fire_p, angle_p, ship_p, target_p], dim=-1)
+                else:
+                    actions_per_player[p] = torch.stack([fire_p, angle_p, ship_p], dim=-1)
 
             # Pool opponent override: in pool envs, replace `opp_seat`'s action
             # with the pool member's action, and mark its storage slot as
@@ -657,6 +696,7 @@ def train(args):
             "fleet_mask":      flat["fleet_mask"],
             "fire_mask":       flat["fire_mask"],
             "angle_mask":      flat["angle_mask"],
+            "target_mask":     flat["target_mask"],
             "slot_valid":      flat["slot_valid"],
             "owned_indices":   flat["owned_indices"],
             "pairwise_features": flat["pairwise_features"],
@@ -665,12 +705,15 @@ def train(args):
                 "fire":  flat["fire_a"],
                 "angle": flat["angle_a"],
                 "ship":  flat["ship_a"],
+                "target": flat["target_a"],
             },
             "old_log_probs": {
                 "fire":  flat["lp_fire"],
                 "angle": flat["lp_angle"],
                 "ships": flat["lp_ship"],
+                "target": flat["lp_target"],
             },
+            "action_decode": args.action_decode,
             "advantages": flat_adv,
             "returns":    flat_ret,
             "old_values": flat["values"],
@@ -691,6 +734,8 @@ def train(args):
                     sub[k] = {kk: vv[mi].to(device, non_blocking=True) for kk, vv in v.items()}
                 elif isinstance(v, list):
                     sub[k] = [v[i] for i in mi.tolist()]
+                else:
+                    sub[k] = v
             minibatches.append(sub)
 
         # IL coefficient schedule: linear decay from il_lambda → 0 over
@@ -862,6 +907,11 @@ if __name__ == "__main__":
                         help="Mask ship bins < this index to -inf (never sampled). "
                              "For fraction-head 10-bin model, set 1 to remove the "
                              "10%%-of-source bin that PPO collapses to in cold-start.")
+    parser.add_argument("--action-decode", choices=["angle", "target"], default="angle",
+                        help="Direction component executed during PPO rollouts. "
+                             "angle keeps the legacy free angle-bin action; target "
+                             "samples target_logits and converts the target planet "
+                             "to an intercept angle in VecTorchEnv.")
     # Opponent pool (PFSP self-play with optional external heuristics) ----
     parser.add_argument("--pool-mode", choices=["none", "self", "mixed"], default="none",
                         help="none: pure current-vs-current self-play (default). "

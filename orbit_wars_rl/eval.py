@@ -12,12 +12,13 @@ import numpy as np
 from config import Config
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH
 from features import extract_features
-from action_mask import compute_action_masks, actions_from_policy
+from action_mask import compute_action_masks, actions_from_policy, actions_from_target_policy
 
 
 def build_agent_fn(model: EntityTransformer, device: torch.device,
                    fire_threshold: float = 0.5, sample: bool = False,
-                   ship_bin_mode: str = "absolute"):
+                   ship_bin_mode: str = "absolute",
+                   target_decode: bool = False):
     """Return a kaggle_environments-compatible agent function wrapping the model.
 
     sample=True uses Bernoulli/Categorical sampling instead of threshold/argmax —
@@ -62,7 +63,20 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                     if "pairwise_features" in features else None,
             )
 
-        return actions_from_policy(
+        action_fn = actions_from_target_policy if target_decode else actions_from_policy
+        if target_decode:
+            return action_fn(
+                outputs["fire_logits"].cpu(),
+                outputs["target_logits"].cpu(),
+                outputs["ship_logits"].cpu(),
+                {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()},
+                obs, player,
+                fire_threshold=fire_threshold,
+                sample=sample,
+                ship_bin_mode=ship_bin_mode,
+            )
+
+        return action_fn(
             outputs["fire_logits"].cpu(),
             outputs["angle_logits"].cpu(),
             outputs["ship_logits"].cpu(),
@@ -86,6 +100,7 @@ def evaluate_against_baseline(
     fire_threshold: float = 0.5,
     sample: bool = False,
     ship_bin_mode: str = "absolute",
+    target_decode: bool = False,
 ) -> dict:
     """Evaluate trained policy against a baseline using kaggle_environments.
 
@@ -96,7 +111,7 @@ def evaluate_against_baseline(
     from kaggle_environments import make
 
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
-                              ship_bin_mode=ship_bin_mode)
+                              ship_bin_mode=ship_bin_mode, target_decode=target_decode)
     opponents = [opponent] * (num_players - 1)
     agents = [agent_fn] + opponents
 
@@ -144,6 +159,7 @@ def evaluate_panel(
     fire_threshold: float = 0.5,
     sample: bool = False,
     ship_bin_mode: str = "absolute",
+    target_decode: bool = False,
 ) -> dict:
     """Stratified eval over the 128-seed community panel, playing both seats.
 
@@ -156,7 +172,7 @@ def evaluate_panel(
     from eval_panel import BY_ARCHETYPE
 
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
-                              ship_bin_mode=ship_bin_mode)
+                              ship_bin_mode=ship_bin_mode, target_decode=target_decode)
 
     per_arch: dict[str, dict] = {arch: {"wins": 0, "total": 0,
                                         "wins_seat0": 0, "wins_seat1": 0,
@@ -240,7 +256,8 @@ def print_panel_report(result: dict, opponent: str) -> None:
 
 def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         opponent: str = "random", fire_threshold: float = 0.5,
-                        panel: bool = False, sample: bool = False):
+                        panel: bool = False, sample: bool = False,
+                        target_decode: bool = False):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
 
@@ -259,6 +276,13 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         n = int(state_dict["ship_head.weight"].shape[0])
         if n != cfg.model.num_ship_bins:
             cfg.model.num_ship_bins = n
+    if "angle_head.weight" in state_dict:
+        n = int(state_dict["angle_head.weight"].shape[0])
+        if n != cfg.model.num_angle_bins:
+            cfg.model.num_angle_bins = n
+            print(f"Detected num_angle_bins={cfg.model.num_angle_bins}")
+    if "pair_kv.weight" not in state_dict:
+        cfg.model.pairwise_feature_dim = 0
     if "min_ship_bin" in ckpt_cfg:
         cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
     if "ship_bin_mode" in ckpt_cfg:
@@ -266,19 +290,25 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         print(f"Checkpoint ship_bin_mode={cfg.model.ship_bin_mode}")
 
     model = EntityTransformer(cfg.model).to(device)
-    model.load_state_dict(state_dict)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    allowed_missing = {"target_head.weight", "target_head.bias"}
+    bad_missing = [k for k in missing if k not in allowed_missing]
+    if bad_missing or unexpected:
+        raise RuntimeError(f"Checkpoint/model mismatch: missing={bad_missing}, unexpected={unexpected}")
     model.eval()
 
     if panel:
         results = evaluate_panel(model, device, opponent=opponent,
                                  fire_threshold=fire_threshold, sample=sample,
-                                 ship_bin_mode=cfg.model.ship_bin_mode)
+                                 ship_bin_mode=cfg.model.ship_bin_mode,
+                                 target_decode=target_decode)
         print_panel_report(results, opponent)
         return results
 
     results = evaluate_against_baseline(
         model, device,
         ship_bin_mode=cfg.model.ship_bin_mode,
+        target_decode=target_decode,
         num_games=num_games,
         opponent=opponent,
         num_players=cfg.env.num_players,
@@ -289,6 +319,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     print(f"Win rate vs {opponent}: {results['win_rate']:.2%}  "
           f"({results['wins']}/{results['total_games']})")
     print(f"Fire threshold: {fire_threshold}")
+    print(f"Target decode: {target_decode}")
     print(f"Avg material: {results['avg_material']:.1f}")
     for r in results["results"][:5]:
         print(f"  seed={r['seed']} win={r['win']} "
@@ -312,6 +343,9 @@ if __name__ == "__main__":
                         help="Sample from policy distribution instead of argmax. "
                              "Use when the mode is degenerate but distribution mass "
                              "is on competent bins (1-ship-fleet trap).")
+    parser.add_argument("--target-decode", action="store_true",
+                        help="Aim with target_logits plus orbital intercept instead "
+                             "of directly using the angle head.")
     args = parser.parse_args()
 
     cfg = Config()
@@ -324,4 +358,5 @@ if __name__ == "__main__":
         fire_threshold=args.fire_threshold,
         panel=args.panel,
         sample=args.sample,
+        target_decode=args.target_decode,
     )

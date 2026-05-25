@@ -105,8 +105,8 @@ class PPOLearner:
             - planet_features, fleet_features, global_features
             - planet_mask, fleet_mask
             - fire_mask, angle_mask, slot_valid, owned_indices, owned_count
-            - actions: {fire, angle, ship} — taken action indices
-            - old_log_probs: {fire, angle, ships}
+            - actions: {fire, angle, ship, target} — taken action indices
+            - old_log_probs: {fire, angle, ships, target}
             - advantages, returns, old_values
         """
         cfg = self.cfg.ppo
@@ -122,7 +122,11 @@ class PPOLearner:
         fleet_mask = to_dev(batch["fleet_mask"])
         fire_mask = to_dev(batch["fire_mask"])
         angle_mask = to_dev(batch["angle_mask"])
+        target_mask = batch.get("target_mask")
+        if target_mask is not None:
+            target_mask = to_dev(target_mask)
         owned_indices = batch["owned_indices"]
+        action_decode = batch.get("action_decode", "angle")
 
         slot_valid_2d = to_dev(batch["slot_valid"])  # (B, max_owned) bool
 
@@ -141,17 +145,22 @@ class PPOLearner:
         fire_logits = outputs["fire_logits"]
         angle_logits = outputs["angle_logits"]
         ship_logits = outputs["ship_logits"]
+        target_logits = outputs["target_logits"]
+        if target_mask is not None:
+            target_logits = target_logits.masked_fill(~target_mask, -1e9)
         values = outputs["value"]
 
         # Action distributions
         fire_dist = torch.distributions.Bernoulli(logits=fire_logits)
         angle_dist = torch.distributions.Categorical(logits=angle_logits)
         ship_dist = torch.distributions.Categorical(logits=ship_logits)
+        target_dist = torch.distributions.Categorical(logits=target_logits)
 
         # Actions taken
         fire_action = to_dev(batch["actions"]["fire"])
         angle_action = to_dev(batch["actions"]["angle"])
         ship_action = to_dev(batch["actions"]["ship"])
+        target_action = to_dev(batch["actions"].get("target", angle_action))
 
         # New log probs. Angle/ship choices are only part of the executed action
         # for slots that actually fire; when fire=0 the env ignores them.
@@ -161,15 +170,27 @@ class PPOLearner:
         new_log_prob_fire = fire_dist.log_prob(fire_action.float()) * slot_valid.squeeze(-1)
         new_log_prob_angle = angle_dist.log_prob(angle_action) * fired_slots
         new_log_prob_ships = ship_dist.log_prob(ship_action) * fired_slots
+        new_log_prob_target = target_dist.log_prob(target_action) * fired_slots
+        if action_decode == "target":
+            new_log_prob_angle = torch.zeros_like(new_log_prob_angle)
+        else:
+            new_log_prob_target = torch.zeros_like(new_log_prob_target)
 
         # Sum across planet slots: (B, max_owned) -> (B,)
-        new_log_prob = (new_log_prob_fire + new_log_prob_angle + new_log_prob_ships).sum(dim=-1)
+        new_log_prob = (
+            new_log_prob_fire + new_log_prob_angle + new_log_prob_ships + new_log_prob_target
+        ).sum(dim=-1)
 
         # Old log probs — same treatment
         old_fire = to_dev(batch["old_log_probs"]["fire"]) * slot_valid.squeeze(-1)
         old_angle = to_dev(batch["old_log_probs"]["angle"]) * fired_slots
         old_ships = to_dev(batch["old_log_probs"]["ships"]) * fired_slots
-        old_log_prob = (old_fire + old_angle + old_ships).sum(dim=-1)  # (B,)
+        old_target = to_dev(batch["old_log_probs"].get("target", batch["old_log_probs"]["angle"])) * fired_slots
+        if action_decode == "target":
+            old_angle = torch.zeros_like(old_angle)
+        else:
+            old_target = torch.zeros_like(old_target)
+        old_log_prob = (old_fire + old_angle + old_ships + old_target).sum(dim=-1)  # (B,)
 
         # Advantages
         advantages = to_dev(batch["advantages"])
@@ -197,6 +218,8 @@ class PPOLearner:
         fire_entropy = fire_dist.entropy().mean()
         angle_entropy = angle_dist.entropy().mean()
         ship_entropy = ship_dist.entropy().mean()
+        target_entropy = target_dist.entropy().mean()
+        direction_entropy = target_entropy if action_decode == "target" else angle_entropy
 
         # IL regularization: KL(π_current || π_frozen_BC) on rollout states.
         # Anchors policy to teacher competence. Coefficient (self.il_coef) is
@@ -208,7 +231,7 @@ class PPOLearner:
         loss = (policy_loss
                 + cfg.value_coef * value_loss
                 - cfg.entropy_coef_fire * fire_entropy
-                - cfg.entropy_coef_angle * angle_entropy
+                - cfg.entropy_coef_angle * direction_entropy
                 - cfg.entropy_coef_ships * ship_entropy
                 + self.il_coef * il_kl)
 
@@ -250,6 +273,7 @@ class PPOLearner:
                 "value_loss": value_loss.item(),
                 "fire_entropy": fire_entropy.item(),
                 "angle_entropy": angle_entropy.item(),
+                "target_entropy": target_entropy.item(),
                 "ship_entropy": ship_entropy.item(),
                 "clip_frac": clip_frac.item(),
                 "approx_kl": (old_log_prob - new_log_prob).mean().item(),

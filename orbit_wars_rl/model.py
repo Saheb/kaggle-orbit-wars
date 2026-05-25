@@ -72,7 +72,8 @@ class EntityTransformer(nn.Module):
 
         # Action heads (per owned planet)
         self.fire_head = nn.Linear(D, 1)
-        self.angle_head = nn.Linear(D, NUM_ANGLE_BINS)
+        self.num_angle_bins = getattr(cfg, "num_angle_bins", NUM_ANGLE_BINS)
+        self.angle_head = nn.Linear(D, self.num_angle_bins)
         # Ship head: bin count is configurable so the fraction-head experiment
         # can swap to 10 fraction bins. Default 32 = legacy absolute counts.
         self.num_ship_bins = getattr(cfg, "num_ship_bins", NUM_SHIP_BINS)
@@ -194,6 +195,14 @@ class EntityTransformer(nn.Module):
             elif N_p > self.max_planets:
                 tgt_scores = tgt_scores[..., :self.max_planets]
             target_logits = tgt_scores
+        elif self.use_pairwise:
+            # Some legacy tests/callers do not pass pairwise_features and do
+            # not consume target_logits. Keep forward usable for those paths
+            # without adding fallback parameters that would break checkpoints.
+            target_logits = torch.zeros(
+                B, max_owned, self.max_planets,
+                device=owned_entities.device, dtype=owned_entities.dtype,
+            )
 
         # Action heads
         fire_logits = self.fire_head(owned_entities).squeeze(-1)  # (B, max_owned)
@@ -226,6 +235,8 @@ class EntityTransformer(nn.Module):
         if fire_mask is not None:
             fire_logits = fire_logits.masked_fill(~fire_mask, -100.0)
         if angle_mask is not None:
+            if angle_mask.shape[-1] != angle_logits.shape[-1]:
+                angle_mask = angle_mask[..., :angle_logits.shape[-1]]
             angle_logits = angle_logits.masked_fill(~angle_mask, -100.0)
         if slot_valid is not None:
             fire_logits = fire_logits.masked_fill(~slot_valid, -100.0)

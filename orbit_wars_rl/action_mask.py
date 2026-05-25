@@ -142,10 +142,109 @@ def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, playe
             continue
         from_id = int(planets[pidx][0])
 
-        angle = float(angle_bins[slot] * ANGLE_BIN_WIDTH + ANGLE_BIN_WIDTH / 2)
+        angle_bin_width = 2 * math.pi / max(1, angle_logits.shape[-1])
+        angle = float(angle_bins[slot] * angle_bin_width + angle_bin_width / 2)
         ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
         if ships > 0 and planets[pidx][5] > ships:
             moves.append([from_id, angle, ships])
+
+    return moves
+
+
+_MAX_SHIP_SPEED = 6.0
+_ROTATION_LIMIT = 50.0
+
+
+def _fleet_speed(ships: int) -> float:
+    if ships <= 0:
+        return 1.0
+    s = 1.0 + (_MAX_SHIP_SPEED - 1.0) * (math.log(max(ships, 1)) / math.log(1000.0)) ** 1.5
+    return min(s, _MAX_SHIP_SPEED)
+
+
+def _target_intercept_angle(src_planet, target_planet, ships: int, obs) -> float:
+    """Aim from src at target's ETA-predicted position."""
+    sx, sy = float(src_planet[2]), float(src_planet[3])
+    tx, ty = float(target_planet[2]), float(target_planet[3])
+    tgt_pid = int(target_planet[0])
+    tgt_radius = float(target_planet[4])
+    speed = _fleet_speed(ships)
+    angular_velocity = float(obs.get("angular_velocity", 0.0))
+    current_step = int(obs.get("step", 0))
+
+    initial_planets = obs.get("initial_planets", obs["planets"])
+    init_by_id = {int(p[0]): p for p in initial_planets}
+    ip = init_by_id.get(tgt_pid)
+    if ip is not None:
+        irx = float(ip[2]) - CENTER
+        iry = float(ip[3]) - CENTER
+        init_angle = math.atan2(iry, irx)
+        orbital_r = math.hypot(irx, iry)
+        is_orbiting = (orbital_r + tgt_radius) < _ROTATION_LIMIT
+    else:
+        init_angle = 0.0
+        orbital_r = 0.0
+        is_orbiting = False
+
+    ax, ay = tx, ty
+    for _ in range(4):
+        dist = math.hypot(ax - sx, ay - sy)
+        eta = max(1, int(math.ceil(dist / speed)))
+        if is_orbiting:
+            ang = init_angle + angular_velocity * (current_step + eta)
+            nax = CENTER + orbital_r * math.cos(ang)
+            nay = CENTER + orbital_r * math.sin(ang)
+        else:
+            nax, nay = tx, ty
+        if abs(nax - ax) < 0.5 and abs(nay - ay) < 0.5:
+            ax, ay = nax, nay
+            break
+        ax, ay = nax, nay
+
+    return float(math.atan2(ay - sy, ax - sx))
+
+
+def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, obs, player,
+                               fire_threshold=0.5, sample: bool = False,
+                               ship_bin_mode: str = "absolute"):
+    """Convert policy outputs to actions using target planet logits for aiming."""
+    planets = obs["planets"]
+    owned_indices = masks["owned_indices"].cpu().numpy()
+    max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
+
+    if sample:
+        fire_dist = torch.distributions.Bernoulli(logits=fire_probs)
+        target_dist = torch.distributions.Categorical(logits=target_logits)
+        ship_dist = torch.distributions.Categorical(logits=ship_logits)
+        fire_decisions = (fire_dist.sample() > 0.5).cpu().numpy().squeeze(0)
+        target_indices = target_dist.sample().cpu().numpy().squeeze(0)
+        ship_bins = ship_dist.sample().cpu().numpy().squeeze(0)
+    else:
+        fire_decisions = (torch.sigmoid(fire_probs) > fire_threshold).cpu().numpy().squeeze(0)
+        target_indices = torch.argmax(target_logits, dim=-1).cpu().numpy().squeeze(0)
+        ship_bins = torch.argmax(ship_logits, dim=-1).cpu().numpy().squeeze(0)
+
+    moves = []
+    max_moves = 8
+    for slot in range(min(masks["owned_count"], fire_decisions.shape[0])):
+        if len(moves) >= max_moves:
+            break
+        if not fire_decisions[slot]:
+            continue
+
+        pidx = int(owned_indices[slot])
+        tidx = int(target_indices[slot])
+        if pidx >= len(planets) or tidx >= len(planets):
+            continue
+        if int(planets[tidx][1]) == player or int(planets[pidx][0]) == int(planets[tidx][0]):
+            continue
+
+        ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
+        if ships <= 0 or planets[pidx][5] <= ships:
+            continue
+
+        angle = _target_intercept_angle(planets[pidx], planets[tidx], ships, obs)
+        moves.append([int(planets[pidx][0]), angle, ships])
 
     return moves
 
