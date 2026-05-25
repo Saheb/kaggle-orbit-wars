@@ -123,8 +123,11 @@ cd ~/home/kaggle-orbit-wars/orbit_wars_rl
 ```
 
 It polls every 3 min, rsyncs `checkpoints/` + `train_gpu.log` into
-`~/home/kaggle-orbit-wars/gpu_run_artifacts/`, and runs
+`../gpu_run_artifacts/` relative to the checkout containing
+`watch_gpu_run.sh`, and runs
 `aws ec2 terminate-instances` when it sees `Training complete` or `Early stop:` in the log.
+Set `LOCAL_DIR=/absolute/path/to/artifacts` before invoking the watcher to
+override the destination explicitly.
 
 ## Teardown checklist (when run is done)
 

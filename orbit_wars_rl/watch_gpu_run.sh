@@ -10,7 +10,9 @@ set -u
 INSTANCE_ID="${1:-i-09f7f32c2e044ea05}"
 PUB_IP="${2:-52.200.49.179}"
 KEY="$HOME/.ssh/samosa-key.pem"
-LOCAL_DIR="$HOME/home/kaggle-orbit-wars/gpu_run_artifacts"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+LOCAL_DIR="${LOCAL_DIR:-$REPO_ROOT/gpu_run_artifacts}"
 REMOTE_USER="ubuntu"
 
 mkdir -p "$LOCAL_DIR/checkpoints" "$LOCAL_DIR/logs"
