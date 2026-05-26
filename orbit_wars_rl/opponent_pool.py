@@ -255,12 +255,22 @@ class OpponentPool:
     def summary(self, max_rows: int = 8) -> str:
         if not self.members:
             return "  (pool empty)"
-        rows = sorted(self.members, key=lambda m: -self._pfsp_weight(m))[:max_rows]
-        lines = [f"  pool size={len(self.members)}  alpha={self.pfsp_alpha}"]
+        # External heuristics are always shown (they can fall off the top-N
+        # display once many self-checkpoints accumulate, creating the false
+        # impression they were evicted when they're still being sampled).
+        externals = [m for m in self.members if m.kind == "external_heuristic"]
+        self_members = [m for m in self.members if m.kind != "external_heuristic"]
+        top_self = sorted(self_members, key=lambda m: -self._pfsp_weight(m))[:max_rows]
+        rows = top_self + externals
+        ext_note = (f"  external_fraction={self.external_fraction:.2f}"
+                    if self.external_fraction > 0 else "")
+        lines = [f"  pool size={len(self.members)}  alpha={self.pfsp_alpha}{ext_note}"]
         for m in rows:
             w = self._pfsp_weight(m)
+            tag = " [fixed]" if (m.kind == "external_heuristic"
+                                 and self.external_fraction > 0) else ""
             lines.append(
                 f"    {m.kind:20s} {m.name:30s} "
-                f"wr={m.win_rate:.2f} (n={m.n_games})  pfsp_w={w:.3f}"
+                f"wr={m.win_rate:.2f} (n={m.n_games})  pfsp_w={w:.3f}{tag}"
             )
         return "\n".join(lines)
