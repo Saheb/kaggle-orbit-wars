@@ -404,6 +404,7 @@ def train(args):
                 pfsp_alpha=args.pool_pfsp_alpha,
                 mastered_winrate=args.pool_mastered_threshold,
                 mastered_min_games=args.pool_mastered_min_games,
+                pfsp_min_games=args.pool_pfsp_min_games,
             )
             # Seed pool with the starting weights so it isn't empty on iteration 1
             pool.add_self_checkpoint(0, model.state_dict())
@@ -993,6 +994,11 @@ if __name__ == "__main__":
                         help="Win-rate above this triggers eviction of an external opponent.")
     parser.add_argument("--pool-mastered-min-games", type=int, default=50,
                         help="Minimum games against an external before mastery-eviction is considered.")
+    parser.add_argument("--pool-pfsp-min-games", type=int, default=30,
+                        help="Minimum games before trusting win-rate for PFSP weight. "
+                             "Below this threshold wr=0.5 is assumed, preventing early "
+                             "lucky streaks from sand-bagging an opponent (e.g. Hellburner "
+                             "getting 0.003 PFSP weight after only 17 rollout games).")
     parser.add_argument("--preseed-pool", type=str, default="",
                         help="Directory of .pt checkpoints to preseed the pool "
                              "with as 'self' members. Step is parsed from filename "

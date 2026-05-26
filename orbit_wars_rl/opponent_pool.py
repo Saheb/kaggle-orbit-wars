@@ -51,12 +51,17 @@ class PoolMember:
 
 class OpponentPool:
     def __init__(self, max_self_members: int = 20, pfsp_alpha: float = 2.0,
-                 mastered_winrate: float = 0.9, mastered_min_games: int = 50):
+                 mastered_winrate: float = 0.9, mastered_min_games: int = 50,
+                 pfsp_min_games: int = 30):
         self.members: list[PoolMember] = []
         self.max_self_members = max_self_members
         self.pfsp_alpha = pfsp_alpha
         self.mastered_winrate = mastered_winrate
         self.mastered_min_games = mastered_min_games
+        # Minimum games before trusting win-rate for PFSP weighting.
+        # Until this threshold, wr=0.5 is used so early lucky streaks don't
+        # sand-bag an opponent (e.g. Hellburner getting 0.003 weight after 17 games).
+        self.pfsp_min_games = pfsp_min_games
 
     def __len__(self) -> int:
         return len(self.members)
@@ -108,7 +113,9 @@ class OpponentPool:
         return r.choices(self.members, weights=weights, k=1)[0]
 
     def _pfsp_weight(self, m: PoolMember) -> float:
-        return max(1.0 - m.win_rate, 1e-6) ** self.pfsp_alpha
+        # Use uninformative prior until we have enough games to trust the estimate.
+        wr = 0.5 if m.n_games < self.pfsp_min_games else m.win_rate
+        return max(1.0 - wr, 1e-6) ** self.pfsp_alpha
 
     # ---- bookkeeping -------------------------------------------------------
 
@@ -173,6 +180,7 @@ class OpponentPool:
                 "pfsp_alpha": self.pfsp_alpha,
                 "mastered_winrate": self.mastered_winrate,
                 "mastered_min_games": self.mastered_min_games,
+                "pfsp_min_games": self.pfsp_min_games,
             },
         }
         tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
@@ -195,6 +203,7 @@ class OpponentPool:
             pfsp_alpha=cfg.get("pfsp_alpha", 2.0),
             mastered_winrate=cfg.get("mastered_winrate", 0.9),
             mastered_min_games=cfg.get("mastered_min_games", 50),
+            pfsp_min_games=cfg.get("pfsp_min_games", 30),
         )
         for m in data.get("self_members", []):
             pool.members.append(PoolMember(
