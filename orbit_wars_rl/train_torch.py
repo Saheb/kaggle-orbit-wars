@@ -44,6 +44,19 @@ from torch_env import (
 # Helpers
 # ----------------------------------------------------------------------------
 
+def atomic_torch_save(obj, path: str | os.PathLike) -> None:
+    """Write a torch checkpoint via atomic rename to avoid partial .pt files."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        torch.save(obj, tmp_path)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
                           angle_mask: torch.Tensor,
                           target_mask: torch.Tensor | None = None,
@@ -856,16 +869,14 @@ def train(args):
         # Checkpoint best by reward
         if len(reward_history) >= 100 and avg_r > best_avg_reward + 0.02:
             best_avg_reward = avg_r
-            os.makedirs("checkpoints", exist_ok=True)
-            torch.save(learner.state_dict(), f"checkpoints/torch_best_{run_ts}.pt")
+            atomic_torch_save(learner.state_dict(), f"checkpoints/torch_best_{run_ts}.pt")
             print(f"  ★ best updated: reward={avg_r:+.3f}")
 
         # Periodic checkpoint by fixed step interval
         if total_env_steps - last_ckpt_step >= args.checkpoint_interval:
             last_ckpt_step = total_env_steps
-            os.makedirs("checkpoints", exist_ok=True)
             path = f"checkpoints/torch_step_{total_env_steps}_{run_ts}.pt"
-            torch.save(learner.state_dict(), path)
+            atomic_torch_save(learner.state_dict(), path)
             print(f"  saved {path}")
             # Persist pool alongside the disk checkpoint so spot interrupts
             # don't lose pool diversity. Naming mirrors the checkpoint stem.
@@ -892,8 +903,7 @@ def train(args):
     print(f"Final SPS: {sps:,.0f}")
 
     # Final checkpoint
-    os.makedirs("checkpoints", exist_ok=True)
-    torch.save(learner.state_dict(), f"checkpoints/torch_step_{total_env_steps}_{run_ts}_final.pt")
+    atomic_torch_save(learner.state_dict(), f"checkpoints/torch_step_{total_env_steps}_{run_ts}_final.pt")
 
     # Shut down external heuristic worker pools
     if 'heur_worker_pools' in dir():

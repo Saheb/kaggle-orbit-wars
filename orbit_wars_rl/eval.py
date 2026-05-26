@@ -255,6 +255,7 @@ def print_panel_report(result: dict, opponent: str) -> None:
 
 
 def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
+                        seed_start: int = 0,
                         opponent: str = "random", fire_threshold: float = 0.5,
                         panel: bool = False, sample: bool = False,
                         target_decode: bool = False):
@@ -314,6 +315,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         ship_bin_mode=cfg.model.ship_bin_mode,
         target_decode=target_decode,
         num_games=num_games,
+        seed_start=seed_start,
         opponent=opponent,
         num_players=cfg.env.num_players,
         fire_threshold=fire_threshold,
@@ -336,6 +338,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True, help="Path to .pt checkpoint file")
     parser.add_argument("--games", type=int, default=32)
+    parser.add_argument("--seed-start", type=int, default=0,
+                        help="First seed for non-panel eval. Ignored by --panel, which uses the fixed archetype panel.")
     parser.add_argument("--opponent", default="random",
                         help="'random' or path to agent .py file")
     parser.add_argument("--num-players", type=int, choices=[2, 4], default=2)
@@ -358,6 +362,7 @@ if __name__ == "__main__":
         args.checkpoint,
         cfg,
         num_games=args.games,
+        seed_start=args.seed_start,
         opponent=args.opponent,
         fire_threshold=args.fire_threshold,
         panel=args.panel,

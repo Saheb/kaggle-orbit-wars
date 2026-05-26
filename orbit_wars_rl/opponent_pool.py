@@ -147,6 +147,8 @@ class OpponentPool:
         themselves are not picklable across module reloads.
         """
         import torch  # local import: avoid forcing torch on test-only imports
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         self_members = []
         ext_members = []
         for m in self.members:
@@ -163,7 +165,7 @@ class OpponentPool:
                     # Skip — can't reconstruct without the source path
                     continue
                 ext_members.append({**base, "source_path": path_attr})
-        torch.save({
+        payload = {
             "self_members": self_members,
             "external_members": ext_members,
             "config": {
@@ -172,7 +174,14 @@ class OpponentPool:
                 "mastered_winrate": self.mastered_winrate,
                 "mastered_min_games": self.mastered_min_games,
             },
-        }, path)
+        }
+        tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+        try:
+            torch.save(payload, tmp_path)
+            os.replace(tmp_path, path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
 
     @classmethod
     def load(cls, path: str, reload_externals: bool = True) -> "OpponentPool":

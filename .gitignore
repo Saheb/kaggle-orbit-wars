@@ -9,3 +9,6 @@ replays*
 *.csv
 *.pkl
 gpu_run_artifacts/checkpoints/
+gpu_run_artifacts/*
+data/*
+external/*

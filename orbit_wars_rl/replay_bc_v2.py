@@ -12,6 +12,8 @@ Filtering:
 
 Usage:
     python replay_bc_v2.py --replay-dir replays --output /tmp/replay_bc.pkl
+    python replay_bc_v2.py --replay-dir replays --output /tmp/replay_bc_frac.pkl \
+        --ship-bin-mode fraction --min-ship-bin 1
 """
 
 from __future__ import annotations
@@ -85,6 +87,10 @@ def main():
     p.add_argument("--output", required=True, help="Output .pkl path")
     p.add_argument("--glob", default="episode-*-replay.json",
                    help="Replay filename glob (default: episode-*-replay.json)")
+    p.add_argument("--ship-bin-mode", choices=["absolute", "fraction"], default="absolute",
+                   help="Label ship targets as absolute 32-bin counts or fraction 10-bin sends.")
+    p.add_argument("--min-ship-bin", type=int, default=0,
+                   help="Only for --ship-bin-mode fraction: clamp labels >= this bin.")
     args = p.parse_args()
 
     paths = sorted(glob.glob(os.path.join(args.replay_dir, args.glob)))
@@ -93,6 +99,9 @@ def main():
     n_replays_used = 0
     n_replays_skipped = 0
     samples = []
+    if args.ship_bin_mode == "fraction":
+        from bc_frac import trajectory_to_fraction_sample
+
     for i, path in enumerate(paths, 1):
         if i % 20 == 0 or i == len(paths):
             print(f"  [{i}/{len(paths)}] used={n_replays_used} "
@@ -107,7 +116,10 @@ def main():
             continue
         n_replays_used += 1
         for traj in trajs:
-            s = trajectory_to_training_sample(traj)
+            if args.ship_bin_mode == "fraction":
+                s = trajectory_to_fraction_sample(traj, min_ship_bin=args.min_ship_bin)
+            else:
+                s = trajectory_to_training_sample(traj)
             if s is not None:
                 samples.append(s)
 
@@ -122,6 +134,9 @@ def main():
         has_tgt = "target_target" in s0
         print(f"Has pairwise_features: {has_pair}")
         print(f"Has target_target:     {has_tgt}")
+        print(f"Ship bin mode:         {args.ship_bin_mode}")
+        if args.ship_bin_mode == "fraction":
+            print(f"Min ship bin:          {args.min_ship_bin}")
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "wb") as f:

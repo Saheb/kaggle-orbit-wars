@@ -1,4 +1,4 @@
-"""Quick validation: 8 games vs random / sniper / zach / hellburner.
+"""Quick validation: 8 games vs random / sniper / zach / hellburner / suneet.
 
 Usage:
     python quick_val.py --checkpoint checkpoints/<name>.pt
@@ -28,6 +28,11 @@ OPPONENTS = [
     ("suneet",     "candidate_suneet_lb1200.py"),
 ]
 
+KONBU_OPPONENT = (
+    "konbu_v4_ml",
+    "external/kaggle_outputs/konbu17_train_submit_v4_ml_validator_topk2_tutorial/main.py",
+)
+
 
 def resolve_opponent(path: str) -> str:
     if path == "random":
@@ -42,7 +47,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--games", type=int, default=8)
+    parser.add_argument("--seed-start", type=int, default=0,
+                        help="First seed for the eval range. Default 0 preserves the standard quick panel.")
     parser.add_argument("--sample", action="store_true")
+    parser.add_argument("--include-konbu", action="store_true",
+                        help="Also eval against the downloaded konbu17 v4+ML agent. Slow; disabled for watcher comparability.")
     parser.add_argument("--action-decode", choices=["auto", "angle", "target"], default="auto",
                         help="Decode mode for eval. auto uses checkpoint config.")
     args = parser.parse_args()
@@ -93,7 +102,7 @@ def main():
         moves = agent_fn(obs)
         move_log.append(moves)
         return moves
-    env = make("orbit_wars", configuration={"seed": 0}, debug=False)
+    env = make("orbit_wars", configuration={"seed": args.seed_start}, debug=False)
     env.run([logging_agent, "random"])
     fires = sum(1 for m in move_log if m)
     print(f"  Steps with moves: {fires}/{len(move_log)}", end="")
@@ -106,11 +115,13 @@ def main():
     # --- run N games vs each opponent ---
     print(f"{'opponent':<12}  {'W/G':>5}  {'WR%':>6}  {'avg_mat':>8}  time")
     print("-" * 46)
-    for label, path in OPPONENTS:
+    opponents = OPPONENTS + ([KONBU_OPPONENT] if args.include_konbu else [])
+    for label, path in opponents:
         t0 = time.perf_counter()
         r = evaluate_against_baseline(
             model, device,
             num_games=args.games,
+            seed_start=args.seed_start,
             opponent=resolve_opponent(path),
             ship_bin_mode=cfg.model.ship_bin_mode,
             target_decode=(action_decode == "target"),
