@@ -52,7 +52,7 @@ class PoolMember:
 class OpponentPool:
     def __init__(self, max_self_members: int = 20, pfsp_alpha: float = 2.0,
                  mastered_winrate: float = 0.9, mastered_min_games: int = 50,
-                 pfsp_min_games: int = 30):
+                 pfsp_min_games: int = 30, external_fraction: float = 0.0):
         self.members: list[PoolMember] = []
         self.max_self_members = max_self_members
         self.pfsp_alpha = pfsp_alpha
@@ -62,6 +62,11 @@ class OpponentPool:
         # Until this threshold, wr=0.5 is used so early lucky streaks don't
         # sand-bag an opponent (e.g. Hellburner getting 0.003 weight after 17 games).
         self.pfsp_min_games = pfsp_min_games
+        # Fixed fraction of pool samples that go to external heuristics,
+        # bypassing PFSP. Guarantees Hellburner exposure regardless of win-rate.
+        # Remaining (1 - external_fraction) is governed by PFSP over self-members.
+        # 0.0 = legacy behaviour (externals compete in PFSP with everyone else).
+        self.external_fraction = external_fraction
 
     def __len__(self) -> int:
         return len(self.members)
@@ -101,16 +106,36 @@ class OpponentPool:
     # ---- sampling ----------------------------------------------------------
 
     def sample(self, rng: Optional[random.Random] = None) -> Optional[PoolMember]:
-        """Sample a member by PFSP weight. Returns None if the pool is empty."""
+        """Sample a member by PFSP weight. Returns None if the pool is empty.
+
+        If external_fraction > 0, external heuristics are guaranteed that
+        fraction of samples regardless of their PFSP win-rate. This keeps
+        targeted opponents (e.g. Hellburner) in the training mix even when
+        the rollout win-rate climbs high. PFSP governs only the self-members
+        within the remaining (1 - external_fraction) budget.
+        """
         if not self.members:
             return None
         r = rng or random
-        weights = [self._pfsp_weight(m) for m in self.members]
+
+        externals = [m for m in self.members if m.kind == "external_heuristic"]
+        self_members = [m for m in self.members if m.kind == "self"]
+
+        if externals and self.external_fraction > 0.0:
+            if r.random() < self.external_fraction:
+                # Fixed external slice: uniform among all external heuristics.
+                return r.choice(externals)
+            # Remaining budget: PFSP over self-members only (fall through below).
+            candidates = self_members if self_members else self.members
+        else:
+            # Legacy path: PFSP over all members together.
+            candidates = self.members
+
+        weights = [self._pfsp_weight(m) for m in candidates]
         total = sum(weights)
         if total <= 0:
-            # All members fully mastered — fall back to uniform
-            return r.choice(self.members)
-        return r.choices(self.members, weights=weights, k=1)[0]
+            return r.choice(candidates)
+        return r.choices(candidates, weights=weights, k=1)[0]
 
     def _pfsp_weight(self, m: PoolMember) -> float:
         # Use uninformative prior until we have enough games to trust the estimate.
@@ -181,6 +206,7 @@ class OpponentPool:
                 "mastered_winrate": self.mastered_winrate,
                 "mastered_min_games": self.mastered_min_games,
                 "pfsp_min_games": self.pfsp_min_games,
+                "external_fraction": self.external_fraction,
             },
         }
         tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
@@ -204,6 +230,7 @@ class OpponentPool:
             mastered_winrate=cfg.get("mastered_winrate", 0.9),
             mastered_min_games=cfg.get("mastered_min_games", 50),
             pfsp_min_games=cfg.get("pfsp_min_games", 30),
+            external_fraction=cfg.get("external_fraction", 0.0),
         )
         for m in data.get("self_members", []):
             pool.members.append(PoolMember(

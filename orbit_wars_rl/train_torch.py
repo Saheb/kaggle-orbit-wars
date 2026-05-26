@@ -405,6 +405,7 @@ def train(args):
                 mastered_winrate=args.pool_mastered_threshold,
                 mastered_min_games=args.pool_mastered_min_games,
                 pfsp_min_games=args.pool_pfsp_min_games,
+                external_fraction=args.pool_external_fraction,
             )
             # Seed pool with the starting weights so it isn't empty on iteration 1
             pool.add_self_checkpoint(0, model.state_dict())
@@ -999,6 +1000,13 @@ if __name__ == "__main__":
                              "Below this threshold wr=0.5 is assumed, preventing early "
                              "lucky streaks from sand-bagging an opponent (e.g. Hellburner "
                              "getting 0.003 PFSP weight after only 17 rollout games).")
+    parser.add_argument("--pool-external-fraction", type=float, default=0.0,
+                        help="Fixed fraction of pool samples reserved for external heuristic "
+                             "opponents, bypassing PFSP. e.g. 0.4 = 40%% of pool games always "
+                             "go to external opponents (split uniformly among them); the "
+                             "remaining 60%% is governed by PFSP over self-checkpoints. "
+                             "Use for targeted runs where you need sustained pressure from "
+                             "a specific opponent regardless of rollout win-rate.")
     parser.add_argument("--preseed-pool", type=str, default="",
                         help="Directory of .pt checkpoints to preseed the pool "
                              "with as 'self' members. Step is parsed from filename "
