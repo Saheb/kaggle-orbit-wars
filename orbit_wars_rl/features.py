@@ -82,8 +82,12 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
     fleet_owner = np.array([f[1] for f in fleets[:n_fleets]], dtype=np.int32)
     fleet_ships_arr = np.array([f[6] for f in fleets[:n_fleets]], dtype=np.float32)
 
-    # Pre-compute owned planet positions for connectivity features
+    # Pre-compute owned planet positions for connectivity features (vectorised)
     owned_pos = [(p[2], p[3]) for p in planets[:max_planets] if p[1] == player]
+    if owned_pos:
+        _owned_xy = np.array(owned_pos, dtype=np.float32)  # (K, 2)
+    else:
+        _owned_xy = None
 
     for i, p in enumerate(planets[:max_planets]):
         planet_mask[i] = True
@@ -125,17 +129,16 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         else:
             capture_cost = 0.0
 
-        # Distance to nearest owned planet
-        min_owned_dist = 100.0
-        for ox, oy in owned_pos:
-            d = math.hypot(x - ox, y - oy)
-            min_owned_dist = min(min_owned_dist, d)
-        if not owned_pos:
+        # Distance / connectivity to owned planets — one vectorised pass
+        if _owned_xy is not None:
+            _dists = np.hypot(_owned_xy[:, 0] - x, _owned_xy[:, 1] - y)
+            min_owned_dist = float(_dists.min())
+            owned_within_15 = int((_dists < 15.0).sum())
+            owned_within_30 = int((_dists < 30.0).sum())
+        else:
             min_owned_dist = 0.0
-
-        # Connectivity: how many owned planets are within reach?
-        owned_within_15 = sum(1 for ox, oy in owned_pos if math.hypot(x - ox, y - oy) < 15.0)
-        owned_within_30 = sum(1 for ox, oy in owned_pos if math.hypot(x - ox, y - oy) < 30.0)
+            owned_within_15 = 0
+            owned_within_30 = 0
 
         # Owner encoding: player=1, neutral=0, enemy=-1
         owner_emb = 1.0 if owner == player else (-1.0 if owner >= 0 else 0.0)
