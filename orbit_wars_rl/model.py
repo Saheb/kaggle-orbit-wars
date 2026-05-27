@@ -5,7 +5,9 @@ Architecture (ADR-001/002/003 documented):
 - Shared backbone + mode token for 2p/4p (ADR-002)
 - Baked-in geometric features, discovered strategy (ADR-003)
 
-~307K params: 3 layers, 96 dim, 4 heads, 3x MLP expansion.
+Phase 1 feature dims: planet=20, fleet=13, global=11, pairwise=12, max_owned=16.
+Value head: concat(global_token, owned_pool) → 2D → D → D/2 → 1.
+~350K params: 3 layers, 96 dim, 4 heads, 3x MLP expansion.
 """
 
 import math
@@ -95,8 +97,10 @@ class EntityTransformer(nn.Module):
         else:
             self.target_head = nn.Linear(D, self.max_planets)
 
-        # Value head
-        self.value_fc1 = nn.Linear(D, D)
+        # Value head: concat global token (attends to everything) with mean of
+        # owned-planet embeddings (your position specifically). Richer than
+        # mean-pooling all entities, giving the critic better spatial grounding.
+        self.value_fc1 = nn.Linear(2 * D, D)
         self.value_fc2 = nn.Linear(D, D // 2)
         self.value_out = nn.Linear(D // 2, 1)
 
@@ -244,10 +248,18 @@ class EntityTransformer(nn.Module):
             ship_logits = ship_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
             target_logits = target_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
-        # Value head: mean-pool valid entities
-        valid_float = (~attn_mask).float()  # (B, N) 1=valid, 0=pad
-        pooled = (x * valid_float.unsqueeze(-1)).sum(dim=1) / valid_float.sum(dim=1, keepdim=True).clamp(min=1)
-        value = self.value_out(F.gelu(self.value_fc2(F.gelu(self.value_fc1(pooled))))).squeeze(-1)
+        # Value head: global token (attends to all entities) + mean of owned planet
+        # embeddings (player's specific position). Concat gives the critic richer
+        # signal than mean-pooling all 64+ entities.
+        global_token = x[:, 0, :]                                    # (B, D)
+        if slot_valid is not None:
+            owned_float = slot_valid.float().unsqueeze(-1)            # (B, max_owned, 1)
+            n_owned = owned_float.sum(dim=1).clamp(min=1)             # (B, 1)
+            owned_pool = (owned_entities * owned_float).sum(dim=1) / n_owned  # (B, D)
+        else:
+            owned_pool = owned_entities.mean(dim=1)                   # (B, D)
+        value_input = torch.cat([global_token, owned_pool], dim=-1)   # (B, 2D)
+        value = self.value_out(F.gelu(self.value_fc2(F.gelu(self.value_fc1(value_input))))).squeeze(-1)
 
         return {
             "fire_logits": fire_logits,

@@ -21,10 +21,10 @@ class EnvConfig:
 @dataclass
 class ModelConfig:
     max_entities: int = 64
-    max_owned_planets: int = 10
-    planet_feature_dim: int = 18
-    fleet_feature_dim: int = 9
-    global_feature_dim: int = 10
+    max_owned_planets: int = 16
+    planet_feature_dim: int = 20
+    fleet_feature_dim: int = 13
+    global_feature_dim: int = 11
     entity_dim: int = 96
     num_heads: int = 4
     num_layers: int = 3
@@ -41,7 +41,7 @@ class ModelConfig:
     # MUST match the BC label scheme that produced the checkpoint.
     # Default "absolute" preserves legacy checkpoint behaviour.
     ship_bin_mode: str = "absolute"
-    pairwise_feature_dim: int = 10   # see features.PAIRWISE_FEATURE_DIM
+    pairwise_feature_dim: int = 12   # see features.PAIRWISE_FEATURE_DIM
     max_planets: int = 48            # for target_head output size; matches EnvConfig
     dropout: float = 0.0
 
