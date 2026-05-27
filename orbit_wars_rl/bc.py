@@ -304,6 +304,7 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
     fire_loss = fire_loss.sum() / slot_valid.sum().clamp(min=1)
 
     # Ship loss: only on slots where heuristic actually fired
+    B, max_owned = fire_logits.shape
     fired = (fire_target == 1).float() * slot_valid  # (B, max_owned)
     ship_loss = F.cross_entropy(
         ship_logits.view(B * max_owned, -1),
