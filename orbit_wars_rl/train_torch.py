@@ -368,16 +368,22 @@ def train(args):
     # reason to ramp LR from 0). User can force warmup with --with-warmup.
     updates_per_batch = cfg.ppo.ppo_epochs * cfg.ppo.num_minibatches
     total_updates = (args.total_steps // (args.num_envs * args.rollout_steps)) * updates_per_batch
+    # --lr-schedule-steps decouples the LR decay horizon from actual training
+    # length. Set it larger than --total-steps for slow/partial decay, or equal
+    # for the default full cosine decay to zero.
+    lr_schedule_steps = args.lr_schedule_steps if args.lr_schedule_steps > 0 else args.total_steps
+    lr_total_updates = (lr_schedule_steps // (args.num_envs * args.rollout_steps)) * updates_per_batch
     skip_warmup = (args.resume and not args.with_warmup) or args.skip_warmup
     warmup = 0 if skip_warmup else cfg.ppo.lr_warmup_steps
     def lr_lambda(step):
         if step < warmup:
             return (step + 1) / max(warmup, 1)
-        progress = (step - warmup) / max(total_updates - warmup, 1)
-        return 0.5 * (1.0 + np.cos(np.pi * progress))
+        progress = (step - warmup) / max(lr_total_updates - warmup, 1)
+        return 0.5 * (1.0 + np.cos(np.pi * min(progress, 1.0)))
     scheduler = torch.optim.lr_scheduler.LambdaLR(learner.optimizer, lr_lambda)
     print(f"LR schedule: warmup={warmup} updates (skip_warmup={skip_warmup}), "
-          f"total_updates={total_updates}, peak_lr={cfg.ppo.learning_rate}")
+          f"total_updates={total_updates}, lr_schedule_steps={lr_schedule_steps}, "
+          f"peak_lr={cfg.ppo.learning_rate}")
 
     # ----------------------------------------------------------------------
     # Opponent pool setup (PFSP self-play with optional external heuristics)
@@ -1017,6 +1023,11 @@ if __name__ == "__main__":
                         help="Comma-separated paths to .py heuristic agents (e.g. "
                              "'../candidate_suneet_lb1200.py,../candidate_zach_public.py'). "
                              "Only used when --pool-mode=mixed.")
+    parser.add_argument("--lr-schedule-steps", type=int, default=0,
+                        help="Decouple the LR cosine decay horizon from --total-steps. "
+                             "Set larger than --total-steps for slow/partial decay "
+                             "(e.g. 2x total-steps → LR only decays halfway). "
+                             "Default 0 = use --total-steps (full decay to zero).")
     parser.add_argument("--skip-warmup", action="store_true",
                         help="Skip the LR warmup phase. Auto-enabled when "
                              "--resume is set (use --with-warmup to override).")

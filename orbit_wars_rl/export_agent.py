@@ -63,6 +63,7 @@ _PAIRWISE_DIM = {pairwise_feature_dim}
 _MIN_SHIP_BIN = {min_ship_bin}
 _FIRE_THRESHOLD = {fire_threshold}
 _SHIP_BIN_MODE = {ship_bin_mode}
+_TARGET_DECODE = {target_decode}
 
 
 # --- Embedded parameters (base64-encoded torch state_dict) ---
@@ -281,15 +282,26 @@ def agent(obs):
                 if "pairwise_features" in features else None,
         )
 
-    return actions_from_policy(
-        out["fire_logits"],
-        out["angle_logits"],
-        out["ship_logits"],
-        {{k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()}},
-        obs, player,
-        fire_threshold=_FIRE_THRESHOLD,
-        ship_bin_mode=_SHIP_BIN_MODE,
-    )
+    if _TARGET_DECODE:
+        return actions_from_target_policy(
+            out["fire_logits"],
+            out["target_logits"],
+            out["ship_logits"],
+            {{k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()}},
+            obs, player,
+            fire_threshold=_FIRE_THRESHOLD,
+            ship_bin_mode=_SHIP_BIN_MODE,
+        )
+    else:
+        return actions_from_policy(
+            out["fire_logits"],
+            out["angle_logits"],
+            out["ship_logits"],
+            {{k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()}},
+            obs, player,
+            fire_threshold=_FIRE_THRESHOLD,
+            ship_bin_mode=_SHIP_BIN_MODE,
+        )
 '''
 
 
@@ -403,7 +415,8 @@ def load_model(checkpoint_path: str, cfg: Config) -> EntityTransformer:
     return model
 
 
-def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_threshold: float = 0.5):
+def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_threshold: float = 0.5,
+                 target_decode: bool = False):
     model = load_model(checkpoint_path, cfg)
 
     # Encode state_dict as base64
@@ -432,6 +445,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         min_ship_bin=m.min_ship_bin,
         fire_threshold=fire_threshold,
         ship_bin_mode=repr(m.ship_bin_mode),
+        target_decode=target_decode,
         params_b64=params_b64,
         features_code=features_code,
         action_mask_code=action_mask_code,
@@ -443,7 +457,39 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     print(f"Exported agent → {output_path}")
     print(f"  Param bytes (base64): {len(params_b64):,}")
     print(f"  Fire threshold: {fire_threshold}")
+    print(f"  Target decode: {target_decode}")
     print(f"  File size: {os.path.getsize(output_path) / 1024:.1f} KB")
+
+    # --- Sanity eval: 8 games vs a random opponent to catch obvious bugs ---
+    print("\nRunning 8-game sanity eval on exported agent...")
+    _sanity_eval(checkpoint_path, target_decode=target_decode)
+
+
+def _sanity_eval(checkpoint_path: str, games: int = 8, target_decode: bool = False):
+    """Quick sanity check: run a few games vs a random agent and verify wins > 0."""
+    import subprocess, sys
+    src_dir = os.path.dirname(os.path.abspath(__file__))
+    quick_eval = os.path.join(src_dir, "quick_eval.py")
+    cmd = [
+        sys.executable, quick_eval,
+        "--checkpoint", checkpoint_path,
+        "--games", str(games),
+        "--action-decode", "target" if target_decode else "angle",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        print("  [sanity] TIMEOUT after 300s — skipping sanity check")
+        return
+    output = result.stdout + result.stderr
+    # Print just the summary lines
+    for line in output.splitlines():
+        if any(k in line for k in ("win", "Win", "WR", "wr", "Overall", "games", "Games", "ERROR", "Error", "Traceback")):
+            print(f"  [sanity] {line}")
+    if result.returncode != 0:
+        print(f"  [sanity] FAILED (rc={result.returncode}) — do NOT submit without investigating")
+    else:
+        print(f"  [sanity] OK (rc=0)")
 
 
 if __name__ == "__main__":
@@ -452,8 +498,13 @@ if __name__ == "__main__":
     parser.add_argument("--output", default="main_submitted.py")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fire-threshold", type=float, default=0.5)
+    parser.add_argument("--target-decode", action="store_true",
+                        help="Use target-planet aiming (actions_from_target_policy). "
+                             "Required for checkpoints trained with --action-decode target.")
     args = parser.parse_args()
 
     cfg = Config()
     cfg.seed = args.seed
-    export_agent(args.checkpoint, args.output, cfg, fire_threshold=args.fire_threshold)
+    export_agent(args.checkpoint, args.output, cfg,
+                 fire_threshold=args.fire_threshold,
+                 target_decode=args.target_decode)

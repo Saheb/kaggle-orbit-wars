@@ -212,7 +212,8 @@ def evaluate_panel(
                 if game_idx % 16 == 0 or game_idx == total_games:
                     print(f"  panel progress: {game_idx}/{total_games}  "
                           f"overall {overall['wins']}/{overall['total']} "
-                          f"({100*overall['wins']/max(overall['total'],1):.1f}%)")
+                          f"({100*overall['wins']/max(overall['total'],1):.1f}%)",
+                          flush=True)
 
     return {"overall": overall, "per_archetype": per_arch}
 
