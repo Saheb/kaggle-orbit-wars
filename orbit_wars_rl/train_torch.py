@@ -58,45 +58,40 @@ def atomic_torch_save(obj, path: str | os.PathLike) -> None:
 
 
 def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
-                          angle_mask: torch.Tensor,
-                          target_mask: torch.Tensor | None = None,
-                          action_decode: str = "angle"):
-    """Sample fire/angle/ship for a batch of envs. Returns actions + log_probs."""
-    fire_logits  = outputs["fire_logits"].masked_fill(~fire_mask, -1e9)
-    angle_logits = outputs["angle_logits"].masked_fill(~angle_mask, -1e9)
-    ship_logits  = outputs["ship_logits"]
-    target_logits = outputs.get("target_logits")
-    if target_logits is not None and target_mask is not None:
+                          target_mask: torch.Tensor | None = None):
+    """Sample fire/ship/target actions for a batch of envs (target-decode only).
+
+    Angle is not part of the executed policy — the env computes the aim direction
+    from the sampled target planet index.  A zero tensor is returned for angle_a
+    so the action tensor passed to env.step keeps its expected 4-column shape
+    [fire, angle, ship, target].
+
+    Returns: (fire_a, angle_a, ship_a, target_a, lp_fire, lp_ship, lp_target)
+    """
+    fire_logits   = outputs["fire_logits"].masked_fill(~fire_mask, -1e9)
+    ship_logits   = outputs["ship_logits"]
+    target_logits = outputs["target_logits"]
+    if target_mask is not None:
         target_logits = target_logits.masked_fill(~target_mask, -1e9)
 
-    fire_dist  = torch.distributions.Bernoulli(logits=fire_logits)
-    angle_dist = torch.distributions.Categorical(logits=angle_logits)
-    ship_dist  = torch.distributions.Categorical(logits=ship_logits)
-    target_dist = (
-        torch.distributions.Categorical(logits=target_logits)
-        if target_logits is not None else None
-    )
+    fire_dist   = torch.distributions.Bernoulli(logits=fire_logits)
+    ship_dist   = torch.distributions.Categorical(logits=ship_logits)
+    target_dist = torch.distributions.Categorical(logits=target_logits)
 
-    fire_a  = fire_dist.sample()                 # (N, MAX_OWNED)
-    angle_a = angle_dist.sample()                # (N, MAX_OWNED)
-    ship_a  = ship_dist.sample()                 # (N, MAX_OWNED)
-    target_a = target_dist.sample() if target_dist is not None else torch.zeros_like(angle_a)
+    fire_a   = fire_dist.sample()    # (N, MAX_OWNED)
+    ship_a   = ship_dist.sample()    # (N, MAX_OWNED)
+    target_a = target_dist.sample()  # (N, MAX_OWNED)
+    # Angle is unused in target-decode; zeros satisfy env.step's action shape.
+    angle_a  = torch.zeros_like(fire_a)
 
-    # log_probs only for valid slots / fired actions
-    slot_valid = fire_mask  # already equivalent for our usage
-    lp_fire  = fire_dist.log_prob(fire_a) * slot_valid.float()
-    fired = (fire_a > 0.5).float() * slot_valid.float()
-    lp_angle = angle_dist.log_prob(angle_a) * fired
-    lp_ship  = ship_dist.log_prob(ship_a)  * fired
-    lp_target = (
-        target_dist.log_prob(target_a) * fired
-        if target_dist is not None else torch.zeros_like(lp_angle)
-    )
+    # Log probs only for valid slots / fired actions.
+    slot_valid = fire_mask.float()
+    fired      = (fire_a > 0.5).float() * slot_valid
+    lp_fire   = fire_dist.log_prob(fire_a) * slot_valid
+    lp_ship   = ship_dist.log_prob(ship_a)   * fired
+    lp_target = target_dist.log_prob(target_a) * fired
 
-    if action_decode == "target":
-        lp_angle = torch.zeros_like(lp_angle)
-
-    return fire_a.long(), angle_a, ship_a, target_a, lp_fire, lp_angle, lp_ship, lp_target
+    return fire_a.long(), angle_a, ship_a, target_a, lp_fire, lp_ship, lp_target
 
 
 def decode_ship_bins(ship_bins: torch.Tensor, max_ships: torch.Tensor, ship_bin_mode: str) -> torch.Tensor:
@@ -498,12 +493,10 @@ def train(args):
         "owned_indices":   torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "pairwise_features": torch.zeros(rollout_T, N, P, MAX_OWNED, 48, 10, device=storage_dev),
         "fire_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
-        "angle_a":    torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "ship_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "ship_count_a": torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
         "target_a":   torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "lp_fire":    torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
-        "lp_angle":   torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
         "lp_ship":    torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
         "lp_target":  torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
         "values":     torch.zeros(rollout_T, N, P, device=storage_dev),
@@ -533,12 +526,9 @@ def train(args):
                     pairwise_features=feats.get("pairwise_features"),
                 )
             fire_a, angle_a, ship_a, target_a, *_ = sample_action_batched(
-                outs, feats["fire_mask"], feats["angle_mask"],
-                feats.get("target_mask"), args.action_decode
+                outs, feats["fire_mask"], feats.get("target_mask")
             )
-            if args.action_decode == "target":
-                return torch.stack([fire_a, angle_a, ship_a, target_a], dim=-1)[env_slice]
-            return torch.stack([fire_a, angle_a, ship_a], dim=-1)[env_slice]
+            return torch.stack([fire_a, angle_a, ship_a, target_a], dim=-1)[env_slice]
 
         if opp.kind == "external_heuristic":
             from torch_env import to_legacy_obs
@@ -629,9 +619,8 @@ def train(args):
             actions_per_player = {}
             for p in range(P):
                 feats_p, outs_p = forward_player(p)
-                fire_p, angle_p, ship_p, target_p, lpf_p, lpa_p, lps_p, lpt_p = sample_action_batched(
-                    outs_p, feats_p["fire_mask"], feats_p["angle_mask"],
-                    feats_p.get("target_mask"), args.action_decode
+                fire_p, angle_p, ship_p, target_p, lpf_p, lps_p, lpt_p = sample_action_batched(
+                    outs_p, feats_p["fire_mask"], feats_p.get("target_mask")
                 )
                 ship_count_p = decode_ship_bins(ship_p, feats_p["max_ships"], cfg.model.ship_bin_mode)
                 storage["planet_features"][t, :, p].copy_(feats_p["planet_features"], non_blocking=True)
@@ -647,19 +636,15 @@ def train(args):
                 if "pairwise_features" in feats_p:
                     storage["pairwise_features"][t, :, p].copy_(feats_p["pairwise_features"], non_blocking=True)
                 storage["fire_a"][t, :, p].copy_(fire_p, non_blocking=True)
-                storage["angle_a"][t, :, p].copy_(angle_p, non_blocking=True)
                 storage["ship_a"][t, :, p].copy_(ship_p, non_blocking=True)
                 storage["ship_count_a"][t, :, p].copy_(ship_count_p, non_blocking=True)
                 storage["target_a"][t, :, p].copy_(target_p, non_blocking=True)
                 storage["lp_fire"][t, :, p].copy_(lpf_p, non_blocking=True)
-                storage["lp_angle"][t, :, p].copy_(lpa_p, non_blocking=True)
                 storage["lp_ship"][t, :, p].copy_(lps_p, non_blocking=True)
                 storage["lp_target"][t, :, p].copy_(lpt_p, non_blocking=True)
                 storage["values"][t, :, p].copy_(outs_p["value"].squeeze(-1), non_blocking=True)
-                if args.action_decode == "target":
-                    actions_per_player[p] = torch.stack([fire_p, angle_p, ship_p, target_p], dim=-1)
-                else:
-                    actions_per_player[p] = torch.stack([fire_p, angle_p, ship_p], dim=-1)
+                # angle_p is zeros (unused in target-decode); env needs 4-col action tensor.
+                actions_per_player[p] = torch.stack([fire_p, angle_p, ship_p, target_p], dim=-1)
 
             # Pool opponent override: in pool envs, replace `opp_seat`'s action
             # with the pool member's action, and mark its storage slot as
@@ -765,18 +750,15 @@ def train(args):
             "pairwise_features": flat["pairwise_features"],
             "owned_count":     flat["slot_valid"].sum(dim=1).tolist(),
             "actions": {
-                "fire":  flat["fire_a"],
-                "angle": flat["angle_a"],
-                "ship":  flat["ship_a"],
+                "fire":   flat["fire_a"],
+                "ship":   flat["ship_a"],
                 "target": flat["target_a"],
             },
             "old_log_probs": {
-                "fire":  flat["lp_fire"],
-                "angle": flat["lp_angle"],
-                "ships": flat["lp_ship"],
+                "fire":   flat["lp_fire"],
+                "ships":  flat["lp_ship"],
                 "target": flat["lp_target"],
             },
-            "action_decode": args.action_decode,
             "advantages": flat_adv,
             "returns":    flat_ret,
             "old_values": flat["values"],

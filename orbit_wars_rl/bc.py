@@ -213,9 +213,8 @@ def trajectory_to_training_sample(traj: dict, max_owned: int = 10, max_planets: 
             pid_to_slot[int(planets[pidx][0])] = slot
 
     # Target tensors: default = no fire / ignore-index for target prediction
-    fire_target = torch.zeros(max_owned, dtype=torch.long)
-    angle_target = torch.zeros(max_owned, dtype=torch.long)
-    ship_target = torch.zeros(max_owned, dtype=torch.long)
+    fire_target   = torch.zeros(max_owned, dtype=torch.long)
+    ship_target   = torch.zeros(max_owned, dtype=torch.long)
     target_target = torch.full((max_owned,), -1, dtype=torch.long)  # -1 = ignore
 
     initial_planets = obs.get("initial_planets", planets)
@@ -230,7 +229,6 @@ def trajectory_to_training_sample(traj: dict, max_owned: int = 10, max_planets: 
         if slot is None:
             continue
         fire_target[slot] = 1
-        angle_target[slot] = _find_angle_bin(angle_rad)
         ship_target[slot] = _find_ship_bin(ship_count)
 
         # Target-index label: which planet did the teacher MEAN by this angle?
@@ -259,7 +257,6 @@ def trajectory_to_training_sample(traj: dict, max_owned: int = 10, max_planets: 
         "owned_indices": masks["owned_indices"],          # (max_owned,)
         "owned_count": n_owned,
         "fire_target": fire_target,                       # (max_owned,)
-        "angle_target": angle_target,                     # (max_owned,)
         "ship_target": ship_target,                       # (max_owned,)
         "target_target": target_target,                   # (max_owned,) -1 = ignore
         "pairwise_features": features["pairwise_features"],  # (max_owned, max_planets, F_pair)
@@ -276,7 +273,7 @@ def _collate(samples: list[dict], device) -> dict:
         "planet_features", "fleet_features", "global_features",
         "planet_mask", "fleet_mask", "fire_mask", "angle_mask",
         "slot_valid", "owned_indices",
-        "fire_target", "angle_target", "ship_target",
+        "fire_target", "ship_target",
         "target_target",
         "pairwise_features",
     ]
@@ -287,14 +284,16 @@ def _collate(samples: list[dict], device) -> dict:
 
 
 def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
-    """Cross-entropy BC loss across all owned-planet slots."""
+    """Cross-entropy BC loss across all owned-planet slots (target-decode).
+
+    Trains fire, ship, and target heads. Angle head is dead weight in
+    target-decode mode and is excluded from the loss.
+    """
     fire_logits = outputs["fire_logits"]     # (B, max_owned)
-    angle_logits = outputs["angle_logits"]   # (B, max_owned, 72)
-    ship_logits = outputs["ship_logits"]     # (B, max_owned, 16)
+    ship_logits = outputs["ship_logits"]     # (B, max_owned, num_ship_bins)
 
     slot_valid = batch["slot_valid"].float()  # (B, max_owned)
     fire_target = batch["fire_target"]        # (B, max_owned)
-    angle_target = batch["angle_target"]      # (B, max_owned)
     ship_target = batch["ship_target"]        # (B, max_owned)
 
     # Fire loss (binary cross-entropy per slot, masked)
@@ -304,17 +303,8 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
     ) * slot_valid
     fire_loss = fire_loss.sum() / slot_valid.sum().clamp(min=1)
 
-    # Angle loss: only on slots where heuristic actually fired
-    fired = (fire_target == 1).float() * slot_valid  # (B, max_owned)
-    B, max_owned, _ = angle_logits.shape
-    angle_loss = F.cross_entropy(
-        angle_logits.view(B * max_owned, -1),
-        angle_target.view(B * max_owned),
-        reduction="none",
-    ).view(B, max_owned)
-    angle_loss = (angle_loss * fired).sum() / fired.sum().clamp(min=1)
-
     # Ship loss: only on slots where heuristic actually fired
+    fired = (fire_target == 1).float() * slot_valid  # (B, max_owned)
     ship_loss = F.cross_entropy(
         ship_logits.view(B * max_owned, -1),
         ship_target.view(B * max_owned),
@@ -338,7 +328,7 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
     n_valid_tgt = valid_tgt.sum().clamp(min=1)
     target_loss = (target_loss_raw * valid_tgt).sum() / n_valid_tgt
 
-    total = fire_loss + angle_loss + ship_loss + target_loss
+    total = fire_loss + ship_loss + target_loss
 
     # Top-k accuracy on target prediction (only on valid slots)
     with torch.no_grad():
@@ -349,28 +339,22 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
         top3_acc = (match_top3.sum() / n_valid_tgt).item()
 
     # Normalized losses (entropy-reduction fraction vs uniform baseline).
-    # Use the actual head widths from the model output, not the legacy constants
-    # — fraction-head BC uses ship_logits.shape[-1]=10, not NUM_SHIP_BINS=32.
     import math as _m
-    fire_uniform = _m.log(2)
-    angle_uniform = _m.log(max(2, angle_logits.shape[-1]))
-    ship_uniform = _m.log(max(2, ship_logits.shape[-1]))
+    fire_uniform   = _m.log(2)
+    ship_uniform   = _m.log(max(2, ship_logits.shape[-1]))
     target_uniform = _m.log(MP)
-    fire_red = 1.0 - fire_loss.item() / fire_uniform
-    angle_red = 1.0 - angle_loss.item() / angle_uniform
-    ship_red = 1.0 - ship_loss.item() / ship_uniform
+    fire_red   = 1.0 - fire_loss.item()   / fire_uniform
+    ship_red   = 1.0 - ship_loss.item()   / ship_uniform
     target_red = 1.0 - target_loss.item() / target_uniform
 
     metrics = {
-        "fire_loss": fire_loss.item(),
-        "angle_loss": angle_loss.item(),
-        "ship_loss": ship_loss.item(),
+        "fire_loss":   fire_loss.item(),
+        "ship_loss":   ship_loss.item(),
         "target_loss": target_loss.item(),
-        "loss": total.item(),
-        "fire_red": fire_red,
-        "angle_red": angle_red,
-        "ship_red": ship_red,
-        "target_red": target_red,
+        "loss":        total.item(),
+        "fire_red":    fire_red,
+        "ship_red":    ship_red,
+        "target_red":  target_red,
         "target_top1": top1_acc,
         "target_top3": top3_acc,
     }
@@ -453,7 +437,6 @@ def train_bc(
                 lr_now = optimizer.param_groups[0]["lr"]
                 print(f"  step {step:4d} | loss {metrics['loss']:.4f} | "
                       f"fire {metrics['fire_loss']:.4f} (red {metrics['fire_red']:+.2f}) | "
-                      f"angle {metrics['angle_loss']:.4f} (red {metrics['angle_red']:+.2f}) | "
                       f"ship {metrics['ship_loss']:.4f} (red {metrics['ship_red']:+.2f}) | "
                       f"tgt {metrics['target_loss']:.3f} (red {metrics['target_red']:+.2f} top1 {metrics['target_top1']:.2f} top3 {metrics['target_top3']:.2f}) | "
                       f"lr {lr_now:.2e}")
@@ -517,21 +500,18 @@ def train_bc(
 
     val_metrics = {f"val_{k}": v / max(n_val_batches, 1) for k, v in val_metrics_sum.items()}
     print(f"\nBC validation: {val_metrics}")
-    # Phase-A gate (legacy): angle_red >= 0.40 over 144 bins.
-    # Phase-A gate (new):    target_red >= 0.40 OR target_top1 >= 0.30
-    #                        — predicting WHICH planet is the semantic action.
-    ang_red = val_metrics.get("val_angle_red", 0.0)
+    # Phase-A gate: target_red >= 0.40 OR target_top1 >= 0.30
+    #               — predicting WHICH planet is the semantic action.
     ship_red = val_metrics.get("val_ship_red", 0.0)
     fire_red = val_metrics.get("val_fire_red", 0.0)
-    tgt_red = val_metrics.get("val_target_red", 0.0)
+    tgt_red  = val_metrics.get("val_target_red", 0.0)
     tgt_top1 = val_metrics.get("val_target_top1", 0.0)
     tgt_top3 = val_metrics.get("val_target_top3", 0.0)
     tgt_pass = (tgt_red >= 0.40) or (tgt_top1 >= 0.30)
     gate = "PASS" if tgt_pass else "FAIL"
     print(f"\nPhase-A target-head gate: target_red={tgt_red:+.2f}  "
           f"top1={tgt_top1:.2f}  top3={tgt_top3:.2f}  → {gate}")
-    print(f"  side metrics: angle_red={ang_red:+.2f}  ship_red={ship_red:+.2f}  "
-          f"fire_red={fire_red:+.2f}")
+    print(f"  side metrics: ship_red={ship_red:+.2f}  fire_red={fire_red:+.2f}")
     return val_metrics
 
 
