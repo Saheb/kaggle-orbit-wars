@@ -481,17 +481,17 @@ def train(args):
     # full trajectory per env step. Effective PPO batch size = T*N*P.
     storage_dev = torch.device("cpu")
     storage = {
-        "planet_features": torch.zeros(rollout_T, N, P, 48, 18, device=storage_dev),
-        "fleet_features":  torch.zeros(rollout_T, N, P, 128, 9, device=storage_dev),
-        "global_features": torch.zeros(rollout_T, N, P, 10, device=storage_dev),
+        "planet_features": torch.zeros(rollout_T, N, P, 48, cfg.model.planet_feature_dim, device=storage_dev),
+        "fleet_features":  torch.zeros(rollout_T, N, P, 128, cfg.model.fleet_feature_dim, device=storage_dev),
+        "global_features": torch.zeros(rollout_T, N, P, cfg.model.global_feature_dim, device=storage_dev),
         "planet_mask":     torch.zeros(rollout_T, N, P, 48, dtype=torch.bool, device=storage_dev),
         "fleet_mask":      torch.zeros(rollout_T, N, P, 128, dtype=torch.bool, device=storage_dev),
         "fire_mask":       torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev),
         "angle_mask":      torch.zeros(rollout_T, N, P, MAX_OWNED, NUM_ANGLE_BINS, dtype=torch.bool, device=storage_dev),
         "slot_valid":      torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev),
-        "target_mask":     torch.zeros(rollout_T, N, P, MAX_OWNED, 48, dtype=torch.bool, device=storage_dev),
+        "target_mask":     torch.zeros(rollout_T, N, P, MAX_OWNED, cfg.env.max_planets, dtype=torch.bool, device=storage_dev),
         "owned_indices":   torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
-        "pairwise_features": torch.zeros(rollout_T, N, P, MAX_OWNED, 48, 10, device=storage_dev),
+        "pairwise_features": torch.zeros(rollout_T, N, P, MAX_OWNED, cfg.env.max_planets, cfg.model.pairwise_feature_dim, device=storage_dev),
         "fire_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "ship_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "ship_count_a": torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
@@ -514,7 +514,7 @@ def train(args):
         if opp.kind == "self":
             # Load opp weights into the reusable frozen model
             pool_opp_model.load_state_dict(opp.state_dict)
-            feats = env.get_features(player, max_planets=48, max_fleets=128)
+            feats = env.get_features(player, max_planets=cfg.env.max_planets, max_fleets=cfg.env.max_fleets)
             with torch.no_grad():
                 outs = pool_opp_model(
                     feats["planet_features"], feats["fleet_features"],
@@ -575,7 +575,7 @@ def train(args):
 
     def forward_player(player: int):
         """Run model forward for given player, return outputs + features dict."""
-        feats = env.get_features(player, max_planets=48, max_fleets=128)
+        feats = env.get_features(player, max_planets=cfg.env.max_planets, max_fleets=cfg.env.max_fleets)
         owned_count = feats["owned_count"]
         with torch.no_grad():
             outs = model(
