@@ -95,12 +95,9 @@ echo "To attach: ssh -i $KEY ubuntu@$PUB_IP -t 'screen -r phase1'"
 echo ""
 echo "=== Step 6: Update watch_phase1.sh ==="
 WATCH="$ART/watch_phase1.sh"
-sed -i '' \
-  "s|INSTANCE_ID=\"REPLACE_AFTER_LAUNCH\"|INSTANCE_ID=\"$INSTANCE_ID\"|" \
-  "$WATCH"
-sed -i '' \
-  "s|PUB_IP=\"REPLACE_AFTER_LAUNCH\"|PUB_IP=\"$PUB_IP\"|" \
-  "$WATCH"
+# Replace any existing INSTANCE_ID / PUB_IP value (not just the initial placeholder)
+sed -i '' "s|INSTANCE_ID=\"[^\"]*\"|INSTANCE_ID=\"$INSTANCE_ID\"|" "$WATCH"
+sed -i '' "s|PUB_IP=\"[^\"]*\"|PUB_IP=\"$PUB_IP\"|"               "$WATCH"
 echo "watch_phase1.sh updated with INSTANCE_ID=$INSTANCE_ID PUB_IP=$PUB_IP"
 
 echo ""
