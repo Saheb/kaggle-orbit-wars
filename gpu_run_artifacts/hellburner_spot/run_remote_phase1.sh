@@ -24,6 +24,7 @@ set -euo pipefail
 
 cd "$HOME/orbit_wars_rl"
 source /opt/pytorch/bin/activate
+pip install -q kaggle-environments
 
 TS="$(date '+%Y%m%d_%H%M%S')"
 LOG="train_gpu_phase1_${TS}.log"
