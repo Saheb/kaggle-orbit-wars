@@ -254,7 +254,7 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         player / max(num_players - 1, 1),    # 0: player index
         step / 500.0,                         # 1: game progress
         angular_velocity / 0.05,             # 2: orbital speed
-        num_owned / 10.0,                    # 3: owned planet count
+        num_owned / float(MAX_OWNED_PLANETS), # 3: owned planet count, normalised to [0,1]
         total_owned_ships / 500.0,           # 4: friendly ships on planets
         total_owned_production / 20.0,       # 5: friendly production
         enemy_ships_on_planets / 2000.0,     # 6: enemy ships on planets (static)

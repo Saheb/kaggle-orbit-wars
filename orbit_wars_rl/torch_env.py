@@ -355,17 +355,26 @@ class VecTorchEnv:
         along_fp = vx_fp * fcos.unsqueeze(2) + vy_fp * fsin.unsqueeze(2)
         perp_fp  = torch.abs(vx_fp * fsin.unsqueeze(2) - vy_fp * fcos.unsqueeze(2))
         alive_expand = planet_alive.unsqueeze(1).expand(-1, F, -1)  # (N, F, P)
-        candidate = (along_fp > 0) & alive_expand
-        perp_masked = perp_fp.masked_fill(~candidate, 1e6)
-        tgt_idx = perp_masked.argmin(dim=2)  # (N, F) — target planet index per fleet
+        candidate = (along_fp > 0) & (perp_fp < r.unsqueeze(1) + 2.0) & alive_expand
+        has_candidate = candidate.any(dim=2)
+        dists_fp = torch.sqrt(vx_fp * vx_fp + vy_fp * vy_fp)
+        dists_masked = dists_fp.masked_fill(~candidate, 1e6)
+        tgt_idx = dists_masked.argmin(dim=2)  # (N, F) — target planet index per fleet
 
         # Gather target planet properties
         _gi = tgt_idx.unsqueeze(-1)                                    # (N, F, 1)
-        dist_to_target = along_fp.gather(2, _gi).squeeze(2).clamp(min=0)  # (N, F)
-        eta_to_target  = (dist_to_target / f_speed.clamp(min=0.1)).ceil().clamp(min=1, max=500)
+        best_dist = dists_fp.gather(2, _gi).squeeze(2)
+        dist_to_target = torch.where(
+            has_candidate,
+            best_dist,
+            torch.full_like(best_dist, BOARD_SIZE),
+        )
+        eta_to_target = (best_dist / f_speed.clamp(min=1e-3)).clamp(min=1.0)
         tgt_owner_f  = owner.unsqueeze(1).expand(-1, F, -1).gather(2, _gi).squeeze(2).long()
         tgt_prod_f   = prod.unsqueeze(1).expand(-1, F, -1).gather(2, _gi).squeeze(2)
-        threatens_owned = ((tgt_owner_f == player) & fleet_alive).float()
+        threatens_owned = ((tgt_owner_f == player) & has_candidate & fleet_alive).float()
+        eta_feat = torch.where(has_candidate, 1.0 / (eta_to_target + 1.0), torch.zeros_like(eta_to_target))
+        tgt_prod_feat = torch.where(has_candidate, tgt_prod_f / 5.0, torch.zeros_like(tgt_prod_f))
 
         ff = torch.stack([
             (fx - CENTER) / CENTER,                   # 0
@@ -376,10 +385,10 @@ class VecTorchEnv:
             torch.log1p(f_ships) / 8.0,              # 5
             f_speed / MAX_SHIP_SPEED,                 # 6
             f_dist_sun / CENTER,                      # 7
-            1.0 / (eta_to_target + 1.0),             # 8  urgency
+            eta_feat,                                # 8  urgency
             dist_to_target / BOARD_SIZE,             # 9  distance remaining
             threatens_owned,                          # 10 heads toward player planet
-            tgt_prod_f / 5.0,                        # 11 target production
+            tgt_prod_feat,                            # 11 target production
             fleet_alive.float(),                      # 12 active mask (was 8)
         ], dim=2)  # (N, F, 13)
         # Zero out dead fleet slots
@@ -404,7 +413,7 @@ class VecTorchEnv:
             torch.full_like(total_owned_ships, player_norm),  # 0
             self.step_count.float() / 500.0,                  # 1
             self.angular_velocity / 0.05,                     # 2
-            num_owned / 10.0,                                 # 3
+            num_owned / float(MAX_OWNED),                     # 3  normalised to [0,1] within cap
             total_owned_ships / 500.0,                        # 4
             total_owned_prod / 20.0,                          # 5
             enemy_planet_ships / 2000.0,                      # 6  on-planet only
@@ -481,7 +490,6 @@ class VecTorchEnv:
         src = self.planets[:, :, :7].gather(1, gather_idx)       # (N, MO, 7)
         sx = src[:, :, 2]                                        # (N, MO)
         sy = src[:, :, 3]
-        src_ships = src[:, :, 5]                                 # (N, MO)
 
         # All target positions: (N, 1, P) broadcastable against (N, MO, 1)
         tx = planets[:, :, 2].unsqueeze(1)                       # (N, 1, P)
@@ -494,23 +502,36 @@ class VecTorchEnv:
         sx_b = sx.unsqueeze(-1)                                  # (N, MO, 1)
         sy_b = sy.unsqueeze(-1)
 
-        dx = tx - sx_b                                           # (N, MO, P)
-        dy = ty - sy_b
+        dx0 = tx - sx_b                                          # (N, MO, P)
+        dy0 = ty - sy_b
+        dist2_0 = dx0 * dx0 + dy0 * dy0
+        dist0 = torch.sqrt(dist2_0.clamp(min=1e-9))
+        ETA_SPEED = 1.0 + (MAX_SHIP_SPEED - 1.0) * (math.log(20.0) / math.log(1000.0)) ** 1.5
+        eta0 = (dist0 / ETA_SPEED).ceil().clamp(min=1.0)
+
+        init_ang_t = self._planet_initial_angle[:, :P].unsqueeze(1)
+        orb_r_t = self._planet_orbital_r[:, :P].unsqueeze(1)
+        is_orb_t = self._planet_is_orbiting[:, :P].unsqueeze(1)
+        step_f = self.step_count.float().view(N, 1, 1)
+        ang_vel = self.angular_velocity.view(N, 1, 1)
+        future_ang = init_ang_t + ang_vel * (step_f + eta0)
+        arr_x = torch.where(is_orb_t, CENTER + orb_r_t * torch.cos(future_ang), tx)
+        arr_y = torch.where(is_orb_t, CENTER + orb_r_t * torch.sin(future_ang), ty)
+
+        dx = arr_x - sx_b
+        dy = arr_y - sy_b
         dist2 = dx * dx + dy * dy
         dist = torch.sqrt(dist2.clamp(min=1e-9))
         sin_a = dy / dist
         cos_a = dx / dist
-
-        # ETA@~20 ships → use the matching speed constant
-        ETA_SPEED = 1.0 + (MAX_SHIP_SPEED - 1.0) * (math.log(20.0) / math.log(1000.0)) ** 1.5
         eta = (dist / ETA_SPEED).ceil().clamp(min=1.0)
 
         # Sun-cross check: point-to-segment distance from (CENTER, CENTER) to src→tgt
-        seg_len2 = dist2.clamp(min=1e-9)
-        t_param = ((CENTER - sx_b) * dx + (CENTER - sy_b) * dy) / seg_len2
+        seg_len2 = dist2_0.clamp(min=1e-9)
+        t_param = ((CENTER - sx_b) * dx0 + (CENTER - sy_b) * dy0) / seg_len2
         t_param = t_param.clamp(0.0, 1.0)
-        proj_x = sx_b + t_param * dx
-        proj_y = sy_b + t_param * dy
+        proj_x = sx_b + t_param * dx0
+        proj_y = sy_b + t_param * dy0
         sun_d = torch.sqrt((proj_x - CENTER) ** 2 + (proj_y - CENTER) ** 2)
         sun_safe = (sun_d >= SUN_RADIUS).float()
 
@@ -529,14 +550,18 @@ class VecTorchEnv:
         # Ships-at-arrival features (ch 10-11)
         ships_b = ships_t.expand(-1, MO, -1)                     # (N, MO, P)
         ships_at_arr = (ships_b + prod_b * 5.0 * eta).clamp(max=500.0) / 200.0
-        src_ships_b = src_ships.unsqueeze(-1).expand(-1, -1, P)  # (N, MO, P)
-        cap_ratio = ((ships_at_arr * 200.0 - src_ships_b) / 200.0).clamp(-1.0, 5.0)
+        cap_cost = torch.where(
+            owner_t == -1,
+            ships_t + 1.0,
+            torch.where(owner_t != player, ships_t + prod_t * 3.0 + 1.0, torch.zeros_like(ships_t)),
+        ).expand(-1, MO, -1)
+        cap_gap = ((ships_at_arr * 200.0 - cap_cost) / 200.0).clamp(-1.0, 5.0)
 
         # Stack channels
         out = torch.stack([
             sin_a, cos_a, dist / BOARD_SIZE, 1.0 / (eta + 1.0),
             sun_safe, is_mine_b, is_enemy_b, is_neutral_b, prod_b, valid_b,
-            ships_at_arr, cap_ratio,
+            ships_at_arr, cap_gap,
         ], dim=-1)  # (N, MO, P, 12)
 
         # Zero out invalid owned slots AND invalid target planets (match kaggle path)
