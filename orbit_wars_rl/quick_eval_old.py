@@ -16,7 +16,7 @@ from pathlib import Path
 import torch
 from config import Config
 from model import EntityTransformer
-from eval import build_agent_fn, evaluate_against_baseline, load_checkpoint
+from eval import build_agent_fn, evaluate_against_baseline
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -56,9 +56,25 @@ def main():
                         help="Decode mode for eval. auto uses checkpoint config.")
     args = parser.parse_args()
 
+    # Load checkpoint — mirrors evaluate_checkpoint logic
+    try:
+        state_dict = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    except Exception:
+        state_dict = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    ckpt_cfg = state_dict.get("config", {}) if isinstance(state_dict, dict) else {}
+    if "model" in state_dict:
+        state_dict = state_dict["model"]
+
     cfg = Config()
-    state_dict, ckpt_action_decode = load_checkpoint(args.checkpoint, cfg)
-    action_decode = ckpt_action_decode
+    if "num_ship_bins" in ckpt_cfg:
+        cfg.model.num_ship_bins = int(ckpt_cfg["num_ship_bins"])
+    elif "ship_head.weight" in state_dict:
+        cfg.model.num_ship_bins = int(state_dict["ship_head.weight"].shape[0])
+    if "min_ship_bin" in ckpt_cfg:
+        cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
+    if "ship_bin_mode" in ckpt_cfg:
+        cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
+    action_decode = str(ckpt_cfg.get("action_decode", "angle"))
     if args.action_decode != "auto":
         action_decode = args.action_decode
 

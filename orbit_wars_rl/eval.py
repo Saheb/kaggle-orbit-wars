@@ -15,6 +15,55 @@ from features import extract_features
 from action_mask import compute_action_masks, actions_from_policy, actions_from_target_policy
 
 
+def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
+    """Load a checkpoint and patch cfg.model dims to match the saved weights.
+
+    Returns (state_dict, action_decode).  Modifies cfg.model in-place so that
+    EntityTransformer(cfg.model) builds the correct architecture for this
+    checkpoint — regardless of what config.py currently says.  This lets old
+    (pre-Phase-1) checkpoints be evaluated after the config has been bumped.
+    """
+    try:
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+
+    ckpt_cfg = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
+    sd = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+
+    # --- head / bin dims from saved config or weight shapes ---
+    if "num_ship_bins" in ckpt_cfg:
+        cfg.model.num_ship_bins = int(ckpt_cfg["num_ship_bins"])
+    elif "ship_head.weight" in sd:
+        cfg.model.num_ship_bins = int(sd["ship_head.weight"].shape[0])
+
+    if "angle_head.weight" in sd:
+        n = int(sd["angle_head.weight"].shape[0])
+        if n != cfg.model.num_angle_bins:
+            cfg.model.num_angle_bins = n
+
+    if "min_ship_bin" in ckpt_cfg:
+        cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
+    if "ship_bin_mode" in ckpt_cfg:
+        cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
+
+    # --- feature projection dims: always infer from weight shapes ---
+    if "planet_proj.weight" in sd:
+        cfg.model.planet_feature_dim = int(sd["planet_proj.weight"].shape[1])
+    if "fleet_proj.weight" in sd:
+        cfg.model.fleet_feature_dim = int(sd["fleet_proj.weight"].shape[1])
+    if "global_proj.weight" in sd:
+        cfg.model.global_feature_dim = int(sd["global_proj.weight"].shape[1])
+    if "pair_kv.weight" in sd:
+        D = int(sd["planet_proj.weight"].shape[0])
+        cfg.model.pairwise_feature_dim = int(sd["pair_kv.weight"].shape[1]) - D
+    else:
+        cfg.model.pairwise_feature_dim = 0
+
+    action_decode = str(ckpt_cfg.get("action_decode", "angle"))
+    return sd, action_decode
+
+
 def build_agent_fn(model: EntityTransformer, device: torch.device,
                    fire_threshold: float = 0.5, sample: bool = False,
                    ship_bin_mode: str = "absolute",
@@ -263,35 +312,11 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
 
-    # Auto-detect num_ship_bins from checkpoint (fraction-head uses 10, default 32).
-    # Also auto-detect min_ship_bin from saved config if present.
-    try:
-        state_dict = torch.load(params_path, map_location="cpu", weights_only=True)
-    except Exception:
-        state_dict = torch.load(params_path, map_location="cpu", weights_only=False)
-    ckpt_cfg = state_dict.get("config", {}) if isinstance(state_dict, dict) else {}
-    if "model" in state_dict:
-        state_dict = state_dict["model"]
-    if "num_ship_bins" in ckpt_cfg:
-        cfg.model.num_ship_bins = int(ckpt_cfg["num_ship_bins"])
-    elif "ship_head.weight" in state_dict:
-        n = int(state_dict["ship_head.weight"].shape[0])
-        if n != cfg.model.num_ship_bins:
-            cfg.model.num_ship_bins = n
-    if "angle_head.weight" in state_dict:
-        n = int(state_dict["angle_head.weight"].shape[0])
-        if n != cfg.model.num_angle_bins:
-            cfg.model.num_angle_bins = n
-            print(f"Detected num_angle_bins={cfg.model.num_angle_bins}")
-    if "pair_kv.weight" not in state_dict:
-        cfg.model.pairwise_feature_dim = 0
-    if "min_ship_bin" in ckpt_cfg:
-        cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
-    if "ship_bin_mode" in ckpt_cfg:
-        cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
+    state_dict, ckpt_action_decode = load_checkpoint(params_path, cfg)
+    if cfg.model.ship_bin_mode != "absolute":
         print(f"Checkpoint ship_bin_mode={cfg.model.ship_bin_mode}")
     # Auto-detect action_decode from checkpoint config; CLI --target-decode overrides.
-    if not target_decode and ckpt_cfg.get("action_decode") == "target":
+    if not target_decode and ckpt_action_decode == "target":
         target_decode = True
         print("Checkpoint action_decode=target  →  enabling target_decode automatically")
 
