@@ -18,7 +18,7 @@ from typing import Optional
 import numpy as np
 import torch
 
-from features import extract_features
+from features import extract_features, MAX_OWNED_PLANETS
 from action_mask import compute_action_masks, NUM_ANGLE_BINS, ANGLE_BIN_WIDTH, SHIP_COUNTS
 from model import NUM_SHIP_BINS
 from model import EntityTransformer
@@ -213,7 +213,7 @@ def _replay_obs_to_dict(obs_raw: dict, player: int) -> Optional[dict]:
 
 def _action_to_bc_targets(action, obs: dict, masks: dict) -> tuple:
     """Convert env action list to per-slot BC targets."""
-    max_owned = 10
+    max_owned = MAX_OWNED_PLANETS
     planets = obs["planets"]
     n_owned = masks["owned_count"]
     owned_indices = masks["owned_indices"].cpu().numpy()

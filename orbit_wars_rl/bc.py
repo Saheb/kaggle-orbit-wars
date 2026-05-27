@@ -21,7 +21,7 @@ import torch.nn.functional as F
 
 from config import Config, BCConfig
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, SHIP_COUNTS
-from features import extract_features
+from features import extract_features, MAX_OWNED_PLANETS
 from action_mask import compute_action_masks
 
 
@@ -186,7 +186,7 @@ def _find_target_planet_index(src_xy, emitted_angle, ship_count, planets, initia
     return best_pid_idx
 
 
-def trajectory_to_training_sample(traj: dict, max_owned: int = 10, max_planets: int = 48) -> dict | None:
+def trajectory_to_training_sample(traj: dict, max_owned: int = MAX_OWNED_PLANETS, max_planets: int = 48) -> dict | None:
     """Convert a (obs, action) trajectory dict to model-ready tensors.
 
     Returns None if the observation has no owned planets.
@@ -246,9 +246,9 @@ def trajectory_to_training_sample(traj: dict, max_owned: int = 10, max_planets: 
                 target_target[slot] = tgt_idx
 
     return {
-        "planet_features": features["planet_features"],   # (max_planets, 18)
-        "fleet_features": features["fleet_features"],     # (max_fleets, 9)
-        "global_features": features["global_features"],   # (10,)
+        "planet_features": features["planet_features"],   # (max_planets, 20)
+        "fleet_features": features["fleet_features"],     # (max_fleets, 13)
+        "global_features": features["global_features"],   # (11,)
         "planet_mask": features["planet_mask"],           # (max_planets,)
         "fleet_mask": features["fleet_mask"],             # (max_fleets,)
         "fire_mask": masks["fire_mask"][0],               # (max_owned,)

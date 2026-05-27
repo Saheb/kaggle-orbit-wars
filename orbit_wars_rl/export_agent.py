@@ -49,7 +49,7 @@ BOARD_SIZE = 100.0
 SUN_RADIUS = 10.0
 CENTER_XY = 50.0
 MAX_SPEED = 6.0
-MAX_OWNED = 10
+MAX_OWNED = {max_owned_planets}
 _ENTITY_DIM = {entity_dim}
 _NUM_HEADS = {num_heads}
 _NUM_LAYERS = {num_layers}
@@ -117,7 +117,7 @@ class _Model(nn.Module):
             )
         else:
             self.target_head = nn.Linear(D, _MAX_PLANETS)
-        self.value_fc1 = nn.Linear(D, D)
+        self.value_fc1 = nn.Linear(2 * D, D)
         self.value_fc2 = nn.Linear(D, D // 2)
         self.value_out = nn.Linear(D // 2, 1)
 
@@ -209,9 +209,16 @@ class _Model(nn.Module):
             sl = sl.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
             target_logits = target_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
-        vf = (~attn_mask).float()
-        pooled = (x * vf.unsqueeze(-1)).sum(1) / vf.sum(1, keepdim=True).clamp(min=1)
-        v = self.value_out(F.gelu(self.value_fc2(F.gelu(self.value_fc1(pooled))))).squeeze(-1)
+        global_token = x[:, 0, :]
+        if slot_valid is not None:
+            sv_f = slot_valid.float().unsqueeze(-1)
+            n_owned = sv_f.sum(dim=1).clamp(min=1)
+            owned_pool = (oe * sv_f).sum(dim=1) / n_owned
+        else:
+            owned_pool = oe.mean(dim=1)
+        v = self.value_out(F.gelu(self.value_fc2(F.gelu(self.value_fc1(
+            torch.cat([global_token, owned_pool], dim=-1)
+        ))))).squeeze(-1)
         return dict(fire_logits=fl, angle_logits=al, ship_logits=sl,
                     target_logits=target_logits, value=v)
 
@@ -438,6 +445,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         num_heads=m.num_heads,
         num_layers=m.num_layers,
         mlp_expansion=m.mlp_expansion,
+        max_owned_planets=m.max_owned_planets,
         planet_feature_dim=m.planet_feature_dim,
         fleet_feature_dim=m.fleet_feature_dim,
         global_feature_dim=m.global_feature_dim,
