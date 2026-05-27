@@ -362,6 +362,21 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
     return total, metrics
 
 
+def _save_bc_checkpoint(model: EntityTransformer, cfg, save_path: str):
+    """Save BC checkpoint with config metadata so load_checkpoint auto-detects it."""
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    torch.save({
+        "model": model.state_dict(),
+        "config": {
+            "action_decode":  "target",
+            "ship_bin_mode":  cfg.model.ship_bin_mode,
+            "num_ship_bins":  cfg.model.num_ship_bins,
+            "min_ship_bin":   cfg.model.min_ship_bin,
+        },
+    }, save_path)
+    print(f"BC model saved → {save_path}")
+
+
 def train_bc(
     model: EntityTransformer,
     samples: list[dict],
@@ -545,9 +560,7 @@ def validate_bc(cfg: Config, agent_path: str, save_path: str = "", verbose: bool
     val_metrics = train_bc(model, samples, cfg.bc, device)
 
     if save_path:
-        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-        torch.save({"model": model.state_dict()}, save_path)
-        print(f"BC model saved → {save_path}")
+        _save_bc_checkpoint(model, cfg, save_path)
 
     print("\nBC validation complete!")
     print(f"  Final val loss: {val_metrics.get('val_loss', float('nan')):.4f}")
@@ -578,9 +591,7 @@ def validate_bc_from_samples(cfg: Config, sample_pkls: list[str],
     val_metrics = train_bc(model, samples, cfg.bc, device)
 
     if save_path:
-        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-        torch.save({"model": model.state_dict()}, save_path)
-        print(f"BC model saved → {save_path}")
+        _save_bc_checkpoint(model, cfg, save_path)
 
     print("\nBC validation complete!")
     print(f"  Final val loss: {val_metrics.get('val_loss', float('nan')):.4f}")
