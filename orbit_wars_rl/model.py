@@ -97,10 +97,11 @@ class EntityTransformer(nn.Module):
         else:
             self.target_head = nn.Linear(D, self.max_planets)
 
-        # Value head: concat global token (attends to everything) with mean of
-        # owned-planet embeddings (your position specifically). Richer than
-        # mean-pooling all entities, giving the critic better spatial grounding.
-        self.value_fc1 = nn.Linear(2 * D, D)
+        # Value head: concat global token + owned pool → Linear(2D→D) by default.
+        # value_head_in=0 means auto (2*D); load_checkpoint sets it to D for
+        # pre-Phase-1 checkpoints that used mean-pool-all-entities (D→D).
+        _vh_in = getattr(cfg, "value_head_in", 0) or (2 * D)
+        self.value_fc1 = nn.Linear(_vh_in, D)
         self.value_fc2 = nn.Linear(D, D // 2)
         self.value_out = nn.Linear(D // 2, 1)
 
@@ -248,17 +249,20 @@ class EntityTransformer(nn.Module):
             ship_logits = ship_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
             target_logits = target_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
-        # Value head: global token (attends to all entities) + mean of owned planet
-        # embeddings (player's specific position). Concat gives the critic richer
-        # signal than mean-pooling all 64+ entities.
-        global_token = x[:, 0, :]                                    # (B, D)
-        if slot_valid is not None:
-            owned_float = slot_valid.float().unsqueeze(-1)            # (B, max_owned, 1)
-            n_owned = owned_float.sum(dim=1).clamp(min=1)             # (B, 1)
-            owned_pool = (owned_entities * owned_float).sum(dim=1) / n_owned  # (B, D)
+        # Value head: new=concat(global_token, owned_pool) [2D], old=mean-pool all [D].
+        if self.value_fc1.in_features == D:
+            # Pre-Phase-1 checkpoint: mean-pool all valid entities
+            valid_float = (~attn_mask).float()
+            value_input = (x * valid_float.unsqueeze(-1)).sum(1) / valid_float.sum(1, keepdim=True).clamp(min=1)
         else:
-            owned_pool = owned_entities.mean(dim=1)                   # (B, D)
-        value_input = torch.cat([global_token, owned_pool], dim=-1)   # (B, 2D)
+            global_token = x[:, 0, :]                                    # (B, D)
+            if slot_valid is not None:
+                owned_float = slot_valid.float().unsqueeze(-1)
+                n_owned = owned_float.sum(dim=1).clamp(min=1)
+                owned_pool = (owned_entities * owned_float).sum(dim=1) / n_owned
+            else:
+                owned_pool = owned_entities.mean(dim=1)
+            value_input = torch.cat([global_token, owned_pool], dim=-1)  # (B, 2D)
         value = self.value_out(F.gelu(self.value_fc2(F.gelu(self.value_fc1(value_input))))).squeeze(-1)
 
         return {

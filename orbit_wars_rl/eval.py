@@ -60,6 +60,10 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     else:
         cfg.model.pairwise_feature_dim = 0
 
+    # Detect value head version from fc1 input width (old=D, new=2D).
+    if "value_fc1.weight" in sd:
+        cfg.model.value_head_in = int(sd["value_fc1.weight"].shape[1])
+
     action_decode = str(ckpt_cfg.get("action_decode", "angle"))
     return sd, action_decode
 

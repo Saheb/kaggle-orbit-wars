@@ -44,6 +44,9 @@ class ModelConfig:
     pairwise_feature_dim: int = 12   # see features.PAIRWISE_FEATURE_DIM
     max_planets: int = 48            # for target_head output size; matches EnvConfig
     dropout: float = 0.0
+    # Value head input width. 0 = auto (2*entity_dim, new concat head).
+    # Set to entity_dim when loading pre-Phase-1 checkpoints (old mean-pool head).
+    value_head_in: int = 0
 
 
 @dataclass
