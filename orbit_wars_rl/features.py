@@ -8,6 +8,16 @@ Features per entity type:
   pressure, capture cost, distance to home, is_home, active mask
 - Fleet (9 features): position, owner, angle, ships, speed, dist_to_sun, mask
 - Global (10 features): player, step, angular_velocity, economy stats, mode
+
+Pairwise features (10 per owned-slot × target-planet pair):
+  0: sin of arrival direction   (corrected for rotation on orbiting targets)
+  1: cos of arrival direction   (corrected for rotation on orbiting targets)
+  2: arrival dist / BOARD_SIZE  (corrected for rotation on orbiting targets)
+  3: 1/(arrival_eta+1)          (corrected for rotation on orbiting targets)
+  4: sun_safe flag
+  5-7: is_mine / is_enemy / is_neutral
+  8: target production / 5
+  9: target valid flag
 """
 
 from __future__ import annotations
@@ -191,6 +201,7 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128)
 
     pairwise = compute_pairwise_features(
         planets, owned_indices, owned_count, player, max_planets=max_planets,
+        angular_velocity=angular_velocity, step=step, init_by_id=init_by_id,
     )
 
     return {
@@ -215,14 +226,35 @@ _ETA_PROBE_SHIPS = 20
 _ETA_PROBE_SPEED = 1.0 + (MAX_SPEED - 1.0) * (math.log(_ETA_PROBE_SHIPS) / math.log(1000.0)) ** 1.5
 
 
+def _planet_arrival_pos(init_angle: float, orbital_r: float, is_orbiting: bool,
+                         current_x: float, current_y: float,
+                         eta: float, angular_velocity: float, step: int) -> tuple:
+    """Return predicted (x, y) of a planet at time step+eta.
+
+    For non-orbiting planets returns current position unchanged.
+    Uses the same orbit formula as extract_features().
+    """
+    if not is_orbiting or orbital_r == 0.0:
+        return current_x, current_y
+    future_angle = init_angle + angular_velocity * (step + eta)
+    return CENTER + orbital_r * math.cos(future_angle), CENTER + orbital_r * math.sin(future_angle)
+
+
 def compute_pairwise_features(planets, owned_indices, owned_count, player,
-                              max_planets: int = 48, max_owned: int = 10):
+                              max_planets: int = 48, max_owned: int = 10,
+                              angular_velocity: float = 0.0, step: int = 0,
+                              init_by_id: dict | None = None):
     """For each (owned-slot, target-planet) pair return geometric + ownership features.
 
     These are exactly the quantities the model cannot easily compute from raw (x, y)
     via attention: angle direction (sin/cos), distance, ETA-at-typical-ships, and
     sun-cross flag. Prior BC angle-head failure (0.08 reduction vs 0.40 gate) was
     driven by the model trying to learn trig from gradients; this fills the gap.
+
+    For orbiting target planets the direction/distance/ETA are corrected to the
+    predicted arrival position (one Newton step): current ETA → predicted arrival
+    planet position → corrected distance → corrected ETA.  Non-orbiting planets
+    are unchanged.
 
     Output: (max_owned, max_planets, PAIRWISE_FEATURE_DIM) float32 numpy array.
     Invalid (slot, target) entries are zero.
@@ -231,13 +263,29 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
     if owned_count == 0 or len(planets) == 0:
         return out
 
-    # Vectorize over targets once
+    # Vectorize over targets once — current positions
     n_p = min(len(planets), max_planets)
     tgt_x = np.array([planets[j][2] for j in range(n_p)], dtype=np.float32)
     tgt_y = np.array([planets[j][3] for j in range(n_p)], dtype=np.float32)
-    tgt_radius = np.array([planets[j][4] for j in range(n_p)], dtype=np.float32)
     tgt_owner = np.array([planets[j][1] for j in range(n_p)], dtype=np.int32)
     tgt_prod = np.array([planets[j][6] for j in range(n_p)], dtype=np.float32)
+
+    # Precompute orbit info for each target planet
+    tgt_is_orbiting = np.zeros(n_p, dtype=np.bool_)
+    tgt_init_angle = np.zeros(n_p, dtype=np.float64)
+    tgt_orbital_r = np.zeros(n_p, dtype=np.float64)
+    if init_by_id is not None:
+        for j in range(n_p):
+            pid = int(planets[j][0])
+            init_p = init_by_id.get(pid, planets[j])
+            rx = float(init_p[2]) - CENTER
+            ry = float(init_p[3]) - CENTER
+            r = math.hypot(rx, ry)
+            radius = float(planets[j][4])
+            if (r + radius) < ROTATION_RADIUS_LIMIT and r > 0:
+                tgt_is_orbiting[j] = True
+                tgt_init_angle[j] = math.atan2(ry, rx)
+                tgt_orbital_r[j] = r
 
     is_mine = (tgt_owner == player).astype(np.float32)
     is_enemy = ((tgt_owner != player) & (tgt_owner >= 0)).astype(np.float32)
@@ -250,29 +298,46 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         src = planets[src_idx]
         sx, sy = float(src[2]), float(src[3])
 
-        dx = tgt_x - sx
-        dy = tgt_y - sy
+        # --- Step 1: distance/ETA to CURRENT planet positions ---
+        dx0 = tgt_x - sx
+        dy0 = tgt_y - sy
+        dist0 = np.sqrt(dx0 * dx0 + dy0 * dy0)
+        eta0 = np.maximum(1.0, np.ceil(dist0 / _ETA_PROBE_SPEED))
+
+        # --- Step 2: for orbiting planets, correct to arrival position ---
+        arr_x = tgt_x.copy()
+        arr_y = tgt_y.copy()
+        for j in range(n_p):
+            if tgt_is_orbiting[j]:
+                ax, ay = _planet_arrival_pos(
+                    tgt_init_angle[j], tgt_orbital_r[j], True,
+                    float(tgt_x[j]), float(tgt_y[j]),
+                    float(eta0[j]), angular_velocity, step,
+                )
+                arr_x[j] = ax
+                arr_y[j] = ay
+
+        dx = arr_x - sx
+        dy = arr_y - sy
         dist = np.sqrt(dx * dx + dy * dy)
-        # Avoid div-by-zero for self-pair (slot's own planet)
         dist_safe = np.maximum(dist, 1e-6)
         sin_a = dy / dist_safe
         cos_a = dx / dist_safe
-        # ETA at typical ship count
         eta = np.maximum(1.0, np.ceil(dist / _ETA_PROBE_SPEED))
 
-        # Sun-cross: point (CENTER, CENTER) to segment (src → tgt) distance
-        seg_len2 = np.maximum(dx * dx + dy * dy, 1e-9)
-        t = ((CENTER - sx) * dx + (CENTER - sy) * dy) / seg_len2
+        # Sun-cross uses current target positions (route planning, not arrival)
+        seg_len2 = np.maximum(dx0 * dx0 + dy0 * dy0, 1e-9)
+        t = ((CENTER - sx) * dx0 + (CENTER - sy) * dy0) / seg_len2
         t = np.clip(t, 0.0, 1.0)
-        proj_x = sx + t * dx
-        proj_y = sy + t * dy
+        proj_x = sx + t * dx0
+        proj_y = sy + t * dy0
         sun_d = np.sqrt((proj_x - CENTER) ** 2 + (proj_y - CENTER) ** 2)
         sun_safe = (sun_d >= SUN_RADIUS).astype(np.float32)
 
-        out[slot, :n_p, 0] = sin_a
-        out[slot, :n_p, 1] = cos_a
-        out[slot, :n_p, 2] = dist / BOARD_SIZE
-        out[slot, :n_p, 3] = 1.0 / (eta + 1.0)            # close-fast preference
+        out[slot, :n_p, 0] = sin_a                         # arrival direction sin
+        out[slot, :n_p, 1] = cos_a                         # arrival direction cos
+        out[slot, :n_p, 2] = dist / BOARD_SIZE             # arrival dist
+        out[slot, :n_p, 3] = 1.0 / (eta + 1.0)            # arrival close-fast preference
         out[slot, :n_p, 4] = sun_safe
         out[slot, :n_p, 5] = is_mine
         out[slot, :n_p, 6] = is_enemy
