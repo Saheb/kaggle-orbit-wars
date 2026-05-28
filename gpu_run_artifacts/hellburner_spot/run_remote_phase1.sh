@@ -5,7 +5,7 @@
 #   - Fresh model (random weights → BC warmstart, NOT resuming old checkpoint)
 #   - Phase 1 feature bundle: planet=20, fleet=13, global=11, pairwise=12,
 #     max_owned=16, value head concat(global_token, owned_pool)
-#   - 2 external opponents in pool (Hellburner, Zach) — Suneet excluded (slows training)
+#   - 1 external opponent in pool (Hellburner only) — Zach/Suneet excluded (14 workers on 8 vCPU g5.2xlarge → 0% GPU, 229 SPS; Phase 0 got ~2300 SPS with HB only)
 #   - ship_bin_mode=absolute (32 bins), min_ship_bin=0 (no masking needed for
 #     fresh model — no cold-start 1-ship collapse since BC initialises well)
 #
@@ -34,16 +34,16 @@ echo "Run: phase1  timestamp: $TS  log: $LOG"
 
 PYTHONUNBUFFERED=1 python train_torch.py \
   --resume ../seed_checkpoints/phase1_resume.pt \
-  --total-steps 100000000 \
-  --lr-schedule-steps 200000000 \
+  --total-steps 30000000 \
+  --lr-schedule-steps 60000000 \
   --learning-rate 0.0003 \
   --num-envs 512 --rollout-steps 64 --num-minibatches 32 \
   --ppo-epochs 2 \
   --checkpoint-interval 1000000 \
   --pool-checkpoint-interval 500000 --pool-max-size 20 \
   --pool-mode mixed --pool-fraction 0.75 \
-  --external-opponents ../candidate_hellburner.py,../candidate_zach_public.py \
-  --pool-external-fraction 0.25 \
+  --external-opponents ../candidate_hellburner.py \
+  --pool-external-fraction 0.05 \
   --win-margin-coeff 0.5 \
   --action-decode target \
   --pool-pfsp-min-games 30 \

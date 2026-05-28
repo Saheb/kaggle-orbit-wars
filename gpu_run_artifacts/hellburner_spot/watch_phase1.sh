@@ -2,8 +2,8 @@
 # Watcher for Phase 1 run. Update INSTANCE_ID and PUB_IP after launch.
 set +euo pipefail
 
-INSTANCE_ID="i-055d4b8eb9a7459b9"
-PUB_IP="34.207.241.27"
+INSTANCE_ID="i-03bb9d0af4e931d6c"
+PUB_IP="3.91.92.159"
 KEY="$HOME/.ssh/samosa-key.pem"
 ROOT="/Users/saheb/.codex/worktrees/296f/kaggle-orbit-wars"
 ART="$ROOT/gpu_run_artifacts/hellburner_spot"
