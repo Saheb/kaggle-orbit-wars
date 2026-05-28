@@ -72,6 +72,7 @@ class VecTorchEnv:
         ship_bin_mode: str = "absolute",
         action_decode: str = "angle",
         win_margin_coeff: float = 0.0,
+        shaping_coef: float = 0.0,
     ):
         self.num_envs = num_envs
         self.num_players = num_players
@@ -86,6 +87,7 @@ class VecTorchEnv:
         # Terminal bonus for winners: +win_margin_coeff * (my_score / total_score).
         # 0.0 = pure ±1 reward (default, backward-compatible).
         self.win_margin_coeff = float(win_margin_coeff)
+        self.shaping_coef = float(shaping_coef)
 
         # State tensors — allocated in reset()
         self.planets: torch.Tensor = None       # (N, P, 7)
@@ -98,6 +100,7 @@ class VecTorchEnv:
         self.next_fleet_id: torch.Tensor = None     # (N,) long
         self.done: torch.Tensor = None              # (N,) bool
         self.rewards: torch.Tensor = None           # (N, num_players) float
+        self.prev_material: torch.Tensor = None     # (N, num_players) float
         # Seeds (per-env) so we can deterministically auto-reset
         self.seeds: list[int] = []
 
@@ -173,7 +176,21 @@ class VecTorchEnv:
         self.seeds = list(seeds)
 
         self._precompute_orbital_params()
+        self.prev_material = self._compute_material()
         return self._state_dict()
+
+    def _compute_material(self) -> torch.Tensor:
+        owner_p = self.planets[:, :, 1].long()
+        owner_f = self.fleets[:, :, 1].long()
+        ships_p = self.planets[:, :, 5] * self.planet_alive.float()
+        ships_f = self.fleets[:, :, 6] * self.fleet_alive.float()
+        material = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
+        for pl in range(self.num_players):
+            material[:, pl] = (
+                ((owner_p == pl).float() * ships_p).sum(dim=1)
+                + ((owner_f == pl).float() * ships_f).sum(dim=1)
+            )
+        return material
 
     def _precompute_orbital_params(self):
         """Cache initial_angle, orbital_r, is_orbiting per planet (shape (N, P))."""
@@ -411,14 +428,14 @@ class VecTorchEnv:
 
         gf = torch.stack([
             torch.full_like(total_owned_ships, player_norm),  # 0
-            self.step_count.float() / 500.0,                  # 1
-            self.angular_velocity / 0.05,                     # 2
+            torch.clamp(self.step_count.float() / 500.0, 0.0, 1.0),  # 1
+            torch.clamp(self.angular_velocity / 0.05, -1.0, 1.0),    # 2
             num_owned / float(MAX_OWNED),                     # 3  normalised to [0,1] within cap
-            total_owned_ships / 500.0,                        # 4
-            total_owned_prod / 20.0,                          # 5
-            enemy_planet_ships / 2000.0,                      # 6  on-planet only
-            enemy_fleet_ships  / 2000.0,                      # 7  in-flight (new)
-            fleet_commit,                                     # 8  (was 7)
+            torch.clamp(total_owned_ships / 500.0, 0.0, 1.0),        # 4
+            torch.clamp(total_owned_prod / 20.0, 0.0, 1.0),          # 5
+            torch.clamp(enemy_planet_ships / 2000.0, 0.0, 1.0),      # 6  on-planet only
+            torch.clamp(enemy_fleet_ships  / 2000.0, 0.0, 1.0),      # 7  in-flight (new)
+            torch.clamp(fleet_commit, 0.0, 1.0),                     # 8  (was 7)
             torch.full_like(total_owned_ships, mode_2p),      # 9  (was 8)
             torch.full_like(total_owned_ships, mode_4p),      # 10 (was 9)
         ], dim=1)  # (N, 11)
@@ -927,6 +944,18 @@ class VecTorchEnv:
 
         # 11. Termination + reward (terminal_rewards is non-zero only for newly-done envs)
         terminal_rewards, done = self._check_done()
+        if self.shaping_coef != 0.0:
+            material = self._compute_material()
+            material_delta = material - self.prev_material
+            if self.num_players == 2:
+                delta = material_delta[:, 0] - material_delta[:, 1]
+                shaping_rewards = torch.stack([delta, -delta], dim=1)
+            else:
+                others = material_delta.sum(dim=1, keepdim=True) - material_delta
+                shaping_rewards = material_delta - others / max(self.num_players - 1, 1)
+            shaping_rewards = self.shaping_coef * torch.tanh(shaping_rewards / 50.0)
+            terminal_rewards = terminal_rewards + shaping_rewards
+            self.prev_material = material
         # 12. Auto-reset done envs in-place — must come AFTER capturing rewards
         if done.any():
             self._auto_reset(done)
@@ -1033,6 +1062,7 @@ class VecTorchEnv:
             self.rewards[env_i] = 0.0
         # Re-precompute orbital params for changed envs
         self._precompute_orbital_params()
+        self.prev_material[done_mask] = self._compute_material()[done_mask]
 
 
 # -------------------------------------------------------------------------

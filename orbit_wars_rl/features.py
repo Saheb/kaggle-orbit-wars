@@ -255,14 +255,14 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
 
     global_feats = np.array([
         player / max(num_players - 1, 1),    # 0: player index
-        step / 500.0,                         # 1: game progress
-        angular_velocity / 0.05,             # 2: orbital speed
+        np.clip(step / 500.0, 0.0, 1.0),      # 1: game progress
+        np.clip(angular_velocity / 0.05, -1.0, 1.0), # 2: orbital speed
         num_owned / float(MAX_OWNED_PLANETS), # 3: owned planet count, normalised to [0,1]
-        total_owned_ships / 500.0,           # 4: friendly ships on planets
-        total_owned_production / 20.0,       # 5: friendly production
-        enemy_ships_on_planets / 2000.0,     # 6: enemy ships on planets (static)
-        enemy_ships_in_fleets / 2000.0,      # 7: enemy ships in fleets (committed)
-        fleet_commitment,                    # 8: fraction of own ships in transit
+        np.clip(total_owned_ships / 500.0, 0.0, 1.0), # 4: friendly ships on planets
+        np.clip(total_owned_production / 20.0, 0.0, 1.0), # 5: friendly production
+        np.clip(enemy_ships_on_planets / 2000.0, 0.0, 1.0), # 6: enemy ships on planets (static)
+        np.clip(enemy_ships_in_fleets / 2000.0, 0.0, 1.0), # 7: enemy ships in fleets (committed)
+        np.clip(fleet_commitment, 0.0, 1.0),  # 8: fraction of own ships in transit
         mode_2p,                             # 9: 2-player mode flag
         mode_4p,                             # 10: 4-player mode flag
     ], dtype=np.float32)

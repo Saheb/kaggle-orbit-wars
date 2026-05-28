@@ -1,0 +1,119 @@
+Loading environment cabt failed: dlopen(/Users/saheb/.codex/worktrees/296f/kaggle-orbit-wars/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so, 0x0006): tried: '/Users/saheb/.codex/worktrees/296f/kaggle-orbit-wars/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file), '/System/Volumes/Preboot/Cryptexes/OS/Users/saheb/.codex/worktrees/296f/kaggle-orbit-wars/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (no such file), '/Users/saheb/.codex/worktrees/296f/kaggle-orbit-wars/.venv/lib/python3.14/site-packages/kaggle_environments/envs/cabt/cg/libcg.so' (slice is not valid mach-o file)
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 24.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_amazons
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_clobber
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_coin_game_arena
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_dark_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_lines_of_action
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_oshi_zumo
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_y
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.
+[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake
+Collecting heuristic trajectories...
+  Collected 20/500 games, 2423 transitions so far
+  Collected 40/500 games, 4766 transitions so far
+  Collected 60/500 games, 6984 transitions so far
+  Collected 80/500 games, 9207 transitions so far
+  Collected 100/500 games, 11574 transitions so far
+  Collected 120/500 games, 13881 transitions so far
+  Collected 140/500 games, 16022 transitions so far
+  Collected 160/500 games, 18281 transitions so far
+  Collected 180/500 games, 20537 transitions so far
+  Collected 200/500 games, 23024 transitions so far
+  Collected 220/500 games, 25039 transitions so far
+  Collected 240/500 games, 27294 transitions so far
+  Collected 260/500 games, 29625 transitions so far
+  Collected 280/500 games, 31707 transitions so far
+  Collected 300/500 games, 34114 transitions so far
+  Collected 320/500 games, 36476 transitions so far
+  Collected 340/500 games, 38762 transitions so far
+  Collected 360/500 games, 41074 transitions so far
+  Collected 380/500 games, 43640 transitions so far
+  Collected 400/500 games, 46005 transitions so far
+  Collected 420/500 games, 48375 transitions so far
+  Collected 440/500 games, 50696 transitions so far
+  Collected 460/500 games, 52782 transitions so far
+  Collected 480/500 games, 55038 transitions so far
+  Collected 500/500 games, 57122 transitions so far
+Collected 57122 raw transitions
+Converting to training samples...
+Usable samples: 57122
+BC training: 51410 train / 5712 val samples
+Steps: 5000, batch: 128, ~401 steps/epoch, ~12 epochs
+  step  100 | loss 4.3889 | fire 0.5196 (red +0.25) | ship 1.7735 (red +0.49) | tgt 2.096 (red +0.46 top1 0.24 top3 0.58) | lr 3.00e-04
+  step  200 | loss 3.3651 | fire 0.4302 (red +0.38) | ship 1.2910 (red +0.63) | tgt 1.644 (red +0.58 top1 0.43 top3 0.81) | lr 2.99e-04
+  step  300 | loss 3.3551 | fire 0.4262 (red +0.39) | ship 1.4813 (red +0.57) | tgt 1.448 (red +0.63 top1 0.50 top3 0.80) | lr 2.98e-04
+  step  400 | loss 3.0869 | fire 0.3666 (red +0.47) | ship 1.2398 (red +0.64) | tgt 1.481 (red +0.62 top1 0.46 top3 0.82) | lr 2.96e-04
+  step  500 | loss 2.7695 | fire 0.3226 (red +0.53) | ship 1.1035 (red +0.68) | tgt 1.343 (red +0.65 top1 0.55 top3 0.84) | lr 2.93e-04
+  step  600 | loss 2.8957 | fire 0.3448 (red +0.50) | ship 1.1602 (red +0.67) | tgt 1.391 (red +0.64 top1 0.51 top3 0.83) | lr 2.91e-04
+  step  700 | loss 2.6729 | fire 0.3399 (red +0.51) | ship 1.0867 (red +0.69) | tgt 1.246 (red +0.68 top1 0.57 top3 0.89) | lr 2.87e-04
+  step  800 | loss 2.7715 | fire 0.3131 (red +0.55) | ship 1.0555 (red +0.70) | tgt 1.403 (red +0.64 top1 0.51 top3 0.85) | lr 2.83e-04
+  step  900 | loss 2.6992 | fire 0.3439 (red +0.50) | ship 1.0212 (red +0.71) | tgt 1.334 (red +0.66 top1 0.54 top3 0.85) | lr 2.79e-04
+  step 1000 | loss 2.4778 | fire 0.2984 (red +0.57) | ship 0.9216 (red +0.73) | tgt 1.258 (red +0.68 top1 0.53 top3 0.89) | lr 2.74e-04
+  step 1100 | loss 2.5412 | fire 0.3118 (red +0.55) | ship 1.0095 (red +0.71) | tgt 1.220 (red +0.68 top1 0.58 top3 0.88) | lr 2.69e-04
+  step 1200 | loss 2.4489 | fire 0.3086 (red +0.55) | ship 0.8282 (red +0.76) | tgt 1.312 (red +0.66 top1 0.52 top3 0.89) | lr 2.63e-04
+  step 1300 | loss 2.4966 | fire 0.3233 (red +0.53) | ship 0.9177 (red +0.74) | tgt 1.256 (red +0.68 top1 0.58 top3 0.90) | lr 2.57e-04
+  step 1400 | loss 2.2889 | fire 0.2933 (red +0.58) | ship 0.8385 (red +0.76) | tgt 1.157 (red +0.70 top1 0.57 top3 0.90) | lr 2.51e-04
+  step 1500 | loss 2.3688 | fire 0.3022 (red +0.56) | ship 0.9132 (red +0.74) | tgt 1.153 (red +0.70 top1 0.58 top3 0.90) | lr 2.44e-04
+  step 1600 | loss 2.4266 | fire 0.3112 (red +0.55) | ship 0.8591 (red +0.75) | tgt 1.256 (red +0.68 top1 0.58 top3 0.86) | lr 2.37e-04
+  step 1700 | loss 2.4144 | fire 0.2815 (red +0.59) | ship 0.9168 (red +0.74) | tgt 1.216 (red +0.69 top1 0.57 top3 0.88) | lr 2.30e-04
+  step 1800 | loss 2.4869 | fire 0.2613 (red +0.62) | ship 0.8861 (red +0.74) | tgt 1.339 (red +0.65 top1 0.49 top3 0.87) | lr 2.22e-04
+  step 1900 | loss 2.2481 | fire 0.3091 (red +0.55) | ship 0.8087 (red +0.77) | tgt 1.130 (red +0.71 top1 0.59 top3 0.92) | lr 2.15e-04
+  step 2000 | loss 2.2370 | fire 0.2631 (red +0.62) | ship 0.7362 (red +0.79) | tgt 1.238 (red +0.68 top1 0.59 top3 0.86) | lr 2.07e-04
+  step 2100 | loss 2.2675 | fire 0.3019 (red +0.56) | ship 0.7337 (red +0.79) | tgt 1.232 (red +0.68 top1 0.61 top3 0.90) | lr 1.99e-04
+  step 2200 | loss 2.2732 | fire 0.3113 (red +0.55) | ship 0.6897 (red +0.80) | tgt 1.272 (red +0.67 top1 0.56 top3 0.88) | lr 1.90e-04
+  step 2300 | loss 2.1125 | fire 0.2884 (red +0.58) | ship 0.6405 (red +0.82) | tgt 1.184 (red +0.69 top1 0.58 top3 0.88) | lr 1.82e-04
+  step 2400 | loss 2.0292 | fire 0.2654 (red +0.62) | ship 0.6128 (red +0.82) | tgt 1.151 (red +0.70 top1 0.61 top3 0.91) | lr 1.73e-04
+  step 2500 | loss 1.9688 | fire 0.2938 (red +0.58) | ship 0.6162 (red +0.82) | tgt 1.059 (red +0.73 top1 0.60 top3 0.92) | lr 1.65e-04
+  step 2600 | loss 1.8679 | fire 0.2970 (red +0.57) | ship 0.4803 (red +0.86) | tgt 1.091 (red +0.72 top1 0.62 top3 0.90) | lr 1.57e-04
+  step 2700 | loss 2.1680 | fire 0.2998 (red +0.57) | ship 0.6630 (red +0.81) | tgt 1.205 (red +0.69 top1 0.59 top3 0.90) | lr 1.48e-04
+  step 2800 | loss 2.0160 | fire 0.3174 (red +0.54) | ship 0.5608 (red +0.84) | tgt 1.138 (red +0.71 top1 0.60 top3 0.90) | lr 1.40e-04
+  step 2900 | loss 2.3143 | fire 0.2963 (red +0.57) | ship 0.9641 (red +0.72) | tgt 1.054 (red +0.73 top1 0.62 top3 0.91) | lr 1.31e-04
+  step 3000 | loss 1.9885 | fire 0.2762 (red +0.60) | ship 0.6009 (red +0.83) | tgt 1.111 (red +0.71 top1 0.59 top3 0.92) | lr 1.23e-04
+  step 3100 | loss 1.7576 | fire 0.2813 (red +0.59) | ship 0.4951 (red +0.86) | tgt 0.981 (red +0.75 top1 0.66 top3 0.92) | lr 1.15e-04
+  step 3200 | loss 1.7607 | fire 0.2595 (red +0.63) | ship 0.5256 (red +0.85) | tgt 0.976 (red +0.75 top1 0.65 top3 0.91) | lr 1.08e-04
+  step 3300 | loss 1.8558 | fire 0.2710 (red +0.61) | ship 0.4690 (red +0.86) | tgt 1.116 (red +0.71 top1 0.60 top3 0.88) | lr 1.00e-04
+  step 3400 | loss 1.7293 | fire 0.2349 (red +0.66) | ship 0.4338 (red +0.87) | tgt 1.061 (red +0.73 top1 0.59 top3 0.90) | lr 9.27e-05
+  step 3500 | loss 1.9480 | fire 0.2602 (red +0.62) | ship 0.4561 (red +0.87) | tgt 1.232 (red +0.68 top1 0.58 top3 0.89) | lr 8.56e-05
+  step 3600 | loss 2.1274 | fire 0.3000 (red +0.57) | ship 0.6128 (red +0.82) | tgt 1.215 (red +0.69 top1 0.60 top3 0.88) | lr 7.89e-05
+  step 3700 | loss 2.0237 | fire 0.2721 (red +0.61) | ship 0.4431 (red +0.87) | tgt 1.308 (red +0.66 top1 0.60 top3 0.88) | lr 7.26e-05
+  step 3800 | loss 1.7651 | fire 0.2652 (red +0.62) | ship 0.3962 (red +0.89) | tgt 1.104 (red +0.71 top1 0.59 top3 0.90) | lr 6.66e-05
+  step 3900 | loss 1.5879 | fire 0.2890 (red +0.58) | ship 0.3895 (red +0.89) | tgt 0.909 (red +0.77 top1 0.68 top3 0.94) | lr 6.10e-05
+  step 4000 | loss 1.8667 | fire 0.3137 (red +0.55) | ship 0.4568 (red +0.87) | tgt 1.096 (red +0.72 top1 0.61 top3 0.90) | lr 5.58e-05
+  step 4100 | loss 2.0639 | fire 0.2565 (red +0.63) | ship 0.5277 (red +0.85) | tgt 1.280 (red +0.67 top1 0.57 top3 0.87) | lr 5.10e-05
+  step 4200 | loss 1.8827 | fire 0.2834 (red +0.59) | ship 0.4635 (red +0.87) | tgt 1.136 (red +0.71 top1 0.58 top3 0.89) | lr 4.67e-05
+  step 4300 | loss 1.8316 | fire 0.2600 (red +0.62) | ship 0.4763 (red +0.86) | tgt 1.095 (red +0.72 top1 0.59 top3 0.93) | lr 4.28e-05
+  step 4400 | loss 1.9362 | fire 0.2947 (red +0.57) | ship 0.6632 (red +0.81) | tgt 0.978 (red +0.75 top1 0.67 top3 0.93) | lr 3.95e-05
+  step 4500 | loss 1.7373 | fire 0.2381 (red +0.66) | ship 0.4077 (red +0.88) | tgt 1.091 (red +0.72 top1 0.62 top3 0.90) | lr 3.66e-05
+  step 4600 | loss 1.9566 | fire 0.2777 (red +0.60) | ship 0.6129 (red +0.82) | tgt 1.066 (red +0.72 top1 0.63 top3 0.92) | lr 3.42e-05
+  step 4700 | loss 1.7281 | fire 0.2718 (red +0.61) | ship 0.4939 (red +0.86) | tgt 0.962 (red +0.75 top1 0.64 top3 0.94) | lr 3.24e-05
+  step 4800 | loss 1.8752 | fire 0.2774 (red +0.60) | ship 0.4898 (red +0.86) | tgt 1.108 (red +0.71 top1 0.65 top3 0.92) | lr 3.11e-05
+  step 4900 | loss 1.7825 | fire 0.2267 (red +0.67) | ship 0.4691 (red +0.86) | tgt 1.087 (red +0.72 top1 0.63 top3 0.90) | lr 3.03e-05
+  step 5000 | loss 1.7464 | fire 0.2405 (red +0.65) | ship 0.3796 (red +0.89) | tgt 1.126 (red +0.71 top1 0.62 top3 0.92) | lr 3.00e-05
+  Restored best weights (val_loss=1.7592)
+
+BC validation: {'val_fire_loss': 0.27312730484538605, 'val_ship_loss': 0.4385887940724691, 'val_target_loss': 1.0474422375361125, 'val_loss': 1.7591583304935032, 'val_fire_red': 0.6059605917681935, 'val_ship_red': 0.8734500243604354, 'val_target_red': 0.7294270603399998, 'val_target_top1': 0.6337420026461283, 'val_target_top3': 0.9182002756330702}
+
+Phase-A target-head gate: target_red=+0.73  top1=0.63  top3=0.92  → PASS
+  side metrics: ship_red=+0.87  fire_red=+0.61
+BC model saved → ../checkpoints/bc_phase1_warmstart.pt
+
+BC validation complete!
+  Final val loss: 1.7592

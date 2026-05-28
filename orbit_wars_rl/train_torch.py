@@ -268,6 +268,12 @@ def train(args):
         cfg.ppo.learning_rate = args.learning_rate
     if args.ppo_epochs is not None:
         cfg.ppo.ppo_epochs = args.ppo_epochs
+    if args.clip_eps is not None:
+        cfg.ppo.clip_eps = args.clip_eps
+    if args.entropy_coef_fire is not None:
+        cfg.ppo.entropy_coef_fire = args.entropy_coef_fire
+    if args.gae_lambda is not None:
+        cfg.ppo.gae_lambda = args.gae_lambda
     if args.il_lambda is not None:
         cfg.ppo.il_lambda = args.il_lambda
     if args.il_decay_frac is not None:
@@ -275,9 +281,12 @@ def train(args):
     if args.bc_coef is not None:
         cfg.ppo.bc_coef = args.bc_coef
     print(f"PPO config: lr={cfg.ppo.learning_rate}, ppo_epochs={cfg.ppo.ppo_epochs}, "
-          f"num_minibatches={cfg.ppo.num_minibatches}, kl_target={cfg.ppo.kl_target}")
+          f"num_minibatches={cfg.ppo.num_minibatches}, clip_eps={cfg.ppo.clip_eps}, "
+          f"entropy_coef_fire={cfg.ppo.entropy_coef_fire}, gae_lambda={cfg.ppo.gae_lambda}, "
+          f"kl_target={cfg.ppo.kl_target}")
     print(f"Action decode: {args.action_decode}")
     print(f"Win margin coeff: {args.win_margin_coeff}")
+    print(f"Shaping coeff: {args.shaping_coef}")
 
     # Honor model-config fields saved in the checkpoint (num_ship_bins,
     # ship_bin_mode, min_ship_bin) BEFORE creating env or model.
@@ -311,7 +320,8 @@ def train(args):
                       device=device, episode_steps=500,
                       ship_bin_mode=cfg.model.ship_bin_mode,
                       action_decode=args.action_decode,
-                      win_margin_coeff=args.win_margin_coeff)
+                      win_margin_coeff=args.win_margin_coeff,
+                      shaping_coef=args.shaping_coef)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
 
     model = EntityTransformer(cfg.model).to(device)
@@ -514,7 +524,7 @@ def train(args):
         if opp.kind == "self":
             # Load opp weights into the reusable frozen model
             pool_opp_model.load_state_dict(opp.state_dict)
-            feats = env.get_features(player, max_planets=cfg.env.max_planets, max_fleets=cfg.env.max_fleets)
+            feats = env.get_features(player, max_planets=cfg.env.max_planets, max_fleets=128)
             with torch.no_grad():
                 outs = pool_opp_model(
                     feats["planet_features"], feats["fleet_features"],
@@ -575,7 +585,7 @@ def train(args):
 
     def forward_player(player: int):
         """Run model forward for given player, return outputs + features dict."""
-        feats = env.get_features(player, max_planets=cfg.env.max_planets, max_fleets=cfg.env.max_fleets)
+        feats = env.get_features(player, max_planets=cfg.env.max_planets, max_fleets=128)
         owned_count = feats["owned_count"]
         with torch.no_grad():
             outs = model(
@@ -684,7 +694,7 @@ def train(args):
         next_value_p = torch.zeros(N, P, device=storage_dev)
         with torch.no_grad():
             for p in range(P):
-                feats_final = env.get_features(p)
+                feats_final = env.get_features(p, max_planets=cfg.env.max_planets, max_fleets=128)
                 outs_final = model(
                     feats_final["planet_features"], feats_final["fleet_features"],
                     feats_final["global_features"], feats_final["planet_mask"],
@@ -808,6 +818,19 @@ def train(args):
                                  bc_batch=bc_batch)
         metrics["avg_fleet_size"] = float(avg_fleet_size.item())
         metrics["p90_fleet_size"] = float(fleet_size_p90.item())
+        with torch.no_grad():
+            metrics["old_value_mean"] = float(flat["values"].mean().item())
+            metrics["old_value_std"] = float(flat["values"].std(unbiased=False).item())
+            metrics["return_mean"] = float(flat_ret.mean().item())
+            metrics["return_std"] = float(flat_ret.std(unbiased=False).item())
+            metrics["adv_std"] = float(flat_adv.std(unbiased=False).item())
+            metrics["reward_mean"] = float(flat["rewards"].mean().item())
+            metrics["reward_std"] = float(flat["rewards"].std(unbiased=False).item())
+            metrics["reward_nonzero"] = float((flat["rewards"].abs() > 1e-8).float().mean().item())
+            metrics["planet_feat_std"] = float(flat["planet_features"].std(unbiased=False).item())
+            metrics["fleet_feat_std"] = float(flat["fleet_features"].std(unbiased=False).item())
+            metrics["global_feat_std"] = float(flat["global_features"].std(unbiased=False).item())
+            metrics["pairwise_feat_std"] = float(flat["pairwise_features"].std(unbiased=False).item())
 
         total_env_steps += rollout_T * N
         iter_count += 1
@@ -842,7 +865,19 @@ def train(args):
                 f"ship0={metrics.get('ship_bin0_rate', 0):.2f} "
                 f"meanshipbin={metrics.get('mean_ship_bin', 0):.1f} "
                 f"avgfleet={metrics.get('avg_fleet_size', 0):.1f} "
-                f"p90fleet={metrics.get('p90_fleet_size', 0):.1f}"
+                f"p90fleet={metrics.get('p90_fleet_size', 0):.1f} | "
+                f"Vμ={metrics.get('old_value_mean', 0):+.3f} "
+                f"Vσ={metrics.get('old_value_std', 0):.3f} "
+                f"Rμ={metrics.get('return_mean', 0):+.3f} "
+                f"Rσ={metrics.get('return_std', 0):.3f} "
+                f"Aσ={metrics.get('adv_std', 0):.3f} "
+                f"rewμ={metrics.get('reward_mean', 0):+.4f} "
+                f"rewσ={metrics.get('reward_std', 0):.4f} "
+                f"rewNZ={metrics.get('reward_nonzero', 0):.3f} "
+                f"featσ[p/f/g/pw]={metrics.get('planet_feat_std', 0):.3f}/"
+                f"{metrics.get('fleet_feat_std', 0):.3f}/"
+                f"{metrics.get('global_feat_std', 0):.3f}/"
+                f"{metrics.get('pairwise_feat_std', 0):.3f}"
                 + (f" | il_kl={metrics.get('il_kl', 0):.3f} "
                    f"il_coef={metrics.get('il_coef', 0):.3f}"
                    if metrics.get('il_coef', 0) > 0 else "")
@@ -928,6 +963,13 @@ if __name__ == "__main__":
                         help="Override PPO learning rate (default: cfg.ppo.learning_rate=3e-4)")
     parser.add_argument("--ppo-epochs", type=int, default=None,
                         help="Override PPO epochs per rollout (default: 4)")
+    parser.add_argument("--clip-eps", type=float, default=None,
+                        help="Override PPO clip epsilon (default: cfg.ppo.clip_eps=0.2)")
+    parser.add_argument("--entropy-coef-fire", type=float, default=None,
+                        help="Override fire-head entropy coefficient "
+                             "(default: cfg.ppo.entropy_coef_fire=0.01)")
+    parser.add_argument("--gae-lambda", type=float, default=None,
+                        help="Override GAE lambda (default: cfg.ppo.gae_lambda=0.95)")
     # IL regularization (KL-to-frozen-BC penalty) ------------------------
     parser.add_argument("--il-lambda", type=float, default=None,
                         help="Peak coef for KL(current||frozen_BC) penalty. "
@@ -961,6 +1003,9 @@ if __name__ == "__main__":
     parser.add_argument("--win-margin-coeff", type=float, default=0.0,
                         help="Terminal bonus coefficient α: winner gets +1 + α*(my_score/total_score). "
                              "0 = pure ±1 reward (default). Suggested start: 0.5.")
+    parser.add_argument("--shaping-coef", type=float, default=0.0,
+                        help="Per-step material-delta shaping coefficient. "
+                             "0 = off. Suggested diagnostic start: 0.03.")
     # Opponent pool (PFSP self-play with optional external heuristics) ----
     parser.add_argument("--pool-mode", choices=["none", "self", "mixed"], default="none",
                         help="none: pure current-vs-current self-play (default). "

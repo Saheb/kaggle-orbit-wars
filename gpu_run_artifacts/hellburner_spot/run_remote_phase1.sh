@@ -19,7 +19,8 @@
 # both), 75% on self-play PFSP. Same recipe that produced 55.5% HB.
 #
 # LR: fresh model needs warmer LR than a resume. 3e-4 peak with cosine decay
-# over 2x the training horizon (12M schedule, 6M actual) → ~50% decay by end.
+# over 2x the training horizon (60M schedule, 30M actual) → ~50% decay by end.
+# total-steps=30M: run until manually killed when plateau detected.
 set -euo pipefail
 
 cd "$HOME/orbit_wars_rl"
@@ -32,9 +33,9 @@ LOG="train_gpu_phase1_${TS}.log"
 echo "Run: phase1  timestamp: $TS  log: $LOG"
 
 PYTHONUNBUFFERED=1 python train_torch.py \
-  --resume ../seed_checkpoints/bc_phase1_warmstart.pt \
-  --total-steps 6000000 \
-  --lr-schedule-steps 12000000 \
+  --resume ../seed_checkpoints/phase1_resume.pt \
+  --total-steps 100000000 \
+  --lr-schedule-steps 200000000 \
   --learning-rate 0.0003 \
   --num-envs 512 --rollout-steps 64 --num-minibatches 32 \
   --ppo-epochs 2 \
