@@ -22,6 +22,8 @@ When training finishes and calls `sudo shutdown -h`, the instance *stops* (billi
 
 **If instance is already stopped (not terminated):** It still has all data on EBS. SSH in, pull everything, then terminate. Do NOT terminate without pulling first.
 
+**On-demand vs spot:** Always launch **on-demand** (no `--spot` flag). Spot instances can be reclaimed by AWS at any time mid-training, losing all unsaved checkpoints. The watcher syncs every 3 min so at most 3 min of work is lost on-demand if the instance fails; a spot interruption can happen at any point with 2 min notice and no guarantee checkpoints have been synced. On-demand cost for a full training run (~12h on g5.2xlarge) is ~$15 — acceptable. Never pass `--spot` to `launch_gpu.sh` or `launch_phase1.sh`.
+
 **Verify status before starting new runs:**
 ```bash
 aws ec2 describe-instances \
