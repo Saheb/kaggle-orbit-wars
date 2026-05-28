@@ -853,7 +853,7 @@ def train(args):
             print(
                 f"iter {iter_count:5d} | steps {total_env_steps:>11,} | "
                 f"SPS {sps:>7,.0f} | r_p0 {avg_r:+.3f} r_p1 {avg_r1:+.3f} | "
-                f"clip_frac {avg_cf:.3f} | KL {metrics.get('approx_kl', 0):.4f} | "
+                f"clip_frac {avg_cf:.3f}(fire:{metrics.get('clip_frac_fire', 0):.3f}) | KL {metrics.get('approx_kl', 0):.4f} | "
                 f"H_fire {metrics.get('fire_entropy', 0):.3f} "
                 f"H_ang {metrics.get('angle_entropy', 0):.2f} "
                 f"H_ship {metrics.get('ship_entropy', 0):.2f} | "

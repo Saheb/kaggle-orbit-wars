@@ -497,7 +497,9 @@ class VecTorchEnv:
           8  target production / 5
           9  valid flag (slot_valid AND target_alive)
           10 ships_at_arrival / 200  — tgt_ships + tgt_prod * eta (capped 500)
-          11 capture ratio at arrival — (ships_at_arrival - src_ships) / 200, clipped [-1,5]
+          11 capture gap at arrival — (ships_at_arrival - capture_cost) / 200, clipped [-1,5]
+             capture_cost = tgt_ships+1 (neutral) or tgt_ships+3*prod+1 (enemy planet)
+             positive = more ships at arrival than needed to capture (hard to take)
         """
         N = self.num_envs
         device = self.device

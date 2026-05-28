@@ -79,7 +79,11 @@ rsync -az \
   -e "ssh -i $KEY -o StrictHostKeyChecking=no" \
   "$ROOT/checkpoints/bc_phase1_warmstart.pt" \
   ubuntu@"$PUB_IP":~/seed_checkpoints/bc_phase1_warmstart.pt
-echo "BC warmstart uploaded."
+# Also copy as phase1_resume.pt (the name --resume expects) so both
+# --resume and --il-ref can reference their respective roles from the same file.
+ssh -i "$KEY" -o StrictHostKeyChecking=no ubuntu@"$PUB_IP" \
+  'cp ~/seed_checkpoints/bc_phase1_warmstart.pt ~/seed_checkpoints/phase1_resume.pt'
+echo "BC warmstart uploaded (bc_phase1_warmstart.pt + phase1_resume.pt)."
 
 echo ""
 echo "=== Step 5: Upload + start training in screen ==="

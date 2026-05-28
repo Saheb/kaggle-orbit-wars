@@ -217,6 +217,21 @@ class PPOLearner:
 
         if return_metrics:
             clip_frac = ((ratio - 1.0).abs() > cfg.clip_eps).float().mean()
+            # Per-slot fire clip_frac: measures whether individual fire decisions
+            # would be clipped, decoupled from multi-slot joint-log-prob amplification.
+            # The joint clip_frac is mechanically inflated when many owned slots are
+            # present (16 slots × per-slot Δlog_p summing up), so this per-slot metric
+            # gives a calibrated read of actual policy change per decision.
+            with torch.no_grad():
+                new_lp_fire_s = fire_dist.log_prob(fire_action.float()) * slot_valid_2d
+                old_lp_fire_s = to_dev(batch["old_log_probs"]["fire"]) * slot_valid_2d
+                ratio_fire_s = torch.exp(
+                    new_lp_fire_s - torch.clamp(old_lp_fire_s, min=-50)
+                )
+                sv_f = slot_valid_2d.float()
+                clip_frac_fire = (
+                    ((ratio_fire_s - 1.0).abs() > cfg.clip_eps).float() * sv_f
+                ).sum() / sv_f.sum().clamp(min=1)
             with torch.no_grad():
                 sv = slot_valid_2d.float()                              # (B, MO)
                 sv_sum = sv.sum().clamp(min=1)
@@ -243,6 +258,7 @@ class PPOLearner:
                 "target_entropy": target_entropy.item(),
                 "ship_entropy": ship_entropy.item(),
                 "clip_frac": clip_frac.item(),
+                "clip_frac_fire": clip_frac_fire.item(),
                 "approx_kl": (old_log_prob - new_log_prob).mean().item(),
                 "mean_advantage": advantages.mean().item(),
                 "mean_value": values.mean().item(),

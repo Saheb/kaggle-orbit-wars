@@ -36,6 +36,12 @@ class PoolMember:
     wins: int = 0
     losses: int = 0
     draws: int = 0
+    # EMA win-rate for external opponents — updated per game, decoupled from the
+    # lifetime win/loss counters.  Starts at 0.5 (uninformative).  Only used
+    # when kind == 'external_heuristic'; for self-checkpoints the lifetime rate
+    # is more stable and is used instead.
+    ema_win_rate: float = 0.5
+    ema_games: int = 0   # number of EMA updates (games) so far
 
     @property
     def n_games(self) -> int:
@@ -52,7 +58,8 @@ class PoolMember:
 class OpponentPool:
     def __init__(self, max_self_members: int = 20, pfsp_alpha: float = 2.0,
                  mastered_winrate: float = 0.9, mastered_min_games: int = 50,
-                 pfsp_min_games: int = 30, external_fraction: float = 0.0):
+                 pfsp_min_games: int = 30, external_fraction: float = 0.0,
+                 ema_alpha: float = 0.01):
         self.members: list[PoolMember] = []
         self.max_self_members = max_self_members
         self.pfsp_alpha = pfsp_alpha
@@ -67,6 +74,15 @@ class OpponentPool:
         # Remaining (1 - external_fraction) is governed by PFSP over self-members.
         # 0.0 = legacy behaviour (externals compete in PFSP with everyone else).
         self.external_fraction = external_fraction
+        # EMA smoothing for external-opponent win-rate tracking.  Using a lifetime
+        # win/loss count for externals causes the PFSP weight to go stale once the
+        # denominator is large — early-training wins dilute recent performance and
+        # make a now-dominant opponent look "almost mastered".  An EMA with
+        # ema_alpha ≈ 0.01 keeps an effective window of ~100 games, so PFSP
+        # reflects the last ~1–2M training steps rather than the full run history.
+        # Self-checkpoints still use lifetime win rate (stable enough given their
+        # smaller n and shorter lifespan).
+        self.ema_alpha: float = float(ema_alpha)
 
     def __len__(self) -> int:
         return len(self.members)
@@ -138,8 +154,13 @@ class OpponentPool:
         return r.choices(candidates, weights=weights, k=1)[0]
 
     def _pfsp_weight(self, m: PoolMember) -> float:
-        # Use uninformative prior until we have enough games to trust the estimate.
-        wr = 0.5 if m.n_games < self.pfsp_min_games else m.win_rate
+        # External opponents: use EMA win-rate (reflects recent performance).
+        # Use uninformative prior until enough EMA games to trust the estimate.
+        # Self-checkpoints: use lifetime win-rate (stable given smaller n).
+        if m.kind == "external_heuristic":
+            wr = 0.5 if m.ema_games < self.pfsp_min_games else m.ema_win_rate
+        else:
+            wr = 0.5 if m.n_games < self.pfsp_min_games else m.win_rate
         return max(1.0 - wr, 1e-6) ** self.pfsp_alpha
 
     # ---- bookkeeping -------------------------------------------------------
@@ -149,6 +170,14 @@ class OpponentPool:
         if result == "win":   member.wins += 1
         elif result == "loss": member.losses += 1
         else:                  member.draws += 1
+        # Update EMA win-rate for external opponents so PFSP stays responsive to
+        # recent performance rather than the full accumulated history.
+        if member.kind == "external_heuristic":
+            win_val = 1.0 if result == "win" else 0.0
+            member.ema_win_rate = (
+                (1.0 - self.ema_alpha) * member.ema_win_rate + self.ema_alpha * win_val
+            )
+            member.ema_games += 1
 
     def maybe_evict_mastered(self) -> list[str]:
         """Drop external opponents whose sustained win-rate is past threshold.
@@ -196,7 +225,12 @@ class OpponentPool:
                 if path_attr is None:
                     # Skip — can't reconstruct without the source path
                     continue
-                ext_members.append({**base, "source_path": path_attr})
+                ext_members.append({
+                    **base,
+                    "source_path": path_attr,
+                    "ema_win_rate": m.ema_win_rate,
+                    "ema_games": m.ema_games,
+                })
         payload = {
             "self_members": self_members,
             "external_members": ext_members,
@@ -207,6 +241,7 @@ class OpponentPool:
                 "mastered_min_games": self.mastered_min_games,
                 "pfsp_min_games": self.pfsp_min_games,
                 "external_fraction": self.external_fraction,
+                "ema_alpha": self.ema_alpha,
             },
         }
         tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
@@ -231,6 +266,7 @@ class OpponentPool:
             mastered_min_games=cfg.get("mastered_min_games", 50),
             pfsp_min_games=cfg.get("pfsp_min_games", 30),
             external_fraction=cfg.get("external_fraction", 0.0),
+            ema_alpha=cfg.get("ema_alpha", 0.01),
         )
         for m in data.get("self_members", []):
             pool.members.append(PoolMember(
@@ -245,6 +281,8 @@ class OpponentPool:
                     pool.members[-1].wins = m["wins"]
                     pool.members[-1].losses = m["losses"]
                     pool.members[-1].draws = m["draws"]
+                    pool.members[-1].ema_win_rate = m.get("ema_win_rate", 0.5)
+                    pool.members[-1].ema_games = m.get("ema_games", 0)
                 except Exception as e:
                     print(f"  WARN: could not re-import external {m['name']} "
                           f"from {m['source_path']}: {e}")
@@ -269,8 +307,16 @@ class OpponentPool:
             w = self._pfsp_weight(m)
             tag = " [fixed]" if (m.kind == "external_heuristic"
                                  and self.external_fraction > 0) else ""
-            lines.append(
-                f"    {m.kind:20s} {m.name:30s} "
-                f"wr={m.win_rate:.2f} (n={m.n_games})  pfsp_w={w:.3f}{tag}"
-            )
+            if m.kind == "external_heuristic":
+                # Show both EMA (recent) and lifetime win-rate so drift is visible.
+                ema_str = f" ema_wr={m.ema_win_rate:.2f}(n={m.ema_games})"
+                lines.append(
+                    f"    {m.kind:20s} {m.name:30s} "
+                    f"wr={m.win_rate:.2f}(n={m.n_games}){ema_str}  pfsp_w={w:.3f}{tag}"
+                )
+            else:
+                lines.append(
+                    f"    {m.kind:20s} {m.name:30s} "
+                    f"wr={m.win_rate:.2f} (n={m.n_games})  pfsp_w={w:.3f}{tag}"
+                )
         return "\n".join(lines)

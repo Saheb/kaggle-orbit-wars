@@ -76,7 +76,9 @@ class PPOConfig:
     il_decay_frac: float = 0.8
     kl_target: float = 0.05   # KL early-stop threshold per epoch; inf = disabled
     value_coef: float = 0.5
-    shaping_coef: float = 0.01
+    # Note: shaping_coef is intentionally NOT here — it is passed as --shaping-coef
+    # CLI arg directly to TorchEnv (see train_torch.py). PPOConfig is not the
+    # right owner for an environment reward shaping parameter.
     max_grad_norm: float = 0.5
     clip_value: bool = True
     normalize_advantages: bool = True

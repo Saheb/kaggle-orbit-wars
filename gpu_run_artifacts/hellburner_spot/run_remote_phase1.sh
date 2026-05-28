@@ -49,5 +49,8 @@ PYTHONUNBUFFERED=1 python train_torch.py \
   --pool-pfsp-min-games 30 \
   --pool-mastered-threshold 0.99 \
   --pool-mastered-min-games 500000 \
+  --il-lambda 0.01 \
+  --il-decay-frac 0.5 \
+  --il-ref ../seed_checkpoints/bc_phase1_warmstart.pt \
   --terminate-on-done \
   2>&1 | tee "$LOG"
