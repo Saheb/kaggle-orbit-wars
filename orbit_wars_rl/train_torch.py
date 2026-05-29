@@ -287,6 +287,8 @@ def train(args):
     print(f"Action decode: {args.action_decode}")
     print(f"Win margin coeff: {args.win_margin_coeff}")
     print(f"Shaping coeff: {args.shaping_coef}")
+    if args.srcs_multi_penalty > 0.0:
+        print(f"srcs_multi penalty: coef={args.srcs_multi_penalty}, threshold={args.srcs_multi_threshold}")
 
     # Honor model-config fields saved in the checkpoint (num_ship_bins,
     # ship_bin_mode, min_ship_bin) BEFORE creating env or model.
@@ -667,6 +669,17 @@ def train(args):
             _, rewards, done = env.step(actions_per_player)
             # rewards: (N, P); done: (N,) shared across players.
             storage["rewards"][t].copy_(rewards[:, :P], non_blocking=True)
+
+            # Per-step srcs_multi penalty: discourage firing from too many
+            # sources simultaneously.  Applied symmetrically to both players.
+            # penalty_t[n,p] = srcs_multi_penalty * max(0, n_fires[n,p] - threshold)
+            if args.srcs_multi_penalty > 0.0:
+                for p in range(P):
+                    fires_p = storage["fire_a"][t, :, p].float()    # (N, MAX_OWNED)
+                    sv_p    = storage["slot_valid"][t, :, p].float() # (N, MAX_OWNED)
+                    n_fires = (fires_p * sv_p).sum(dim=-1)           # (N,)
+                    excess  = (n_fires - args.srcs_multi_threshold).clamp(min=0)
+                    storage["rewards"][t, :, p] -= args.srcs_multi_penalty * excess
             storage["dones"][t, :, 0].copy_(done, non_blocking=True)
             storage["dones"][t, :, 1].copy_(done, non_blocking=True)
 
@@ -1006,6 +1019,15 @@ if __name__ == "__main__":
     parser.add_argument("--shaping-coef", type=float, default=0.0,
                         help="Per-step material-delta shaping coefficient. "
                              "0 = off. Suggested diagnostic start: 0.03.")
+    parser.add_argument("--srcs-multi-penalty", type=float, default=0.0,
+                        help="Per-step reward penalty per source over --srcs-multi-threshold. "
+                             "Applied symmetrically to both players each rollout step. "
+                             "Discourages carpet-bombing (firing from many sources at once). "
+                             "Typical: 0.001–0.005. 0 = off.")
+    parser.add_argument("--srcs-multi-threshold", type=float, default=2.0,
+                        help="Number of simultaneous fire sources at or below which no "
+                             "penalty is applied (default: 2.0). Fires > threshold incur "
+                             "--srcs-multi-penalty per excess source per step.")
     # Opponent pool (PFSP self-play with optional external heuristics) ----
     parser.add_argument("--pool-mode", choices=["none", "self", "mixed"], default="none",
                         help="none: pure current-vs-current self-play (default). "
