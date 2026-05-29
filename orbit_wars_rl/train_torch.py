@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import math
 import os
 import random
 import time
@@ -288,7 +289,9 @@ def train(args):
     print(f"Win margin coeff: {args.win_margin_coeff}")
     print(f"Shaping coeff: {args.shaping_coef}")
     if args.srcs_multi_penalty > 0.0:
-        print(f"srcs_multi penalty: coef={args.srcs_multi_penalty}, threshold={args.srcs_multi_threshold}")
+        print(f"srcs_multi penalty: coef={args.srcs_multi_penalty}, threshold={args.srcs_multi_threshold}, "
+              f"decay_frac={args.srcs_multi_penalty_decay_frac} "
+              f"({'cosine decay to 0' if args.srcs_multi_penalty_decay_frac > 0 else 'constant'})")
 
     # Honor model-config fields saved in the checkpoint (num_ship_bins,
     # ship_bin_mode, min_ship_bin) BEFORE creating env or model.
@@ -672,14 +675,22 @@ def train(args):
 
             # Per-step srcs_multi penalty: discourage firing from too many
             # sources simultaneously.  Applied symmetrically to both players.
-            # penalty_t[n,p] = srcs_multi_penalty * max(0, n_fires[n,p] - threshold)
+            # penalty_t[n,p] = effective_coef * max(0, n_fires[n,p] - threshold)
+            # If srcs_multi_penalty_decay_frac > 0, the coefficient cosine-decays
+            # from srcs_multi_penalty to 0 over that fraction of total_steps.
             if args.srcs_multi_penalty > 0.0:
+                if args.srcs_multi_penalty_decay_frac > 0.0:
+                    decay_steps = args.srcs_multi_penalty_decay_frac * args.total_steps
+                    t_frac = min(total_env_steps / max(decay_steps, 1), 1.0)
+                    _coef = args.srcs_multi_penalty * 0.5 * (1.0 + math.cos(math.pi * t_frac))
+                else:
+                    _coef = args.srcs_multi_penalty
                 for p in range(P):
                     fires_p = storage["fire_a"][t, :, p].float()    # (N, MAX_OWNED)
                     sv_p    = storage["slot_valid"][t, :, p].float() # (N, MAX_OWNED)
                     n_fires = (fires_p * sv_p).sum(dim=-1)           # (N,)
                     excess  = (n_fires - args.srcs_multi_threshold).clamp(min=0)
-                    storage["rewards"][t, :, p] -= args.srcs_multi_penalty * excess
+                    storage["rewards"][t, :, p] -= _coef * excess
             storage["dones"][t, :, 0].copy_(done, non_blocking=True)
             storage["dones"][t, :, 1].copy_(done, non_blocking=True)
 
@@ -875,6 +886,11 @@ def train(args):
                 f"early_stop={metrics.get('kl_early_stop', 0):.0f} | "
                 f"fire[0]={slot0:.2f} fire[rest_max]={slot_rest_max:.2f} "
                 f"srcs_multi={metrics.get('avg_sources_multi', 0):.2f} "
+                + (
+                    (f"pencoef={args.srcs_multi_penalty * 0.5 * (1.0 + math.cos(math.pi * min(total_env_steps / max(args.srcs_multi_penalty_decay_frac * args.total_steps, 1), 1.0))):.5f} "
+                     if args.srcs_multi_penalty > 0.0 and args.srcs_multi_penalty_decay_frac > 0.0
+                     else "")
+                ) +
                 f"ship0={metrics.get('ship_bin0_rate', 0):.2f} "
                 f"meanshipbin={metrics.get('mean_ship_bin', 0):.1f} "
                 f"avgfleet={metrics.get('avg_fleet_size', 0):.1f} "
@@ -1028,6 +1044,11 @@ if __name__ == "__main__":
                         help="Number of simultaneous fire sources at or below which no "
                              "penalty is applied (default: 2.0). Fires > threshold incur "
                              "--srcs-multi-penalty per excess source per step.")
+    parser.add_argument("--srcs-multi-penalty-decay-frac", type=float, default=0.0,
+                        help="If > 0, the srcs_multi penalty cosine-decays from "
+                             "--srcs-multi-penalty to 0 over this fraction of --total-steps. "
+                             "E.g. 0.5 = penalty is full strength at step 0, decays to 0 "
+                             "by step total_steps*0.5, stays 0 after. 0 = constant penalty.")
     # Opponent pool (PFSP self-play with optional external heuristics) ----
     parser.add_argument("--pool-mode", choices=["none", "self", "mixed"], default="none",
                         help="none: pure current-vs-current self-play (default). "
