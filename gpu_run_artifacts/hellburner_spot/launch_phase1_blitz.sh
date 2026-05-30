@@ -26,15 +26,12 @@ aws ec2 describe-instances \
 
 echo ""
 echo "=== Launching on-demand g5.2xlarge ==="
-INSTANCE_JSON=$(bash "$ROOT/gpu_run_artifacts/launch_gpu.sh")
-INSTANCE_ID=$(echo "$INSTANCE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['Instances'][0]['InstanceId'])")
+LAUNCH_OUT=$(bash "$ROOT/gpu_run_artifacts/launch_gpu.sh")
+echo "$LAUNCH_OUT"
+INSTANCE_ID=$(echo "$LAUNCH_OUT" | grep "^Instance ID:" | awk '{print $3}')
+PUB_IP=$(echo "$LAUNCH_OUT"     | grep "^Ready:"       | awk '{print $3}' | cut -d'@' -f2)
 echo "Instance ID: $INSTANCE_ID"
-
-echo "Waiting for instance to reach running state..."
-aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
-PUB_IP=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
-  --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-echo "Public IP: $PUB_IP"
+echo "Public IP:   $PUB_IP"
 
 echo "Waiting 60s for SSH to become available..."
 sleep 60
