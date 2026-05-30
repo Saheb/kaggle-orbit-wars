@@ -29,7 +29,7 @@ echo "=== Launching on-demand g5.2xlarge ==="
 LAUNCH_OUT=$(bash "$ROOT/gpu_run_artifacts/launch_gpu.sh")
 echo "$LAUNCH_OUT"
 INSTANCE_ID=$(echo "$LAUNCH_OUT" | grep "^Instance ID:" | awk '{print $3}')
-PUB_IP=$(echo "$LAUNCH_OUT"     | grep "^Ready:"       | awk '{print $3}' | cut -d'@' -f2)
+PUB_IP=$(echo "$LAUNCH_OUT"     | grep "^Ready:"       | awk '{print $4}')
 echo "Instance ID: $INSTANCE_ID"
 echo "Public IP:   $PUB_IP"
 
