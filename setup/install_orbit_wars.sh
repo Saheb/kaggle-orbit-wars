@@ -10,9 +10,13 @@ SRC="$SCRIPT_DIR/orbit_wars_env"
 
 # Find where kaggle_environments is installed
 KE_PATH=$(python3 -c "
-import kaggle_environments, os, sys
-# suppress INFO logs
-import logging; logging.disable(logging.INFO)
+import sys, io
+# Redirect stdout to suppress open_spiel INFO spam before import
+_real_stdout = sys.stdout
+sys.stdout = io.StringIO()
+import logging; logging.disable(logging.CRITICAL)
+import kaggle_environments, os
+sys.stdout = _real_stdout
 print(os.path.dirname(kaggle_environments.__file__))
 " 2>/dev/null)
 
@@ -27,7 +31,10 @@ cp "$SRC/orbit_wars.py" "$SRC/orbit_wars.json" "$SRC/orbit_wars.js" "$SRC/README
 
 echo "Installed orbit_wars env to: $DEST"
 python3 -c "
-import logging; logging.disable(logging.INFO)
+import sys, io, logging
+logging.disable(logging.CRITICAL)
+_out = sys.stdout; sys.stdout = io.StringIO()
 from kaggle_environments.envs.orbit_wars.orbit_wars import generate_planets
+sys.stdout = _out
 print('Import OK')
 "
