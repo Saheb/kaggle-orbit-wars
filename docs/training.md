@@ -6,10 +6,18 @@
 
 **Active run:** None — Rev7 killed at 4.6M steps (2026-05-30 ~17:40)
 
-**Next:** Rev8 — awaiting Rev7 1M panel scores to decide single delta
+**Next:** Rev8 — decide single delta based on Rev7 1M results below
 
-**Pending evals (running locally):**
-- `torch_step_1015808_20260530_104829` vs HB / Zach / Suneet — results pending
+**Rev7 1M panel results** (`torch_step_1015808_20260530_104829`, 256 games, 2026-05-30):
+
+| Opponent | Score | vs Phase 1 6M peak |
+|----------|-------|--------------------|
+| Hellburner | 40.2% | +1.5pp vs 38.7% |
+| Zach | 50.8% | -3.5pp vs 54.3% |
+| Suneet | 59.8% | -1.9pp vs 61.7% |
+
+HB up slightly vs 6M peak; Zach/Suneet slightly below — all expected at 1M steps.
+Trajectory looks healthy (Suneet ~60% at 1M is strong). Rev7 6M checkpoint will be the real comparison.
 
 **Rev7 post-mortem:**
 - Instance `i-0a5129fba17cf3de6` terminated; all checkpoints + log pulled locally
