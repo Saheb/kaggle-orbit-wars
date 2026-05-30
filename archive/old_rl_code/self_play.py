@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from env import OrbitWarsEnv
-from features import extract_features
+from features import extract_features, MAX_OWNED_PLANETS
 from action_mask import (
     compute_action_masks,
     actions_from_policy,
@@ -92,7 +92,7 @@ def _find_ship_bin(ships: int, max_ships: int = 10000) -> int:
     return best_bin
 
 
-def teacher_targets_from_action(obs, action, masks, max_owned: int = 10):
+def teacher_targets_from_action(obs, action, masks, max_owned: int = MAX_OWNED_PLANETS):
     """Convert teacher moves into per-owned-slot BC targets."""
     player = obs.get("player", 0)
     planets = obs["planets"]

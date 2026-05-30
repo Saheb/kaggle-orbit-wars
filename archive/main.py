@@ -17,7 +17,7 @@ import importlib.util
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
 EARLY_RUSH_DETECT_UNTIL = 30
 ZACH_RESPONSE_UNTIL = 90
 

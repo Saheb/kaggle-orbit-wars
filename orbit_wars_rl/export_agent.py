@@ -49,7 +49,7 @@ BOARD_SIZE = 100.0
 SUN_RADIUS = 10.0
 CENTER_XY = 50.0
 MAX_SPEED = 6.0
-MAX_OWNED = 10
+MAX_OWNED = {max_owned_planets}
 _ENTITY_DIM = {entity_dim}
 _NUM_HEADS = {num_heads}
 _NUM_LAYERS = {num_layers}
@@ -59,7 +59,11 @@ _FLEET_DIM = {fleet_feature_dim}
 _GLOBAL_DIM = {global_feature_dim}
 _MAX_PLANETS = 48
 _MAX_FLEETS = 128
+_PAIRWISE_DIM = {pairwise_feature_dim}
+_MIN_SHIP_BIN = {min_ship_bin}
 _FIRE_THRESHOLD = {fire_threshold}
+_SHIP_BIN_MODE = {ship_bin_mode}
+_TARGET_DECODE = {target_decode}
 
 
 # --- Embedded parameters (base64-encoded torch state_dict) ---
@@ -94,16 +98,33 @@ class _Model(nn.Module):
         self.global_proj = nn.Linear(_GLOBAL_DIM, D)
         self.mode_proj = nn.Linear(_GLOBAL_DIM, D)
         self.blocks = nn.ModuleList([_Block(D, _NUM_HEADS, _MLP_EXP) for _ in range(_NUM_LAYERS)])
+        self.use_pairwise = _PAIRWISE_DIM > 0
+        if self.use_pairwise:
+            self.pair_kv = nn.Linear(D + _PAIRWISE_DIM, 2 * D)
+            self.pair_q = nn.Linear(D, D)
+            self.pair_out = nn.Linear(D, D)
+            self.pair_ln = nn.LayerNorm(D)
         self.fire_head = nn.Linear(D, 1)
         self.angle_head = nn.Linear(D, NUM_ANGLE_BINS)
         self.ship_head = nn.Linear(D, NUM_SHIP_BINS)
-        self.value_fc1 = nn.Linear(D, D)
+        if self.use_pairwise:
+            self.tgt_q = nn.Linear(D, D)
+            self.tgt_k = nn.Linear(D, D)
+            self.target_scorer = nn.Sequential(
+                nn.Linear(D + D + _PAIRWISE_DIM, D),
+                nn.GELU(),
+                nn.Linear(D, 1),
+            )
+        else:
+            self.target_head = nn.Linear(D, _MAX_PLANETS)
+        self.value_fc1 = nn.Linear(2 * D, D)
         self.value_fc2 = nn.Linear(D, D // 2)
         self.value_out = nn.Linear(D // 2, 1)
 
     def forward(self, pf, ff, gf, pm, fm, fire_mask=None, angle_mask=None,
-                slot_valid=None, owned_indices=None):
+                slot_valid=None, owned_indices=None, pairwise_features=None):
         B, D = pf.shape[0], _ENTITY_DIM
+        max_owned = MAX_OWNED
         planet_emb = self.planet_proj(pf)
         fleet_emb = self.fleet_proj(ff)
         global_emb = self.global_proj(gf) + self.mode_proj(gf)
@@ -125,9 +146,58 @@ class _Model(nn.Module):
         bi = torch.arange(B).unsqueeze(1).expand(-1, MAX_OWNED)
         oe = x[bi, fi]
 
+        target_logits = None
+        if self.use_pairwise and pairwise_features is not None:
+            n_p = pf.shape[1]
+            planet_emb_post = x[:, 1:1 + n_p, :]
+            planet_per_slot = planet_emb_post.unsqueeze(1).expand(-1, max_owned, -1, -1)
+            kv_input = torch.cat([planet_per_slot, pairwise_features], dim=-1)
+            kv = self.pair_kv(kv_input)
+            k, v = kv.chunk(2, dim=-1)
+            q = self.pair_q(oe).unsqueeze(2)
+            scores = (q @ k.transpose(-2, -1)).squeeze(2) * (D ** -0.5)
+            tgt_valid = pm.unsqueeze(1).expand(-1, max_owned, -1)
+            scores = scores.masked_fill(~tgt_valid, -1e4)
+            attn = F.softmax(scores, dim=-1).unsqueeze(2)
+            enriched = (attn @ v).squeeze(2)
+            oe = self.pair_ln(oe + self.pair_out(enriched))
+
+            q_tgt = self.tgt_q(oe).unsqueeze(2).expand(-1, -1, n_p, -1)
+            k_tgt = self.tgt_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
+            scorer_in = torch.cat([q_tgt, k_tgt, pairwise_features], dim=-1)
+            tgt_scores = self.target_scorer(scorer_in).squeeze(-1)
+            if n_p < _MAX_PLANETS:
+                pad = torch.full(
+                    (B, max_owned, _MAX_PLANETS - n_p),
+                    -100.0, device=tgt_scores.device, dtype=tgt_scores.dtype,
+                )
+                tgt_scores = torch.cat([tgt_scores, pad], dim=-1)
+            else:
+                tgt_scores = tgt_scores[..., :_MAX_PLANETS]
+            target_logits = tgt_scores
+        elif self.use_pairwise:
+            target_logits = torch.zeros(
+                B, max_owned, _MAX_PLANETS,
+                device=oe.device, dtype=oe.dtype,
+            )
+
         fl = self.fire_head(oe).squeeze(-1)
         al = self.angle_head(oe)
         sl = self.ship_head(oe)
+        if _MIN_SHIP_BIN > 0:
+            sl[..., :_MIN_SHIP_BIN] = -100.0
+        if target_logits is None:
+            target_logits = self.target_head(oe)
+        if pm is not None:
+            tgt_mask = pm.unsqueeze(1).expand(-1, max_owned, -1)
+            mp = target_logits.shape[-1]
+            np_obs = tgt_mask.shape[-1]
+            if mp > np_obs:
+                pad = torch.zeros(B, max_owned, mp - np_obs, dtype=torch.bool, device=tgt_mask.device)
+                tgt_mask = torch.cat([tgt_mask, pad], dim=-1)
+            elif mp < np_obs:
+                tgt_mask = tgt_mask[..., :mp]
+            target_logits = target_logits.masked_fill(~tgt_mask, -100.0)
 
         if fire_mask is not None:
             fl = fl.masked_fill(~fire_mask, -100.0)
@@ -137,11 +207,20 @@ class _Model(nn.Module):
             fl = fl.masked_fill(~slot_valid, -100.0)
             al = al.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
             sl = sl.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
+            target_logits = target_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
-        vf = (~attn_mask).float()
-        pooled = (x * vf.unsqueeze(-1)).sum(1) / vf.sum(1, keepdim=True).clamp(min=1)
-        v = self.value_out(F.gelu(self.value_fc2(F.gelu(self.value_fc1(pooled))))).squeeze(-1)
-        return dict(fire_logits=fl, angle_logits=al, ship_logits=sl, value=v)
+        global_token = x[:, 0, :]
+        if slot_valid is not None:
+            sv_f = slot_valid.float().unsqueeze(-1)
+            n_owned = sv_f.sum(dim=1).clamp(min=1)
+            owned_pool = (oe * sv_f).sum(dim=1) / n_owned
+        else:
+            owned_pool = oe.mean(dim=1)
+        v = self.value_out(F.gelu(self.value_fc2(F.gelu(self.value_fc1(
+            torch.cat([global_token, owned_pool], dim=-1)
+        ))))).squeeze(-1)
+        return dict(fire_logits=fl, angle_logits=al, ship_logits=sl,
+                    target_logits=target_logits, value=v)
 
 
 # --- Lazy model loader ---
@@ -206,16 +285,30 @@ def agent(obs):
             angle_mask=masks["angle_mask"],
             slot_valid=masks["slot_valid"],
             owned_indices=masks["owned_indices"].unsqueeze(0),
+            pairwise_features=features["pairwise_features"].unsqueeze(0)
+                if "pairwise_features" in features else None,
         )
 
-    return actions_from_policy(
-        out["fire_logits"],
-        out["angle_logits"],
-        out["ship_logits"],
-        {{k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()}},
-        obs, player,
-        fire_threshold=_FIRE_THRESHOLD,
-    )
+    if _TARGET_DECODE:
+        return actions_from_target_policy(
+            out["fire_logits"],
+            out["target_logits"],
+            out["ship_logits"],
+            {{k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()}},
+            obs, player,
+            fire_threshold=_FIRE_THRESHOLD,
+            ship_bin_mode=_SHIP_BIN_MODE,
+        )
+    else:
+        return actions_from_policy(
+            out["fire_logits"],
+            out["angle_logits"],
+            out["ship_logits"],
+            {{k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()}},
+            obs, player,
+            fire_threshold=_FIRE_THRESHOLD,
+            ship_bin_mode=_SHIP_BIN_MODE,
+        )
 '''
 
 
@@ -293,12 +386,35 @@ def _read_module_body(filepath: str, strip_imports: bool = True) -> str:
     return source
 
 
-def load_model(checkpoint_path: str, cfg: Config) -> EntityTransformer:
-    model = EntityTransformer(cfg.model)
+def _load_checkpoint(checkpoint_path: str):
     try:
-        sd = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        return torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     except Exception:
-        sd = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        return torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+
+def _apply_checkpoint_model_config(checkpoint, cfg: Config) -> dict:
+    """Update cfg.model with architecture metadata saved in a checkpoint."""
+    ckpt_cfg = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
+    state_dict = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+
+    if "num_ship_bins" in ckpt_cfg:
+        cfg.model.num_ship_bins = int(ckpt_cfg["num_ship_bins"])
+    elif isinstance(state_dict, dict) and "ship_head.weight" in state_dict:
+        cfg.model.num_ship_bins = int(state_dict["ship_head.weight"].shape[0])
+
+    if "min_ship_bin" in ckpt_cfg:
+        cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
+    if "ship_bin_mode" in ckpt_cfg:
+        cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
+
+    return state_dict
+
+
+def load_model(checkpoint_path: str, cfg: Config) -> EntityTransformer:
+    checkpoint = _load_checkpoint(checkpoint_path)
+    sd = _apply_checkpoint_model_config(checkpoint, cfg)
+    model = EntityTransformer(cfg.model)
     if "model" in sd:
         sd = sd["model"]
     model.load_state_dict(sd)
@@ -306,7 +422,8 @@ def load_model(checkpoint_path: str, cfg: Config) -> EntityTransformer:
     return model
 
 
-def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_threshold: float = 0.5):
+def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_threshold: float = 0.5,
+                 target_decode: bool = False):
     model = load_model(checkpoint_path, cfg)
 
     # Encode state_dict as base64
@@ -322,16 +439,21 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     m = cfg.model
     agent_code = AGENT_TEMPLATE.format(
         num_angle_bins=NUM_ANGLE_BINS,
-        num_ship_bins=NUM_SHIP_BINS,
+        num_ship_bins=m.num_ship_bins,
         angle_bin_width=ANGLE_BIN_WIDTH,
         entity_dim=m.entity_dim,
         num_heads=m.num_heads,
         num_layers=m.num_layers,
         mlp_expansion=m.mlp_expansion,
+        max_owned_planets=m.max_owned_planets,
         planet_feature_dim=m.planet_feature_dim,
         fleet_feature_dim=m.fleet_feature_dim,
         global_feature_dim=m.global_feature_dim,
+        pairwise_feature_dim=m.pairwise_feature_dim,
+        min_ship_bin=m.min_ship_bin,
         fire_threshold=fire_threshold,
+        ship_bin_mode=repr(m.ship_bin_mode),
+        target_decode=target_decode,
         params_b64=params_b64,
         features_code=features_code,
         action_mask_code=action_mask_code,
@@ -343,7 +465,39 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     print(f"Exported agent → {output_path}")
     print(f"  Param bytes (base64): {len(params_b64):,}")
     print(f"  Fire threshold: {fire_threshold}")
+    print(f"  Target decode: {target_decode}")
     print(f"  File size: {os.path.getsize(output_path) / 1024:.1f} KB")
+
+    # --- Sanity eval: 8 games vs a random opponent to catch obvious bugs ---
+    print("\nRunning 8-game sanity eval on exported agent...")
+    _sanity_eval(checkpoint_path, target_decode=target_decode)
+
+
+def _sanity_eval(checkpoint_path: str, games: int = 8, target_decode: bool = False):
+    """Quick sanity check: run a few games vs a random agent and verify wins > 0."""
+    import subprocess, sys
+    src_dir = os.path.dirname(os.path.abspath(__file__))
+    quick_eval = os.path.join(src_dir, "quick_eval.py")
+    cmd = [
+        sys.executable, quick_eval,
+        "--checkpoint", checkpoint_path,
+        "--games", str(games),
+        "--action-decode", "target" if target_decode else "angle",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        print("  [sanity] TIMEOUT after 300s — skipping sanity check")
+        return
+    output = result.stdout + result.stderr
+    # Print just the summary lines
+    for line in output.splitlines():
+        if any(k in line for k in ("win", "Win", "WR", "wr", "Overall", "games", "Games", "ERROR", "Error", "Traceback")):
+            print(f"  [sanity] {line}")
+    if result.returncode != 0:
+        print(f"  [sanity] FAILED (rc={result.returncode}) — do NOT submit without investigating")
+    else:
+        print(f"  [sanity] OK (rc=0)")
 
 
 if __name__ == "__main__":
@@ -352,8 +506,13 @@ if __name__ == "__main__":
     parser.add_argument("--output", default="main_submitted.py")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fire-threshold", type=float, default=0.5)
+    parser.add_argument("--target-decode", action="store_true",
+                        help="Use target-planet aiming (actions_from_target_policy). "
+                             "Required for checkpoints trained with --action-decode target.")
     args = parser.parse_args()
 
     cfg = Config()
     cfg.seed = args.seed
-    export_agent(args.checkpoint, args.output, cfg, fire_threshold=args.fire_threshold)
+    export_agent(args.checkpoint, args.output, cfg,
+                 fire_threshold=args.fire_threshold,
+                 target_decode=args.target_decode)
