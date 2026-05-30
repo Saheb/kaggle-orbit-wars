@@ -39,7 +39,11 @@ sleep 60
 SSH="ssh -i $KEY -o StrictHostKeyChecking=no -o ConnectTimeout=30"
 
 echo "=== Uploading repo ==="
-rsync -az --exclude='.git' --exclude='gpu_run_artifacts/hellburner_spot/checkpoints' \
+rsync -az \
+  --exclude='.git' \
+  --exclude='.venv' \
+  --exclude='archive' \
+  --exclude='gpu_run_artifacts/hellburner_spot/checkpoints' \
   --exclude='gpu_run_artifacts/hellburner_spot/panels' \
   --exclude='gpu_run_artifacts/hellburner_spot/logs' \
   -e "ssh -i $KEY -o StrictHostKeyChecking=no" \

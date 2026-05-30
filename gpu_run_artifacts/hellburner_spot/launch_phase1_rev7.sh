@@ -38,12 +38,19 @@ sleep 60
 SSH="ssh -i $KEY -o StrictHostKeyChecking=no -o ConnectTimeout=30"
 
 echo "=== Uploading repo ==="
-rsync -az --exclude='.git' \
+rsync -az \
+  --exclude='.git' \
+  --exclude='.venv' \
+  --exclude='archive' \
   --exclude='gpu_run_artifacts/hellburner_spot/checkpoints' \
   --exclude='gpu_run_artifacts/hellburner_spot/panels' \
   --exclude='gpu_run_artifacts/hellburner_spot/logs' \
   -e "ssh -i $KEY -o StrictHostKeyChecking=no" \
   "$ROOT/" ubuntu@"$PUB_IP":~/orbit_wars_rl/
+
+echo "=== Authenticating W&B on remote ==="
+WANDB_KEY=$(python3 -c "import netrc; a=netrc.netrc().authenticators('api.wandb.ai'); print(a[2])")
+$SSH ubuntu@"$PUB_IP" "source /opt/pytorch/bin/activate && pip install -q wandb && wandb login --relogin $WANDB_KEY && echo 'W&B login OK'"
 
 echo "=== Uploading seed checkpoint as phase1_resume.pt ==="
 $SSH ubuntu@"$PUB_IP" "mkdir -p ~/orbit_wars_rl/seed_checkpoints"

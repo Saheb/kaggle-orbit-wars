@@ -1,4 +1,33 @@
-# Orbit Wars
+# Orbit Wars — RL Training Project
+
+Self-play RL agent for the [Orbit Wars Kaggle competition](https://www.kaggle.com/competitions/orbit-wars).
+
+## Quick navigation
+
+| Where | What |
+|-------|------|
+| `docs/training.md` | Current training state, full run history, what's been tried |
+| `docs/commands.md` | Copy-paste commands for eval, monitoring, EC2, launch |
+| `docs/aws_runbook.md` | EC2 setup, hyperparameter notes, gotchas |
+| `docs/GCP_RUNBOOK.md` | GCP fallback (for when AWS credits run out) |
+| `CLAUDE.md` | Agent operating rules (hard constraints for Claude Code) |
+| `orbit_wars_rl/` | All active RL code |
+| `opponents/` | Eval opponents (HB, Zach, Suneet) |
+| `seed_checkpoints/` | Resume points for training runs |
+| `gpu_run_artifacts/` | Training scripts, watchers, synced checkpoints (gitignored) |
+
+## Current best
+
+| Checkpoint | HB | Zach | Suneet |
+|---|---|---|---|
+| `torch_step_1015808_20260526_141208` (old arch) | **55.5%** | 74.2% | 80.1% |
+| `torch_step_6094848_20260529_160908` (Phase 1) | 38.7% | 54.3% | 61.7% |
+
+Target: >75% on all three simultaneously.
+
+---
+
+# Game Specification
 
 Conquer planets rotating around a sun in continuous 2D space. A real-time strategy game for 2 or 4 players.
 

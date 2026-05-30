@@ -27,6 +27,12 @@ from pathlib import Path
 import numpy as np
 import torch
 
+# wandb is optional — only imported when --wandb flag is passed
+try:
+    import wandb as _wandb
+except ImportError:
+    _wandb = None
+
 from config import Config
 from model import EntityTransformer, count_params
 from opponent_pool import OpponentPool, PoolMember
@@ -480,6 +486,40 @@ def train(args):
     start = time.perf_counter()
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     print(f"Run timestamp: {run_ts}")
+
+    # --- W&B init -----------------------------------------------------------
+    wb = None
+    if args.wandb:
+        if _wandb is None:
+            print("WARNING: --wandb passed but wandb package not installed. "
+                  "Run: pip install wandb")
+        else:
+            wb = _wandb.init(
+                project=args.wandb_project,
+                name=args.wandb_run_name or run_ts,
+                config={
+                    "total_steps": args.total_steps,
+                    "num_envs": args.num_envs,
+                    "rollout_steps": args.rollout_steps,
+                    "learning_rate": args.learning_rate,
+                    "lr_schedule_steps": args.lr_schedule_steps,
+                    "ppo_epochs": cfg.ppo.ppo_epochs,
+                    "num_minibatches": cfg.ppo.num_minibatches,
+                    "pool_mode": args.pool_mode,
+                    "pool_fraction": args.pool_fraction,
+                    "pool_external_fraction": args.pool_external_fraction,
+                    "srcs_multi_penalty": args.srcs_multi_penalty,
+                    "srcs_multi_threshold": args.srcs_multi_threshold,
+                    "il_lambda": cfg.ppo.il_lambda,
+                    "win_margin_coeff": args.win_margin_coeff,
+                    "action_decode": args.action_decode,
+                    "resume": args.resume or "",
+                    "ship_bin_mode": cfg.model.ship_bin_mode,
+                },
+                resume="allow",
+            )
+            print(f"W&B run: {wb.url}")
+
     reward_history = deque(maxlen=200)     # p0 episode rewards
     reward_history_p1 = deque(maxlen=200)  # p1 episode rewards (should mirror p0)
     clipfrac_history = deque(maxlen=50)
@@ -911,6 +951,45 @@ def train(args):
                    f"il_coef={metrics.get('il_coef', 0):.3f}"
                    if metrics.get('il_coef', 0) > 0 else "")
             )
+            # W&B logging
+            if wb is not None:
+                wb.log({
+                    # Core training
+                    "train/steps": total_env_steps,
+                    "train/sps": sps,
+                    "train/reward_p0": avg_r,
+                    "train/reward_p1": avg_r1,
+                    "train/lr": metrics["learning_rate"],
+                    # PPO health
+                    "ppo/clip_frac": avg_cf,
+                    "ppo/clip_frac_fire": metrics.get("clip_frac_fire", 0),
+                    "ppo/approx_kl": metrics.get("approx_kl", 0),
+                    "ppo/value_loss": metrics.get("value_loss", 0),
+                    "ppo/early_stop": metrics.get("kl_early_stop", 0),
+                    # Policy behaviour — the key kill-signal metrics
+                    "policy/fire_0": slot0,
+                    "policy/fire_rest_max": slot_rest_max,
+                    "policy/srcs_multi": metrics.get("avg_sources_multi", 0),
+                    "policy/ship_bin0_rate": metrics.get("ship_bin0_rate", 0),
+                    "policy/mean_ship_bin": metrics.get("mean_ship_bin", 0),
+                    "policy/avg_fleet": metrics.get("avg_fleet_size", 0),
+                    "policy/p90_fleet": metrics.get("p90_fleet_size", 0),
+                    # Entropy
+                    "entropy/fire": metrics.get("fire_entropy", 0),
+                    "entropy/ship": metrics.get("ship_entropy", 0),
+                    # Value / return stats
+                    "value/mean": metrics.get("old_value_mean", 0),
+                    "value/std": metrics.get("old_value_std", 0),
+                    "value/return_mean": metrics.get("return_mean", 0),
+                    "value/adv_std": metrics.get("adv_std", 0),
+                    # Reward stats
+                    "reward/mean": metrics.get("reward_mean", 0),
+                    "reward/nonzero_frac": metrics.get("reward_nonzero", 0),
+                    # IL (zero when not active)
+                    "il/kl": metrics.get("il_kl", 0),
+                    "il/coef": metrics.get("il_coef", 0),
+                }, step=total_env_steps)
+
             # Collapse warnings — flag early instead of finding via replay at 10M
             if iter_count > 20:  # skip BC-resume noise
                 if slot0 > 0.8 and slot_rest_max < 0.1:
@@ -966,6 +1045,9 @@ def train(args):
                 wp.close()
             except Exception:
                 pass
+
+    if wb is not None:
+        wb.finish()
 
     # Auto-terminate the host (cost control). Set
     # InstanceInitiatedShutdownBehavior=terminate on the EC2 instance and this
@@ -1091,7 +1173,7 @@ if __name__ == "__main__":
                              "and for resuming pool diversity across runs.")
     parser.add_argument("--external-opponents", type=str, default="",
                         help="Comma-separated paths to .py heuristic agents (e.g. "
-                             "'../candidate_suneet_lb1200.py,../candidate_zach_public.py'). "
+                             "'opponents/candidate_suneet_lb1200.py,opponents/candidate_zach_public.py'). "
                              "Only used when --pool-mode=mixed.")
     parser.add_argument("--lr-schedule-steps", type=int, default=0,
                         help="Decouple the LR cosine decay horizon from --total-steps. "
@@ -1107,6 +1189,12 @@ if __name__ == "__main__":
                         help="Run 'sudo shutdown -h +1' after training. Combined "
                              "with EC2 InstanceInitiatedShutdownBehavior=terminate "
                              "this stops the instance to end billing.")
+    parser.add_argument("--wandb", action="store_true",
+                        help="Enable Weights & Biases logging.")
+    parser.add_argument("--wandb-project", type=str, default="orbit-wars",
+                        help="W&B project name (default: orbit-wars).")
+    parser.add_argument("--wandb-run-name", type=str, default="",
+                        help="W&B run name. Defaults to run timestamp if not set.")
     args = parser.parse_args()
 
     if not args.device:

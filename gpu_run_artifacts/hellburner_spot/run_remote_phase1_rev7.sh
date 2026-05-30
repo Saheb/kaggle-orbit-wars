@@ -30,7 +30,7 @@ set -euo pipefail
 
 cd "$HOME/orbit_wars_rl"
 source /opt/pytorch/bin/activate
-pip install -q kaggle-environments
+pip install -q kaggle-environments wandb
 
 TS="$(date '+%Y%m%d_%H%M%S')"
 LOG="train_gpu_phase1_rev7_${TS}.log"
@@ -47,7 +47,7 @@ PYTHONUNBUFFERED=1 python orbit_wars_rl/train_torch.py \
   --checkpoint-interval 1000000 \
   --pool-checkpoint-interval 500000 --pool-max-size 20 \
   --pool-mode mixed --pool-fraction 0.75 \
-  --external-opponents candidate_hellburner.py \
+  --external-opponents opponents/candidate_hellburner.py \
   --pool-external-fraction 0.05 \
   --win-margin-coeff 0.5 \
   --action-decode target \

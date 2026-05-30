@@ -2,8 +2,8 @@
 # Watcher for Phase 1 run. Update INSTANCE_ID and PUB_IP after launch.
 set +euo pipefail
 
-INSTANCE_ID="i-0f4d05a946f78ff26"
-PUB_IP="3.231.205.95"
+INSTANCE_ID="i-0a5129fba17cf3de6"
+PUB_IP="3.236.231.55"
 KEY="$HOME/.ssh/samosa-key.pem"
 ROOT="/Users/saheb/.codex/worktrees/296f/kaggle-orbit-wars"
 ART="$ROOT/gpu_run_artifacts/hellburner_spot"
@@ -52,7 +52,7 @@ while true; do
     "$ART/logs/"
   log_rc=$?
 
-  log="$(ls -t "$ART/logs/train_gpu_phase1_"*.log 2>/dev/null | head -1)"
+  log="$(ls -t "$ART/logs/train_gpu_phase1_rev7_"*.log "$ART/logs/train_gpu_phase1_"*.log 2>/dev/null | head -1)"
   last="$(grep -E '^iter|saved checkpoint|Training complete' "$log" 2>/dev/null | tail -1)"
   n_ckpt="$(find "$ART/checkpoints" -maxdepth 1 -type f -name '*.pt' 2>/dev/null | wc -l | xargs)"
   echo "[$ts] state=$INSTANCE_STATE ckpt_rc=$ckpt_rc log_rc=$log_rc ckpts=$n_ckpt last: $last"

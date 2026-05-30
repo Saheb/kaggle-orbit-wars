@@ -1,17 +1,35 @@
-__pycache__
-leader-replays/*
-orbit-wars-data/orbit-wars.zip
-kernels/
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# Model checkpoints (large binary files)
 *.pt
-replays/
-replays*
+*.pkl
 *.zip
 *.csv
-*.pkl
-gpu_run_artifacts/checkpoints/
-gpu_run_artifacts/*
-data/*
-external/*
-# archive compiled output
-archive/**/__pycache__/
-gpu_pool_artifacts/
+
+# Training artifacts (gitignored — use rsync watcher to sync locally)
+gpu_run_artifacts/
+
+# Archive data (large datasets)
+archive/data/
+
+# Kaggle / competition data
+leader-replays/
+orbit-wars-data/
+
+# Logs (gpu_run_artifacts logs are covered above; docs/logs/ is tracked intentionally)
+gpu_run_artifacts/**/*.log
+
+# W&B local cache
+wandb/
+
+# Misc
+replays/
+replays*/
+kernels/

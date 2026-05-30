@@ -22,16 +22,21 @@ orbit_wars_rl/          ← ALL active RL code lives here
   bc.py / bc_frac.py    ← behaviour cloning (used to create warmstart)
   tests/                ← unit tests
 
-candidate_hellburner.py    ← PRIMARY eval opponent (HB)
-candidate_zach_public.py   ← PRIMARY eval opponent (Zach)
-candidate_suneet_lb1200.py ← PRIMARY eval opponent (Suneet)
+opponents/                 ← eval + training opponents
+  candidate_hellburner.py    ← PRIMARY (HB)
+  candidate_zach_public.py   ← PRIMARY (Zach)
+  candidate_suneet_lb1200.py ← PRIMARY (Suneet)
 
 seed_checkpoints/          ← resume points uploaded to training instances
   phase1_resume.pt         ← current Phase 1 resume checkpoint
   bc_phase1_warmstart.pt   ← BC warmstart (IL reference)
 
 setup/                     ← install orbit_wars kaggle env (run once per instance)
-docs/                      ← logs, runbooks, checklists
+docs/                      ← runbooks and logs
+  commands.md              ← ⭐ copy-paste command reference (start here)
+  training.md              ← current training state, full run history, key config
+  aws_runbook.md           ← EC2 launch, hyperparameter notes, gotchas
+  GCP_RUNBOOK.md           ← GCP fallback (for when AWS credits run out)
 gpu_run_artifacts/         ← training scripts, watchers, synced checkpoints (gitignored)
 archive/                   ← dead code, old logs, old eval scripts (ignore unless archaeology)
 ```
@@ -40,31 +45,20 @@ archive/                   ← dead code, old logs, old eval scripts (ignore unl
 
 ## EC2 / GPU Instances
 
-**NEVER launch an EC2 instance directly with `aws ec2 run-instances` raw.**
-Always use `gpu_run_artifacts/launch_gpu.sh` which bakes in cost-safety defaults.
+**Full procedures:** see [`docs/aws_runbook.md`](docs/aws_runbook.md) and [`docs/GCP_RUNBOOK.md`](docs/GCP_RUNBOOK.md).
 
-**Why:** Raw `run-instances` defaults `--instance-initiated-shutdown-behavior stop`.
-When training finishes and calls `sudo shutdown -h`, the instance *stops* (billing continues for EBS).
-`launch_gpu.sh` sets `--instance-initiated-shutdown-behavior terminate` so the instance is destroyed on shutdown.
+**Hard rules (non-negotiable):**
 
-**Termination rule:** When a training run finishes:
-1. SSH into the instance first and confirm all checkpoints are present on disk.
-2. Run a final manual rsync before terminating: `rsync -az ubuntu@<ip>:~/orbit_wars_rl/checkpoints/ gpu_run_artifacts/hellburner_spot/checkpoints/`
-3. Also pull the full training log: `rsync -az ubuntu@<ip>:~/orbit_wars_rl/train_gpu_*.log gpu_run_artifacts/hellburner_spot/logs/`
-4. Only then terminate: `aws ec2 terminate-instances --instance-ids <id>`
-5. Never leave an instance in *stopped* state — stopped still bills for EBS storage.
-
-**If instance is already stopped (not terminated):** It still has all data on EBS. SSH in, pull everything, then terminate. Do NOT terminate without pulling first.
-
-**On-demand vs spot:** Always launch **on-demand** (no `--spot` flag). Spot instances can be reclaimed by AWS at any time mid-training, losing all unsaved checkpoints. The watcher syncs every 3 min so at most 3 min of work is lost on-demand if the instance fails; a spot interruption can happen at any point with 2 min notice and no guarantee checkpoints have been synced. On-demand cost for a full training run (~12h on g5.2xlarge) is ~$15 — acceptable. Never pass `--spot` to `launch_gpu.sh` or `launch_phase1.sh`.
-
-**Verify status before starting new runs:**
-```bash
-aws ec2 describe-instances \
-  --filters "Name=tag:Project,Values=orbit-wars" "Name=instance-state-name,Values=running,stopped" \
-  --query 'Reservations[].Instances[].[InstanceId,State.Name,InstanceType,PublicIpAddress]' \
-  --output table
-```
+- **NEVER** launch with raw `aws ec2 run-instances`. Always use `gpu_run_artifacts/launch_gpu.sh` — it sets `--instance-initiated-shutdown-behavior terminate` so instances self-destruct when training ends.
+- **Always on-demand** — never pass `--spot`. Spot interruptions lose unsaved checkpoints mid-run.
+- **Before terminating:** SSH in, confirm checkpoints, rsync everything, then terminate. Never leave an instance stopped (EBS still bills).
+- **Verify no instance running** before starting a new one:
+  ```bash
+  aws ec2 describe-instances \
+    --filters "Name=tag:Project,Values=orbit-wars" "Name=instance-state-name,Values=running,stopped" \
+    --query 'Reservations[].Instances[].[InstanceId,State.Name,InstanceType,PublicIpAddress]' \
+    --output table
+  ```
 
 ---
 
@@ -82,7 +76,6 @@ aws ec2 describe-instances \
 | `--terminate-on-done` | Shuts down instance OS when training ends (triggers terminate if launched correctly) |
 | `--pool-external-fraction` | Fraction of pool samples guaranteed to go to external opponents (bypasses PFSP) |
 | `--pool-pfsp-min-games` | Use wr=0.5 for PFSP weight until N games played (prevents death-spiral) |
-| `--instance-initiated-shutdown-behavior terminate` | Set at launch time via `launch_gpu.sh` |
 
 ---
 
@@ -99,9 +92,9 @@ python orbit_wars_rl/eval.py \
 256 games (128 seeds × 2 seats). Takes ~40 min per opponent on local CPU.
 
 Opponent paths are relative to repo root (not `orbit_wars_rl/`):
-- `candidate_hellburner.py`
-- `candidate_zach_public.py`
-- `candidate_suneet_lb1200.py`
+- `opponents/candidate_hellburner.py`
+- `opponents/candidate_zach_public.py`
+- `opponents/candidate_suneet_lb1200.py`
 
 ---
 
