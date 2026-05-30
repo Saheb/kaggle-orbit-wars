@@ -12,3 +12,6 @@ gpu_run_artifacts/checkpoints/
 gpu_run_artifacts/*
 data/*
 external/*
+# archive compiled output
+archive/**/__pycache__/
+gpu_pool_artifacts/

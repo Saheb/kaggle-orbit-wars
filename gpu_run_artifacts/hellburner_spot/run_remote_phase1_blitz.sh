@@ -28,8 +28,8 @@ LOG="train_gpu_phase1_blitz_${TS}.log"
 
 echo "Run: phase1 blitz  timestamp: $TS  log: $LOG"
 
-PYTHONUNBUFFERED=1 python train_torch.py \
-  --resume ../seed_checkpoints/phase1_resume.pt \
+PYTHONUNBUFFERED=1 python orbit_wars_rl/train_torch.py \
+  --resume seed_checkpoints/phase1_resume.pt \
   --total-steps 2000000 \
   --lr-schedule-steps 4000000 \
   --learning-rate 0.00003 \
@@ -38,7 +38,7 @@ PYTHONUNBUFFERED=1 python train_torch.py \
   --checkpoint-interval 500000 \
   --pool-checkpoint-interval 500000 --pool-max-size 20 \
   --pool-mode mixed --pool-fraction 0.9 \
-  --external-opponents ../candidate_hellburner.py \
+  --external-opponents candidate_hellburner.py \
   --pool-external-fraction 1.0 \
   --win-margin-coeff 0.5 \
   --action-decode target \

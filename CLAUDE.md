@@ -4,6 +4,40 @@ Rules every Claude Code agent must follow in this project. These are not suggest
 
 ---
 
+## Repo Map
+
+```
+orbit_wars_rl/          ← ALL active RL code lives here
+  train_torch.py        ← PRIMARY: GPU self-play training (always use this)
+  eval.py               ← PRIMARY: full 256-game panel eval
+  quick_eval.py         ← sanity check only (never use for decisions)
+  export_agent.py       ← export checkpoint → submission agent
+  model.py              ← entity transformer model
+  torch_env.py          ← vectorised GPU environment (ship bins, action decode)
+  features.py           ← feature extraction (Phase 1 feature bundle)
+  ppo.py                ← PPO learner + IL regularisation
+  opponent_pool.py      ← self-play pool + PFSP
+  config.py             ← ModelConfig / PPOConfig
+  action_mask.py        ← action masking for eval
+  bc.py / bc_frac.py    ← behaviour cloning (used to create warmstart)
+  tests/                ← unit tests
+
+candidate_hellburner.py    ← PRIMARY eval opponent (HB)
+candidate_zach_public.py   ← PRIMARY eval opponent (Zach)
+candidate_suneet_lb1200.py ← PRIMARY eval opponent (Suneet)
+
+seed_checkpoints/          ← resume points uploaded to training instances
+  phase1_resume.pt         ← current Phase 1 resume checkpoint
+  bc_phase1_warmstart.pt   ← BC warmstart (IL reference)
+
+setup/                     ← install orbit_wars kaggle env (run once per instance)
+docs/                      ← logs, runbooks, checklists
+gpu_run_artifacts/         ← training scripts, watchers, synced checkpoints (gitignored)
+archive/                   ← dead code, old logs, old eval scripts (ignore unless archaeology)
+```
+
+---
+
 ## EC2 / GPU Instances
 
 **NEVER launch an EC2 instance directly with `aws ec2 run-instances` raw.**

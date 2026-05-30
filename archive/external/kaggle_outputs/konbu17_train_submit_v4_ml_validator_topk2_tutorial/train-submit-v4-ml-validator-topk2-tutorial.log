@@ -1,0 +1,148 @@
+[{"stream_name":"stderr","time":8.468782472000001,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":8.468878571,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":8.468886985,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":8.468891609,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stderr","time":9.279980007,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":9.280021093,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":9.280027408,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":9.280032494,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stdout","time":10.62148435,"data":"v4 base loaded: /kaggle/working/obn_v4_exp004ish.py (113,252 bytes)\n"}
+,{"stream_name":"stdout","time":10.82172503,"data":"Installing /kaggle/input/datasets/konbu17/orbit-wars-v4-base/kaggle_environments-1.28.1-py3-none-any.whl\n"}
+,{"stream_name":"stderr","time":53.366119585,"data":"\u001b[92m05:43:20 - LiteLLM:WARNING\u001b[0m: get_model_cost_map.py:271 - LiteLLM: Failed to fetch remote model cost map from https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: [Errno -3] Temporary failure in name resolution. Falling back to local backup.\n"}
+,{"stream_name":"stderr","time":53.366172336,"data":"\n"}
+,{"stream_name":"stderr","time":53.366180939,"data":"\u001b[92m05:43:20 - LiteLLM:WARNING\u001b[0m: get_model_cost_map.py:271 - LiteLLM: Failed to fetch remote model cost map from https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: [Errno -3] Temporary failure in name resolution. Falling back to local backup.\n"}
+,{"stream_name":"stdout","time":60.946424246,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: Successfully loaded OpenSpiel environments: 16.\n"}
+,{"stream_name":"stdout","time":60.947502093,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_backgammon\n"}
+,{"stream_name":"stdout","time":60.948801734,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_checkers\n"}
+,{"stream_name":"stdout","time":60.950057647,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_chess\n"}
+,{"stream_name":"stdout","time":60.951223506,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_connect_four\n"}
+,{"stream_name":"stdout","time":60.952598539,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_gin_rummy\n"}
+,{"stream_name":"stdout","time":60.953687566,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_go\n"}
+,{"stream_name":"stdout","time":60.954707751,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_goofspiel\n"}
+,{"stream_name":"stdout","time":60.955603852,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hearts\n"}
+,{"stream_name":"stdout","time":60.956580582,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_hex\n"}
+,{"stream_name":"stdout","time":60.957512532,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_matching_pennies_3p\n"}
+,{"stream_name":"stdout","time":60.958371902,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_othello\n"}
+,{"stream_name":"stdout","time":60.959209526,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_game\n"}
+,{"stream_name":"stdout","time":60.96013218,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_tic_tac_toe\n"}
+,{"stream_name":"stdout","time":60.961079505,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_universal_poker\n"}
+,{"stream_name":"stdout","time":60.962311995,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_repeated_poker\n"}
+,{"stream_name":"stdout","time":60.963382013,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    open_spiel_python_repeated_pokerkit\n"}
+,{"stream_name":"stdout","time":60.964610929,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO: OpenSpiel games skipped: 1.\n"}
+,{"stream_name":"stdout","time":60.965748877,"data":"[kaggle_environments.envs.open_spiel_env.open_spiel_env] INFO:    snake\n"}
+,{"stream_name":"stdout","time":61.857095278,"data":"kaggle_environments 1.28.1; orbit_wars available: True\n"}
+,{"stream_name":"stdout","time":64.403825611,"data":"torch 2.10.0+cpu, cuda available: False\n"}
+,{"stream_name":"stdout","time":64.44147549,"data":"  wrote /kaggle/working/opponents/nearest_sniper.py\n"}
+,{"stream_name":"stdout","time":64.441510494,"data":"  wrote /kaggle/working/opponents/weakest_first.py\n"}
+,{"stream_name":"stdout","time":64.441516843,"data":"  wrote /kaggle/working/opponents/production_first.py\n"}
+,{"stream_name":"stdout","time":64.44152125,"data":"  wrote /kaggle/working/opponents/defender.py\n"}
+,{"stream_name":"stdout","time":64.441525665,"data":"  added v4 self-play: /kaggle/working/obn_v4_exp004ish.py\n"}
+,{"stream_name":"stdout","time":64.501492259,"data":"Jobs: 140 games (teacher=v4, 5 opps, 10 seeds × 2 sides)\n"}
+,{"stream_name":"stdout","time":131.669321104,"data":"  5/140 games, rows=379, t=67s\n"}
+,{"stream_name":"stdout","time":181.121011612,"data":"  10/140 games, rows=799, t=117s\n"}
+,{"stream_name":"stdout","time":462.43859051,"data":"  15/140 games, rows=1160, t=398s\n"}
+,{"stream_name":"stdout","time":517.112585711,"data":"  20/140 games, rows=1560, t=453s\n"}
+,{"stream_name":"stdout","time":577.214459946,"data":"  25/140 games, rows=2000, t=513s\n"}
+,{"stream_name":"stdout","time":630.335322773,"data":"  30/140 games, rows=2333, t=566s\n"}
+,{"stream_name":"stdout","time":669.870847437,"data":"  35/140 games, rows=2812, t=605s\n"}
+,{"stream_name":"stdout","time":722.154343281,"data":"  40/140 games, rows=3289, t=658s\n"}
+,{"stream_name":"stdout","time":794.679614972,"data":"  45/140 games, rows=3684, t=730s\n"}
+,{"stream_name":"stdout","time":867.915729218,"data":"  50/140 games, rows=4128, t=803s\n"}
+,{"stream_name":"stdout","time":976.829596826,"data":"  55/140 games, rows=4557, t=912s\n"}
+,{"stream_name":"stdout","time":1077.084398044,"data":"  60/140 games, rows=4981, t=1013s\n"}
+,{"stream_name":"stdout","time":1169.665147659,"data":"  65/140 games, rows=5421, t=1105s\n"}
+,{"stream_name":"stdout","time":1309.665755198,"data":"  70/140 games, rows=5996, t=1245s\n"}
+,{"stream_name":"stdout","time":1618.143968912,"data":"  75/140 games, rows=6409, t=1554s\n"}
+,{"stream_name":"stdout","time":1789.047119913,"data":"  80/140 games, rows=6841, t=1724s\n"}
+,{"stream_name":"stdout","time":2171.965443644,"data":"  85/140 games, rows=7748, t=2107s\n"}
+,{"stream_name":"stdout","time":2456.387477435,"data":"  90/140 games, rows=8543, t=2392s\n"}
+,{"stream_name":"stdout","time":2789.619605843,"data":"  95/140 games, rows=9465, t=2725s\n"}
+,{"stream_name":"stdout","time":3023.964064213,"data":"  100/140 games, rows=10553, t=2959s\n"}
+,{"stream_name":"stdout","time":3602.505440513,"data":"  105/140 games, rows=11353, t=3538s\n"}
+,{"stream_name":"stdout","time":3915.054035131,"data":"  110/140 games, rows=12225, t=3851s\n"}
+,{"stream_name":"stdout","time":4095.453957987,"data":"  115/140 games, rows=13201, t=4031s\n"}
+,{"stream_name":"stdout","time":4754.230610769,"data":"  120/140 games, rows=14141, t=4690s\n"}
+,{"stream_name":"stdout","time":5204.897132957,"data":"  125/140 games, rows=15106, t=5140s\n"}
+,{"stream_name":"stdout","time":5666.6348663,"data":"  130/140 games, rows=16074, t=5602s\n"}
+,{"stream_name":"stdout","time":5889.846573121,"data":"  135/140 games, rows=16874, t=5825s\n"}
+,{"stream_name":"stdout","time":6186.951699142,"data":"  140/140 games, rows=18157, t=6122s\n"}
+,{"stream_name":"stdout","time":6187.125406071,"data":"\n"}
+,{"stream_name":"stdout","time":6187.125458061,"data":"Done: 18157 shots collected (0 games failed)\n"}
+,{"stream_name":"stdout","time":6187.125467736,"data":"  features: (18157, 24), labels: (18157,)\n"}
+,{"stream_name":"stdout","time":6187.125473889,"data":"  positive rate: 73.3%\n"}
+,{"stream_name":"stdout","time":6187.125479818,"data":"  saved /kaggle/working/shot_dataset.npz\n"}
+,{"stream_name":"stdout","time":6187.187477439,"data":"Training on: cpu (cuda not available)\n"}
+,{"stream_name":"stdout","time":6187.187516372,"data":"  train: 14703 shots (112 games), val: 3454 shots (28 games)\n"}
+,{"stream_name":"stdout","time":6187.187521962,"data":"  train pos: 73.7%, val pos: 71.3%\n"}
+,{"stream_name":"stdout","time":6187.199393354,"data":"  pos_weight (neg/pos): 0.356\n"}
+,{"stream_name":"stdout","time":6187.414530209,"data":"\n"}
+,{"stream_name":"stdout","time":6187.414560543,"data":"--- Training model 1/3 (seed=42) ---\n"}
+,{"stream_name":"stderr","time":6194.003958824,"data":"/tmp/ipykernel_16/2540084797.py:31: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.\n"}
+,{"stream_name":"stderr","time":6194.004008889,"data":"Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)\n"}
+,{"stream_name":"stderr","time":6194.004017046,"data":"  losses.append(float(loss))\n"}
+,{"stream_name":"stderr","time":6194.004023258,"data":"\n"}
+,{"stream_name":"stderr","time":6194.004029083,"data":"/tmp/ipykernel_16/2540084797.py:31: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.\n"}
+,{"stream_name":"stderr","time":6194.004035754,"data":"Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)\n"}
+,{"stream_name":"stderr","time":6194.00404238,"data":"  losses.append(float(loss))\n"}
+,{"stream_name":"stdout","time":6194.482735317,"data":"  epoch  10 | t_loss=0.2818 v_acc(0.3)=0.771 best=0.779\n"}
+,{"stream_name":"stdout","time":6194.955180867,"data":"  epoch  20 | t_loss=0.2712 v_acc(0.3)=0.787 best=0.791\n"}
+,{"stream_name":"stdout","time":6195.432637418,"data":"  epoch  30 | t_loss=0.2646 v_acc(0.3)=0.787 best=0.792\n"}
+,{"stream_name":"stdout","time":6195.906828151,"data":"  epoch  40 | t_loss=0.2586 v_acc(0.3)=0.782 best=0.794\n"}
+,{"stream_name":"stdout","time":6195.906866232,"data":"\n"}
+,{"stream_name":"stdout","time":6195.906871938,"data":"--- Training model 2/3 (seed=100) ---\n"}
+,{"stream_name":"stdout","time":6196.376902138,"data":"  epoch  10 | t_loss=0.2828 v_acc(0.3)=0.781 best=0.785\n"}
+,{"stream_name":"stdout","time":6196.844886119,"data":"  epoch  20 | t_loss=0.2691 v_acc(0.3)=0.793 best=0.793\n"}
+,{"stream_name":"stdout","time":6197.30172236,"data":"  epoch  30 | t_loss=0.2620 v_acc(0.3)=0.788 best=0.797\n"}
+,{"stream_name":"stdout","time":6197.765143644,"data":"  epoch  40 | t_loss=0.2556 v_acc(0.3)=0.790 best=0.797\n"}
+,{"stream_name":"stdout","time":6197.765182126,"data":"\n"}
+,{"stream_name":"stdout","time":6197.765187835,"data":"--- Training model 3/3 (seed=7) ---\n"}
+,{"stream_name":"stdout","time":6198.241010592,"data":"  epoch  10 | t_loss=0.2807 v_acc(0.3)=0.778 best=0.783\n"}
+,{"stream_name":"stdout","time":6198.71370212,"data":"  epoch  20 | t_loss=0.2708 v_acc(0.3)=0.786 best=0.795\n"}
+,{"stream_name":"stdout","time":6199.181873088,"data":"  epoch  30 | t_loss=0.2626 v_acc(0.3)=0.793 best=0.801\n"}
+,{"stream_name":"stdout","time":6199.454723813,"data":"  epoch  40 | t_loss=0.2573 v_acc(0.3)=0.790 best=0.801\n"}
+,{"stream_name":"stdout","time":6199.454762243,"data":"\n"}
+,{"stream_name":"stdout","time":6199.454767917,"data":"Training complete. Ensemble of 3 models.\n"}
+,{"stream_name":"stdout","time":6199.513203443,"data":"  n_models: (1,), int32\n"}
+,{"stream_name":"stdout","time":6199.513241562,"data":"  m0_0_w: (64, 24), float32\n"}
+,{"stream_name":"stdout","time":6199.513285099,"data":"  m0_0_b: (64,), float32\n"}
+,{"stream_name":"stdout","time":6199.513291198,"data":"  m0_2_w: (32, 64), float32\n"}
+,{"stream_name":"stdout","time":6199.51329672,"data":"  m0_2_b: (32,), float32\n"}
+,{"stream_name":"stdout","time":6199.513303013,"data":"  m0_4_w: (1, 32), float32\n"}
+,{"stream_name":"stdout","time":6199.513308743,"data":"  m0_4_b: (1,), float32\n"}
+,{"stream_name":"stdout","time":6199.513314309,"data":"  m1_0_w: (64, 24), float32\n"}
+,{"stream_name":"stdout","time":6199.513319556,"data":"  m1_0_b: (64,), float32\n"}
+,{"stream_name":"stdout","time":6199.513325141,"data":"  m1_2_w: (32, 64), float32\n"}
+,{"stream_name":"stdout","time":6199.513330868,"data":"  m1_2_b: (32,), float32\n"}
+,{"stream_name":"stdout","time":6199.513336723,"data":"  m1_4_w: (1, 32), float32\n"}
+,{"stream_name":"stdout","time":6199.513342268,"data":"  m1_4_b: (1,), float32\n"}
+,{"stream_name":"stdout","time":6199.513347956,"data":"  m2_0_w: (64, 24), float32\n"}
+,{"stream_name":"stdout","time":6199.513353553,"data":"  m2_0_b: (64,), float32\n"}
+,{"stream_name":"stdout","time":6199.513359079,"data":"  m2_2_w: (32, 64), float32\n"}
+,{"stream_name":"stdout","time":6199.51336464,"data":"  m2_2_b: (32,), float32\n"}
+,{"stream_name":"stdout","time":6199.513369832,"data":"  m2_4_w: (1, 32), float32\n"}
+,{"stream_name":"stdout","time":6199.513375216,"data":"  m2_4_b: (1,), float32\n"}
+,{"stream_name":"stdout","time":6199.513380963,"data":"\n"}
+,{"stream_name":"stdout","time":6199.513386663,"data":"Saved /kaggle/working/weights.npz (49,222 bytes)\n"}
+,{"stream_name":"stdout","time":6199.513412136,"data":"\n"}
+,{"stream_name":"stdout","time":6199.51341779,"data":"Parity check (PyTorch ensemble vs numpy ensemble):\n"}
+,{"stream_name":"stdout","time":6199.513423612,"data":"  torch_avg: [0.5920533  0.3702542  0.37911296 0.3285122  0.43440077]\n"}
+,{"stream_name":"stdout","time":6199.513435684,"data":"  numpy_avg: [0.5920533  0.3702542  0.37911296 0.32851222 0.43440077]\n"}
+,{"stream_name":"stdout","time":6199.513441755,"data":"  max diff: 2.980232e-08\n"}
+,{"stream_name":"stdout","time":6199.564681679,"data":"v4 source: 3,378 lines, 113,252 chars\n"}
+,{"stream_name":"stdout","time":6199.564721121,"data":"main.py: 118,614 bytes (3,514 lines)\n"}
+,{"stream_name":"stdout","time":6209.87704417,"data":"Game finished in 104 steps:\n"}
+,{"stream_name":"stdout","time":6209.877090644,"data":"  P0: reward=1, status=DONE\n"}
+,{"stream_name":"stdout","time":6209.877119407,"data":"  P1: reward=-1, status=DONE\n"}
+,{"stream_name":"stdout","time":6209.956394123,"data":"\n"}
+,{"stream_name":"stdout","time":6209.956446056,"data":"✅ Submission ready: /kaggle/working/submission.tar.gz (65,758 bytes = 64.2 KB)\n"}
+,{"stream_name":"stdout","time":6209.956454174,"data":"  main.py: 118,614 bytes\n"}
+,{"stream_name":"stdout","time":6209.956459424,"data":"  weights.npz: 49,222 bytes\n"}
+,{"stream_name":"stderr","time":6216.142053898,"data":"/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":6216.142205462,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":6216.357126836,"data":"/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":6216.357162384,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":6217.193892732,"data":"[NbConvertApp] Converting notebook __notebook__.ipynb to notebook\n"}
+,{"stream_name":"stderr","time":6217.623197299,"data":"[NbConvertApp] Writing 68734 bytes to __notebook__.ipynb\n"}
+,{"stream_name":"stderr","time":6221.045032619,"data":"[NbConvertApp] Converting notebook __notebook__.ipynb to html\n"}
+,{"stream_name":"stderr","time":6222.333244245,"data":"[NbConvertApp] Writing 430176 bytes to __results__.html\n"}
+]
