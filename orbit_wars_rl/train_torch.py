@@ -485,6 +485,9 @@ def train(args):
     iter_count = 0
     start = time.perf_counter()
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Embed run name in checkpoint filenames so rev11_2M is unambiguous
+    if args.run_name:
+        run_ts = f"{args.run_name}_{run_ts}"
     print(f"Run timestamp: {run_ts}")
 
     # --- W&B init -----------------------------------------------------------
@@ -1193,6 +1196,10 @@ if __name__ == "__main__":
                         help="Enable Weights & Biases logging.")
     parser.add_argument("--wandb-project", type=str, default="orbit-wars",
                         help="W&B project name (default: orbit-wars).")
+    parser.add_argument("--run-name", type=str, default="",
+                        help="Short revision label embedded in checkpoint filenames. "
+                             "e.g. 'rev12' → torch_step_1015808_rev12_20260601_120000.pt. "
+                             "Makes it impossible to confuse checkpoints from different runs.")
     parser.add_argument("--wandb-run-name", type=str, default="",
                         help="W&B run name. Defaults to run timestamp if not set.")
     args = parser.parse_args()
