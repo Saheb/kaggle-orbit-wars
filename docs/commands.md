@@ -211,14 +211,153 @@ Common causes:
 
 ---
 
-## 9. Export a checkpoint as a submission agent
+## 9. Download our LB episode replays for analysis
+
+### Step 1 — list our submission's episodes
+```python
+# Run from repo root with venv activated
+import requests, json
+
+with open('/Users/saheb/.kaggle/access_token') as f:
+    token = f.read().strip()
+with open('/Users/saheb/.kaggle/kaggle.json') as f:
+    creds = json.load(f)
+
+# Our best submission ID (check: kaggle competitions submissions --competition orbit-wars --csv)
+SUB_ID = 53076736
+
+url = "https://www.kaggle.com/api/i/competitions.EpisodeService/ListEpisodes"
+resp = requests.post(url,
+    auth=(creds['username'], creds['key']),
+    json={"submissionId": SUB_ID},
+    headers={"Content-Type": "application/json", "Accept": "application/json"})
+
+data = resp.json()
+print(f"Found {len(data['episodes'])} episodes")
+json.dump(data, open('/tmp/our_episodes.json', 'w'))
+```
+
+### Step 2 — analyse win/loss patterns
+```python
+import json, collections
+
+with open('/tmp/our_episodes.json') as f:
+    episodes = json.load(f)['episodes']
+OUR_SUB = 53076736
+
+wins, loss_data = 0, []
+for ep in episodes:
+    our = next((a for a in ep['agents'] if a['submissionId'] == OUR_SUB), None)
+    if not our: continue
+    if our['reward'] > 0:
+        wins += 1
+    else:
+        for a in ep['agents']:
+            if a['submissionId'] != OUR_SUB and a['reward'] > 0:
+                loss_data.append((a['initialScore'], ep['id'], our['initialScore']))
+
+print(f"W={wins} L={len(loss_data)} WR={wins/(wins+len(loss_data))*100:.0f}%")
+# Losses to weaker opponents (most actionable):
+weak = [(s,ep,our) for s,ep,our in loss_data if s < our]
+print(f"Losses to weaker opponents: {len(weak)}/{len(loss_data)}")
+```
+
+### Step 3 — download specific replay JSONs
+```python
+import requests, os, time
+
+with open('/Users/saheb/.kaggle/access_token') as f:
+    token = f.read().strip()
+# ⚠️ MUST use Bearer token — basic auth returns 401 for replay endpoint
+
+os.makedirs('/tmp/our_losses', exist_ok=True)
+ep_ids = [78025831, 78083575, ...]  # from step 2
+
+for ep_id in ep_ids:
+    r = requests.get(
+        f"https://www.kaggle.com/api/v1/competitions/episodes/{ep_id}/replay",
+        headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    if r.status_code == 200:
+        open(f"/tmp/our_losses/{ep_id}.json", "wb").write(r.content)
+    time.sleep(0.3)  # avoid 429
+```
+
+> **Auth note:** The `~/.kaggle/access_token` file is a Bearer token (separate from `kaggle.json` which has API key for basic auth). Both are needed for different endpoints.
+>
+> | Endpoint | Auth method |
+> |----------|-------------|
+> | `EpisodeService/ListEpisodes` | Basic auth (username + API key) |
+> | `v1/competitions/episodes/{id}/replay` | Bearer token (`access_token`) |
+
+### Step 4 — analyse behaviour in replays
+```python
+import json, glob, statistics
+
+def analyze_replay(path):
+    ep = json.load(open(path))
+    rewards = ep['rewards']
+    winner_slot = rewards.index(max(rewards))
+    results = {}
+    for slot, name in enumerate(a['Name'] for a in ep['info']['Agents']):
+        fire_steps = total = multi = 0; ships = []
+        for step in ep['steps'][1:]:
+            if slot >= len(step): continue
+            acts = step[slot].get('action', [])
+            total += 1
+            if acts:
+                fire_steps += 1
+                ships.extend(a[2] for a in acts if len(a) >= 3)
+                if len(acts) > 1: multi += 1
+        results[slot] = dict(name=name, won=(slot==winner_slot),
+            fire_rate=fire_steps/max(total,1),
+            avg_ship=statistics.mean(ships) if ships else 0,
+            multi_rate=multi/max(fire_steps,1), n_steps=len(ep['steps']))
+    return results
+```
+
+---
+
+## 10. Export a checkpoint as a submission agent
+
+**⚠️ Phase 1 checkpoints require `--target-decode`. Forgetting it produces an agent that scores ~87 on LB (loses everything).**
 
 ```bash
-source /Users/saheb/home/.venv/bin/activate
-python orbit_wars_rl/export_agent.py \
+source orbit_wars_rl/.venv/bin/activate
+
+# Phase 1 checkpoints (32-bin absolute, action_decode=target) — ALWAYS use --target-decode
+python3 orbit_wars_rl/export_agent.py \
   --checkpoint gpu_run_artifacts/hellburner_spot/checkpoints/<name>.pt \
+  --output submission_agent.py \
+  --target-decode
+
+# Old architecture checkpoints (10-bin fraction) — no --target-decode
+python3 orbit_wars_rl/export_agent.py \
+  --checkpoint <old_arch_checkpoint>.pt \
   --output submission_agent.py
 ```
+
+**Verify before submitting:**
+```bash
+source orbit_wars_rl/.venv/bin/activate
+python3 -c "
+import kaggle_environments as ke, re
+code = open('submission_agent.py').read()
+print('target_decode:', re.search(r'_TARGET_DECODE = (\w+)', code).group(1))
+print('signature:', re.search(r'def agent\([^)]+\)', code).group(0))
+g = {}; exec(code, g); agent = g['agent']
+wins = sum(ke.make('orbit_wars').run([agent,'random'])[-1][0]['reward'] > 0 for _ in range(5))
+print(f'vs random: {wins}/5')
+"
+```
+
+**Then submit:**
+```bash
+kaggle competitions submit orbit-wars -f submission_agent.py -m "description"
+```
+
+**Known bugs fixed (2026-05-31):**
+1. `def agent(obs)` → `def agent(obs, cfg=None)` — was crashing silently on every LB step
+2. Missing `--target-decode` → used angle decode, scored 87 on LB vs 894 expected
 
 ---
 

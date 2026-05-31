@@ -253,7 +253,7 @@ def _get_model():
 
 # --- Kaggle agent entry point ---
 
-def agent(obs):
+def agent(obs, cfg=None):
     model = _get_model()
 
     if not isinstance(obs, dict):

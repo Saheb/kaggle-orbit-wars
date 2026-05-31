@@ -22,10 +22,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 OPPONENTS = [
     ("random",     "random"),
-    ("sniper",     "candidate_sniper.py"),
-    ("zach",       "candidate_zach_public.py"),
-    ("hellburner", "candidate_hellburner.py"),
-    ("suneet",     "candidate_suneet_lb1200.py"),
+    ("hellburner", "opponents/candidate_hellburner.py"),
+    ("zach",       "opponents/candidate_zach_public.py"),
+    ("suneet",     "opponents/candidate_suneet_lb1200.py"),
 ]
 
 KONBU_OPPONENT = (
