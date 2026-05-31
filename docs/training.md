@@ -13,7 +13,7 @@
 | **Rev8** | `--shaping-coef 0.05` | Reward material gain per step → more firing | HB dropped to 30% at 1M. fire[0] hit 0.22 by 1.5M | Passive + panel regression | — |
 | **Rev9** | `--entropy-coef-fire 0.05` | Higher H_fire suppresses passive locking | H_fire rose (✓) but HB=25%, Zach=42% — entropy = random firing, not strategic | Panel regression on all metrics | — |
 | **Rev10d** | `rollout-steps 512, envs=64` | Better credit assignment for sparse reward | HB=28.1%, Zach=46.9%, Suneet=53.8%. avgfleet oscillated 85-92 post-1M | Panel below rev7 on all metrics | 772 LB (1M) |
-| **Rev11** | Pure self-play, 10M target, pool=40, kill floor 0.20 | Passive phases may recover at scale; HB was wrong opponent | clip_frac=0.205↓ (lowest ever). 1M=0.32, 2M=0.34↑, 3M=0.31↓ (decline 1/3). avgfleet spikes but resolves. Best ckpt likely 2M (fire=0.34, fleet=77). | Still running (4M next) | — |
+| **Rev11** | Pure self-play, 10M target, pool=40, kill floor 0.20 | Passive phases may recover at scale; HB was wrong opponent | clip_frac=0.199↓ (lowest ever). 2M best (fire=0.34, fleet=77). 4M/5M/6M declined. vs 141208: 2M=17%, 4M=8%, 5M=6%. vs Zach: 2M=41%, 5M=36%. Killed at 6M. | **Best: 2M** (`torch_step_2031616_20260531_065423.pt`) — submit tomorrow | — |
 
 **What we know:**
 - Every run peaks at ~1M steps then passive drift sets in
@@ -28,13 +28,18 @@
 
 ## Current State (2026-05-31)
 
-**Active run:** Rev11 — GCP `orbit-wars-training` (us-central1-b), started 2026-05-31
+**Active run:** None — Rev11 killed at 6M (2026-05-31)
 - Pure self-play (no external opponents), pool-max-size=40, 10M step target
 - Kill threshold lowered: fire[0] < 0.20 (allow passive phases)
 - 1M checkpoint: fire[0]=0.32, avgfleet=78.1 — comparable to rev7 1M
 - Behaviour post-1M: avgfleet oscillating 78-85, NOT monotonically climbing like previous runs
 - clip_frac=0.213 still drifting down (healthy)
-- **Not submitting until tomorrow** (4/5 daily slots used today)
+- **Tomorrow (2026-06-01):** Submit rev11 2M as slot 1. Then consider rev12 direction.
+
+**Rev12 candidates:**
+1. Resume from rev11 2M, longer pure self-play (get to 10M+ total)
+2. Resume from rev11 2M, try pool-only (no current-self games, pure historical self-play)
+3. Try `--run-name rev12` — all checkpoints now embed revision name (no more file confusion)
 
 **LB scores for correctly-exported Phase 1 agents (2026-05-31):**
 
