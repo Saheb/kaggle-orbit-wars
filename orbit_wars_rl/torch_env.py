@@ -75,6 +75,8 @@ class VecTorchEnv:
         shaping_coef: float = 0.0,
         expansion_coef: float = 0.0,
         defense_coef: float = 0.0,
+        handicap_frac: float = 0.0,
+        handicap_ships: int = 5,
     ):
         self.num_envs = num_envs
         self.num_players = num_players
@@ -99,6 +101,11 @@ class VecTorchEnv:
         # Defense shaping: per-step penalty for losing owned production (consolidation
         # incentive — rewards HOLDING planets, complements expansion's GRAB). 0.0 = off.
         self.defense_coef = float(defense_coef)
+        # Handicap curriculum: fraction of games where player 0 starts with fewer ships.
+        # Forces the agent to practise fighting from behind — the bimodal collapse state
+        # that pure symmetric self-play never generates enough gradient for.
+        self.handicap_frac = float(handicap_frac)
+        self.handicap_ships = int(handicap_ships)
 
         # State tensors — allocated in reset()
         self.planets: torch.Tensor = None       # (N, P, 7)
@@ -160,7 +167,10 @@ class VecTorchEnv:
                 home_group = init_rng.randint(0, num_groups - 1)
                 base = home_group * 4
                 if self.num_players == 2:
-                    pad[base, 1] = 0;     pad[base, 5] = 10
+                    p0_ships = (self.handicap_ships
+                                if self.handicap_frac > 0 and random.random() < self.handicap_frac
+                                else 10)
+                    pad[base, 1] = 0;     pad[base, 5] = p0_ships
                     pad[base + 3, 1] = 1; pad[base + 3, 5] = 10
                 elif self.num_players == 4:
                     for j in range(4):

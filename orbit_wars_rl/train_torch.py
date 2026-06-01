@@ -304,6 +304,8 @@ def train(args):
     print(f"Shaping coeff: {args.shaping_coef}")
     print(f"Expansion coeff: {args.expansion_coef}")
     print(f"Defense coeff: {args.defense_coef}")
+    if args.handicap_frac > 0:
+        print(f"Handicap: {args.handicap_frac*100:.0f}% of games start with {args.handicap_ships} ships (vs normal 10)")
     if args.srcs_multi_penalty > 0.0:
         print(f"srcs_multi penalty: coef={args.srcs_multi_penalty}, threshold={args.srcs_multi_threshold}, "
               f"decay_frac={args.srcs_multi_penalty_decay_frac} "
@@ -344,7 +346,9 @@ def train(args):
                       win_margin_coeff=args.win_margin_coeff,
                       shaping_coef=args.shaping_coef,
                       expansion_coef=args.expansion_coef,
-                      defense_coef=args.defense_coef)
+                      defense_coef=args.defense_coef,
+                      handicap_frac=args.handicap_frac,
+                      handicap_ships=args.handicap_ships)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
 
     model = EntityTransformer(cfg.model).to(device)
@@ -1152,6 +1156,14 @@ if __name__ == "__main__":
                              "captured from us). Consolidation/defense incentive — rewards "
                              "HOLDING planets, complements --expansion-coef's GRAB. "
                              "0 = off. rev15 defense lever; suggested start: 0.02.")
+    parser.add_argument("--handicap-frac", type=float, default=0.0,
+                        help="Fraction of games where player 0 starts with --handicap-ships "
+                             "instead of the normal 10. Forces exposure to losing positions "
+                             "during self-play so the agent learns to fight back from behind. "
+                             "0 = off (symmetric starts). Suggested: 0.3.")
+    parser.add_argument("--handicap-ships", type=int, default=5,
+                        help="Starting ship count for player 0 in handicap games "
+                             "(default 5 = half normal). Only used when --handicap-frac > 0.")
     parser.add_argument("--srcs-multi-penalty", type=float, default=0.0,
                         help="Per-step reward penalty per source over --srcs-multi-threshold. "
                              "Applied symmetrically to both players each rollout step. "
