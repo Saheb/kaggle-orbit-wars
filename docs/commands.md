@@ -400,6 +400,7 @@ python -m pytest orbit_wars_rl/tests/ -x -q
 
 | Mistake | Fix |
 |---------|-----|
+| RL-agent external opponent (141208) without `--heuristic-workers 2` | Auto-default uses `cpu_count-1=7` workers; each loads a neural net → all 8 CPUs saturated, GPU drops to 0%, training deadlocks. **Always add `--heuristic-workers 2` for RL-agent opponents.** If already hung: `gcloud compute instances reset` (SSH unresponsive). |
 | `python train_torch.py` without activating venv | `source /Users/saheb/home/.venv/bin/activate` first, or use full path |
 | `nohup python ...` on Mac | Fails silently — activate venv first so `python` resolves |
 | `--opponent candidate_hellburner.py` | Path is `opponents/candidate_hellburner.py` |

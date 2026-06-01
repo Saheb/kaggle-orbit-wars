@@ -14,6 +14,7 @@
 | **Rev9** | `--entropy-coef-fire 0.05` | Higher H_fire suppresses passive locking | H_fire rose (✓) but HB=25%, Zach=42% — entropy = random firing, not strategic | Panel regression on all metrics | — |
 | **Rev10d** | `rollout-steps 512, envs=64` | Better credit assignment for sparse reward | HB=28.1%, Zach=46.9%, Suneet=53.8%. avgfleet oscillated 85-92 post-1M | Panel below rev7 on all metrics | 772 LB (1M) |
 | **Rev11** | Pure self-play, 10M target, pool=40, kill floor 0.20 | Passive phases may recover at scale; HB was wrong opponent | clip_frac=0.199↓ (lowest ever). 2M best (fire=0.34, fleet=77). 4M/5M/6M declined. vs 141208: 2M=17%, 4M=8%, 5M=6%. vs Zach: 2M=41%, 5M=36%. Killed at 6M. | **Best: 2M** (`torch_step_2031616_20260531_065423.pt`) — submit tomorrow | — |
+| **Rev12** | Top-team stabilizer recipe as a unit (+1/-1, rollout 512, minibatch 16, grad-clip 10, entropy 0.02/0.03/0.02, ~const LR) | Drift needs the recipe *combination*, not duration; dense ckpts capture peak | **WORKED.** Peaked at 6M (Zach 69.9%, vs-rev11-2M 73.4%) — best Phase-1 ever. Declined after (9M/11M lose to 6M head-to-head). Stopped ~15M. | Submitted 6M to LB 2026-06-01; stopped (clean monotonic decline past peak) | **6M = best Phase-1** |
 
 **What we know:**
 - Every run peaks at ~1M steps then passive drift sets in
@@ -36,10 +37,15 @@
 - clip_frac=0.213 still drifting down (healthy)
 - **Tomorrow (2026-06-01):** Submit rev11 2M as slot 1. Then consider rev12 direction.
 
-**Rev12 candidates:**
-1. Resume from rev11 2M, longer pure self-play (get to 10M+ total)
-2. Resume from rev11 2M, try pool-only (no current-self games, pure historical self-play)
-3. Try `--run-name rev12` — all checkpoints now embed revision name (no more file confusion)
+**Rev12 (decided 2026-05-31): stabilized scaled self-play, 50M target.**
+- **Hypothesis:** passivity drift is not fixed by duration alone (rev11 proved that — pure self-play 10M still peaked at 2M). Our single-delta tests (rev8 shaping, rev9 fire-entropy, rev10 rollouts) each isolated ONE top-team change and failed because the others fought back. Reproduce the top-10 team's stabilizer recipe **as a unit** (documented exception to one-delta-at-a-time).
+- **Resume:** `torch_step_2031616_20260531_065423.pt` (rev11 2M best, fire=0.34).
+- **Recipe deltas from rev11:** pure `+1/-1` (`--win-margin-coeff 0.0`); rollout 512 / num-envs 64 / **minibatch 16** (mb8 OOM'd at first PPO update on L4 23GB — mb16=2048/batch is the largest that fits; run with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, GPU sits ~22/23GiB); `--max-grad-norm 10.0` (was hardcoded 0.5); entropy fire 0.02 / angle 0.03 / ships 0.02 (~2×, NOT team's 50%-of-max — rev9 showed our env punishes random firing); `--lr-schedule-steps 200000000` (~constant LR); `--total-steps 50000000`.
+- **Running on GCP** (`orbit-wars-training`, us-central1-b, L4) as of 2026-05-31. Launched 10:12 UTC after an mb8 attempt at 10:04 OOM'd.
+- **Code change:** exposed `--max-grad-norm`, `--entropy-coef-angle`, `--entropy-coef-ships` as CLI flags in `train_torch.py` (fields already existed in `config.py`).
+- **Scripts:** `gpu_run_artifacts/hellburner_spot/run_remote_phase1_rev12.sh` + `launch_phase1_rev12.sh`.
+- **Monitoring (NOT fire[0] kills):** dense 1M checkpoints + Zach/Suneet panel capture the peak wherever it lands; do NOT kill on fire[0] decline or HB regression. Watch `clip_frac` — if it creeps toward 0.30 (team canary), HALVE lr (intervention, not kill). First 5 iters: check `nvidia-smi` mem (bump minibatch to 16 if OOM). Hard stop 50M (budget ~$50).
+- **Success:** any rev12 checkpoint exports (`--target-decode`) to LB > 894.
 
 **LB scores for correctly-exported Phase 1 agents (2026-05-31):**
 
@@ -336,7 +342,7 @@ Trajectory looks healthy (Suneet ~60% at 1M is strong). Rev7 6M checkpoint will 
 | `clip_frac` | 0.10–0.22 | > 0.30, creeping upward | PPO's measure of how often the policy update was clipped (policy changed too much). Creeping upward = gradients are too large = value function estimates go stale = training destabilises. From standard PPO/IMPALA/AlphaStar literature: sustained > 0.30 is a red flag. Our rev11 shows clip_frac drifting *down* to 0.205 which is unusually good. |
 | `H_fire` | 0.08–0.15 | < 0.05 (deterministic) | Entropy of the fire-head distribution. Low = policy is near-deterministically choosing fire or no-fire in each state. Too low = rigid passive policy that can't adapt. **Note:** higher is NOT automatically better — rev9 showed that boosting H_fire with `--entropy-coef-fire` made firing random rather than strategic, hurting LB. |
 | `meanshipbin` | 15–18 | > 19 trending up | Mean ship-count bin when firing (Phase 1 has 32 bins; bin 16 ≈ mid-range fleet fraction). Rising alongside avgfleet = passive (building bigger fleets before attacking). Rising with stable avgfleet = sending larger forces per attack (may be OK). |
-| `SPS` | 650–730 | < 500 | Environment steps per second. Drops if: rollouts are longer (rev10d hit 499 with envs=64), pool workers are slow, or GPU is doing other work. |
+| `SPS` | 650–730 | < 500 | Environment steps per second. Drops if: rollouts are longer (rev10d hit 499 with envs=64), pool workers are slow, or GPU is doing other work. **⚠️ If SPS drops to ~0 and GPU shows 0% utilisation with CPU at 100%: the heuristic worker pool is deadlocked — see note below.** |
 
 ---
 
@@ -643,7 +649,29 @@ python orbit_wars_rl/train_torch.py \
 | Metric | Healthy range | Warning | Kill |
 |--------|--------------|---------|------|
 | `fire[0]` | 0.30–0.55 | Declining 2 consecutive | Declining 3 consecutive or <0.25 |
+
 | `srcs_multi` | 1.0–2.5 | 2.5–4.0 | >4.0 (carpet-bomb collapse) |
 | `avgfleet` | 50–90 | >100 and rising | — |
 | `clip_frac` | 0.10–0.25 | >0.30 sustained | — |
 | `H_fire` (entropy) | 0.05–0.15 | <0.03 (deterministic) | — |
+
+---
+
+## ⚠️ External Opponent Gotcha: `--heuristic-workers` (rev18, 2026-06-01)
+
+**Symptom:** Training hangs after a few iters. GPU shows **0% utilisation** despite process being alive. All CPU cores at 100%. `ps aux` shows 7+ Python worker processes each consuming ~82% CPU.
+
+**Cause:** The heuristic worker pool defaults to `os.cpu_count() - 1` workers (7 on a g2-standard-8). This is fine for lightweight rule-based opponents (Hellburner, Zach) which run fast Python logic. But **141208 and other RL-agent opponents run a full neural network on CPU** — each worker loads the model and runs inference. With 7 workers all inferring simultaneously on an 8-core machine, all CPU is consumed and the main training process (which also needs CPU to coordinate the GPU) deadlocks waiting for workers that can never finish.
+
+**Fix:** Always pass `--heuristic-workers 2` (or 3) when using RL-agent opponents as externals:
+```bash
+--external-opponents opponents/archive/main_rl_141208.py \
+--pool-external-fraction 0.25 \
+--heuristic-workers 2        # ← essential for RL-agent opponents
+```
+
+**Rule of thumb:**
+- Lightweight heuristic (Hellburner, Zach, landgrab): auto workers fine, or `--heuristic-workers 4`
+- RL-agent opponent (141208, any exported .py with embedded weights): `--heuristic-workers 2`
+
+**Recovery:** If already hung, `gcloud compute instances reset` (SSH will be unresponsive since all CPUs are saturated).
