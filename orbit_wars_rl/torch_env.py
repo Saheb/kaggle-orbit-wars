@@ -73,6 +73,8 @@ class VecTorchEnv:
         action_decode: str = "angle",
         win_margin_coeff: float = 0.0,
         shaping_coef: float = 0.0,
+        expansion_coef: float = 0.0,
+        defense_coef: float = 0.0,
     ):
         self.num_envs = num_envs
         self.num_players = num_players
@@ -88,6 +90,15 @@ class VecTorchEnv:
         # 0.0 = pure ±1 reward (default, backward-compatible).
         self.win_margin_coeff = float(win_margin_coeff)
         self.shaping_coef = float(shaping_coef)
+        # Expansion shaping: potential-based reward on OWNED PRODUCTION (sum of
+        # planet production rates owned). Unlike material (ships), production only
+        # changes when planets change hands — so a passive hoarder gets 0 from it
+        # (avoids the rev8 material-shaping trap). Rewards winning the planet/economy
+        # race that decides snowball games. 0.0 = off (default).
+        self.expansion_coef = float(expansion_coef)
+        # Defense shaping: per-step penalty for losing owned production (consolidation
+        # incentive — rewards HOLDING planets, complements expansion's GRAB). 0.0 = off.
+        self.defense_coef = float(defense_coef)
 
         # State tensors — allocated in reset()
         self.planets: torch.Tensor = None       # (N, P, 7)
@@ -101,6 +112,7 @@ class VecTorchEnv:
         self.done: torch.Tensor = None              # (N,) bool
         self.rewards: torch.Tensor = None           # (N, num_players) float
         self.prev_material: torch.Tensor = None     # (N, num_players) float
+        self.prev_production: torch.Tensor = None   # (N, num_players) float — owned production for expansion shaping
         # Seeds (per-env) so we can deterministically auto-reset
         self.seeds: list[int] = []
 
@@ -177,6 +189,7 @@ class VecTorchEnv:
 
         self._precompute_orbital_params()
         self.prev_material = self._compute_material()
+        self.prev_production = self._compute_production()
         return self._state_dict()
 
     def _compute_material(self) -> torch.Tensor:
@@ -191,6 +204,15 @@ class VecTorchEnv:
                 + ((owner_f == pl).float() * ships_f).sum(dim=1)
             )
         return material
+
+    def _compute_production(self) -> torch.Tensor:
+        """Total production rate of planets owned by each player. (N, num_players)"""
+        owner_p = self.planets[:, :, 1].long()
+        prod_p = self.planets[:, :, 6] * self.planet_alive.float()
+        production = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
+        for pl in range(self.num_players):
+            production[:, pl] = ((owner_p == pl).float() * prod_p).sum(dim=1)
+        return production
 
     def _precompute_orbital_params(self):
         """Cache initial_angle, orbital_r, is_orbiting per planet (shape (N, P))."""
@@ -958,9 +980,35 @@ class VecTorchEnv:
             shaping_rewards = self.shaping_coef * torch.tanh(shaping_rewards / 50.0)
             terminal_rewards = terminal_rewards + shaping_rewards
             self.prev_material = material
+        # Expansion shaping: potential-based reward on the change in owned-production
+        # lead. Dense per-step signal for winning the planet/economy race (the thing
+        # that decides snowball games). Telescopes, so passive play nets ~0.
+        # Defense shaping: per-step PENALTY for losing owned production (a planet
+        # captured from us). Targets the consolidation gap — agent grabs planets but
+        # won't hold/reinforce them (reinforce_rate ~0.05). Asymmetric: only the
+        # negative (loss) side, so it rewards HOLDING, distinct from expansion's GRAB.
+        if self.expansion_coef != 0.0 or self.defense_coef != 0.0:
+            production = self._compute_production()
+            prod_delta = production - self.prev_production
+            if self.expansion_coef != 0.0:
+                if self.num_players == 2:
+                    d = prod_delta[:, 0] - prod_delta[:, 1]
+                    expansion_rewards = torch.stack([d, -d], dim=1)
+                else:
+                    others = prod_delta.sum(dim=1, keepdim=True) - prod_delta
+                    expansion_rewards = prod_delta - others / max(self.num_players - 1, 1)
+                terminal_rewards = terminal_rewards + self.expansion_coef * expansion_rewards
+            if self.defense_coef != 0.0:
+                # penalize each player's own production lost this step (clamp to losses)
+                prod_lost = (-prod_delta).clamp(min=0.0)   # (N, num_players)
+                terminal_rewards = terminal_rewards - self.defense_coef * prod_lost
         # 12. Auto-reset done envs in-place — must come AFTER capturing rewards
         if done.any():
             self._auto_reset(done)
+        # Refresh prev_production AFTER auto-reset so done envs telescope from their
+        # fresh post-reset state (avoids a spurious capture/loss spike on episode boundary).
+        if self.expansion_coef != 0.0 or self.defense_coef != 0.0:
+            self.prev_production = self._compute_production()
         return self._state_dict(), terminal_rewards, done
 
     # ---------------------------------------------------------------------

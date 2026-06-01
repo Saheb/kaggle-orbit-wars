@@ -279,6 +279,12 @@ def train(args):
         cfg.ppo.clip_eps = args.clip_eps
     if args.entropy_coef_fire is not None:
         cfg.ppo.entropy_coef_fire = args.entropy_coef_fire
+    if args.entropy_coef_angle is not None:
+        cfg.ppo.entropy_coef_angle = args.entropy_coef_angle
+    if args.entropy_coef_ships is not None:
+        cfg.ppo.entropy_coef_ships = args.entropy_coef_ships
+    if args.max_grad_norm is not None:
+        cfg.ppo.max_grad_norm = args.max_grad_norm
     if args.gae_lambda is not None:
         cfg.ppo.gae_lambda = args.gae_lambda
     if args.il_lambda is not None:
@@ -291,9 +297,13 @@ def train(args):
           f"num_minibatches={cfg.ppo.num_minibatches}, clip_eps={cfg.ppo.clip_eps}, "
           f"entropy_coef_fire={cfg.ppo.entropy_coef_fire}, gae_lambda={cfg.ppo.gae_lambda}, "
           f"kl_target={cfg.ppo.kl_target}")
+    print(f"Entropy coefs: fire={cfg.ppo.entropy_coef_fire}, angle={cfg.ppo.entropy_coef_angle}, "
+          f"ships={cfg.ppo.entropy_coef_ships} | max_grad_norm={cfg.ppo.max_grad_norm}")
     print(f"Action decode: {args.action_decode}")
     print(f"Win margin coeff: {args.win_margin_coeff}")
     print(f"Shaping coeff: {args.shaping_coef}")
+    print(f"Expansion coeff: {args.expansion_coef}")
+    print(f"Defense coeff: {args.defense_coef}")
     if args.srcs_multi_penalty > 0.0:
         print(f"srcs_multi penalty: coef={args.srcs_multi_penalty}, threshold={args.srcs_multi_threshold}, "
               f"decay_frac={args.srcs_multi_penalty_decay_frac} "
@@ -332,7 +342,9 @@ def train(args):
                       ship_bin_mode=cfg.model.ship_bin_mode,
                       action_decode=args.action_decode,
                       win_margin_coeff=args.win_margin_coeff,
-                      shaping_coef=args.shaping_coef)
+                      shaping_coef=args.shaping_coef,
+                      expansion_coef=args.expansion_coef,
+                      defense_coef=args.defense_coef)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
 
     model = EntityTransformer(cfg.model).to(device)
@@ -1082,6 +1094,15 @@ if __name__ == "__main__":
     parser.add_argument("--entropy-coef-fire", type=float, default=None,
                         help="Override fire-head entropy coefficient "
                              "(default: cfg.ppo.entropy_coef_fire=0.01)")
+    parser.add_argument("--entropy-coef-angle", type=float, default=None,
+                        help="Override direction/angle-head entropy coefficient "
+                             "(default: cfg.ppo.entropy_coef_angle=0.02)")
+    parser.add_argument("--entropy-coef-ships", type=float, default=None,
+                        help="Override ships-head entropy coefficient "
+                             "(default: cfg.ppo.entropy_coef_ships=0.01)")
+    parser.add_argument("--max-grad-norm", type=float, default=None,
+                        help="Override gradient-clipping max norm "
+                             "(default: cfg.ppo.max_grad_norm=0.5)")
     parser.add_argument("--gae-lambda", type=float, default=None,
                         help="Override GAE lambda (default: cfg.ppo.gae_lambda=0.95)")
     # IL regularization (KL-to-frozen-BC penalty) ------------------------
@@ -1119,7 +1140,18 @@ if __name__ == "__main__":
                              "0 = pure ±1 reward (default). Suggested start: 0.5.")
     parser.add_argument("--shaping-coef", type=float, default=0.0,
                         help="Per-step material-delta shaping coefficient. "
-                             "0 = off. Suggested diagnostic start: 0.03.")
+                             "0 = off. Suggested diagnostic start: 0.03. "
+                             "NOTE: rewards passive ship accumulation — failed in rev8.")
+    parser.add_argument("--expansion-coef", type=float, default=0.0,
+                        help="Potential-based shaping on owned-production lead "
+                             "(planet/economy race). Unlike --shaping-coef, passive "
+                             "play nets ~0 (production only changes on capture). "
+                             "0 = off. rev14 expansion fix; suggested start: 0.01.")
+    parser.add_argument("--defense-coef", type=float, default=0.0,
+                        help="Per-step penalty for losing owned production (a planet "
+                             "captured from us). Consolidation/defense incentive — rewards "
+                             "HOLDING planets, complements --expansion-coef's GRAB. "
+                             "0 = off. rev15 defense lever; suggested start: 0.02.")
     parser.add_argument("--srcs-multi-penalty", type=float, default=0.0,
                         help="Per-step reward penalty per source over --srcs-multi-threshold. "
                              "Applied symmetrically to both players each rollout step. "
