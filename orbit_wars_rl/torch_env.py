@@ -75,6 +75,8 @@ class VecTorchEnv:
         shaping_coef: float = 0.0,
         expansion_coef: float = 0.0,
         defense_coef: float = 0.0,
+        early_capture_coef: float = 0.0,
+        early_capture_steps: int = 100,
         handicap_frac: float = 0.0,
         handicap_ships: int = 5,
     ):
@@ -101,6 +103,13 @@ class VecTorchEnv:
         # Defense shaping: per-step penalty for losing owned production (consolidation
         # incentive — rewards HOLDING planets, complements expansion's GRAB). 0.0 = off.
         self.defense_coef = float(defense_coef)
+        # Early capture shaping: per-step bonus for each net new planet owned above
+        # starting count (1), decayed linearly from 1.0→0.0 over early_capture_steps.
+        # Gives gradient signal for the opening probe that the terminal reward cannot see.
+        # Coeff math: sum(coeff*(1-t/100), t=4..100) ≈ 97*0.48*coeff per planet captured
+        # at step 3. Keep cumulative bonus ≤ 10-15% of terminal win → coeff 0.002-0.003.
+        self.early_capture_coef = float(early_capture_coef)
+        self.early_capture_steps = int(early_capture_steps)
         # Handicap curriculum: fraction of games where player 0 starts with fewer ships.
         # Forces the agent to practise fighting from behind — the bimodal collapse state
         # that pure symmetric self-play never generates enough gradient for.
@@ -1012,6 +1021,22 @@ class VecTorchEnv:
                 # penalize each player's own production lost this step (clamp to losses)
                 prod_lost = (-prod_delta).clamp(min=0.0)   # (N, num_players)
                 terminal_rewards = terminal_rewards - self.defense_coef * prod_lost
+        # Early capture shaping: time-decayed bonus for net new planets above starting count.
+        # Zero-sum (relative) to keep total return scale stable.
+        if self.early_capture_coef != 0.0:
+            ec_owner = self.planets[:, :, 1].long()  # (N, P)
+            decay = (1.0 - self.step_count.float() / self.early_capture_steps).clamp(min=0.0)  # (N,)
+            owned = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
+            for pl in range(self.num_players):
+                owned[:, pl] = ((ec_owner == pl) & self.planet_alive).float().sum(dim=1)
+            net_new = (owned - 1.0).clamp(min=0.0)  # planets above starting count
+            if self.num_players == 2:
+                d = net_new[:, 0] - net_new[:, 1]
+                ec_rewards = torch.stack([d, -d], dim=1)
+            else:
+                others = net_new.sum(dim=1, keepdim=True) - net_new
+                ec_rewards = net_new - others / max(self.num_players - 1, 1)
+            terminal_rewards = terminal_rewards + self.early_capture_coef * decay.unsqueeze(1) * ec_rewards
         # 12. Auto-reset done envs in-place — must come AFTER capturing rewards
         if done.any():
             self._auto_reset(done)

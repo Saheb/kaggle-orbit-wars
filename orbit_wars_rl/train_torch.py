@@ -304,6 +304,7 @@ def train(args):
     print(f"Shaping coeff: {args.shaping_coef}")
     print(f"Expansion coeff: {args.expansion_coef}")
     print(f"Defense coeff: {args.defense_coef}")
+    print(f"Early capture coeff: {args.early_capture_coef} (decay over {args.early_capture_steps} steps)")
     if args.handicap_frac > 0:
         print(f"Handicap: {args.handicap_frac*100:.0f}% of games start with {args.handicap_ships} ships (vs normal 10)")
     if args.srcs_multi_penalty > 0.0:
@@ -347,6 +348,8 @@ def train(args):
                       shaping_coef=args.shaping_coef,
                       expansion_coef=args.expansion_coef,
                       defense_coef=args.defense_coef,
+                      early_capture_coef=args.early_capture_coef,
+                      early_capture_steps=args.early_capture_steps,
                       handicap_frac=args.handicap_frac,
                       handicap_ships=args.handicap_ships)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
@@ -357,7 +360,7 @@ def train(args):
         sd = torch.load(args.resume, map_location="cpu", weights_only=False)
         if "model" in sd: sd = sd["model"]
         model.load_state_dict(sd)
-        print(f"Resumed from {args.resume}")
+        print(f"Resumed from {Path(args.resume).resolve()}")
 
     # IL regularization: load frozen reference policy if requested
     frozen_il_model = None
@@ -579,6 +582,10 @@ def train(args):
         # train_mask[t, e, p] = True if (env=e, player=p) is OUR current policy at
         # step t. Pool-opponent slots are False so PPO won't train on them.
         "train_mask": torch.ones(rollout_T, N, P, dtype=torch.bool, device=storage_dev),
+        # Planet ship counts snapshot per step — used for avgfleet/p90fleet metrics.
+        # Shape (T, N) — mean ships per planet across all owned planets per env.
+        # Measuring planet inventories (not action sizes) is the correct passivity proxy.
+        "planet_ships_snap": torch.zeros(rollout_T, N, device=storage_dev),
     }
 
     def compute_pool_actions(opp: PoolMember, player: int, env_slice: slice) -> torch.Tensor:
@@ -728,7 +735,15 @@ def train(args):
                 actions_per_player[opp_seat][pool_slice] = opp_action
                 storage["train_mask"][t, pool_slice, opp_seat] = False
 
-            _, rewards, done = env.step(actions_per_player)
+            state, rewards, done = env.step(actions_per_player)
+            # Snapshot mean planet ships per env — used for avgfleet/p90fleet metrics.
+            # Measures actual planet inventories (passivity proxy), not action sizes.
+            planet_ships = env.planets[:, :, 5]           # (N, max_planets)
+            alive = env.planet_alive                       # (N, max_planets) bool
+            n_alive = alive.float().sum(dim=1).clamp(min=1)
+            storage["planet_ships_snap"][t].copy_(
+                (planet_ships * alive.float()).sum(dim=1) / n_alive, non_blocking=True
+            )
             # rewards: (N, P); done: (N,) shared across players.
             storage["rewards"][t].copy_(rewards[:, :P], non_blocking=True)
 
@@ -822,11 +837,12 @@ def train(args):
 
         fired_train_slots = flat["fire_a"].float() * flat["slot_valid"].float()
         fired_count = fired_train_slots.sum().clamp(min=1.0)
-        avg_fleet_size = (flat["ship_count_a"] * fired_train_slots).sum() / fired_count
-        fleet_size_p90 = torch.quantile(
-            flat["ship_count_a"][fired_train_slots.bool()],
-            0.9,
-        ) if fired_train_slots.bool().any() else torch.tensor(0.0)
+        # avgfleet/p90fleet: mean and p90 of actual planet ship inventories (passivity
+        # proxy). Previously computed from action ship sizes — that was wrong: the
+        # p90 pinned to a fixed SHIP_COUNTS bin value regardless of policy changes.
+        planet_snaps = storage["planet_ships_snap"].reshape(-1)  # (T*N,)
+        avg_fleet_size = planet_snaps.mean()
+        fleet_size_p90 = torch.quantile(planet_snaps, 0.9)
 
         # Build PPOLearner-compatible batch (matches make_batch in self_play.py)
         batch = {
@@ -1156,6 +1172,14 @@ if __name__ == "__main__":
                              "captured from us). Consolidation/defense incentive — rewards "
                              "HOLDING planets, complements --expansion-coef's GRAB. "
                              "0 = off. rev15 defense lever; suggested start: 0.02.")
+    parser.add_argument("--early-capture-coef", type=float, default=0.0,
+                        help="Per-step bonus for each net new planet owned above starting count, "
+                             "decayed linearly to 0 over --early-capture-steps. "
+                             "Gives gradient signal for the opening probe the terminal reward cannot see. "
+                             "Coeff math: cumulative bonus per step-3 capture ≈ 97*0.48*coeff; "
+                             "keep ≤0.15 of terminal win → range 0.002-0.003. 0 = off.")
+    parser.add_argument("--early-capture-steps", type=int, default=100,
+                        help="Step at which the early-capture decay reaches zero. Default 100.")
     parser.add_argument("--handicap-frac", type=float, default=0.0,
                         help="Fraction of games where player 0 starts with --handicap-ships "
                              "instead of the normal 10. Forces exposure to losing positions "

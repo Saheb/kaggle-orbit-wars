@@ -35,6 +35,7 @@ PYTHONUNBUFFERED=1 python3 orbit_wars_rl/train_torch.py \
   --pool-mode mixed --pool-fraction 0.75 \
   --external-opponents opponents/archive/main_rl_141208.py \
   --pool-external-fraction 0.25 \
+  --heuristic-workers 2 \
   --win-margin-coeff 0.5 \
   --expansion-coef 0.01 \
   --action-decode target \
