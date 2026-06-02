@@ -305,6 +305,7 @@ def train(args):
     print(f"Expansion coeff: {args.expansion_coef}")
     print(f"Defense coeff: {args.defense_coef}")
     print(f"Early capture coeff: {args.early_capture_coef} (decay over {args.early_capture_steps} steps)")
+    print(f"Speed coeff: {args.speed_coef}")
     if args.handicap_frac > 0:
         print(f"Handicap: {args.handicap_frac*100:.0f}% of games start with {args.handicap_ships} ships (vs normal 10)")
     if args.srcs_multi_penalty > 0.0:
@@ -350,6 +351,7 @@ def train(args):
                       defense_coef=args.defense_coef,
                       early_capture_coef=args.early_capture_coef,
                       early_capture_steps=args.early_capture_steps,
+                      speed_coef=args.speed_coef,
                       handicap_frac=args.handicap_frac,
                       handicap_ships=args.handicap_ships)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
@@ -534,6 +536,7 @@ def train(args):
                     "srcs_multi_threshold": args.srcs_multi_threshold,
                     "il_lambda": cfg.ppo.il_lambda,
                     "win_margin_coeff": args.win_margin_coeff,
+                    "speed_coef": args.speed_coef,
                     "action_decode": args.action_decode,
                     "resume": args.resume or "",
                     "ship_bin_mode": cfg.model.ship_bin_mode,
@@ -1184,6 +1187,11 @@ if __name__ == "__main__":
                              "keep ≤10%% of terminal win → range 0.05-0.10. 0 = off.")
     parser.add_argument("--early-capture-steps", type=int, default=400,
                         help="Step at which the delta-capture decay reaches zero. Default 400.")
+    parser.add_argument("--speed-coef", type=float, default=0.0,
+                        help="Terminal time-to-victory bonus coefficient. Winners get "
+                             "+((episode_steps - termination_step) / episode_steps) * coef, "
+                             "so early eliminations are worth more than timeout/grind wins. "
+                             "0 = off. Suggested start: 0.3-0.5.")
     parser.add_argument("--handicap-frac", type=float, default=0.0,
                         help="Fraction of games where player 0 starts with --handicap-ships "
                              "instead of the normal 10. Forces exposure to losing positions "
