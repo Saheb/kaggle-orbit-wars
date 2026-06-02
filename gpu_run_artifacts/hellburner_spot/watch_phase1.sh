@@ -5,7 +5,7 @@ set +euo pipefail
 INSTANCE_ID="i-0a5129fba17cf3de6"
 PUB_IP="3.236.231.55"
 KEY="$HOME/.ssh/samosa-key.pem"
-ROOT="/Users/saheb/.codex/worktrees/296f/kaggle-orbit-wars"
+ROOT="/Users/saheb/home/kaggle-orbit-wars"
 ART="$ROOT/gpu_run_artifacts/hellburner_spot"
 
 mkdir -p "$ART/checkpoints" "$ART/logs"
