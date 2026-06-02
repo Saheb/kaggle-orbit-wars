@@ -59,18 +59,40 @@ done
 
 echo ""
 echo "=== Step 3: rsync code + candidates ==="
-# orbit_wars_rl directory
-rsync -az --exclude '__pycache__' --exclude '*.pyc' --exclude 'checkpoints/' \
-  -e "ssh -i $KEY -o StrictHostKeyChecking=no" \
-  "$ROOT/orbit_wars_rl/" \
-  ubuntu@"$PUB_IP":~/orbit_wars_rl/
+RSYNC_EXCLUDES=(
+  --exclude='.git' --exclude='.venv' --exclude='.claude'
+  --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pt'
+  --exclude='archive' --exclude='leader-replays' --exclude='kernels'
+  --exclude='checkpoints' --exclude='seed_checkpoints'
+  --exclude='gpu_run_artifacts/hellburner_spot/checkpoints'
+  --exclude='gpu_run_artifacts/hellburner_spot/panels'
+  --exclude='gpu_run_artifacts/hellburner_spot/logs'
+  --exclude='orbit_wars_rl/episode_data'
+  --exclude='orbit_wars_rl/replays' --exclude='orbit_wars_rl/replays_4p_heuristic'
+  --exclude='orbit_wars_rl/episode_index' --exclude='orbit_wars_rl/*.pkl'
+  --exclude='submission_hybrid*.py' --exclude='submission_rev*.py'
+  --exclude='submission_agent.py'
+)
 
-# Candidate files (opponents)
-rsync -az \
+# ⚠️ Pre-flight size check — abort if > 50MB
+MAX_MB=50
+TRANSFER_MB=$(rsync --dry-run --stats "${RSYNC_EXCLUDES[@]}" "$ROOT/" /tmp/dummy/ 2>/dev/null | \
+  awk '/Total transferred file size/{gsub(/,/,"",$NF); printf "%d", $NF/1024/1024}')
+TRANSFER_MB=${TRANSFER_MB:-0}
+echo "Estimated transfer: ~${TRANSFER_MB}MB"
+if [ "$TRANSFER_MB" -gt "$MAX_MB" ]; then
+  echo ""
+  echo "❌ ERROR: rsync transfer size ${TRANSFER_MB}MB exceeds ${MAX_MB}MB limit."
+  echo "   Fix RSYNC_EXCLUDES in this script before launching."
+  echo "   Top offenders:"
+  du -sh "$ROOT"/* 2>/dev/null | sort -rh | head -10
+  exit 1
+fi
+
+rsync -az "${RSYNC_EXCLUDES[@]}" \
   -e "ssh -i $KEY -o StrictHostKeyChecking=no" \
-  "$ROOT/candidate_hellburner.py" \
-  "$ROOT/candidate_zach_public.py" \
-  ubuntu@"$PUB_IP":~/
+  "$ROOT/" ubuntu@"$PUB_IP":~/orbit_wars_rl/
+echo "Code uploaded (~${TRANSFER_MB}MB)"
 
 echo ""
 echo "=== Step 4: Upload BC warmstart ==="
@@ -105,10 +127,26 @@ sed -i '' "s|PUB_IP=\"[^\"]*\"|PUB_IP=\"$PUB_IP\"|"               "$WATCH"
 echo "watch_phase1.sh updated with INSTANCE_ID=$INSTANCE_ID PUB_IP=$PUB_IP"
 
 echo ""
+echo "=== Starting local checkpoint watcher ==="
+WATCHER_LOG="$ART/logs/watcher_aws_$(date +%Y%m%d_%H%M%S).log"
+mkdir -p "$ART/logs" "$ART/checkpoints"
+nohup bash -c "
+  while true; do
+    rsync -az -e 'ssh -i $KEY -o StrictHostKeyChecking=no' \
+      ubuntu@${PUB_IP}:~/orbit_wars_rl/checkpoints/ '$ART/checkpoints/' 2>/dev/null
+    rsync -az -e 'ssh -i $KEY -o StrictHostKeyChecking=no' \
+      --include='train_gpu_phase1_*.log' --exclude='*' \
+      ubuntu@${PUB_IP}:~/orbit_wars_rl/ '$ART/logs/' 2>/dev/null
+    sleep 180
+  done
+" > "$WATCHER_LOG" 2>&1 &
+echo "Watcher PID: $!  log: $WATCHER_LOG"
+
+echo ""
 echo "==================================================================="
 echo "Phase 1 launch complete!"
 echo "  Instance : $INSTANCE_ID @ $PUB_IP"
 echo "  Training : screen session 'phase1' on remote"
-echo "  Watcher  : bash $ART/watch_phase1.sh &"
+echo "  Watcher  : running (PID above), syncing every 3 min → $ART/logs/"
 echo "  Attach   : ssh -i $KEY ubuntu@$PUB_IP -t 'screen -r phase1'"
 echo "==================================================================="

@@ -77,6 +77,7 @@ class VecTorchEnv:
         defense_coef: float = 0.0,
         early_capture_coef: float = 0.0,
         early_capture_steps: int = 100,
+        speed_coef: float = 0.0,
         handicap_frac: float = 0.0,
         handicap_ships: int = 5,
     ):
@@ -110,6 +111,13 @@ class VecTorchEnv:
         # at step 3. Keep cumulative bonus ≤ 10-15% of terminal win → coeff 0.002-0.003.
         self.early_capture_coef = float(early_capture_coef)
         self.early_capture_steps = int(early_capture_steps)
+        # Time-to-victory velocity bonus: winners get an extra reward scaled by how early
+        # they won. reward_win = 1.0 + (episode_steps - T) / episode_steps * speed_coef.
+        # A win at step 150 of 500 earns +0.70*speed_coef extra vs +0.02*speed_coef at 490.
+        # Creates constant pressure to close games fast; grinding passive wins penalised.
+        # speed_coef=0.5 means a step-0 win scores 1.5, a timeout win scores ~1.0.
+        # Keep ≤ 0.5 so a slow win still beats a fast loss.
+        self.speed_coef = float(speed_coef)
         # Handicap curriculum: fraction of games where player 0 starts with fewer ships.
         # Forces the agent to practise fighting from behind — the bimodal collapse state
         # that pure symmetric self-play never generates enough gradient for.
@@ -129,6 +137,7 @@ class VecTorchEnv:
         self.rewards: torch.Tensor = None           # (N, num_players) float
         self.prev_material: torch.Tensor = None     # (N, num_players) float
         self.prev_production: torch.Tensor = None   # (N, num_players) float — owned production for expansion shaping
+        self.prev_owned: torch.Tensor = None        # (N, num_players) float — owned planet count for delta-capture shaping
         # Seeds (per-env) so we can deterministically auto-reset
         self.seeds: list[int] = []
 
@@ -209,6 +218,10 @@ class VecTorchEnv:
         self._precompute_orbital_params()
         self.prev_material = self._compute_material()
         self.prev_production = self._compute_production()
+        owner_p = self.planets[:, :, 1].long()
+        self.prev_owned = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
+        for pl in range(self.num_players):
+            self.prev_owned[:, pl] = ((owner_p == pl) & self.planet_alive).float().sum(dim=1)
         return self._state_dict()
 
     def _compute_material(self) -> torch.Tensor:
@@ -1021,29 +1034,45 @@ class VecTorchEnv:
                 # penalize each player's own production lost this step (clamp to losses)
                 prod_lost = (-prod_delta).clamp(min=0.0)   # (N, num_players)
                 terminal_rewards = terminal_rewards - self.defense_coef * prod_lost
-        # Early capture shaping: time-decayed bonus for net new planets above starting count.
-        # Zero-sum (relative) to keep total return scale stable.
+        # Delta-capture shaping: time-decayed reward for CAPTURING planets (delta in owned
+        # count), NOT for holding them. Fires as a spike when a planet changes hands.
+        # Decay window: early_capture_steps (default 400) — stays active through mid-game
+        # so the 18-step GAE horizon can see capture events throughout the game, not just
+        # the opening. Zero-sum (relative) to preserve Nash equilibrium at the terminal.
+        #
+        # Coeff math (delta, not cumulative): one capture event at step t gives
+        #   coeff × (1 - t/400) ≈ coeff per event.
+        #   Keep ≤ 10% of terminal win → coeff 0.05–0.10.
         if self.early_capture_coef != 0.0:
             ec_owner = self.planets[:, :, 1].long()  # (N, P)
             decay = (1.0 - self.step_count.float() / self.early_capture_steps).clamp(min=0.0)  # (N,)
             owned = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
             for pl in range(self.num_players):
                 owned[:, pl] = ((ec_owner == pl) & self.planet_alive).float().sum(dim=1)
-            net_new = (owned - 1.0).clamp(min=0.0)  # planets above starting count
+            # Delta: how many planets each player gained this step vs prev.
+            # CAPPED AT 1 per player per step — prevents carpet-bomb incentive where
+            # firing from all planets simultaneously earns N×reward. One capture = one
+            # reward unit regardless of how many planets fired.
+            owned_delta = (owned - self.prev_owned).clamp(min=0.0, max=1.0)
             if self.num_players == 2:
-                d = net_new[:, 0] - net_new[:, 1]
+                d = owned_delta[:, 0] - owned_delta[:, 1]
                 ec_rewards = torch.stack([d, -d], dim=1)
             else:
-                others = net_new.sum(dim=1, keepdim=True) - net_new
-                ec_rewards = net_new - others / max(self.num_players - 1, 1)
+                others = owned_delta.sum(dim=1, keepdim=True) - owned_delta
+                ec_rewards = owned_delta - others / max(self.num_players - 1, 1)
             terminal_rewards = terminal_rewards + self.early_capture_coef * decay.unsqueeze(1) * ec_rewards
+            self.prev_owned = owned
         # 12. Auto-reset done envs in-place — must come AFTER capturing rewards
         if done.any():
             self._auto_reset(done)
-        # Refresh prev_production AFTER auto-reset so done envs telescope from their
-        # fresh post-reset state (avoids a spurious capture/loss spike on episode boundary).
+        # Refresh prev_production / prev_owned AFTER auto-reset so done envs telescope
+        # from their fresh post-reset state (avoids spurious spike on episode boundary).
         if self.expansion_coef != 0.0 or self.defense_coef != 0.0:
             self.prev_production = self._compute_production()
+        if self.early_capture_coef != 0.0 and done.any():
+            ec_owner = self.planets[:, :, 1].long()
+            for pl in range(self.num_players):
+                self.prev_owned[done, pl] = ((ec_owner[done] == pl) & self.planet_alive[done]).float().sum(dim=1)
         return self._state_dict(), terminal_rewards, done
 
     # ---------------------------------------------------------------------
@@ -1095,6 +1124,15 @@ class VecTorchEnv:
             margin = scores / total_score          # (N, P) fraction in [0, 1]
             bonus = self.win_margin_coeff * margin
             rewards = torch.where(wins, rewards + bonus, rewards)
+        # Time-to-victory velocity bonus: winners get extra reward for winning early.
+        # reward_win += (episode_steps - T) / episode_steps * speed_coef
+        # Gradient constantly pressures the agent to close games faster.
+        if self.speed_coef != 0.0:
+            # step_count is (N,) — clamp to episode_steps to handle edge cases
+            t = self.step_count.float().clamp(max=self.episode_steps)
+            velocity = (self.episode_steps - t) / self.episode_steps  # (N,) in [0, 1]
+            speed_bonus = self.speed_coef * velocity.unsqueeze(1)     # (N, 1)
+            rewards = torch.where(wins, rewards + speed_bonus, rewards)
         # Only return rewards for newly-done envs; zero otherwise
         rewards = rewards * newly_done.unsqueeze(1).float()
         self.rewards = torch.where(newly_done.unsqueeze(1), rewards, self.rewards)

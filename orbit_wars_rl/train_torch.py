@@ -822,8 +822,12 @@ def train(args):
         # Pool-opponent slots have train_mask=False — drop them so PPO only
         # learns from samples where current model picked the action.
         TN = rollout_T * N * P
+        # Keys with shape (T, N) instead of (T, N, P, ...) — skip standard flatten
+        _PER_ENV_KEYS = {"planet_ships_snap"}
         flat = {}
         for k, v in storage.items():
+            if k in _PER_ENV_KEYS:
+                continue  # handled separately (not per-player)
             flat[k] = v.reshape(TN, *v.shape[3:])
         flat_adv  = advantages.reshape(TN)
         flat_ret  = returns.reshape(TN)
@@ -1173,13 +1177,13 @@ if __name__ == "__main__":
                              "HOLDING planets, complements --expansion-coef's GRAB. "
                              "0 = off. rev15 defense lever; suggested start: 0.02.")
     parser.add_argument("--early-capture-coef", type=float, default=0.0,
-                        help="Per-step bonus for each net new planet owned above starting count, "
-                             "decayed linearly to 0 over --early-capture-steps. "
-                             "Gives gradient signal for the opening probe the terminal reward cannot see. "
-                             "Coeff math: cumulative bonus per step-3 capture ≈ 97*0.48*coeff; "
-                             "keep ≤0.15 of terminal win → range 0.002-0.003. 0 = off.")
-    parser.add_argument("--early-capture-steps", type=int, default=100,
-                        help="Step at which the early-capture decay reaches zero. Default 100.")
+                        help="Spike reward for CAPTURING a planet (delta in owned count), decayed "
+                             "linearly to 0 over --early-capture-steps (default 400). Active through "
+                             "mid-game so GAE 18-step horizon can see captures throughout, not just "
+                             "the opening. Coeff math: one capture event ≈ coeff × decay_at_t; "
+                             "keep ≤10%% of terminal win → range 0.05-0.10. 0 = off.")
+    parser.add_argument("--early-capture-steps", type=int, default=400,
+                        help="Step at which the delta-capture decay reaches zero. Default 400.")
     parser.add_argument("--handicap-frac", type=float, default=0.0,
                         help="Fraction of games where player 0 starts with --handicap-ships "
                              "instead of the normal 10. Forces exposure to losing positions "

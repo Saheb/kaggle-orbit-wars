@@ -87,6 +87,20 @@ Target behavior: fire ≤ step 5 with ~13 ships, then fire continuously from eac
 
 ---
 
+## Multi-source firing (srcs_multi) targets
+
+How many planets fire simultaneously per step:
+
+| Metric | kovi wins | Shun_PI wins | Rev24@5M (carpet-bomb) |
+|--------|-----------|--------------|------------------------|
+| mean srcs/fire step | **1.51** | **1.65** | ~6.84 |
+| p90 srcs | **2.7** | **3.0** | carpet-bomb |
+| max srcs ever | **4.7** | **4.0** | 6.84+ |
+
+Rank1 fires from 1-2 sources on average. They occasionally coordinate 3-4 sources simultaneously at key moments, but never sustain it. The srcs_multi=4.0 warning threshold in training is well-calibrated to this data — above 4 sustained means degenerate multi-source spray, not tactical coordination.
+
+---
+
 ## Shaped reward design — coefficient sanity check
 
 Proposed reward: `+coeff * max(0, 1 - step/100)` for each planet owned above starting count, applied per step.

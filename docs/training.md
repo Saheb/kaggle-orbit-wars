@@ -26,7 +26,10 @@
 | **Rev20b** | rollout=64, **141208-teacher BC** warmstart, entropy=0.02 | Correct BC prior: selective aggression from RL teacher | 1M: Zach 14.5%. 2M: Zach 19.5%, vs-rev15-2M 4.7%, vs-141208 1.6%. BC prior erodes by 2M. | Self-play erases BC prior; still far below rev15-2M | — |
 | **Rev21** | rollout=64, heuristic BC, entropy=0.05 | Higher entropy + wrong BC | Same failure as Rev20 — 0.8% vs rev15-2M at 1M | Wrong BC + high entropy = random spray | — |
 | **Rev21b** | rollout=64, **141208-teacher BC**, entropy=0.05 | Higher entropy to resist passive collapse | 2M: Zach 16.8%, vs-rev15-2M 5.1% — slightly worse than Rev20b | Entropy=0.05 worse than 0.02 with 141208-BC | — |
-| **Rev22** | `--early-capture-coef 0.0025` (time-decayed planet bonus, decay over 100 steps), resume **rev15-2M** | Terminal reward blind to early expansion timing; shaped reward gives gradient at step 3 | *pending* | *pending* | *pending* |
+| **Rev22** | `--early-capture-coef 0.0025` (cumulative holding, 100-step decay), resume rev15-2M | Terminal reward blind to early expansion timing | fire[0] dropped 0.32→0.19-0.21 at 1M. Holding reward wrong design: symmetric self-play cancels advantages, wrong 100-step window | fire[0] below baseline | — |
+| **Rev23** | `--gae-lambda 0.99` + delta-capture(0.07/400) + resume rev15-2M | Isolate horizon fix; rev15-2M critic stale under λ=0.95, expected instability | Critic shock confirmed: avgfleet ballooned 26→100+, fire[0] degraded to 0.23-0.25 at 3M. Still running on GCP | Still running (GCP) | — |
+| **Rev24** | Same horizon fix + **rank1 BC warmstart** (fresh critic) | Fresh critic eliminates shock; delta-capture should give early-expansion gradient | fire[0] rose to 0.42-0.52 — most aggressive Phase 1 ever. BUT carpet-bomb collapse: srcs_multi hit 6.84 at 5.7M. 5M Zach=28.9% (best BC-warmed run, but degrading). **Root cause:** delta-capture rewards ALL simultaneous captures, incentivising carpet-bomb. | srcs_multi=6.84, carpet-bomb | — |
+| **Rev25** | Same as rev24 but delta-capture **capped at 1 capture/step** (prevents carpet-bomb incentive) | Remove degenerate multi-capture reward; preserve single-probe gradient | *pending* | *pending* | *pending* |
 
 **What we know:**
 - Every run peaks at ~1M steps then passive drift sets in
