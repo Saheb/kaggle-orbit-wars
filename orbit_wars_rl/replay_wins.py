@@ -1,6 +1,10 @@
 """
-Run a small number of games vs an opponent and save HTML replays for wins.
-Useful for diagnosing whether wins are meaningful or accidental.
+Run a small number of games vs an opponent and save HTML replays + analysis.
+
+For each game saves:
+  - HTML replay (with title showing which color you are)
+  - JSON with planet-lead trajectory per step
+  - PNG plot of planet lead over game steps
 
 Usage:
   python3 orbit_wars_rl/replay_wins.py \
@@ -14,12 +18,74 @@ import argparse, json, os, sys
 import torch
 from pathlib import Path
 
-# Allow running from repo root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from orbit_wars_rl.eval import load_checkpoint, build_agent_fn
 from orbit_wars_rl.config import Config
 from orbit_wars_rl.model import EntityTransformer
+
+# seat 0 = blue, seat 1 = orange (orbit wars renderer convention)
+SEAT_COLOR = {0: "BLUE", 1: "ORANGE"}
+
+
+def extract_planet_lead(env_steps, my_seat):
+    """Return list of (step, my_planets, opp_planets, lead) across all game steps."""
+    trajectory = []
+    for i, step_obs in enumerate(env_steps):
+        obs = step_obs[my_seat].observation
+        if obs is None:
+            continue
+        my_planets = sum(1 for p in obs.planets if p[1] == my_seat)
+        opp_planets = sum(1 for p in obs.planets if p[1] == (1 - my_seat))
+        trajectory.append({
+            "step": i,
+            "my_planets": my_planets,
+            "opp_planets": opp_planets,
+            "lead": my_planets - opp_planets,
+        })
+    return trajectory
+
+
+def plot_planet_lead(trajectory, label, output_path, is_win):
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        steps = [t["step"] for t in trajectory]
+        lead  = [t["lead"] for t in trajectory]
+        mine  = [t["my_planets"] for t in trajectory]
+        opp   = [t["opp_planets"] for t in trajectory]
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+        outcome = "WIN" if is_win else "LOSS"
+        fig.suptitle(f"{label} — {outcome}", fontsize=12)
+
+        ax1.plot(steps, mine, color="steelblue", label="My planets", linewidth=1.5)
+        ax1.plot(steps, opp,  color="tomato",    label="Opp planets", linewidth=1.5)
+        ax1.set_ylabel("Planet count")
+        ax1.legend(fontsize=9)
+        ax1.grid(True, alpha=0.3)
+
+        ax2.fill_between(steps, lead, 0,
+                         where=[l >= 0 for l in lead], color="steelblue", alpha=0.4, label="Ahead")
+        ax2.fill_between(steps, lead, 0,
+                         where=[l < 0 for l in lead],  color="tomato",    alpha=0.4, label="Behind")
+        ax2.plot(steps, lead, color="black", linewidth=1.0)
+        ax2.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+        ax2.axvline(400, color="orange", linewidth=1.0, linestyle=":", label="Capture reward cliff (400)")
+        ax2.set_ylabel("Planet lead (me - opp)")
+        ax2.set_xlabel("Game step")
+        ax2.legend(fontsize=9)
+        ax2.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=130)
+        plt.close()
+        return True
+    except Exception as e:
+        print(f"    (plot failed: {e})")
+        return False
 
 
 def run_replay(checkpoint, opponent_path, seeds, output_dir, target_decode=False):
@@ -40,6 +106,7 @@ def run_replay(checkpoint, opponent_path, seeds, output_dir, target_decode=False
     wins, losses = [], []
 
     for seat in [0, 1]:
+        color = SEAT_COLOR[seat]
         for seed in seeds:
             agents = [agent_fn, opponent_path] if seat == 0 else [opponent_path, agent_fn]
             env = make("orbit_wars", configuration={"seed": seed}, debug=False)
@@ -47,32 +114,53 @@ def run_replay(checkpoint, opponent_path, seeds, output_dir, target_decode=False
             final = env.steps[-1]
             rewards = [s.reward for s in final]
 
-            my_idx = seat
-            my_reward = rewards[my_idx] if rewards[my_idx] is not None else 0.0
-            opp_reward = rewards[1 - my_idx] if rewards[1 - my_idx] is not None else 0.0
+            my_reward  = rewards[seat]       if rewards[seat]       is not None else 0.0
+            opp_reward = rewards[1 - seat]   if rewards[1 - seat]   is not None else 0.0
             is_win = my_reward > opp_reward
+            n_steps = len(env.steps)
 
-            result = {
-                "seed": seed, "seat": seat, "win": is_win,
-                "my_reward": my_reward, "opp_reward": opp_reward,
-                "steps": len(env.steps),
-            }
+            label = f"seed{seed}_seat{seat}_{color}_{'WIN' if is_win else 'LOSS'}"
+            print(f"  {label}: my={my_reward:+.3f} opp={opp_reward:+.3f} steps={n_steps}")
 
-            label = f"seed{seed}_seat{seat}_{'WIN' if is_win else 'LOSS'}"
-            print(f"  {label}: my={my_reward:+.3f} opp={opp_reward:+.3f} steps={len(env.steps)}")
+            # Planet lead trajectory
+            trajectory = extract_planet_lead(env.steps, seat)
+            final_lead = trajectory[-1]["lead"] if trajectory else 0
 
-            # Save HTML replay
+            # HTML replay — inject banner via script (runs after Preact mounts)
             html = env.render(mode="html")
+            html = html.replace("<title>", f"<title>[You={color} seat{seat}] ", 1)
+            bg = "#1a5276" if color == "BLUE" else "#7d3c00"
+            border = "#3498db" if color == "BLUE" else "#e67e22"
+            banner_script = f"""
+<script>
+window.addEventListener('load', function() {{
+  var b = document.createElement('div');
+  b.innerHTML = 'YOU = <b>{color}</b> (seat {seat}) &nbsp;|&nbsp; Seed {seed} &nbsp;|&nbsp; {"WIN ✓" if is_win else "LOSS ✗"} in {n_steps} steps &nbsp;|&nbsp; Final planet lead: {final_lead:+d}';
+  b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;background:{bg};color:white;padding:7px 14px;font-size:14px;font-family:monospace;border-bottom:3px solid {border};pointer-events:none;';
+  document.body.appendChild(b);
+}});
+</script>"""
+            html = html.replace("</body>", banner_script + "</body>", 1)
             html_path = os.path.join(output_dir, f"{label}.html")
             with open(html_path, "w") as f:
                 f.write(html)
 
-            # Save raw episode JSON for analysis
-            episode = [{"step": i, "obs": str(s[0].observation)[:500]}
-                       for i, s in enumerate(env.steps[::10])]  # every 10 steps
+            # JSON with trajectory
             json_path = os.path.join(output_dir, f"{label}.json")
             with open(json_path, "w") as f:
-                json.dump({"result": result, "sampled_steps": episode}, f, indent=2)
+                json.dump({
+                    "result": {
+                        "seed": seed, "seat": seat, "color": color,
+                        "win": is_win, "steps": n_steps,
+                        "my_reward": my_reward, "opp_reward": opp_reward,
+                        "final_planet_lead": final_lead,
+                    },
+                    "planet_trajectory": trajectory,
+                }, f, indent=2)
+
+            # Planet lead plot
+            plot_path = os.path.join(output_dir, f"{label}_planet_lead.png")
+            plot_planet_lead(trajectory, label, plot_path, is_win)
 
             if is_win:
                 wins.append(label)

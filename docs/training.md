@@ -33,28 +33,32 @@
 | **Rev26** | Same as rev25 + **speed_coef=0.5** (time-to-victory velocity bonus: `reward_win += ((500-T)/500)*0.5`) | Pressure agent to close games fast, reduce timeout games | **New failure: ship-bin-0 collapse.** 51-66% of fires argmax to bin 0 (1 ship) from 500K steps onwards. 1-ship fleets can't capture neutrals → attacks useless. p90fleet reached 179 at 2M (best ever!) but via artificial mechanism (ships drained, not games decisive). avgfleet=76 at 2M. fire[0]=0.20-0.28. 29 ship-bin-0 collapse warnings. No external opponents in pool (pure self-play Nash). | ship-bin-0 collapse + not scoring real wins | — |
 | **Rev27** | Drop speed_coef (0→0), `--entropy-coef-ships 0.02→0.05`; rank1 BC warmstart | Fix ship-bin-0 collapse from rev26; keep delta-capture+λ=0.99 architecture | Same failure: iters 1-7 r_p0=+0.000 (no terminals), delta-capture fires ~zero times. BC prior gives brief fire[0]=0.22 at iter 9 then erodes to 0.12-0.14 by iter 13. Identical pattern to all previous runs. | Same passive Nash; 0.07 coeff too small (~65x below terminal signal) | — |
 | **Rev28** | `--early-capture-coef 0.07→0.30` (4x); keep entropy-ships=0.05, no speed-coef; rank1 BC warmstart | 0.30 coeff makes step-0 capture = +0.30 vs +1.0 win — large enough to dominate sparse-game early-training gradient | **Breakthrough.** Slow start (0.8% at 1M, 8.2% at 3M) then takeoff after 6M: Zach 39.5% at 7M → 43.4% at 16M → 48.4% at 26M → **58.2% at 32M** (H100 10M checkpoint). Wins are decisive (85-110 step eliminations), not timeout luck. rewNZ=0.50+ (dense rewards). meanshipbin climbing to 18-19. Still running on H100 (rollout=64, 2048 envs) targeting 100M. Key insight: run needed 6M+ steps to develop game sense — same slow-burn pattern as 62M run that scored 894 LB. | **Best Phase 1 result ever. Still climbing.** | TBD |
-| **Rev29** | Same as Rev28 but **rollout=512, num-envs=256** (same total transitions=262K). Resume from Rev28 10M checkpoint. | Test if full-game credit assignment fixes value function horizon blindspot — rollout=512 covers full game, terminal reward at step 499 appears directly in GAE target at step 0, no 8-hop bootstrapping chain | **Strong start.** 1M: Zach 57.8% (vs rev28's 46.9% at same step — +11pp). V_loss stable 0.44-0.52 (no shock). ship0≈0.00, meanshipbin=19-21. SPS=~1,900 (slower than rollout=64 due to longer rollout). 4M: Zach 52.0% (oscillation normal). Parallel run alongside Rev28 on separate H100. | *running* | TBD |
+| **Rev29** | Same as Rev28 but **rollout=512, num-envs=256** (same total transitions=262K). Resume from Rev28 10M checkpoint. | Test if full-game credit assignment fixes value function horizon blindspot | Declined: 1M=57.8% → 4M=52.0% → plateau ~52%. Pool mismatch (40 strong opponents from rollout=64 run), lower SPS (1,750), 256 envs hurt diversity. Not a clean test of rollout=512 alone. Killed at 13M. | Pool mismatch + low SPS confounded the test | — |
+| **Rev30** | **Symmetric capture reward** (`planet_delta = clamp(-1,1)` — losses penalised = no planet-tennis arbitrage) + **exponential decay + 0.10 floor** (no hard cliff at 400) + **expansion_coef 0.01→0.03**. Resume from Rev28 27M (77.3% peak). | Fix late-game gradient desert: symmetric reward eliminates farming exploit so capture signal can run to step 500; floor keeps gradient alive on rotating boards (seed6462 went 473-step timeout → 81-step decisive win). **Halved LR to 0.00005 at 12M** when clip_frac hit 0.28. | **New all-time Phase 1 record.** Peak at 11M: **84.8% vs Zach**. Submitted. loss-seed isolation test: 15/21 at peak. seed6462 seat0 fixed (473→81 steps). Remaining failures: `low_prod__mostly_static` boards and seat1 complacency (agent goes ahead at step 100, stops firing, Zach overtakes). | Peak at 11M then drifts 82-83%. Submitted 11M. | **TBD (submitted)** |
+| **Rev30b** | Resume Rev30 from 17M checkpoint (83.2% vs Zach, 16/21 loss seeds). **Halve LR again: 0.00005→0.000025**. Spot H100 on Jarvis (₹112/hr). | Test if second LR halve stabilises and pushes past 84.8% peak — worked first time (77%→84.8%), might work again. 17M has better loss-seed score (16/21) than 11M peak (15/21). | *running* | *running* | TBD |
 
 **What we know:**
-- Rev28 cracked the passive Nash: slow burn 0-6M then continuous improvement. Key = 0.30 capture coeff providing dense gradient + long training
-- rollout=64 requires dense rewards to compensate for 8-hop bootstrapping chain; rollout=512 may not need them
-- HB panel is the **wrong metric** — we beat HB by being passive (low fire rate wins vs HB)
+- Rev28→Rev30 breakthrough: **0.30 capture coeff + symmetric reward + halved LR = 84.8% vs Zach** (new Phase 1 record, matches Phase 0 quality)
+- Halving LR when clip_frac > 0.25 is actionable, not just a warning — it unlocked +7.5pp improvement
+- Symmetric capture reward fixes late-game gradient desert: planet losses now penalised, farming impossible, signal runs full game
+- Remaining ceiling: "complacency failure" — agent leads on planets at step 100, stops firing, Zach overtakes. Value function doesn't model compound planet production advantage
+- rollout=64 requires dense rewards to compensate for 8-hop bootstrapping chain
 - Use Zach as primary proxy; LB score is ground truth
-- Export requires `--target-decode` for Phase 1; all pre-fix submissions scored ~87
+- Export requires `--target-decode` for Phase 1
 
-**LB scores:** 141208 (old arch) = **894** | rev10d 1M = **772** | rev7 1M = **750**
+**LB scores:** 141208 (old arch) = **894** | Rev30 11M = **TBD (submitted)** | Rev28 27M = TBD | rev15 2M = **796** | rev10d 1M = **772**
 **Target:** > 894 to beat current best. Top 100 needs ~1153.
 
-**Rev28 panel progression (vs Zach):** 1M=0.8% → 3M=8.2% → 7M=39.5% → 16M=43.4% → 26M=48.4% → **32M=58.2%** (still climbing)
-**Rev29 panel progression (vs Zach, rollout=512):** 1M=57.8% → 4M=52.0% (still early)
+**Rev28 panel (vs Zach):** 1M=0.8% → 7M=39.5% → 32M=58.2% → **48M=77.3%** (peak, submitted)
+**Rev30 panel (vs Zach):** 1M=80.5% → 2M=81.3% → **11M=84.8%** (peak, submitted) → 17M=83.2%
 
 ---
 
-## Current State (2026-06-03)
+## Current State (2026-06-04)
 
-**Active runs (two parallel H100s on JarvisLabs):**
+**Active run:**
 
-**Rev28** — rollout=64, 2048 envs, H100 (machine 420526, `217.18.55.39`)
+**Rev30b** — resume from Rev30 17M, LR=0.000025, spot H100 Jarvis (machine 420801, `217.18.55.22`)
 - Resume: Rev28 22M checkpoint (=28M overall from scratch)
 - Total target: 100M steps. Currently ~32M overall.
 - Best panel: **58.2% vs Zach at 32M** and still climbing

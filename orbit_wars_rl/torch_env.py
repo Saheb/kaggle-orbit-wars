@@ -1036,30 +1036,36 @@ class VecTorchEnv:
                 terminal_rewards = terminal_rewards - self.defense_coef * prod_lost
         # Delta-capture shaping: time-decayed reward for CAPTURING planets (delta in owned
         # count), NOT for holding them. Fires as a spike when a planet changes hands.
-        # Decay window: early_capture_steps (default 400) — stays active through mid-game
-        # so the 18-step GAE horizon can see capture events throughout the game, not just
-        # the opening. Zero-sum (relative) to preserve Nash equilibrium at the terminal.
+        # Rev30 capture reward: symmetric delta + exponential decay with permanent floor.
         #
-        # Coeff math (delta, not cumulative): one capture event at step t gives
-        #   coeff × (1 - t/400) ≈ coeff per event.
-        #   Keep ≤ 10% of terminal win → coeff 0.05–0.10.
+        # Key changes from Rev28:
+        #   1. SYMMETRIC: planet_delta tracks both gains (+) and losses (-), clamped to [-1, 1].
+        #      Losing a planet now costs as much as gaining one. This eliminates the "planet
+        #      tennis" arbitrage in self-play where both agents trade planets for free reward.
+        #      With losses penalised, trading is net-zero → farming is structurally impossible.
+        #
+        #   2. EXPONENTIAL DECAY + FLOOR: replaces the hard linear cliff at step 400.
+        #      decay = exp(-2.5 × t/500) + 0.10 → stabilises at ~10% of initial coeff.
+        #      At step 450: ~12% of coeff survives. Keeps a navigational beacon alive on
+        #      rotating boards (e.g. seed6462) when orbital alignment opens at step 430.
+        #      Never hits absolute zero, so the late-game gradient desert is eliminated.
+        #
+        #   early_capture_steps parameter is now unused (kept for CLI compat), decay runs
+        #   to episode end.
         if self.early_capture_coef != 0.0:
             ec_owner = self.planets[:, :, 1].long()  # (N, P)
-            decay = (1.0 - self.step_count.float() / self.early_capture_steps).clamp(min=0.0)  # (N,)
+            t = self.step_count.float()  # (N,)
+            # Exponential decay with 10% permanent floor — never hits zero
+            decay = torch.exp(-2.5 * t / self.episode_steps) + 0.10  # (N,)
             owned = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
             for pl in range(self.num_players):
                 owned[:, pl] = ((ec_owner == pl) & self.planet_alive).float().sum(dim=1)
-            # Delta: how many planets each player gained this step vs prev.
-            # CAPPED AT 1 per player per step — prevents carpet-bomb incentive where
-            # firing from all planets simultaneously earns N×reward. One capture = one
-            # reward unit regardless of how many planets fired.
-            owned_delta = (owned - self.prev_owned).clamp(min=0.0, max=1.0)
-            if self.num_players == 2:
-                d = owned_delta[:, 0] - owned_delta[:, 1]
-                ec_rewards = torch.stack([d, -d], dim=1)
-            else:
-                others = owned_delta.sum(dim=1, keepdim=True) - owned_delta
-                ec_rewards = owned_delta - others / max(self.num_players - 1, 1)
+            # Symmetric delta: gains positive, losses negative. Capped at ±1/step.
+            planet_delta = (owned - self.prev_owned).clamp(min=-1.0, max=1.0)
+            # Each player's reward = their net delta (no additional zero-sum netting;
+            # symmetric delta is already self-correcting: capturing from opponent gives
+            # +1 to attacker and -1 to defender automatically).
+            ec_rewards = planet_delta
             terminal_rewards = terminal_rewards + self.early_capture_coef * decay.unsqueeze(1) * ec_rewards
             self.prev_owned = owned
         # 12. Auto-reset done envs in-place — must come AFTER capturing rewards

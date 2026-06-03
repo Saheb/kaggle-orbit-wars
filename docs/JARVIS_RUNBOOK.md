@@ -152,6 +152,13 @@ python3 orbit_wars_rl/train_torch.py ...   # ✓ correct
 # NOT: cd /home/orbit_wars_rl && python3 train_torch.py  (imports break)
 ```
 
+**Always create this symlink at the top of every training script** — checkpoints save to `/home/checkpoints/` (cwd-relative) but watchers expect `/home/orbit_wars_rl/checkpoints/`:
+```bash
+mkdir -p /home/checkpoints
+ln -sfn /home/checkpoints /home/orbit_wars_rl/checkpoints
+```
+Without this, the local watcher syncs from the wrong path and checkpoints/panels never appear locally.
+
 **Eval** uses absolute path and also needs `/home` as cwd:
 ```bash
 cd /home
