@@ -35,7 +35,7 @@
 | **Rev28** | `--early-capture-coef 0.07→0.30` (4x); keep entropy-ships=0.05, no speed-coef; rank1 BC warmstart | 0.30 coeff makes step-0 capture = +0.30 vs +1.0 win — large enough to dominate sparse-game early-training gradient | **Breakthrough.** Slow start (0.8% at 1M, 8.2% at 3M) then takeoff after 6M: Zach 39.5% at 7M → 43.4% at 16M → 48.4% at 26M → **58.2% at 32M** (H100 10M checkpoint). Wins are decisive (85-110 step eliminations), not timeout luck. rewNZ=0.50+ (dense rewards). meanshipbin climbing to 18-19. Still running on H100 (rollout=64, 2048 envs) targeting 100M. Key insight: run needed 6M+ steps to develop game sense — same slow-burn pattern as 62M run that scored 894 LB. | **Best Phase 1 result ever. Still climbing.** | TBD |
 | **Rev29** | Same as Rev28 but **rollout=512, num-envs=256** (same total transitions=262K). Resume from Rev28 10M checkpoint. | Test if full-game credit assignment fixes value function horizon blindspot | Declined: 1M=57.8% → 4M=52.0% → plateau ~52%. Pool mismatch (40 strong opponents from rollout=64 run), lower SPS (1,750), 256 envs hurt diversity. Not a clean test of rollout=512 alone. Killed at 13M. | Pool mismatch + low SPS confounded the test | — |
 | **Rev30** | **Symmetric capture reward** (`planet_delta = clamp(-1,1)` — losses penalised = no planet-tennis arbitrage) + **exponential decay + 0.10 floor** (no hard cliff at 400) + **expansion_coef 0.01→0.03**. Resume from Rev28 27M (77.3% peak). | Fix late-game gradient desert: symmetric reward eliminates farming exploit so capture signal can run to step 500; floor keeps gradient alive on rotating boards (seed6462 went 473-step timeout → 81-step decisive win). **Halved LR to 0.00005 at 12M** when clip_frac hit 0.28. | **New all-time Phase 1 record.** Peak at 11M: **84.8% vs Zach**. Submitted. loss-seed isolation test: 15/21 at peak. seed6462 seat0 fixed (473→81 steps). Remaining failures: `low_prod__mostly_static` boards and seat1 complacency (agent goes ahead at step 100, stops firing, Zach overtakes). | Peak at 11M then drifts 82-83%. Submitted 11M. | **TBD (submitted)** |
-| **Rev30b** | Resume Rev30 from 17M checkpoint (83.2% vs Zach, 16/21 loss seeds). **Halve LR again: 0.00005→0.000025**. Spot H100 on Jarvis (₹112/hr). | Test if second LR halve stabilises and pushes past 84.8% peak — worked first time (77%→84.8%), might work again. 17M has better loss-seed score (16/21) than 11M peak (15/21). | *running* | *running* | TBD |
+| **Rev30b** | Resume Rev30 from 17M checkpoint (83.2% vs Zach, 16/21 loss seeds). **Halve LR again: 0.00005→0.000025**. Spot H100 on Jarvis (₹112/hr). | Test if second LR halve stabilises and pushes past 84.8% peak | **New record: 85.2% vs Zach at 4M** (218/256). clip_frac stable at 0.23. 7M checkpoints saved. Stopped at 7.7M. Key finding from LB episode analysis: opening paralysis (FireP=0.001 at step 0, entropy=0.0003 — confident no-fire) costs LB points vs aggressive openers. Zach panel doesn't catch this because Zach also waits. Rev31 will fix opening with First Strike bonus. | Clip_frac stable, new record | **TBD (to submit)** |
 
 **What we know:**
 - Rev28→Rev30 breakthrough: **0.30 capture coeff + symmetric reward + halved LR = 84.8% vs Zach** (new Phase 1 record, matches Phase 0 quality)
@@ -58,7 +58,9 @@
 
 **Active run:**
 
-**Rev30b** — resume from Rev30 17M, LR=0.000025, spot H100 Jarvis (machine 420801, `217.18.55.22`)
+**No active runs.** Planning Rev31 (First Strike opening bonus to fix step-0 paralysis).
+
+**Rev30b** completed: peak 85.2% vs Zach at 4M (LR=0.000025). Best checkpoint: `torch_step_4194304_rev30b_20260603_143644.pt`
 - Resume: Rev28 22M checkpoint (=28M overall from scratch)
 - Total target: 100M steps. Currently ~32M overall.
 - Best panel: **58.2% vs Zach at 32M** and still climbing
