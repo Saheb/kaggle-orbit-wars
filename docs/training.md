@@ -29,26 +29,42 @@
 | **Rev22** | `--early-capture-coef 0.0025` (cumulative holding, 100-step decay), resume rev15-2M | Terminal reward blind to early expansion timing | fire[0] dropped 0.32→0.19-0.21 at 1M. Holding reward wrong design: symmetric self-play cancels advantages, wrong 100-step window | fire[0] below baseline | — |
 | **Rev23** | `--gae-lambda 0.99` + delta-capture(0.07/400) + resume rev15-2M | Isolate horizon fix; rev15-2M critic stale under λ=0.95, expected instability | Critic shock confirmed: avgfleet ballooned 26→100+, fire[0] degraded to 0.23-0.25 at 3M. Still running on GCP | Still running (GCP) | — |
 | **Rev24** | Same horizon fix + **rank1 BC warmstart** (fresh critic) | Fresh critic eliminates shock; delta-capture should give early-expansion gradient | fire[0] rose to 0.42-0.52 — most aggressive Phase 1 ever. BUT carpet-bomb collapse: srcs_multi hit 6.84 at 5.7M. 5M Zach=28.9% (best BC-warmed run, but degrading). **Root cause:** delta-capture rewards ALL simultaneous captures, incentivising carpet-bomb. | srcs_multi=6.84, carpet-bomb | — |
-| **Rev25** | Same as rev24 but delta-capture **capped at 1 capture/step** (prevents carpet-bomb incentive) | Remove degenerate multi-capture reward; preserve single-probe gradient | *pending* | *pending* | *pending* |
+| **Rev25** | Same as rev24 but delta-capture **capped at 1 capture/step** (prevents carpet-bomb incentive) | Remove degenerate multi-capture reward; preserve single-probe gradient | p90fleet still 200-370 throughout. fire[0]=0.19-0.25. No qualitative improvement over rev24 post-fix. Games still passive. | Still passive; no improvement over rev24 at matching steps | — |
+| **Rev26** | Same as rev25 + **speed_coef=0.5** (time-to-victory velocity bonus: `reward_win += ((500-T)/500)*0.5`) | Pressure agent to close games fast, reduce timeout games | **New failure: ship-bin-0 collapse.** 51-66% of fires argmax to bin 0 (1 ship) from 500K steps onwards. 1-ship fleets can't capture neutrals → attacks useless. p90fleet reached 179 at 2M (best ever!) but via artificial mechanism (ships drained, not games decisive). avgfleet=76 at 2M. fire[0]=0.20-0.28. 29 ship-bin-0 collapse warnings. No external opponents in pool (pure self-play Nash). | ship-bin-0 collapse + not scoring real wins | — |
+| **Rev27** | Drop speed_coef (0→0), `--entropy-coef-ships 0.02→0.05`; rank1 BC warmstart | Fix ship-bin-0 collapse from rev26; keep delta-capture+λ=0.99 architecture | Same failure: iters 1-7 r_p0=+0.000 (no terminals), delta-capture fires ~zero times. BC prior gives brief fire[0]=0.22 at iter 9 then erodes to 0.12-0.14 by iter 13. Identical pattern to all previous runs. | Same passive Nash; 0.07 coeff too small (~65x below terminal signal) | — |
+| **Rev28** | `--early-capture-coef 0.07→0.30` (4x); keep entropy-ships=0.05, no speed-coef; rank1 BC warmstart | 0.30 coeff makes step-0 capture = +0.30 vs +1.0 win — large enough to dominate sparse-game early-training gradient | **Breakthrough.** Slow start (0.8% at 1M, 8.2% at 3M) then takeoff after 6M: Zach 39.5% at 7M → 43.4% at 16M → 48.4% at 26M → **58.2% at 32M** (H100 10M checkpoint). Wins are decisive (85-110 step eliminations), not timeout luck. rewNZ=0.50+ (dense rewards). meanshipbin climbing to 18-19. Still running on H100 (rollout=64, 2048 envs) targeting 100M. Key insight: run needed 6M+ steps to develop game sense — same slow-burn pattern as 62M run that scored 894 LB. | **Best Phase 1 result ever. Still climbing.** | TBD |
+| **Rev29** | Same as Rev28 but **rollout=512, num-envs=256** (same total transitions=262K). Resume from Rev28 10M checkpoint. | Test if full-game credit assignment fixes value function horizon blindspot — rollout=512 covers full game, terminal reward at step 499 appears directly in GAE target at step 0, no 8-hop bootstrapping chain | **Strong start.** 1M: Zach 57.8% (vs rev28's 46.9% at same step — +11pp). V_loss stable 0.44-0.52 (no shock). ship0≈0.00, meanshipbin=19-21. SPS=~1,900 (slower than rollout=64 due to longer rollout). 4M: Zach 52.0% (oscillation normal). Parallel run alongside Rev28 on separate H100. | *running* | TBD |
 
 **What we know:**
-- Every run peaks at ~1M steps then passive drift sets in
+- Rev28 cracked the passive Nash: slow burn 0-6M then continuous improvement. Key = 0.30 capture coeff providing dense gradient + long training
+- rollout=64 requires dense rewards to compensate for 8-hop bootstrapping chain; rollout=512 may not need them
 - HB panel is the **wrong metric** — we beat HB by being passive (low fire rate wins vs HB)
-- Use Zach and Suneet as proxies; LB score is ground truth
+- Use Zach as primary proxy; LB score is ground truth
 - Export requires `--target-decode` for Phase 1; all pre-fix submissions scored ~87
 
 **LB scores:** 141208 (old arch) = **894** | rev10d 1M = **772** | rev7 1M = **750**
 **Target:** > 894 to beat current best. Top 100 needs ~1153.
 
+**Rev28 panel progression (vs Zach):** 1M=0.8% → 3M=8.2% → 7M=39.5% → 16M=43.4% → 26M=48.4% → **32M=58.2%** (still climbing)
+**Rev29 panel progression (vs Zach, rollout=512):** 1M=57.8% → 4M=52.0% (still early)
+
 ---
 
-## Current State (2026-05-31)
+## Current State (2026-06-03)
 
-**Active run:** None — Rev11 killed at 6M (2026-05-31)
-- Pure self-play (no external opponents), pool-max-size=40, 10M step target
-- Kill threshold lowered: fire[0] < 0.20 (allow passive phases)
-- 1M checkpoint: fire[0]=0.32, avgfleet=78.1 — comparable to rev7 1M
-- Behaviour post-1M: avgfleet oscillating 78-85, NOT monotonically climbing like previous runs
+**Active runs (two parallel H100s on JarvisLabs):**
+
+**Rev28** — rollout=64, 2048 envs, H100 (machine 420526, `217.18.55.39`)
+- Resume: Rev28 22M checkpoint (=28M overall from scratch)
+- Total target: 100M steps. Currently ~32M overall.
+- Best panel: **58.2% vs Zach at 32M** and still climbing
+- Panel watcher: Zach + HB only (Suneet removed), auto-runs on each 1M checkpoint
+
+**Rev29** — rollout=512, 256 envs, H100 (machine 420547, `217.18.55.95`)
+- Resume: Rev28 10M checkpoint (=32M overall)
+- Hypothesis: full-game credit assignment without 8-hop bootstrapping chain
+- Early panels: 1M=57.8% (+11pp vs rev28 at same step), 4M=52% (oscillating)
+- V_loss stable (no critic shock), ship0≈0, meanshipbin=19-21
 - clip_frac=0.213 still drifting down (healthy)
 - **Tomorrow (2026-06-01):** Submit rev11 2M as slot 1. Then consider rev12 direction.
 

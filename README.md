@@ -10,6 +10,7 @@ Self-play RL agent for the [Orbit Wars Kaggle competition](https://www.kaggle.co
 | `docs/commands.md` | Copy-paste commands for eval, monitoring, EC2, launch |
 | `docs/aws_runbook.md` | EC2 setup, hyperparameter notes, gotchas |
 | `docs/GCP_RUNBOOK.md` | GCP fallback (for when AWS credits run out) |
+| `docs/JARVIS_RUNBOOK.md` | Jarvis Labs GPU setup, CLI commands, lifecycle |
 | `CLAUDE.md` | Agent operating rules (hard constraints for Claude Code) |
 | `orbit_wars_rl/` | All active RL code |
 | `opponents/` | Eval opponents (HB, Zach, Suneet) |
