@@ -189,6 +189,42 @@ ps aux | grep "run_panel_eval_watcher" | grep -v grep | awk '{print $2}' | xargs
 ps aux | grep "eval.py" | grep -v grep | grep -v "opponents/" | awk '{print $2}' | xargs kill
 ```
 
+### Long local jobs: use `tmux`, not plain `nohup ... &`
+
+For long-running local Python jobs such as BC training, prefer a dedicated
+`tmux` session. On this machine, detached shell jobs can disappear without
+leaving a useful log, while `tmux` keeps a real terminal attached to the
+process.
+
+```bash
+# Start a persistent tmux session for BC training
+tmux new-session -d -s bc_isaiah_hober_5k \
+  'cd /Users/saheb/home/kaggle-orbit-wars && \
+   exec stdbuf -oL -eL orbit_wars_rl/.venv/bin/python -u orbit_wars_rl/bc.py \
+     --samples /tmp/targeted_bc/isaiah_hober_pressure_merged.pkl \
+     --steps 5000 \
+     --save orbit_wars_rl/checkpoints/bc_isaiah_hober_pressure_5k.pt \
+     2>&1 | tee /tmp/targeted_bc/bc_isaiah_hober_pressure_5k.log'
+
+# Confirm session exists
+tmux list-sessions | grep bc_isaiah_hober_5k
+
+# Attach to the live job
+tmux attach -t bc_isaiah_hober_5k
+
+# Read the live log without attaching
+tail -f /tmp/targeted_bc/bc_isaiah_hober_pressure_5k.log
+
+# Stop the job from another shell
+tmux send-keys -t bc_isaiah_hober_5k C-c
+
+# Remove the finished session
+tmux kill-session -t bc_isaiah_hober_5k
+```
+
+> ⚠️ For local BC/training, treat `tmux` as the default. Use plain background
+> shell jobs only for small helpers/watchers.
+
 ---
 
 ## 8. Diagnose a silent eval failure
@@ -314,6 +350,50 @@ def analyze_replay(path):
             multi_rate=multi/max(fire_steps,1), n_steps=len(ep['steps']))
     return results
 ```
+
+### Step 5 — audit target selection with the actual checkpoint
+
+Use this when the replay viewer makes a move look like an aiming miss or a bad
+planet choice and you want to know what the submitted policy actually did.
+
+```bash
+source /Users/saheb/home/.venv/bin/activate
+
+python orbit_wars_rl/audit_submission_targets.py \
+  --checkpoint gpu_run_artifacts/h100_rev31/checkpoints/torch_step_10485760_rev31_20260603_153146.pt \
+  --replay-dir /tmp/sub53336058_eps \
+  --player-name Saheb \
+  --output-json /tmp/rev31_target_audit.json \
+  --output-md /tmp/rev31_target_audit.md
+```
+
+Read the saved summary:
+```bash
+sed -n '1,160p' /tmp/rev31_target_audit.md
+```
+
+Audit just a few episodes:
+```bash
+python orbit_wars_rl/audit_submission_targets.py \
+  --checkpoint gpu_run_artifacts/h100_rev31/checkpoints/torch_step_10485760_rev31_20260603_153146.pt \
+  --replay-dir /tmp/sub53336058_eps \
+  --episode-id 78686024 \
+  --episode-id 78680551 \
+  --episode-id 78656975 \
+  --player-name Saheb \
+  --output-md /tmp/rev31_target_audit_focus.md
+```
+
+The audit reports, per launch:
+- decoded chosen target
+- nearest / cheapest / best-tempo alternatives
+- open-space / decode-fail count
+- angle error vs the decoded target intercept
+
+This is the quick way to separate:
+- actual aiming/intercept misses
+- target-priority mistakes
+- “looks wrong in viewer, but the model deliberately chose that farther planet”
 
 ---
 

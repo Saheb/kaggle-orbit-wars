@@ -211,6 +211,18 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
     planets = obs["planets"]
     owned_indices = masks["owned_indices"].cpu().numpy()
     max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
+    target_logits = target_logits.clone()
+
+    # Restrict target choice to legal launch targets before argmax / sampling.
+    # The prior path argmaxed over all planets and then dropped own/self picks,
+    # turning many fire-positive slots into silent no-ops at inference.
+    for slot in range(min(masks["owned_count"], target_logits.shape[1])):
+        pidx = int(owned_indices[slot])
+        if pidx >= len(planets):
+            continue
+        for tidx, tgt in enumerate(planets[:target_logits.shape[-1]]):
+            if int(tgt[1]) == player or int(tgt[0]) == int(planets[pidx][0]):
+                target_logits[:, slot, tidx] = -1e9
 
     if sample:
         fire_dist = torch.distributions.Bernoulli(logits=fire_probs)
