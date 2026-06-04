@@ -36,58 +36,60 @@
 | **Rev29** | Same as Rev28 but **rollout=512, num-envs=256** (same total transitions=262K). Resume from Rev28 10M checkpoint. | Test if full-game credit assignment fixes value function horizon blindspot | Declined: 1M=57.8% → 4M=52.0% → plateau ~52%. Pool mismatch (40 strong opponents from rollout=64 run), lower SPS (1,750), 256 envs hurt diversity. Not a clean test of rollout=512 alone. Killed at 13M. | Pool mismatch + low SPS confounded the test | — |
 | **Rev30** | **Symmetric capture reward** (`planet_delta = clamp(-1,1)` — losses penalised = no planet-tennis arbitrage) + **exponential decay + 0.10 floor** (no hard cliff at 400) + **expansion_coef 0.01→0.03**. Resume from Rev28 27M (77.3% peak). | Fix late-game gradient desert: symmetric reward eliminates farming exploit so capture signal can run to step 500; floor keeps gradient alive on rotating boards (seed6462 went 473-step timeout → 81-step decisive win). **Halved LR to 0.00005 at 12M** when clip_frac hit 0.28. | **New all-time Phase 1 record.** Peak at 11M: **84.8% vs Zach**. Submitted. loss-seed isolation test: 15/21 at peak. seed6462 seat0 fixed (473→81 steps). Remaining failures: `low_prod__mostly_static` boards and seat1 complacency (agent goes ahead at step 100, stops firing, Zach overtakes). | Peak at 11M then drifts 82-83%. Submitted 11M. | **TBD (submitted)** |
 | **Rev30b** | Resume Rev30 from 17M checkpoint. **Halve LR again: 0.00005→0.000025**. Spot H100 Jarvis (₹112/hr). | Test if second LR halve stabilises past 84.8% peak | **85.2% vs Zach at 4M**. Clip_frac stable 0.23. 7M checkpoints. LB episode analysis revealed opening paralysis: FireP=0.001 at step 0 — policy confident in no-fire. Zach panel doesn't catch this (Zach also waits). | New panel record, but LB gap vs rev28 | TBD |
-| **Rev31** | `--first-strike-steps 50 --first-strike-mult 2.0`: capture reward doubled for t<50. Resume from Rev30b 4M. LR=0.000025. | Overcome opening paralysis: step-2 FireP 0.003→0.772, making policy fire 2 steps earlier. Value function must unlearn "waiting is safe" for opening steps. | **Breakthrough: 913.2 LB** (new all-time record, beats Phase 0's 894). 84.8% Zach at 10M (balanced seats: 85%/84%). 16/21 loss seeds. Continuing on GCP L4 (512 envs, 725 SPS) from 10M checkpoint. | **New all-time LB record** | **913.2** |
+| **Rev31** | `--first-strike-steps 50 --first-strike-mult 2.0`: capture reward doubled for t<50. Resume from Rev30b 4M. LR=0.000025. | Overcome opening paralysis: step-2 FireP 0.003→0.772, making policy fire 2 steps earlier. Value function must unlearn "waiting is safe" for opening steps. | **Breakthrough: 918.8 LB** (new all-time record). 84.8% Zach at 10M (balanced seats: 85%/84%). 16/21 loss seeds. GCP continuation peaked at 31M (84.4% Zach, 17/21 loss seeds). | Peaked at 31M | **918.8** |
+| **Rev32** | rollout=128, BC warmstart (`bc_isaiah_hober_pressure_5k.pt`), LR=0.0001. Jarvis H100 spot. | Test rollout=128 as middle ground between 64 and 512. | Spot instance preempted at 16M, checkpoints not synced (rsync symlink bug). Run lost. | Instance preempted + sync bug | — |
+| **Rev32b** | First Strike 4×t<20 (stronger/shorter window). Resume Rev31 31M. GCP L4, rollout=64. | Push step-0 firing further — 2×t<50 fixed step 1-2, try 4×t<20 for step 0. | **New Zach record: 88.7% at 6M. 20/21 loss seeds.** Ajay panel = 0.8% (same as Rev31 — intercept aiming gap structural). | Peak at 6M | **pending LB** |
+| **Rev33** | Resume Rev31 31M + `--bc-samples tempo_mix_small.pkl --bc-coef 0.05`. Jarvis H100 spot. | BC auxiliary nudge from tempo dataset without wiping PPO competence. | Running (early, ~2M steps) | Still running | — |
 
 **What we know:**
-- **Rev31 First Strike is the key insight**: opening paralysis (FireP=0.001 at step 0) was killing LB score vs aggressive openers. 2× capture reward for t<50 fixed step 2-3 firing and scored 913.2 LB
-- Zach panel is blind to opening quality — Zach also waits at step 0. LB episode analysis is the right diagnostic
-- Symmetric capture reward (Rev30) + halved LR + First Strike = current recipe
-- Remaining gap to top 10 (~1153): complacency failure (leads at step 100, stops firing), mid-game production compounding not modelled
-- Halving LR when clip_frac > 0.25 is actionable — unlocked improvements twice
-- Export requires `--target-decode` for Phase 1
+- **Rev31 First Strike is the key insight**: opening paralysis fixed, 918.8 LB. Step-0 still 0.001 but step 1-2 fire aggressively.
+- **Rev32b**: First Strike 4×t<20 pushed Zach to 88.7% and 20/21 loss seeds — new records. Doesn't help vs Ajay.
+- **Ajay gap is structural**: `orbit_lite.intercept_aim` makes Ajay's fleets arrive 3× faster (intercept vs chase). Our agent fires at current planet position, not intercept point. Fleet routing fix needed in action decode.
+- Zach panel saturating ~88-89%. Ajay panel is now the primary metric (our agent scores ~1-2%).
+- BC as standalone warmstart fails if checkpoint is partial/diagnostic (clip_frac stays 0). Use strong PPO checkpoint + `--bc-samples` as regularizer.
+- Rsync symlink bug: always use `-L` flag or sync directly from `/home/checkpoints/` (not via symlink at `/home/orbit_wars_rl/checkpoints/`).
+- Spot instances: verify sync working after first checkpoint before leaving unattended.
+- Export requires `--target-decode` for Phase 1.
 
-**LB scores (best per run):** Rev31 10M = **913.2** ← new record | Rev30 11M = 867.4 | Rev28 27M = 843.9 | 141208 (Phase 0) = 894 | rev15 2M = 796
-**Target:** Top 10 needs ~1153. Currently at 913.2, gap = ~240 points.
-
-**Rev31 panel (vs Zach):** 1M=83.2% → 2M=84.4% → **10M=84.8%** (submitted, 913.2 LB)
+**LB scores (best per run):** Rev31 10M = **918.8** ← record | Rev32b 6M = pending | Rev30 11M = 866.3 | Rev28 27M = 843.9 | 141208 (Phase 0) = 894
+**Target:** Top 10 needs ~1153. Currently at 918.8, gap = ~234 points.
 
 ---
 
 ## Current State (2026-06-04)
 
-**Active run:**
+**Active runs:**
 
-**Rev31 continuation** — GCP L4 (`orbit-wars-4p-gcp`, us-central1-b, 136.111.175.50)
-- Resume from Rev31 10M checkpoint (913.2 LB)
-- 512 envs, rollout=64, LR=0.000025, First Strike 2×t<50
-- Currently at ~30M+ steps, ~725 SPS
-- Panel watcher running (Zach only, newest-first, fixed glob)
+**Rev33** — Jarvis H100 spot (`421356`, `217.18.55.12`)
+- Resume: `seed_checkpoints/rev31_31M_resume.pt` (Rev31 31M, 914.5 LB)
+- BC aux: `seed_checkpoints/tempo_mix_small.pkl`, 2817 samples, `--bc-coef 0.05`
+- rollout=64, 2048 envs, LR=0.000025, First Strike 2×t<50, 10M total steps
+- Panel: quick-16 vs Ajay every 500K, full panel every 5M
+- Sync watcher: `gpu_run_artifacts/jarvis_rev33/` with `-L` flag
 
-**Submitted checkpoints:**
-- Rev31 10M → **913.2 LB** (step-1 FireP=0.715, 16/21 loss seeds)
-- Rev31 26M → **pending** (step-1 FireP=0.859, 18/21 loss seeds)
+**Rev32b** — GCP L4 (`orbit-wars-rev32b`, us-central1-a, 35.193.52.221)
+- Resume: Rev31 31M, First Strike 4×t<20 2.0× → 4.0×
+- rollout=64, 512 envs, LR=0.000025
+- Best checkpoint: `gpu_run_artifacts/gcp_rev32b/checkpoints/torch_step_6815744_rev32b_20260604_112217.pt`
+  - Zach: **88.7%**, Loss seeds: **20/21**, Ajay: 0.8% — submitted (pending LB)
 
 **Key diagnostic tools:**
-- `orbit_wars_rl/diagnose_opening.py` — measures FireP at each game step on LB episode
-- `orbit_wars_rl/test_seed6462.py` — 21-seed isolation test for known failure boards
-- `orbit_wars_rl/replay_wins.py` — generates HTML replays + planet-lead plots (with You=COLOR banner)
-- `submission_analysis/` — documented loss analysis per submission
+- `orbit_wars_rl/diagnose_opening.py` — FireP per step on episode JSON
+- `orbit_wars_rl/test_seed6462.py` — 21-seed isolation test
+- `orbit_wars_rl/step_firep.py` — compare FireP at steps 0-3 across checkpoints
+- `opponents/candidate_ajay_1200.py` + `opponents/orbit_lite/` — Ajay now works as panel opponent
+- `docs/submissions.md` — full submission log with Kaggle IDs and checkpoint paths
 
-**Loss analysis summary (Rev31 10M, 913.2 LB):**
-- 50% early aggression (behind at step 30, fast elimination)
-- 29% mid collapse (competitive at step 30, then lost)
-- 11% complacency (ahead at step 30, stopped expanding)
-
-**BC work in progress:**
-- Downloaded June 3 episode dataset (4609 episodes)
-- Top agents: Isaiah @ Tufa Labs (86% WR), Hober Malloc (67%), Ebi (64%)
-- ajay_1200 / producer_1200 notebooks extracted but need `orbit_lite` module fix
-- Plan: use Isaiah/Hober/Ebi winning episodes for new BC warmstart targeting step-0 aggression
+**Ajay gap root cause (identified 2026-06-04):**
+- `orbit_lite.intercept_aim` computes where planet will BE when fleet arrives → fleets land in ~4 steps
+- Our agent fires at current planet position → fleets take ~12 steps (3× slower)
+- At step 5: Ajay has 2 planets, we have 1 → snowballs from there
+- Fix needed: intercept-aware action decode in `eval.py` / `export_agent.py`
 
 **Next priorities:**
-1. Fix orbit_lite dependency in ajay/producer opponent agents
-2. Generate new BC from top-agent replays (Isaiah + Hober focus)
-3. Rev32: new BC warmstart + training from scratch to get step-0 firing (currently only step 1-2)
+1. Monitor Rev33 — does bc-coef=0.05 nudge Ajay win rate above 2%?
+2. Implement intercept aiming in action decode (biggest structural gap)
+3. If Rev32b LB > 918.8 → Rev32b recipe is the new baseline
 
 **Rev30b** completed: peak 85.2% vs Zach at 4M (LR=0.000025). Best checkpoint: `torch_step_4194304_rev30b_20260603_143644.pt`
 - Resume: Rev28 22M checkpoint (=28M overall from scratch)
