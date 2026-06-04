@@ -309,6 +309,8 @@ def train(args):
     print(f"Speed coeff: {args.speed_coef}")
     if args.handicap_frac > 0:
         print(f"Handicap: {args.handicap_frac*100:.0f}% of games start with {args.handicap_ships} ships (vs normal 10)")
+    if args.ssdr_frac > 0:
+        print(f"SSDR: {args.ssdr_frac*100:.0f}% of resets fast-forward 1..{args.ssdr_max_steps} random steps")
     if args.srcs_multi_penalty > 0.0:
         print(f"srcs_multi penalty: coef={args.srcs_multi_penalty}, threshold={args.srcs_multi_threshold}, "
               f"decay_frac={args.srcs_multi_penalty_decay_frac} "
@@ -356,7 +358,9 @@ def train(args):
                       first_strike_mult=args.first_strike_mult,
                       speed_coef=args.speed_coef,
                       handicap_frac=args.handicap_frac,
-                      handicap_ships=args.handicap_ships)
+                      handicap_ships=args.handicap_ships,
+                      ssdr_frac=args.ssdr_frac,
+                      ssdr_max_steps=args.ssdr_max_steps)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
 
     model = EntityTransformer(cfg.model).to(device)
@@ -1210,6 +1214,15 @@ if __name__ == "__main__":
     parser.add_argument("--handicap-ships", type=int, default=5,
                         help="Starting ship count for player 0 in handicap games "
                              "(default 5 = half normal). Only used when --handicap-frac > 0.")
+    parser.add_argument("--ssdr-frac", type=float, default=0.0,
+                        help="Start-State Domain Randomisation: fraction of env resets that "
+                             "fast-forward the game by 1..--ssdr-max-steps random steps before "
+                             "handing control to the learner. Both players act randomly during "
+                             "warmup, creating asymmetric mid-game starts that shatter the "
+                             "symmetric-start passive Nash. 0 = off. Suggested: 0.3.")
+    parser.add_argument("--ssdr-max-steps", type=int, default=20,
+                        help="Max warmup steps for SSDR. Actual steps ~ U(1, ssdr_max_steps). "
+                             "20 = up to ~4%% of a 500-step game pre-played. (default: 20)")
     parser.add_argument("--srcs-multi-penalty", type=float, default=0.0,
                         help="Per-step reward penalty per source over --srcs-multi-threshold. "
                              "Applied symmetrically to both players each rollout step. "

@@ -576,3 +576,4 @@ python -m pytest orbit_wars_rl/tests/ -x -q
 | Leaving instance in stopped state | Stopped still bills for EBS; terminate after pulling everything |
 | Panel watcher running with old opponent paths | Kill watcher (`ps aux \| grep run_panel_eval_watcher ... xargs kill`), fix paths, restart |
 | Running many evals in parallel on Mac | CPU contention → each eval takes 10× longer; limit to 3 at most |
+| Eval OOM on training instance | Training occupies GPU; eval auto-detects CUDA and OOMs. Always prefix: `CUDA_VISIBLE_DEVICES="" python3 orbit_wars_rl/eval.py ...` on any instance running training |

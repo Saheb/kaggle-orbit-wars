@@ -82,6 +82,8 @@ class VecTorchEnv:
         speed_coef: float = 0.0,
         handicap_frac: float = 0.0,
         handicap_ships: int = 5,
+        ssdr_frac: float = 0.0,
+        ssdr_max_steps: int = 20,
     ):
         self.num_envs = num_envs
         self.num_players = num_players
@@ -127,6 +129,14 @@ class VecTorchEnv:
         # that pure symmetric self-play never generates enough gradient for.
         self.handicap_frac = float(handicap_frac)
         self.handicap_ships = int(handicap_ships)
+        # Start-State Domain Randomisation (SSDR): with probability ssdr_frac,
+        # fast-forward a freshly-reset env by U(1, ssdr_max_steps) random steps
+        # before handing it to the learner. Both players take random actions during
+        # the warmup so the learner wakes up in a messy, asymmetric mid-game state.
+        # This shatters the symmetric-start passive Nash equilibrium.
+        self.ssdr_frac = float(ssdr_frac)
+        self.ssdr_max_steps = int(ssdr_max_steps)
+        self._ssdr_active = False  # re-entrancy guard — prevents recursive SSDR calls
 
         # State tensors — allocated in reset()
         self.planets: torch.Tensor = None       # (N, P, 7)
@@ -226,6 +236,9 @@ class VecTorchEnv:
         self.prev_owned = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         for pl in range(self.num_players):
             self.prev_owned[:, pl] = ((owner_p == pl) & self.planet_alive).float().sum(dim=1)
+        if self.ssdr_frac > 0.0:
+            all_idx = list(range(self.num_envs))
+            self._ssdr_warmup(all_idx)
         return self._state_dict()
 
     def _compute_material(self) -> torch.Tensor:
@@ -1164,6 +1177,67 @@ class VecTorchEnv:
     # Keeps the running training loop simple — no need for caller-side resets.
     # ---------------------------------------------------------------------
 
+    def _ssdr_warmup(self, env_indices: list):
+        """Fast-forward a random subset of envs by 1..ssdr_max_steps random steps.
+
+        Both players fire randomly so the learner wakes in a messy, asymmetric
+        mid-game state — shattering the symmetric-start passive Nash.
+        Called after reset() and after each auto-reset.
+        """
+        if not env_indices or self.ssdr_frac <= 0.0 or self._ssdr_active:
+            return
+        self._ssdr_active = True
+        try:
+            self._ssdr_warmup_inner(env_indices)
+        finally:
+            self._ssdr_active = False
+
+    def _ssdr_warmup_inner(self, env_indices: list):
+        # Pick which envs get warmed up this time
+        warmup_envs = [i for i in env_indices if random.random() < self.ssdr_frac]
+        if not warmup_envs:
+            return
+
+        # For each chosen env, sample how many steps to fast-forward
+        steps_per_env = {i: random.randint(1, self.ssdr_max_steps) for i in warmup_envs}
+        max_steps = max(steps_per_env.values())
+
+        # Mask: which envs still need more warmup steps at each timestep t
+        warmup_set = set(warmup_envs)
+        # Build fire mask: 1 for warmup envs, 0 for non-warmup (they get no-op)
+        warmup_mask = torch.tensor(
+            [1 if i in warmup_set else 0 for i in range(self.num_envs)],
+            dtype=torch.long, device=self.device
+        ).unsqueeze(1)  # (N, 1)
+
+        for t in range(max_steps):
+            # Only fire for envs that still have warmup steps remaining
+            active_mask = torch.tensor(
+                [1 if (i in warmup_set and t < steps_per_env[i]) else 0
+                 for i in range(self.num_envs)],
+                dtype=torch.long, device=self.device
+            ).unsqueeze(1)  # (N, 1)
+
+            actions = {}
+            for pid in range(self.num_players):
+                _, slot_valid = self.owned_indices_for(pid)
+                fire = (torch.rand(self.num_envs, MAX_OWNED, device=self.device) < 0.6).long()
+                fire = fire * slot_valid.long() * active_mask  # zero fire for non-warmup envs
+                angle_bin = torch.randint(0, NUM_ANGLE_BINS, (self.num_envs, MAX_OWNED), device=self.device)
+                ship_bin = torch.randint(10, 15, (self.num_envs, MAX_OWNED), device=self.device)
+                actions[pid] = torch.stack([fire, angle_bin, ship_bin], dim=-1)
+
+            self.step(actions)
+
+        # After warmup: reset step_count to 0 for non-warmup envs (physics advanced
+        # but no fleets launched — equivalent to a different random orbital offset)
+        for i in range(self.num_envs):
+            if i not in warmup_set:
+                self.step_count[i] = 0
+        # Also reset step_count to actual warmup length for warmup envs
+        for i, n in steps_per_env.items():
+            self.step_count[i] = n
+
     def _auto_reset(self, done_mask: torch.Tensor):
         """Re-generate state for envs where done_mask is True."""
         from kaggle_environments.envs.orbit_wars.orbit_wars import generate_planets
@@ -1206,6 +1280,8 @@ class VecTorchEnv:
         # Re-precompute orbital params for changed envs
         self._precompute_orbital_params()
         self.prev_material[done_mask] = self._compute_material()[done_mask]
+        if self.ssdr_frac > 0.0:
+            self._ssdr_warmup(done_idx)
 
 
 # -------------------------------------------------------------------------
