@@ -35,5 +35,9 @@ wandb/
 replays/
 replays*/
 kernels/
+build/
+main_submitted.py
+pytorch_docs/
+*.DS_Store
 
 opponents/*
