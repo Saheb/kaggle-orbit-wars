@@ -35,3 +35,5 @@ wandb/
 replays/
 replays*/
 kernels/
+
+opponents/*

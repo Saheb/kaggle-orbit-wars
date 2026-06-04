@@ -383,6 +383,7 @@ def train_bc(
     cfg_bc: BCConfig,
     device: torch.device,
     val_frac: float = 0.1,
+    trainable_param_patterns: list[str] | None = None,
 ) -> dict:
     """Train model via BC for cfg_bc.num_steps gradient steps.
 
@@ -392,7 +393,23 @@ def train_bc(
     Returns final val metrics.
     """
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg_bc.learning_rate, eps=1e-5)
+    if trainable_param_patterns:
+        for p in model.parameters():
+            p.requires_grad = False
+        trainable = []
+        for name, p in model.named_parameters():
+            if any(pattern in name for pattern in trainable_param_patterns):
+                p.requires_grad = True
+                trainable.append((name, p))
+        if not trainable:
+            raise ValueError(f"No trainable params matched patterns: {trainable_param_patterns}")
+        optimizer_params = [p for _, p in trainable]
+        print("BC trainable params:")
+        for name, _ in trainable:
+            print(f"  - {name}")
+    else:
+        optimizer_params = list(model.parameters())
+    optimizer = torch.optim.Adam(optimizer_params, lr=cfg_bc.learning_rate, eps=1e-5)
     # Cosine decay: lr falls from learning_rate to learning_rate/10 over num_steps
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg_bc.num_steps, eta_min=cfg_bc.learning_rate / 10
@@ -568,7 +585,9 @@ def validate_bc(cfg: Config, agent_path: str, save_path: str = "", verbose: bool
 
 
 def validate_bc_from_samples(cfg: Config, sample_pkls: list[str],
-                             save_path: str = "") -> dict:
+                             save_path: str = "",
+                             init_checkpoint: str = "",
+                             trainable_param_patterns: list[str] | None = None) -> dict:
     """BC training from one or more pre-extracted sample .pkl files.
 
     Used by the replay-mining pipeline (replay_bc_v2.py emits these pkls).
@@ -588,7 +607,13 @@ def validate_bc_from_samples(cfg: Config, sample_pkls: list[str],
         return {}
 
     model = EntityTransformer(cfg.model)
-    val_metrics = train_bc(model, samples, cfg.bc, device)
+    if init_checkpoint:
+        from eval import load_checkpoint
+        sd, _ = load_checkpoint(init_checkpoint, cfg)
+        model.load_state_dict(sd)
+        print(f"Loaded init checkpoint: {init_checkpoint}")
+    val_metrics = train_bc(model, samples, cfg.bc, device,
+                           trainable_param_patterns=trainable_param_patterns)
 
     if save_path:
         _save_bc_checkpoint(model, cfg, save_path)
@@ -610,6 +635,13 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save", type=str, default="checkpoints/bc_warmstart.pt",
                         help="Where to save the BC-pretrained model")
+    parser.add_argument("--init-checkpoint", type=str, default="",
+                        help="Optional checkpoint to load before BC training. "
+                             "Useful for targeted BC fine-tuning from an existing warmstart.")
+    parser.add_argument("--trainable-param", action="append", default=[],
+                        help="Optional substring filter for trainable params. Repeatable. "
+                             "If set, only parameters whose names contain one of these "
+                             "substrings are updated.")
     args = parser.parse_args()
 
     cfg = Config()
@@ -618,7 +650,9 @@ if __name__ == "__main__":
     cfg.bc.num_steps = args.steps
 
     if args.samples:
-        validate_bc_from_samples(cfg, args.samples, save_path=args.save)
+        validate_bc_from_samples(cfg, args.samples, save_path=args.save,
+                                 init_checkpoint=args.init_checkpoint,
+                                 trainable_param_patterns=args.trainable_param or None)
     else:
         if not args.agent:
             raise SystemExit("--agent or --samples required")

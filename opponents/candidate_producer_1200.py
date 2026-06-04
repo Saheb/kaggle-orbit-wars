@@ -1,4 +1,3 @@
-%%writefile main.py
 
 from __future__ import annotations
 
@@ -368,8 +367,3 @@ def agent(obs):
     return sparse_action_row_to_moves(sparse_row, obs, player_id=player_id)
 
 
-!mkdir -p build
-!mv main.py build/
-!cp -r /kaggle/input/datasets/slawekbiel/producer-orbit-wars-utils/orbit_lite build/
-!tar -czf submission.tar.gz -C build .
-!rm -fR build

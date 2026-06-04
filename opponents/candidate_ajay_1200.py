@@ -1,4 +1,3 @@
-%%writefile main.py
 
 from __future__ import annotations
 
@@ -368,35 +367,3 @@ def agent(obs):
     return sparse_action_row_to_moves(sparse_row, obs, player_id=player_id)
 
 
-!find /kaggle/input -name "orbit_lite" -type d 2>/dev/null
-!echo "---"
-!ls /kaggle/input/
-import os, shutil, tarfile
-
-# ── Write main.py directly ──────────────────────────────────────────────────
-os.makedirs("build", exist_ok=True)
-
-main_py = r'''
-from __future__ import annotations
-# ... paste your entire main.py content here ...
-'''
-
-with open("build/main.py", "w") as f:
-    f.write(main_py.strip())
-
-# ── Copy orbit_lite ──────────────────────────────────────────────────────────
-shutil.copytree(
-    "/kaggle/input/datasets/slawekbiel/producer-orbit-wars-utils/orbit_lite",
-    "build/orbit_lite",
-    dirs_exist_ok=True,
-)
-
-# ── Pack ─────────────────────────────────────────────────────────────────────
-with tarfile.open("submission.tar.gz", "w:gz") as tar:
-    tar.add("build", arcname=".")
-
-shutil.rmtree("build")
-
-# ── Verify ───────────────────────────────────────────────────────────────────
-print("✅ submission.tar.gz contents:")
-os.system("tar -tzf submission.tar.gz")

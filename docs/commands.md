@@ -55,7 +55,44 @@ tail -20 gpu_run_artifacts/hellburner_spot/logs/watcher_rev7.log
 
 ---
 
-## 3. Full panel eval (256 games, ~40 min/opponent on EC2; much slower on Mac CPU)
+## 3. Panel eval
+
+### Full panel (256 games, ~40 min locally)
+
+```bash
+source /Users/saheb/home/.venv/bin/activate
+
+# Ajay (primary metric — harder than Zach)
+python orbit_wars_rl/eval.py \
+  --checkpoint <path>.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --panel --target-decode \
+  > /tmp/eval_ajay.log 2>&1 &
+
+# Zach (secondary — saturating ~88-89%)
+python orbit_wars_rl/eval.py \
+  --checkpoint <path>.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --panel --target-decode \
+  > /tmp/eval_zach.log 2>&1 &
+
+wait
+grep "Overall" /tmp/eval_ajay.log /tmp/eval_zach.log
+```
+
+### Quick eval (16 games, ~2 min — for trend tracking)
+
+```bash
+python orbit_wars_rl/eval.py \
+  --checkpoint <path>.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 16 --target-decode
+```
+
+> ⚠️ `orbit_lite` package must be at `opponents/orbit_lite/` for Ajay/Producer to work.
+> ⚠️ Always `--target-decode` for Phase 1. Opponent paths relative to repo root.
+
+### Full panel eval (legacy — 256 games, ~40 min/opponent on EC2; much slower on Mac CPU)
 
 **Activate venv first** (see top section), then run from repo root:
 
@@ -247,111 +284,54 @@ Common causes:
 
 ---
 
-## 9. Download our LB episode replays for analysis
+## 9. Review a submission's loss replays
 
-### Step 1 — list our submission's episodes
-```python
-# Run from repo root with venv activated
-import requests, json
+### One command: fetch loss replays and run the target audit
 
-with open('/Users/saheb/.kaggle/access_token') as f:
-    token = f.read().strip()
-with open('/Users/saheb/.kaggle/kaggle.json') as f:
-    creds = json.load(f)
+Use this as the default daily workflow after a submission has enough episodes.
 
-# Our best submission ID (check: kaggle competitions submissions --competition orbit-wars --csv)
-SUB_ID = 53076736
-
-url = "https://www.kaggle.com/api/i/competitions.EpisodeService/ListEpisodes"
-resp = requests.post(url,
-    auth=(creds['username'], creds['key']),
-    json={"submissionId": SUB_ID},
-    headers={"Content-Type": "application/json", "Accept": "application/json"})
-
-data = resp.json()
-print(f"Found {len(data['episodes'])} episodes")
-json.dump(data, open('/tmp/our_episodes.json', 'w'))
+```bash
+orbit_wars_rl/.venv/bin/python orbit_wars_rl/review_submission_targets.py \
+  --submission-id 53359633 \
+  --checkpoint seed_checkpoints/rev31_31M_resume.pt \
+  --player-name Saheb
 ```
 
-### Step 2 — analyse win/loss patterns
-```python
-import json, collections
-
-with open('/tmp/our_episodes.json') as f:
-    episodes = json.load(f)['episodes']
-OUR_SUB = 53076736
-
-wins, loss_data = 0, []
-for ep in episodes:
-    our = next((a for a in ep['agents'] if a['submissionId'] == OUR_SUB), None)
-    if not our: continue
-    if our['reward'] > 0:
-        wins += 1
-    else:
-        for a in ep['agents']:
-            if a['submissionId'] != OUR_SUB and a['reward'] > 0:
-                loss_data.append((a['initialScore'], ep['id'], our['initialScore']))
-
-print(f"W={wins} L={len(loss_data)} WR={wins/(wins+len(loss_data))*100:.0f}%")
-# Losses to weaker opponents (most actionable):
-weak = [(s,ep,our) for s,ep,our in loss_data if s < our]
-print(f"Losses to weaker opponents: {len(weak)}/{len(loss_data)}")
+Outputs go to:
+```text
+/tmp/sub53359633_review/
+  episodes.json          # full Kaggle manifest for the submission
+  selected_losses.json   # metadata for the loss slice actually audited
+  replays/*.json         # downloaded replay payloads
+  target_audit.json      # machine-readable audit
+  target_audit.md        # readable report
 ```
 
-### Step 3 — download specific replay JSONs
-```python
-import requests, os, time
+Useful flags:
+```bash
+# only 2-player losses
+orbit_wars_rl/.venv/bin/python orbit_wars_rl/review_submission_targets.py \
+  --submission-id 53359633 \
+  --checkpoint seed_checkpoints/rev31_31M_resume.pt \
+  --player-name Saheb \
+  --only-two-player
 
-with open('/Users/saheb/.kaggle/access_token') as f:
-    token = f.read().strip()
-# ⚠️ MUST use Bearer token — basic auth returns 401 for replay endpoint
-
-os.makedirs('/tmp/our_losses', exist_ok=True)
-ep_ids = [78025831, 78083575, ...]  # from step 2
-
-for ep_id in ep_ids:
-    r = requests.get(
-        f"https://www.kaggle.com/api/v1/competitions/episodes/{ep_id}/replay",
-        headers={"Authorization": f"Bearer {token}"}, timeout=30)
-    if r.status_code == 200:
-        open(f"/tmp/our_losses/{ep_id}.json", "wb").write(r.content)
-    time.sleep(0.3)  # avoid 429
+# cap review size and focus on the opening
+orbit_wars_rl/.venv/bin/python orbit_wars_rl/review_submission_targets.py \
+  --submission-id 53359633 \
+  --checkpoint seed_checkpoints/rev31_31M_resume.pt \
+  --player-name Saheb \
+  --max-episodes 10 \
+  --step-limit 40
 ```
 
-> **Auth note:** The `~/.kaggle/access_token` file is a Bearer token (separate from `kaggle.json` which has API key for basic auth). Both are needed for different endpoints.
->
-> | Endpoint | Auth method |
-> |----------|-------------|
-> | `EpisodeService/ListEpisodes` | Basic auth (username + API key) |
-> | `v1/competitions/episodes/{id}/replay` | Bearer token (`access_token`) |
+What the wrapper does:
+- fetches the richer Kaggle `EpisodeService/ListEpisodes` manifest
+- selects losses for the requested submission
+- downloads replay JSONs with retry/backoff
+- runs the same target audit used for manual replay review
 
-### Step 4 — analyse behaviour in replays
-```python
-import json, glob, statistics
-
-def analyze_replay(path):
-    ep = json.load(open(path))
-    rewards = ep['rewards']
-    winner_slot = rewards.index(max(rewards))
-    results = {}
-    for slot, name in enumerate(a['Name'] for a in ep['info']['Agents']):
-        fire_steps = total = multi = 0; ships = []
-        for step in ep['steps'][1:]:
-            if slot >= len(step): continue
-            acts = step[slot].get('action', [])
-            total += 1
-            if acts:
-                fire_steps += 1
-                ships.extend(a[2] for a in acts if len(a) >= 3)
-                if len(acts) > 1: multi += 1
-        results[slot] = dict(name=name, won=(slot==winner_slot),
-            fire_rate=fire_steps/max(total,1),
-            avg_ship=statistics.mean(ships) if ships else 0,
-            multi_rate=multi/max(fire_steps,1), n_steps=len(ep['steps']))
-    return results
-```
-
-### Step 5 — audit target selection with the actual checkpoint
+### Audit target selection with the actual checkpoint
 
 Use this when the replay viewer makes a move look like an aiming miss or a bad
 planet choice and you want to know what the submitted policy actually did.
@@ -387,6 +367,7 @@ python orbit_wars_rl/audit_submission_targets.py \
 The audit reports, per launch:
 - decoded chosen target
 - nearest / cheapest / best-tempo alternatives
+- weakest nearby / highest-production nearby alternatives
 - open-space / decode-fail count
 - angle error vs the decoded target intercept
 
@@ -394,6 +375,105 @@ This is the quick way to separate:
 - actual aiming/intercept misses
 - target-priority mistakes
 - “looks wrong in viewer, but the model deliberately chose that farther planet”
+
+### Compare tempo metrics across checkpoints on fixed Ajay seeds
+
+Use this when you want the exact comparison we just did: generate fresh replays
+for a fixed opponent/seed slice, audit them, and print checkpoint-to-checkpoint
+tempo metrics in one command.
+
+```bash
+orbit_wars_rl/.venv/bin/python orbit_wars_rl/compare_tempo_checkpoints.py \
+  --checkpoints \
+    gpu_run_artifacts/jarvis_rev33/checkpoints/torch_step_1572864_rev33_20260604_144227.pt \
+    gpu_run_artifacts/jarvis_rev33/checkpoints/torch_step_3145728_rev33_20260604_144227.pt \
+    gpu_run_artifacts/jarvis_rev33/checkpoints/torch_step_4194304_rev33_20260604_144227.pt \
+    gpu_run_artifacts/jarvis_rev33/checkpoints/torch_step_5242880_rev33_20260604_144227.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --target-decode \
+  --step-limit 40 \
+  --output-dir /tmp/rev33_ajay_compare
+```
+
+Outputs:
+- per-checkpoint replay JSONs under `/tmp/rev33_ajay_compare/<checkpoint-stem>/replays`
+- per-checkpoint audit files:
+  - `audit.json`
+  - `audit.md`
+- merged comparison summary:
+  - `/tmp/rev33_ajay_compare/summary.json`
+  - `/tmp/rev33_ajay_compare/summary.md`
+
+The comparison summary includes:
+- `farther_than_nearest_rate`
+- `mean_eta_gap_vs_nearest`
+- `mean_distance_gap_vs_nearest`
+- `tempo_match_rate`
+- `nearest_match_rate`
+- `mean_first_capture_step`
+- `invalid_raw_argmax`
+
+### Build a conversion-focused auxiliary BC dataset
+
+Use this when target ranking has improved but the opening still captures too
+late because it spends too many ships before the first productive capture.
+
+This extracts teacher openings that:
+- face early pressure
+- get the first extra planet early
+- keep pre-capture ship spend restrained
+
+It can also mix in the earlier target-relabel failure dataset so the resulting
+auxiliary BC still carries the tempo-target correction.
+
+```bash
+orbit_wars_rl/.venv/bin/python orbit_wars_rl/build_conversion_bc.py \
+  --teacher-replay-dir /tmp/orbit_episodes \
+  --teacher-agent "Isaiah @ Tufa Labs" \
+  --teacher-agent "Hober Malloc" \
+  --teacher-agent "Ebi" \
+  --teacher-steps-max 40 \
+  --teacher-require-opponent-first-fire-by 12 \
+  --teacher-max-first-capture-step 14 \
+  --teacher-max-ships-before-first-capture 36 \
+  --teacher-max-launches-before-first-capture 3 \
+  --teacher-stop-at-first-capture \
+  --failure-audit-json /tmp/sub53359633_target_audit.json \
+  --failure-audit-json /tmp/ajay_panel_seat0_audit.json \
+  --failure-relabel-mode tempo \
+  --failure-min-eta-regret 4 \
+  --failure-steps-max 40 \
+  --samples-out /tmp/targeted_bc/conversion_mix_loose.pkl \
+  --summary-out /tmp/targeted_bc/conversion_mix_loose_summary.json
+```
+
+**Calibration (full June-3 dataset, loose thresholds):**
+- 316 teacher replays kept → 436 teacher samples
+- 817 failure relabels
+- Total: 1,253 samples → `seed_checkpoints/conversion_mix_loose.pkl`
+
+**Strict thresholds** (first-capture ≤12, ships ≤28, launches ≤2) yield only ~9 samples — too tight.
+**Loose thresholds** (first-capture ≤14, ships ≤36, launches ≤3) yield 1,253 — use these.
+
+What it writes:
+- standard BC sample pickle for `bc.py`
+- JSON summary with:
+  - kept replay count
+  - teacher sample count
+  - failure relabel count
+  - filter-drop counts
+
+### Low-level notes
+
+Auth split still matters if you debug this manually:
+
+| Endpoint | Auth method |
+|----------|-------------|
+| `EpisodeService/ListEpisodes` | Basic auth (`~/.kaggle/kaggle.json`) |
+| `v1/competitions/episodes/{id}/replay` | Bearer token (`~/.kaggle/access_token`) |
+
+The replay endpoint intermittently EOFs. Always use retry/backoff when
+downloading many episodes.
 
 ---
 
@@ -464,6 +544,10 @@ python -m pytest orbit_wars_rl/tests/ -x -q
 | `orbit_wars_rl/opponent_pool.py` | Self-play pool + PFSP sampling |
 | `orbit_wars_rl/export_agent.py` | Export checkpoint → submission .py |
 | `orbit_wars_rl/bc.py` | BC loss (lazily imported by ppo.py when --il-lambda set) |
+| `orbit_wars_rl/build_conversion_bc.py` | Build conversion-focused BC dataset (fast-capture teacher + failure relabels) |
+| `orbit_wars_rl/compare_tempo_checkpoints.py` | Compare first-capture/conversion metrics across checkpoints on fixed Ajay seeds |
+| `orbit_wars_rl/step_firep.py` | Compare FireP at steps 0-3 across multiple checkpoints (opening aggression) |
+| `opponents/orbit_lite/` | Ajay/Producer dependency — intercept aiming, fleet routing (must be present) |
 | `orbit_wars_rl/env.py` | Old kaggle_environments wrapper (used by validate_training + tests) |
 | `orbit_wars_rl/eval_panel.py` | 128-seed stratified panel used inside eval.py |
 | `gpu_run_artifacts/launch_gpu.sh` | **Only** way to launch EC2 — bakes in terminate-on-shutdown |

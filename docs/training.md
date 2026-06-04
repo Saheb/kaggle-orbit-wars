@@ -39,15 +39,16 @@
 | **Rev31** | `--first-strike-steps 50 --first-strike-mult 2.0`: capture reward doubled for t<50. Resume from Rev30b 4M. LR=0.000025. | Overcome opening paralysis: step-2 FireP 0.003→0.772, making policy fire 2 steps earlier. Value function must unlearn "waiting is safe" for opening steps. | **Breakthrough: 918.8 LB** (new all-time record). 84.8% Zach at 10M (balanced seats: 85%/84%). 16/21 loss seeds. GCP continuation peaked at 31M (84.4% Zach, 17/21 loss seeds). | Peaked at 31M | **918.8** |
 | **Rev32** | rollout=128, BC warmstart (`bc_isaiah_hober_pressure_5k.pt`), LR=0.0001. Jarvis H100 spot. | Test rollout=128 as middle ground between 64 and 512. | Spot instance preempted at 16M, checkpoints not synced (rsync symlink bug). Run lost. | Instance preempted + sync bug | — |
 | **Rev32b** | First Strike 4×t<20 (stronger/shorter window). Resume Rev31 31M. GCP L4, rollout=64. | Push step-0 firing further — 2×t<50 fixed step 1-2, try 4×t<20 for step 0. | **New Zach record: 88.7% at 6M. 20/21 loss seeds.** Ajay panel = 0.8% (same as Rev31 — intercept aiming gap structural). | Peak at 6M | **pending LB** |
-| **Rev33** | Resume Rev31 31M + `--bc-samples tempo_mix_small.pkl --bc-coef 0.05`. Jarvis H100 spot. | BC auxiliary nudge from tempo dataset without wiping PPO competence. | Running (early, ~2M steps) | Still running | — |
+| **Rev33** | Resume Rev31 31M + `--bc-samples tempo_mix_small.pkl --bc-coef 0.05`. Jarvis H100 spot. | BC auxiliary nudge from tempo dataset (2817 samples). | Ran to 10M. Ajay quick-16: 1/16 (6.25%) — marginal improvement. Killed, checkpoints saved locally. | Peak unclear, marginal Ajay gain | — |
+| **Rev34** | Resume Rev33 7M + `--bc-samples conversion_mix_loose.pkl --bc-coef 0.05`. GCP L4, 20M steps. | **Conversion-focused BC**: filters teacher openings by fast first capture (≤14 steps), ≤36 ships pre-capture. 436 teacher + 817 failure relabels. Ajay gap = commitment problem (35-40 ships before capture vs Ajay's 17.5). | Overnight run, in progress | In progress | — |
 
 **What we know:**
-- **Rev31 First Strike is the key insight**: opening paralysis fixed, 918.8 LB. Step-0 still 0.001 but step 1-2 fire aggressively.
-- **Rev32b**: First Strike 4×t<20 pushed Zach to 88.7% and 20/21 loss seeds — new records. Doesn't help vs Ajay.
-- **Ajay gap is structural**: `orbit_lite.intercept_aim` makes Ajay's fleets arrive 3× faster (intercept vs chase). Our agent fires at current planet position, not intercept point. Fleet routing fix needed in action decode.
-- Zach panel saturating ~88-89%. Ajay panel is now the primary metric (our agent scores ~1-2%).
-- BC as standalone warmstart fails if checkpoint is partial/diagnostic (clip_frac stays 0). Use strong PPO checkpoint + `--bc-samples` as regularizer.
-- Rsync symlink bug: always use `-L` flag or sync directly from `/home/checkpoints/` (not via symlink at `/home/orbit_wars_rl/checkpoints/`).
+- **Rev31 First Strike**: opening paralysis fixed, 918.8 LB record. Step-0 still 0.001 but step 1-2 fire aggressively.
+- **Rev32b**: First Strike 4×t<20 → Zach 88.7%, 20/21 loss seeds — new records. Submitted pending LB.
+- **Ajay gap is a conversion/commitment problem**: we spend 35-40 ships before first capture vs Ajay's 17.5. Ranking improved (tempo BC), conversion didn't. `build_conversion_bc.py` targets this directly.
+- Zach panel saturating ~88-89%. Ajay is now the signal metric (currently ~1-2%).
+- BC as standalone warmstart fails if checkpoint is partial (clip_frac stays 0). Use strong PPO checkpoint + `--bc-samples`.
+- Rsync symlink bug: always use `-L` flag or sync from `/home/checkpoints/` directly (not via symlink).
 - Spot instances: verify sync working after first checkpoint before leaving unattended.
 - Export requires `--target-decode` for Phase 1.
 
@@ -60,12 +61,12 @@
 
 **Active runs:**
 
-**Rev33** — Jarvis H100 spot (`421356`, `217.18.55.12`)
-- Resume: `seed_checkpoints/rev31_31M_resume.pt` (Rev31 31M, 914.5 LB)
-- BC aux: `seed_checkpoints/tempo_mix_small.pkl`, 2817 samples, `--bc-coef 0.05`
-- rollout=64, 2048 envs, LR=0.000025, First Strike 2×t<50, 10M total steps
+**Rev34** — GCP L4 (`orbit-wars-rev34`, us-central1-b, `34.67.229.80`)
+- Resume: `seed_checkpoints/rev33_7M_resume.pt` (Rev33 7M)
+- BC aux: `seed_checkpoints/conversion_mix_loose.pkl`, 1253 samples (436 teacher + 817 failure relabels), `--bc-coef 0.05`
+- rollout=64, 512 envs, LR=0.000025, First Strike 2×t<50, 20M total steps (~8 hrs overnight)
 - Panel: quick-16 vs Ajay every 500K, full panel every 5M
-- Sync watcher: `gpu_run_artifacts/jarvis_rev33/` with `-L` flag
+- Sync: `gpu_run_artifacts/gcp_rev34/`
 
 **Rev32b** — GCP L4 (`orbit-wars-rev32b`, us-central1-a, 35.193.52.221)
 - Resume: Rev31 31M, First Strike 4×t<20 2.0× → 4.0×
