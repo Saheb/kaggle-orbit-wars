@@ -60,8 +60,34 @@
 **Rev31 continuation** — GCP L4 (`orbit-wars-4p-gcp`, us-central1-b, 136.111.175.50)
 - Resume from Rev31 10M checkpoint (913.2 LB)
 - 512 envs, rollout=64, LR=0.000025, First Strike 2×t<50
-- Currently at ~27M steps (from 10M overnight), ~725 SPS
-- Panel watcher running (Zach only, newest-first)
+- Currently at ~30M+ steps, ~725 SPS
+- Panel watcher running (Zach only, newest-first, fixed glob)
+
+**Submitted checkpoints:**
+- Rev31 10M → **913.2 LB** (step-1 FireP=0.715, 16/21 loss seeds)
+- Rev31 26M → **pending** (step-1 FireP=0.859, 18/21 loss seeds)
+
+**Key diagnostic tools:**
+- `orbit_wars_rl/diagnose_opening.py` — measures FireP at each game step on LB episode
+- `orbit_wars_rl/test_seed6462.py` — 21-seed isolation test for known failure boards
+- `orbit_wars_rl/replay_wins.py` — generates HTML replays + planet-lead plots (with You=COLOR banner)
+- `submission_analysis/` — documented loss analysis per submission
+
+**Loss analysis summary (Rev31 10M, 913.2 LB):**
+- 50% early aggression (behind at step 30, fast elimination)
+- 29% mid collapse (competitive at step 30, then lost)
+- 11% complacency (ahead at step 30, stopped expanding)
+
+**BC work in progress:**
+- Downloaded June 3 episode dataset (4609 episodes)
+- Top agents: Isaiah @ Tufa Labs (86% WR), Hober Malloc (67%), Ebi (64%)
+- ajay_1200 / producer_1200 notebooks extracted but need `orbit_lite` module fix
+- Plan: use Isaiah/Hober/Ebi winning episodes for new BC warmstart targeting step-0 aggression
+
+**Next priorities:**
+1. Fix orbit_lite dependency in ajay/producer opponent agents
+2. Generate new BC from top-agent replays (Isaiah + Hober focus)
+3. Rev32: new BC warmstart + training from scratch to get step-0 firing (currently only step 1-2)
 
 **Rev30b** completed: peak 85.2% vs Zach at 4M (LR=0.000025). Best checkpoint: `torch_step_4194304_rev30b_20260603_143644.pt`
 - Resume: Rev28 22M checkpoint (=28M overall from scratch)
