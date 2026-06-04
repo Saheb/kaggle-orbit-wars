@@ -305,6 +305,7 @@ def train(args):
     print(f"Expansion coeff: {args.expansion_coef}")
     print(f"Defense coeff: {args.defense_coef}")
     print(f"Early capture coeff: {args.early_capture_coef} (decay over {args.early_capture_steps} steps)")
+    print(f"First Strike: {args.first_strike_mult}x for t<{args.first_strike_steps} steps" if args.first_strike_steps > 0 else "First Strike: off")
     print(f"Speed coeff: {args.speed_coef}")
     if args.handicap_frac > 0:
         print(f"Handicap: {args.handicap_frac*100:.0f}% of games start with {args.handicap_ships} ships (vs normal 10)")
@@ -351,6 +352,8 @@ def train(args):
                       defense_coef=args.defense_coef,
                       early_capture_coef=args.early_capture_coef,
                       early_capture_steps=args.early_capture_steps,
+                      first_strike_steps=args.first_strike_steps,
+                      first_strike_mult=args.first_strike_mult,
                       speed_coef=args.speed_coef,
                       handicap_frac=args.handicap_frac,
                       handicap_ships=args.handicap_ships)
@@ -1187,6 +1190,13 @@ if __name__ == "__main__":
                              "keep ≤10%% of terminal win → range 0.05-0.10. 0 = off.")
     parser.add_argument("--early-capture-steps", type=int, default=400,
                         help="Step at which the delta-capture decay reaches zero. Default 400.")
+    parser.add_argument("--first-strike-steps", type=int, default=0,
+                        help="Apply first_strike_mult to capture reward for t < N steps. "
+                             "Breaks opening paralysis by making early captures more lucrative. "
+                             "Suggested: 50. 0 = off.")
+    parser.add_argument("--first-strike-mult", type=float, default=2.0,
+                        help="Multiplier applied to capture reward for t < --first-strike-steps. "
+                             "Default 2.0 (doubles the capture reward in the opening).")
     parser.add_argument("--speed-coef", type=float, default=0.0,
                         help="Terminal time-to-victory bonus coefficient. Winners get "
                              "+((episode_steps - termination_step) / episode_steps) * coef, "

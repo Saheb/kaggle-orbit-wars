@@ -77,6 +77,8 @@ class VecTorchEnv:
         defense_coef: float = 0.0,
         early_capture_coef: float = 0.0,
         early_capture_steps: int = 100,
+        first_strike_steps: int = 0,
+        first_strike_mult: float = 2.0,
         speed_coef: float = 0.0,
         handicap_frac: float = 0.0,
         handicap_ships: int = 5,
@@ -110,6 +112,8 @@ class VecTorchEnv:
         # Coeff math: sum(coeff*(1-t/100), t=4..100) ≈ 97*0.48*coeff per planet captured
         # at step 3. Keep cumulative bonus ≤ 10-15% of terminal win → coeff 0.002-0.003.
         self.early_capture_coef = float(early_capture_coef)
+        self.first_strike_steps = int(first_strike_steps)
+        self.first_strike_mult = float(first_strike_mult)
         self.early_capture_steps = int(early_capture_steps)
         # Time-to-victory velocity bonus: winners get an extra reward scaled by how early
         # they won. reward_win = 1.0 + (episode_steps - T) / episode_steps * speed_coef.
@@ -1066,7 +1070,17 @@ class VecTorchEnv:
             # symmetric delta is already self-correcting: capturing from opponent gives
             # +1 to attacker and -1 to defender automatically).
             ec_rewards = planet_delta
-            terminal_rewards = terminal_rewards + self.early_capture_coef * decay.unsqueeze(1) * ec_rewards
+            # First Strike bonus: multiply capture reward by first_strike_mult for t < first_strike_steps.
+            # Overcomes value critic's "home invasion fear" — makes early captures so lucrative
+            # that the policy fires at step 0 instead of waiting.
+            if self.first_strike_steps > 0:
+                fs_mult = torch.where(t < self.first_strike_steps,
+                                      torch.full_like(t, self.first_strike_mult),
+                                      torch.ones_like(t))  # (N,)
+                effective_coef = self.early_capture_coef * decay * fs_mult  # (N,)
+            else:
+                effective_coef = self.early_capture_coef * decay  # (N,)
+            terminal_rewards = terminal_rewards + effective_coef.unsqueeze(1) * ec_rewards
             self.prev_owned = owned
         # 12. Auto-reset done envs in-place — must come AFTER capturing rewards
         if done.any():
