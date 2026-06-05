@@ -41,7 +41,7 @@ class ModelConfig:
     # MUST match the BC label scheme that produced the checkpoint.
     # Default "absolute" preserves legacy checkpoint behaviour.
     ship_bin_mode: str = "absolute"
-    pairwise_feature_dim: int = 12   # see features.PAIRWISE_FEATURE_DIM
+    pairwise_feature_dim: int = 15   # see features.PAIRWISE_FEATURE_DIM
     max_planets: int = 48            # for target_head output size; matches EnvConfig
     dropout: float = 0.0
     # Value head input width. 0 = auto (2*entity_dim, new concat head).

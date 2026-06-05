@@ -12,7 +12,7 @@ Features per entity type:
 - Global (11 features): player, step, angular_velocity, economy stats,
   enemy ships split (on_planets / in_fleets), mode
 
-Pairwise features (12 per owned-slot × target-planet pair):
+Pairwise features (15 per owned-slot × target-planet pair):
   0: sin of arrival direction   (corrected for rotation on orbiting targets)
   1: cos of arrival direction   (corrected for rotation on orbiting targets)
   2: arrival dist / BOARD_SIZE  (corrected for rotation on orbiting targets)
@@ -23,6 +23,9 @@ Pairwise features (12 per owned-slot × target-planet pair):
   9: target valid flag
   10: ships-at-arrival / 200    (current ships + production * eta)
   11: capture-gap / 200         (ships_at_arrival - current_capture_cost; + = harder)
+  12: roi_20                    (production*20 - cap_cost_at_arrival) / cap_cost_at_arrival, clipped [-1,1]
+  13: roi_50                    same with horizon 50
+  14: enemy_contest / 100       total enemy fleet ships racing toward this target
 """
 
 from __future__ import annotations
@@ -267,10 +270,33 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         mode_4p,                             # 10: 4-player mode flag
     ], dtype=np.float32)
 
+    # Precompute enemy fleet ships racing toward each target planet (pairwise feat 14).
+    # Result shape: (n_p_pair,) — independent of source slot, broadcast in compute_pairwise_features.
+    n_p_pair = min(len(planets), max_planets)
+    enemy_contest = np.zeros(n_p_pair, dtype=np.float32)
+    if n_fleets > 0 and n_p_pair > 0:
+        enemy_fleet_mask = (fleet_owner != player) & (fleet_owner >= 0)
+        if enemy_fleet_mask.any():
+            efx = fleet_x[enemy_fleet_mask]
+            efy = fleet_y[enemy_fleet_mask]
+            efcos = fleet_cos[enemy_fleet_mask]
+            efsin = fleet_sin[enemy_fleet_mask]
+            efships = fleet_ships_arr[enemy_fleet_mask]
+            tgt_x_p = np.array([planets[j][2] for j in range(n_p_pair)], dtype=np.float32)
+            tgt_y_p = np.array([planets[j][3] for j in range(n_p_pair)], dtype=np.float32)
+            tgt_r_p = np.array([planets[j][4] for j in range(n_p_pair)], dtype=np.float32)
+            # (E, n_p) broadcast: is each enemy fleet e heading toward planet p?
+            vx_ep = tgt_x_p[np.newaxis, :] - efx[:, np.newaxis]
+            vy_ep = tgt_y_p[np.newaxis, :] - efy[:, np.newaxis]
+            along_ep = vx_ep * efcos[:, np.newaxis] + vy_ep * efsin[:, np.newaxis]
+            perp_ep  = np.abs(vx_ep * efsin[:, np.newaxis] - vy_ep * efcos[:, np.newaxis])
+            headed = (along_ep > 0) & (perp_ep < tgt_r_p[np.newaxis, :] + 1.5)
+            enemy_contest = (efships[:, np.newaxis] * headed).sum(axis=0).astype(np.float32)
+
     pairwise = compute_pairwise_features(
         planets, owned_indices, owned_count, player, max_planets=max_planets,
         max_owned=max_owned, angular_velocity=angular_velocity, step=step,
-        init_by_id=init_by_id,
+        init_by_id=init_by_id, enemy_contest=enemy_contest,
     )
 
     return {
@@ -287,7 +313,7 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
 
 # Number of pairwise features per (owned-slot, target-planet) pair.
 # Keep in sync with compute_pairwise_features() and ModelConfig.pairwise_feature_dim.
-PAIRWISE_FEATURE_DIM = 12
+PAIRWISE_FEATURE_DIM = 15
 
 # Typical fleet size used to estimate an ETA prior (matches teacher MIN_SHIP_FLOOR ~ 10
 # but in practice ETA varies modestly with size since speed is log-shaped).
@@ -312,7 +338,8 @@ def _planet_arrival_pos(init_angle: float, orbital_r: float, is_orbiting: bool,
 def compute_pairwise_features(planets, owned_indices, owned_count, player,
                               max_planets: int = 48, max_owned: int = MAX_OWNED_PLANETS,
                               angular_velocity: float = 0.0, step: int = 0,
-                              init_by_id: dict | None = None):
+                              init_by_id: dict | None = None,
+                              enemy_contest: np.ndarray | None = None):
     """For each (owned-slot, target-planet) pair return geometric + ownership features.
 
     These are exactly the quantities the model cannot easily compute from raw (x, y)
@@ -415,6 +442,17 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         # Capture gap: how much harder (positive) or easier (negative) vs right now.
         cap_gap = ships_at_arrival - tgt_cap_cost
 
+        # ROI at horizons 20 and 50: (prod * H - cap_cost_at_arrival) / cap_cost_at_arrival.
+        # cap_cost_at_arrival accounts for ships accumulated during flight (ships_at_arrival).
+        # Positive = attack pays off within H steps; negative = not worth it yet.
+        cap_cost_at_arrival = np.where(
+            tgt_owner == -1,       ships_at_arrival + 1,
+            np.where(tgt_owner != player, ships_at_arrival + tgt_prod * 3 + 1, 0.0)
+        )
+        safe_cap = np.maximum(cap_cost_at_arrival, 1.0)
+        roi_20 = np.clip((tgt_prod * 20 - cap_cost_at_arrival) / safe_cap, -1.0, 1.0)
+        roi_50 = np.clip((tgt_prod * 50 - cap_cost_at_arrival) / safe_cap, -1.0, 1.0)
+
         out[slot, :n_p, 0]  = sin_a                         # arrival direction sin
         out[slot, :n_p, 1]  = cos_a                         # arrival direction cos
         out[slot, :n_p, 2]  = dist / BOARD_SIZE             # arrival dist
@@ -427,5 +465,9 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         out[slot, :n_p, 9]  = 1.0                            # target valid flag
         out[slot, :n_p, 10] = ships_at_arrival / 200.0       # projected ships at arrival
         out[slot, :n_p, 11] = np.clip(cap_gap / 200.0, -1.0, 5.0)  # capture gap (+ = harder by ETA)
+        out[slot, :n_p, 12] = roi_20                          # ROI at horizon 20
+        out[slot, :n_p, 13] = roi_50                          # ROI at horizon 50
+        if enemy_contest is not None:
+            out[slot, :n_p, 14] = np.minimum(enemy_contest[:n_p], 500.0) / 100.0  # contested ships
 
     return out

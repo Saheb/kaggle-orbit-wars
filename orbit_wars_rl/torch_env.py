@@ -565,10 +565,15 @@ class VecTorchEnv:
 
         # ----- Pairwise (src, tgt) features for the model's cross-attention -----
         # Matches features.compute_pairwise_features() in the kaggle path.
-        # Output: (N, MAX_OWNED, P, 12) — same channel order as features.py.
+        # Output: (N, MAX_OWNED, P, 15) — same channel order as features.py.
+        # enemy_contest[n, p] = total enemy fleet ships racing toward planet p in env n.
+        # `incoming` (N, P, F) and enemy mask reuse tensors already computed above.
+        enemy_fleet = (f_owner != player) & (f_owner >= 0) & fleet_alive   # (N, F)
+        enemy_contest = (f_ships.unsqueeze(1) * (incoming & enemy_fleet.unsqueeze(1)).float()).sum(dim=2)  # (N, P)
         pairwise = self._compute_pairwise(
             planets=planets, planet_alive=planet_alive, P=P,
             owned_idx=owned_idx, slot_valid=slot_valid, player=player,
+            enemy_contest=enemy_contest,
         )
 
         return {
@@ -587,10 +592,11 @@ class VecTorchEnv:
             "pairwise_features": pairwise,
         }
 
-    def _compute_pairwise(self, planets, planet_alive, P, owned_idx, slot_valid, player):
+    def _compute_pairwise(self, planets, planet_alive, P, owned_idx, slot_valid, player,
+                          enemy_contest=None):
         """Vectorized counterpart of features.compute_pairwise_features().
 
-        Returns (N, MAX_OWNED, P, 12) float32 on self.device. Channel order:
+        Returns (N, MAX_OWNED, P, 15) float32 on self.device. Channel order:
           0  sin(angle src→tgt)
           1  cos(angle src→tgt)
           2  distance / BOARD_SIZE
@@ -605,6 +611,9 @@ class VecTorchEnv:
           11 capture gap at arrival — (ships_at_arrival - capture_cost) / 200, clipped [-1,5]
              capture_cost = tgt_ships+1 (neutral) or tgt_ships+3*prod+1 (enemy planet)
              positive = more ships at arrival than needed to capture (hard to take)
+          12 roi_20  — (prod*20 - cap_cost_at_arrival) / cap_cost_at_arrival, clipped [-1,1]
+          13 roi_50  — same at horizon 50
+          14 enemy_contest / 100  — total enemy fleet ships racing toward this target
         """
         N = self.num_envs
         device = self.device
@@ -681,12 +690,33 @@ class VecTorchEnv:
         ).expand(-1, MO, -1)
         cap_gap = ((ships_at_arr * 200.0 - cap_cost) / 200.0).clamp(-1.0, 5.0)
 
+        # ROI features (ch 12-13): (prod*H - cap_cost_at_arrival) / cap_cost_at_arrival
+        prod_actual = prod_b * 5.0                               # (N, MO, P) unnormalized
+        ships_actual = ships_at_arr * 200.0                      # (N, MO, P) unnormalized
+        owner_exp = owner_t.expand(-1, MO, -1)                   # (N, MO, P)
+        cap_at_arr = torch.where(
+            owner_exp == -1,
+            ships_actual + 1.0,
+            torch.where(owner_exp != player,
+                        ships_actual + prod_actual * 3.0 + 1.0,
+                        torch.zeros_like(ships_actual))
+        )
+        safe_cap = cap_at_arr.clamp(min=1.0)
+        roi_20 = ((prod_actual * 20.0 - cap_at_arr) / safe_cap).clamp(-1.0, 1.0)
+        roi_50 = ((prod_actual * 50.0 - cap_at_arr) / safe_cap).clamp(-1.0, 1.0)
+
+        # Enemy contest feature (ch 14): broadcast (N, P) → (N, MO, P)
+        if enemy_contest is not None:
+            contest_b = (enemy_contest / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1)
+        else:
+            contest_b = torch.zeros(N, MO, P, device=device)
+
         # Stack channels
         out = torch.stack([
             sin_a, cos_a, dist / BOARD_SIZE, 1.0 / (eta + 1.0),
             sun_safe, is_mine_b, is_enemy_b, is_neutral_b, prod_b, valid_b,
-            ships_at_arr, cap_gap,
-        ], dim=-1)  # (N, MO, P, 12)
+            ships_at_arr, cap_gap, roi_20, roi_50, contest_b,
+        ], dim=-1)  # (N, MO, P, 15)
 
         # Zero out invalid owned slots AND invalid target planets (match kaggle path)
         slot_valid_b = slot_valid.unsqueeze(-1).unsqueeze(-1).float()    # (N, MO, 1, 1)
