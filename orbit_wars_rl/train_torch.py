@@ -310,7 +310,7 @@ def train(args):
     if args.handicap_frac > 0:
         print(f"Handicap: {args.handicap_frac*100:.0f}% of games start with {args.handicap_ships} ships (vs normal 10)")
     if args.ssdr_frac > 0:
-        print(f"SSDR: {args.ssdr_frac*100:.0f}% of resets fast-forward 1..{args.ssdr_max_steps} random steps")
+        print(f"SSDR: {args.ssdr_frac*100:.0f}% of resets grant opponent 1..{args.ssdr_max_steps} extra planets (asymmetric start)")
     if args.srcs_multi_penalty > 0.0:
         print(f"srcs_multi penalty: coef={args.srcs_multi_penalty}, threshold={args.srcs_multi_threshold}, "
               f"decay_frac={args.srcs_multi_penalty_decay_frac} "
@@ -701,6 +701,13 @@ def train(args):
             current_seat = rng.randint(0, 1)  # alternate so current sees both seats
         opp_seat = 1 - current_seat
         pool_slice = slice(N_self, N) if N_pool > 0 else slice(0, 0)
+        # Inform env which envs are self-play (SSDR active) vs pool (symmetric).
+        # Pool envs get clean symmetric starts so old checkpoints aren't poisoned
+        # by asymmetric boards they were never trained on.
+        if env.ssdr_frac > 0.0:
+            self_mask = torch.zeros(N, dtype=torch.bool)
+            self_mask[:N_self] = True
+            env.set_ssdr_mask(self_mask)
         # Reset train_mask: all True by default, mark opp's slots False below
         storage["train_mask"].fill_(True)
 

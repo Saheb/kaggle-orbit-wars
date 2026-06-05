@@ -135,8 +135,15 @@ class VecTorchEnv:
         # the warmup so the learner wakes up in a messy, asymmetric mid-game state.
         # This shatters the symmetric-start passive Nash equilibrium.
         self.ssdr_frac = float(ssdr_frac)
-        self.ssdr_max_steps = int(ssdr_max_steps)
-        self._ssdr_active = False  # re-entrancy guard — prevents recursive SSDR calls
+        self.ssdr_max_steps = int(ssdr_max_steps)  # now = max extra planets granted to opponent
+        # Asymmetric Planet SSDR: with probability ssdr_frac, grant opponent 1..ssdr_max_steps
+        # extra neutral planets at reset. No random play, no fleet explosion.
+        # Breaks symmetric-start Nash cleanly.
+        #
+        # ssdr_self_only_mask: bool tensor (N,) set by training loop each rollout.
+        # True = self-play env (SSDR active), False = pool env (symmetric start).
+        # If None, SSDR applies to all envs.
+        self._ssdr_self_mask: torch.Tensor | None = None  # set via set_ssdr_mask()
 
         # State tensors — allocated in reset()
         self.planets: torch.Tensor = None       # (N, P, 7)
@@ -160,6 +167,24 @@ class VecTorchEnv:
         self._planet_orbital_r: torch.Tensor = None      # (N, P) float
         self._planet_is_orbiting: torch.Tensor = None    # (N, P) bool
 
+    def set_ssdr_mask(self, self_play_mask: torch.Tensor) -> None:
+        """Mark which envs are self-play (SSDR active) vs pool (symmetric start).
+
+        Call once per rollout from the training loop when pool assignments change:
+            env.set_ssdr_mask(torch.arange(N) < N_self)  # first N_self = self-play
+
+        If never called, SSDR applies to all envs (original behaviour).
+        """
+        self._ssdr_self_mask = self_play_mask.bool().cpu()
+
+    def _ssdr_active_for(self, env_i: int) -> bool:
+        """Return True if SSDR should apply to env index env_i."""
+        if self.ssdr_frac <= 0.0:
+            return False
+        if self._ssdr_self_mask is None:
+            return True  # no mask set → apply to all
+        return bool(self._ssdr_self_mask[env_i].item())
+
     # ---------------------------------------------------------------------
     # Reset — generates N games using the kaggle env's seed-based generator,
     # then stacks into batched tensors. This is the only non-vectorized op,
@@ -178,7 +203,7 @@ class VecTorchEnv:
         planet_alive_list = []
         angular_velocities = []
 
-        for seed in seeds:
+        for seed_idx, seed in enumerate(seeds):
             init_rng = random.Random(seed)
             ang_vel = init_rng.uniform(0.025, 0.05)
             angular_velocities.append(ang_vel)
@@ -204,6 +229,18 @@ class VecTorchEnv:
                                 else 10)
                     pad[base, 1] = 0;     pad[base, 5] = p0_ships
                     pad[base + 3, 1] = 1; pad[base + 3, 5] = 10
+                    # SSDR: grant opponent 1..ssdr_max_steps extra neutral planets
+                    # Only applies to self-play envs (not pool envs) per mask.
+                    if self._ssdr_active_for(seed_idx) and random.random() < self.ssdr_frac:
+                        k = random.randint(1, max(1, self.ssdr_max_steps))
+                        # find neutral planets (owner=-1, alive) excluding home slots
+                        neutral_idx = [i for i in range(n)
+                                       if pad[i, 1] == -1 and i != base and i != base + 3]
+                        random.shuffle(neutral_idx)
+                        for ni in neutral_idx[:k]:
+                            prod = pad[ni, 6]
+                            pad[ni, 1] = 1  # give to opponent
+                            pad[ni, 5] = max(10, int(prod * 3))  # realistic ships
                 elif self.num_players == 4:
                     for j in range(4):
                         pad[base + j, 1] = j; pad[base + j, 5] = 10
@@ -236,9 +273,6 @@ class VecTorchEnv:
         self.prev_owned = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         for pl in range(self.num_players):
             self.prev_owned[:, pl] = ((owner_p == pl) & self.planet_alive).float().sum(dim=1)
-        if self.ssdr_frac > 0.0:
-            all_idx = list(range(self.num_envs))
-            self._ssdr_warmup(all_idx)
         return self._state_dict()
 
     def _compute_material(self) -> torch.Tensor:
@@ -1262,6 +1296,15 @@ class VecTorchEnv:
                 if self.num_players == 2:
                     pad[base, 1] = 0;     pad[base, 5] = 10
                     pad[base + 3, 1] = 1; pad[base + 3, 5] = 10
+                    # SSDR asymmetric planet assignment — self-play envs only
+                    if self._ssdr_active_for(env_i) and random.random() < self.ssdr_frac:
+                        k = random.randint(1, max(1, self.ssdr_max_steps))
+                        neutral_idx = [i for i in range(n)
+                                       if pad[i, 1] == -1 and i != base and i != base + 3]
+                        random.shuffle(neutral_idx)
+                        for ni in neutral_idx[:k]:
+                            pad[ni, 1] = 1
+                            pad[ni, 5] = max(10, int(pad[ni, 6] * 3))
                 elif self.num_players == 4:
                     for j in range(4):
                         pad[base + j, 1] = j; pad[base + j, 5] = 10
@@ -1280,8 +1323,6 @@ class VecTorchEnv:
         # Re-precompute orbital params for changed envs
         self._precompute_orbital_params()
         self.prev_material[done_mask] = self._compute_material()[done_mask]
-        if self.ssdr_frac > 0.0:
-            self._ssdr_warmup(done_idx)
 
 
 # -------------------------------------------------------------------------
