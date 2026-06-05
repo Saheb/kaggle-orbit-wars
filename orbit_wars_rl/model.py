@@ -105,24 +105,18 @@ class EntityTransformer(nn.Module):
         self.value_fc2 = nn.Linear(D, D // 2)
         self.value_out = nn.Linear(D // 2, 1)
 
-    def forward(self, planet_features, fleet_features, global_features,
-                planet_mask, fleet_mask, fire_mask=None, angle_mask=None,
-                slot_valid=None, owned_indices=None, owned_count=None,
-                pairwise_features=None):
-        """
-        Args:
-            planet_features: (B, N_p, D_p)
-            fleet_features: (B, N_f, D_f)
-            global_features: (B, D_g)
-            planet_mask: (B, N_p) bool, True = real entity
-            fleet_mask: (B, N_f) bool, True = real entity
-            fire_mask: (B, max_owned) bool, True = can fire
-            angle_mask: (B, max_owned, 72) bool, True = legal angle
-            slot_valid: (B, max_owned) bool, True = real owned planet slot
-            owned_indices: (B, max_owned) int, indices into planet array
-            owned_count: (B,) int
+    def encode_state(self, planet_features, fleet_features, global_features,
+                     planet_mask, fleet_mask, slot_valid=None, owned_indices=None,
+                     pairwise_features=None):
+        """Encode a state and expose backbone embeddings for auxiliary heads.
 
-        Returns dict with fire_logits, angle_logits, ship_logits, value.
+        Returns a dict with:
+        - ``global_token``: (B, D)
+        - ``planet_emb``:   (B, N_p, D) post-transformer planet embeddings
+        - ``owned_entities``: (B, max_owned, D) slot embeddings
+        - ``owned_enriched``: (B, max_owned, D) after pairwise enrichment
+        - ``pairwise_features`` passthrough
+        - ``attn_mask`` and ``x`` for value head compatibility
         """
         B = planet_features.shape[0]
         D = self.cfg.entity_dim
@@ -161,14 +155,14 @@ class EntityTransformer(nn.Module):
         full_indices = (owned_indices + 1).clamp(0, x.shape[1] - 1)  # (B, max_owned)
         batch_idx = torch.arange(B, device=x.device).unsqueeze(1).expand(-1, max_owned)
         owned_entities = x[batch_idx, full_indices]  # (B, max_owned, D)
+        planet_emb_post = x[:, 1:1 + planet_features.shape[1], :]
+        owned_enriched = owned_entities
 
         # Pairwise cross-attention: enrich each slot with explicit (src, tgt) geometry
         # for fire/angle/ship heads. Target head scores per-(slot, target) directly
         # from the same per-target inputs — see docs/bugs.md.
-        target_logits = None
         if self.use_pairwise and pairwise_features is not None:
             N_p = planet_features.shape[1]
-            planet_emb_post = x[:, 1:1 + N_p, :]                                # (B, N_p, D)
             planet_per_slot = planet_emb_post.unsqueeze(1).expand(-1, max_owned, -1, -1)
             kv_input = torch.cat([planet_per_slot, pairwise_features], dim=-1)  # (B, MO, N_p, D+F)
             kv = self.pair_kv(kv_input)                                         # (B, MO, N_p, 2D)
@@ -180,13 +174,60 @@ class EntityTransformer(nn.Module):
             scores = scores.masked_fill(~tgt_valid, -1e4)
             attn = F.softmax(scores, dim=-1).unsqueeze(2)
             enriched = (attn @ v).squeeze(2)
-            owned_entities = self.pair_ln(owned_entities + self.pair_out(enriched))
+            owned_enriched = self.pair_ln(owned_entities + self.pair_out(enriched))
 
-            # Per-target scoring head: each (slot, target) gets its own logit from
-            # [q_slot, k_target, pair_features]. This is the fix for the collapse
-            # documented in docs/bugs.md — the prior Linear(D, max_planets) head
-            # had no per-target conditioning, capping target_top1 near random.
-            q_tgt = self.tgt_q(owned_entities).unsqueeze(2).expand(-1, -1, N_p, -1)
+        return {
+            "x": x,
+            "attn_mask": attn_mask,
+            "global_token": x[:, 0, :],
+            "planet_emb": planet_emb_post,
+            "owned_entities": owned_entities,
+            "owned_enriched": owned_enriched,
+            "pairwise_features": pairwise_features,
+        }
+
+    def forward(self, planet_features, fleet_features, global_features,
+                planet_mask, fleet_mask, fire_mask=None, angle_mask=None,
+                slot_valid=None, owned_indices=None, owned_count=None,
+                pairwise_features=None):
+        """
+        Args:
+            planet_features: (B, N_p, D_p)
+            fleet_features: (B, N_f, D_f)
+            global_features: (B, D_g)
+            planet_mask: (B, N_p) bool, True = real entity
+            fleet_mask: (B, N_f) bool, True = real entity
+            fire_mask: (B, max_owned) bool, True = can fire
+            angle_mask: (B, max_owned, 72) bool, True = legal angle
+            slot_valid: (B, max_owned) bool, True = real owned planet slot
+            owned_indices: (B, max_owned) int, indices into planet array
+            owned_count: (B,) int
+
+        Returns dict with fire_logits, angle_logits, ship_logits, value.
+        """
+        encoded = self.encode_state(
+            planet_features, fleet_features, global_features,
+            planet_mask, fleet_mask,
+            slot_valid=slot_valid, owned_indices=owned_indices,
+            pairwise_features=pairwise_features,
+        )
+        x = encoded["x"]
+        attn_mask = encoded["attn_mask"]
+        planet_emb_post = encoded["planet_emb"]
+        owned_entities = encoded["owned_entities"]
+        owned_enriched = encoded["owned_enriched"]
+        B = planet_features.shape[0]
+        max_owned = owned_enriched.shape[1]
+        D = x.shape[-1]
+        target_logits = None
+
+        # Per-target scoring head: each (slot, target) gets its own logit from
+        # [q_slot, k_target, pair_features]. This is the fix for the collapse
+        # documented in docs/bugs.md — the prior Linear(D, max_planets) head
+        # had no per-target conditioning, capping target_top1 near random.
+        if self.use_pairwise and pairwise_features is not None:
+            N_p = planet_features.shape[1]
+            q_tgt = self.tgt_q(owned_enriched).unsqueeze(2).expand(-1, -1, N_p, -1)
             k_tgt = self.tgt_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
             scorer_in = torch.cat([q_tgt, k_tgt, pairwise_features], dim=-1)
             tgt_scores = self.target_scorer(scorer_in).squeeze(-1)              # (B, MO, N_p)
@@ -206,13 +247,13 @@ class EntityTransformer(nn.Module):
             # without adding fallback parameters that would break checkpoints.
             target_logits = torch.zeros(
                 B, max_owned, self.max_planets,
-                device=owned_entities.device, dtype=owned_entities.dtype,
+                device=owned_enriched.device, dtype=owned_enriched.dtype,
             )
 
         # Action heads
-        fire_logits = self.fire_head(owned_entities).squeeze(-1)  # (B, max_owned)
-        angle_logits = self.angle_head(owned_entities)  # (B, max_owned, 144)
-        ship_logits = self.ship_head(owned_entities)  # (B, max_owned, num_ship_bins)
+        fire_logits = self.fire_head(owned_enriched).squeeze(-1)  # (B, max_owned)
+        angle_logits = self.angle_head(owned_enriched)  # (B, max_owned, 144)
+        ship_logits = self.ship_head(owned_enriched)  # (B, max_owned, num_ship_bins)
         # min_ship_bin: bins below this are masked to -inf so they're never
         # sampled / argmaxed. For the fraction head (10 bins on [0.1, 1.0]),
         # setting min_ship_bin=1 removes the "10%-of-source" trap that PPO
@@ -259,9 +300,9 @@ class EntityTransformer(nn.Module):
             if slot_valid is not None:
                 owned_float = slot_valid.float().unsqueeze(-1)
                 n_owned = owned_float.sum(dim=1).clamp(min=1)
-                owned_pool = (owned_entities * owned_float).sum(dim=1) / n_owned
+                owned_pool = (owned_enriched * owned_float).sum(dim=1) / n_owned
             else:
-                owned_pool = owned_entities.mean(dim=1)
+                owned_pool = owned_enriched.mean(dim=1)
             value_input = torch.cat([global_token, owned_pool], dim=-1)  # (B, 2D)
         value = self.value_out(F.gelu(self.value_fc2(F.gelu(self.value_fc1(value_input))))).squeeze(-1)
 

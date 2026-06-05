@@ -92,6 +92,78 @@ python orbit_wars_rl/eval.py \
 > ⚠️ `orbit_lite` package must be at `opponents/orbit_lite/` for Ajay/Producer to work.
 > ⚠️ Always `--target-decode` for Phase 1. Opponent paths relative to repo root.
 
+### Producer-style ranking audit on replay losses
+
+```bash
+source /Users/saheb/home/.venv/bin/activate
+
+python orbit_wars_rl/analyze_producer_ranking.py \
+  --checkpoint gpu_run_artifacts/jarvis/checkpoints/<checkpoint>.pt \
+  --replay-dir /tmp/ajay_seed_replays \
+  --player-slot 0 \
+  --step-limit 40 \
+  --output-json /tmp/producer_ranking.json \
+  --output-md /tmp/producer_ranking.md
+```
+
+This compares, per launch:
+- our decoded target
+- our target-head top target
+- producer-style shortlist best target (`H=18` in 2P)
+
+Use it to check whether failures come from:
+- target ranking
+- source/shortlist mismatch
+- commitment / no valid producer candidate
+
+### Producer whole-action ranking audit
+
+```bash
+source /Users/saheb/home/.venv/bin/activate
+
+python orbit_wars_rl/analyze_producer_action_ranking.py \
+  --replay-dir /tmp/ajay_seed_replays \
+  --player-slot 0 \
+  --step-limit 40 \
+  --output-json /tmp/producer_action_ranking.json \
+  --output-md /tmp/producer_action_ranking.md
+```
+
+This compares replay launches against Producer-best **whole actions**:
+- best `(source, target, ships)` candidate in the state
+- whether replay source matches producer-best source
+- whether replay target matches producer-best target
+- rank/score of the replay move under the same action scorer
+
+### Producer-target BC dataset for target-head supervision
+
+```bash
+source /Users/saheb/home/.venv/bin/activate
+
+python orbit_wars_rl/build_producer_target_bc.py \
+  --replay-dir /tmp/sub53359633_eps \
+  --player-name Saheb \
+  --step-limit 40 \
+  --mismatch-repeat 4 \
+  --samples-out /tmp/producer_target_bc.pkl \
+  --summary-out /tmp/producer_target_bc_summary.json
+```
+
+Then fine-tune only the target modules:
+
+```bash
+source /Users/saheb/home/.venv/bin/activate
+
+python orbit_wars_rl/bc.py \
+  --samples /tmp/producer_target_bc.pkl \
+  --init-checkpoint seed_checkpoints/rev31_31M_resume.pt \
+  --trainable-param tgt_q \
+  --trainable-param tgt_k \
+  --trainable-param target_scorer \
+  --steps 300 \
+  --save orbit_wars_rl/checkpoints/bc_producer_target_smoke.pt
+```
+
 ### Full panel eval (legacy — 256 games, ~40 min/opponent on EC2; much slower on Mac CPU)
 
 **Activate venv first** (see top section), then run from repo root:
@@ -544,8 +616,10 @@ python -m pytest orbit_wars_rl/tests/ -x -q
 | `orbit_wars_rl/opponent_pool.py` | Self-play pool + PFSP sampling |
 | `orbit_wars_rl/export_agent.py` | Export checkpoint → submission .py |
 | `orbit_wars_rl/bc.py` | BC loss (lazily imported by ppo.py when --il-lambda set) |
+| `orbit_wars_rl/build_producer_target_bc.py` | Build producer-labeled target-only BC dataset from replay launches |
 | `orbit_wars_rl/build_conversion_bc.py` | Build conversion-focused BC dataset (fast-capture teacher + failure relabels) |
 | `orbit_wars_rl/compare_tempo_checkpoints.py` | Compare first-capture/conversion metrics across checkpoints on fixed Ajay seeds |
+| `orbit_wars_rl/eval_joint_opening.py` | Opening-only live prototype: joint action scorer picks early moves, base policy handles the rest |
 | `orbit_wars_rl/step_firep.py` | Compare FireP at steps 0-3 across multiple checkpoints (opening aggression) |
 | `opponents/orbit_lite/` | Ajay/Producer dependency — intercept aiming, fleet routing (must be present) |
 | `orbit_wars_rl/env.py` | Old kaggle_environments wrapper (used by validate_training + tests) |

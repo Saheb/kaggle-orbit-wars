@@ -155,11 +155,46 @@ def test_model_with_masks():
         )
 
     # Masked-out slots should have fire_logit << 0
-    assert out["fire_logits"][0, 1].item() < -1e8, "Slot 1 should be masked (slot_valid=False)"
+    assert out["fire_logits"][0, 1].item() <= -100.0, "Slot 1 should be masked (slot_valid=False)"
     # Masked angles should be << 0
-    assert out["angle_logits"][0, 0, 36].item() < -1e8, "Angle 36 should be masked"
-    assert out["angle_logits"][0, 0, 0].item() > -1e8, "Angle 0 should be legal"
+    assert out["angle_logits"][0, 0, 36].item() <= -100.0, "Angle 36 should be masked"
+    assert out["angle_logits"][0, 0, 0].item() > -100.0, "Angle 0 should be legal"
     print("test_model_with_masks: PASS")
+
+
+def test_model_forward_with_pairwise_target_head():
+    """Forward pass with pairwise target scoring should run and return target logits."""
+    cfg = ModelConfig()
+    model = EntityTransformer(cfg)
+    model.eval()
+
+    B, N_p, N_f = 1, 20, 5
+    max_owned = cfg.max_owned_planets
+
+    planet_features = torch.randn(B, N_p, cfg.planet_feature_dim)
+    fleet_features = torch.randn(B, N_f, cfg.fleet_feature_dim)
+    global_features = torch.randn(B, cfg.global_feature_dim)
+    planet_mask = torch.ones(B, N_p, dtype=torch.bool)
+    fleet_mask = torch.ones(B, N_f, dtype=torch.bool)
+    fire_mask = torch.zeros(B, max_owned, dtype=torch.bool)
+    fire_mask[0, 0] = True
+    angle_mask = torch.ones(B, max_owned, NUM_ANGLE_BINS, dtype=torch.bool)
+    slot_valid = torch.zeros(B, max_owned, dtype=torch.bool)
+    slot_valid[0, 0] = True
+    owned_indices = torch.zeros(B, max_owned, dtype=torch.long)
+    pairwise_features = torch.randn(B, max_owned, N_p, cfg.pairwise_feature_dim)
+
+    with torch.no_grad():
+        out = model(
+            planet_features, fleet_features, global_features, planet_mask, fleet_mask,
+            fire_mask=fire_mask, angle_mask=angle_mask, slot_valid=slot_valid,
+            owned_indices=owned_indices, pairwise_features=pairwise_features,
+        )
+
+    assert out["target_logits"] is not None
+    assert out["target_logits"].shape == (B, max_owned, cfg.max_planets), out["target_logits"].shape
+    assert out["value"].shape == (B,), out["value"].shape
+    print("test_model_forward_with_pairwise_target_head: PASS")
 
 
 def test_end_to_end_obs_to_actions():
@@ -205,5 +240,6 @@ if __name__ == "__main__":
     test_feature_normalization()
     test_model_forward_shapes()
     test_model_with_masks()
+    test_model_forward_with_pairwise_target_head()
     test_end_to_end_obs_to_actions()
     print("\nAll model shape tests passed!")

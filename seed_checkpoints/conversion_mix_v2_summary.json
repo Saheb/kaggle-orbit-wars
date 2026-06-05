@@ -1,0 +1,42 @@
+{
+  "teacher_replay_dirs": [
+    "/tmp/orbit_episodes"
+  ],
+  "teacher_agents": [
+    "Isaiah @ Tufa Labs",
+    "Hober Malloc",
+    "Ebi"
+  ],
+  "teacher_replay_count": 3420,
+  "teacher_sample_count": 2299,
+  "failure_audit_json": [
+    "/tmp/sub53359633_target_audit.json",
+    "/tmp/ajay_panel_seat0_audit.json"
+  ],
+  "failure_sample_count": 220,
+  "total_sample_count": 2519,
+  "teacher_stats": {
+    "skip_name_filter": 2450,
+    "skip_first_capture": 49,
+    "skip_precap_ships": 47,
+    "skip_not_2p": 549,
+    "skip_pressure_filter": 8,
+    "teacher_replays_kept": 316,
+    "teacher_first_capture_sum": 2615,
+    "teacher_first_launch_sum": 775,
+    "teacher_precap_ships_sum": 5719,
+    "teacher_precap_launches_sum": 436,
+    "teacher_no_fire_samples_kept": 1863,
+    "teacher_samples_kept": 436,
+    "teacher_actions_kept": 436,
+    "replay_read_fail": 1
+  },
+  "failure_stats": {
+    "failure_retarget_and_downsize": 109,
+    "failure_relabels": 220,
+    "failure_required_ships_sum": 2212,
+    "skip_post_capture_action": 1046,
+    "skip_not_overspend": 77,
+    "failure_downsize_only": 111
+  }
+}

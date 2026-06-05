@@ -1,6 +1,6 @@
 """Action mask computation for Orbit Wars.
 
-For each owned planet, determines which of the 72 angle bins are legal
+For each owned planet, determines which of the angle bins are legal
 (don't cross sun, don't go out of bounds). Also computes per-planet
 max sendable ships and ownership masks.
 
@@ -28,7 +28,7 @@ def compute_action_masks(obs, player, max_owned=MAX_OWNED_PLANETS):
 
     Returns dict with torch tensors (batch dim 0=1):
         - fire_mask: (1, max_owned) bool
-        - angle_mask: (1, max_owned, 72) bool
+        - angle_mask: (1, max_owned, 144) bool
         - max_ships: (1, max_owned) int
         - owned_indices: (max_owned,) int — indices into planet array
         - owned_count: int
@@ -56,8 +56,9 @@ def compute_action_masks(obs, player, max_owned=MAX_OWNED_PLANETS):
         owned_indices[slot] = idx
         px, py, pr, ps = p[2], p[3], p[4], p[5]
 
-        fire_mask[slot] = ps > 1
-        max_ships_arr[slot] = max(0, int(ps) - 1)
+        # Orbit Wars allows launching all ships from a planet.
+        fire_mask[slot] = ps > 0
+        max_ships_arr[slot] = max(0, int(ps))
 
         # Compute legal angles: launch from just outside planet radius
         spawn_x = px + (pr + 0.1) * np.cos(ANGLE_BIN_CENTERS)
@@ -145,7 +146,7 @@ def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, playe
         angle_bin_width = 2 * math.pi / max(1, angle_logits.shape[-1])
         angle = float(angle_bins[slot] * angle_bin_width + angle_bin_width / 2)
         ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
-        if ships > 0 and planets[pidx][5] > ships:
+        if ships > 0 and planets[pidx][5] >= ships:
             moves.append([from_id, angle, ships])
 
     return moves
@@ -252,7 +253,7 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
             continue
 
         ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
-        if ships <= 0 or planets[pidx][5] <= ships:
+        if ships <= 0 or planets[pidx][5] < ships:
             continue
 
         angle = _target_intercept_angle(planets[pidx], planets[tidx], ships, obs)
@@ -287,7 +288,7 @@ def actions_from_sampled_policy(fire_action, angle_action, ship_action, masks, o
 
         angle = float(int(angle_bins[slot]) * ANGLE_BIN_WIDTH + ANGLE_BIN_WIDTH / 2)
         ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
-        if ships > 0 and planets[pidx][5] > ships:
+        if ships > 0 and planets[pidx][5] >= ships:
             moves.append([from_id, angle, ships])
 
     return moves

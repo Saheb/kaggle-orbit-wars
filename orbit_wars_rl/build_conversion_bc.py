@@ -31,8 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from orbit_wars_rl.bc import trajectory_to_training_sample  # noqa: E402
-from orbit_wars_rl.build_tempo_bc import build_failure_relabels  # noqa: E402
+from orbit_wars_rl.bc import trajectory_to_training_sample, _find_ship_bin  # noqa: E402
 
 
 def _strict_winner_idx(data: dict) -> int | None:
@@ -60,6 +59,14 @@ def _obs_from_step_agent(step_agent: dict, player_idx: int, step_idx: int) -> di
     out.setdefault("comet_planet_ids", [])
     out.setdefault("initial_planets", out["planets"])
     return out
+
+
+def _obs_before_action(steps: list, player_idx: int, action_step_idx: int) -> dict | None:
+    """Replay action at step t must be paired with observation at step t-1."""
+    if action_step_idx <= 0 or action_step_idx - 1 >= len(steps):
+        return None
+    prev_agent = steps[action_step_idx - 1][player_idx]
+    return _obs_from_step_agent(prev_agent, player_idx, action_step_idx - 1)
 
 
 def _initial_planet_count(data: dict, slot: int) -> int:
@@ -103,6 +110,65 @@ def _launches_and_ships_before_step(data: dict, slot: int, limit_step: int | Non
         launches += len(actions)
         ships += sum(int(a[2]) for a in actions if len(a) >= 3)
     return launches, ships
+
+
+def _planet_idx_by_id(planets: list[list], planet_id: int) -> int | None:
+    for idx, p in enumerate(planets):
+        if int(p[0]) == int(planet_id):
+            return idx
+    return None
+
+
+def _capture_cost(target: list, player_slot: int) -> int:
+    owner = int(target[1])
+    ships = int(target[5])
+    production = int(target[6])
+    if owner == -1:
+        return ships + 1
+    if owner != player_slot:
+        return ships + production * 3 + 1
+    return 0
+
+
+def _slot_for_from_pid(obs: dict, player_idx: int, from_pid: int) -> int | None:
+    from orbit_wars_rl.action_mask import compute_action_masks  # local import to avoid cycle
+
+    masks = compute_action_masks(obs, player_idx)
+    planets = obs["planets"]
+    owned_indices = masks["owned_indices"].numpy()
+    for slot in range(masks["owned_count"]):
+        pidx = int(owned_indices[slot])
+        if pidx < len(planets) and int(planets[pidx][0]) == int(from_pid):
+            return slot
+    return None
+
+
+def _clone_sample(sample: dict) -> dict:
+    out = {}
+    for k, v in sample.items():
+        out[k] = v.clone() if torch.is_tensor(v) else v
+    return out
+
+
+def _zero_action_targets(sample: dict) -> dict:
+    out = _clone_sample(sample)
+    out["fire_target"].zero_()
+    out["ship_target"].zero_()
+    out["target_target"].fill_(-1)
+    return out
+
+
+def _retarget_with_ship(
+    sample: dict,
+    slot: int,
+    target_idx: int,
+    ship_bin: int,
+) -> dict:
+    out = _zero_action_targets(sample)
+    out["fire_target"][slot] = 1
+    out["ship_target"][slot] = int(ship_bin)
+    out["target_target"][slot] = int(target_idx)
+    return out
 
 
 def _first_fire_step(data: dict, slot: int, max_steps: int | None = None) -> int | None:
@@ -187,9 +253,7 @@ def build_teacher_conversion_samples(
             step = steps[step_idx]
             agent_data = step[winner_idx]
             action = agent_data.get("action") or []
-            if not action:
-                continue
-            obs = _obs_from_step_agent(agent_data, winner_idx, step_idx)
+            obs = _obs_before_action(steps, winner_idx, step_idx)
             if obs is None:
                 stats["skip_missing_obs"] += 1
                 continue
@@ -197,10 +261,109 @@ def build_teacher_conversion_samples(
             if sample is None:
                 stats["skip_sample_none"] += 1
                 continue
+            if not action:
+                samples.append(sample)
+                stats["teacher_no_fire_samples_kept"] += 1
+                continue
             samples.append(sample)
             stats["teacher_samples_kept"] += 1
             stats["teacher_actions_kept"] += len(action)
 
+    return samples, stats
+
+
+def build_failure_conversion_relabels(
+    audit_json_paths: list[str],
+    relabel_mode: str,
+    min_eta_regret: int,
+    max_steps: int,
+) -> tuple[list[dict], Counter]:
+    stats = Counter()
+    samples: list[dict] = []
+    for audit_path in audit_json_paths:
+        rep = json.loads(Path(audit_path).read_text())
+        for ep in rep.get("episodes", []):
+            replay = json.loads(Path(ep["replay_path"]).read_text())
+            player_slot = int(ep["player_slot"])
+            first_cap = _first_capture_step(replay, player_slot)
+            for a in ep.get("actions", []):
+                step_idx = int(a["step"])
+                if step_idx > max_steps:
+                    continue
+                if first_cap is not None and step_idx >= first_cap:
+                    stats["skip_post_capture_action"] += 1
+                    continue
+
+                step = replay["steps"][step_idx]
+                agent_data = step[player_slot]
+                action = agent_data.get("action") or []
+                obs = _obs_before_action(replay["steps"], player_slot, step_idx)
+                if obs is None:
+                    stats["skip_missing_obs"] += 1
+                    continue
+                sample = trajectory_to_training_sample({"obs": obs, "action": action})
+                if sample is None:
+                    stats["skip_sample_none"] += 1
+                    continue
+
+                from_pid = int(a["from_planet_id"])
+                slot = _slot_for_from_pid(obs, player_slot, from_pid)
+                if slot is None:
+                    stats["skip_missing_slot"] += 1
+                    continue
+
+                from_idx = _planet_idx_by_id(obs["planets"], from_pid)
+                if from_idx is None:
+                    stats["skip_bad_indices"] += 1
+                    continue
+
+                src = obs["planets"][from_idx]
+                max_sendable = max(1, int(src[5]) - 1)
+                current_target = a.get("decoded_target")
+                current_sent = int(a.get("ships", 0))
+                if not current_target or int(current_target["planet_idx"]) >= len(obs["planets"]):
+                    stats["skip_missing_current_target"] += 1
+                    continue
+                current_tgt = obs["planets"][int(current_target["planet_idx"])]
+                current_required = _capture_cost(current_tgt, player_slot)
+                if not (current_required <= max_sendable and current_sent > current_required):
+                    stats["skip_not_overspend"] += 1
+                    continue
+
+                target_key = "tempo_target" if relabel_mode == "tempo" else "nearest_target"
+                better = a.get(target_key)
+
+                chosen_target_idx = None
+                required = None
+                eta_gap = a.get("eta_gap_vs_nearest")
+                if (
+                    a.get("classification") == "target_priority"
+                    and eta_gap is not None
+                    and int(eta_gap) >= min_eta_regret
+                    and better
+                    and int(better["planet_idx"]) < len(obs["planets"])
+                ):
+                    better_tgt = obs["planets"][int(better["planet_idx"])]
+                    better_required = _capture_cost(better_tgt, player_slot)
+                    if better_required <= max_sendable:
+                        chosen_target_idx = int(better["planet_idx"])
+                        required = better_required
+                        stats["failure_retarget_and_downsize"] += 1
+
+                if chosen_target_idx is None:
+                    chosen_target_idx = int(current_target["planet_idx"])
+                    required = current_required
+                    stats["failure_downsize_only"] += 1
+
+                if chosen_target_idx is None or required is None:
+                    stats["skip_no_feasible_conversion_fix"] += 1
+                    continue
+
+                ship_bin = _find_ship_bin(required)
+                relabeled = _retarget_with_ship(sample, slot=slot, target_idx=chosen_target_idx, ship_bin=ship_bin)
+                samples.append(relabeled)
+                stats["failure_relabels"] += 1
+                stats["failure_required_ships_sum"] += required
     return samples, stats
 
 
@@ -242,7 +405,7 @@ def main() -> None:
         stop_at_first_capture=args.teacher_stop_at_first_capture,
     )
 
-    failure_samples, failure_stats = build_failure_relabels(
+    failure_samples, failure_stats = build_failure_conversion_relabels(
         audit_json_paths=args.failure_audit_json,
         relabel_mode=args.failure_relabel_mode,
         min_eta_regret=args.failure_min_eta_regret,

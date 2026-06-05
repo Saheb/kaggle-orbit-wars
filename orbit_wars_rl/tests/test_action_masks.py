@@ -39,14 +39,14 @@ def _make_obs(planets, fleets=None):
 
 
 def test_fire_mask_requires_ships():
-    """Planet needs > 1 ship to fire."""
+    """Any owned planet with at least 1 ship can fire."""
     planets = [
-        [0, 0, 25.0, 25.0, 1.5, 1, 2],   # owned, only 1 ship → cannot fire
+        [0, 0, 25.0, 25.0, 1.5, 1, 2],   # owned, 1 ship → can fire all ships
         [1, 0, 75.0, 25.0, 1.5, 10, 2],  # owned, 10 ships → can fire
     ]
     masks = compute_action_masks(_make_obs(planets), player=0)
     fire = masks["fire_mask"].squeeze(0)
-    assert not fire[0].item(), "Planet with 1 ship should not be fireable"
+    assert fire[0].item(), "Planet with 1 ship should be fireable"
     assert fire[1].item(), "Planet with 10 ships should be fireable"
     print("test_fire_mask_requires_ships: PASS")
 
@@ -100,13 +100,13 @@ def test_out_of_bounds_masked():
     print("test_out_of_bounds_masked: PASS")
 
 
-def test_max_ships_is_ships_minus_one():
-    """max_ships for a planet is ships - 1 (keep 1 at home)."""
+def test_max_ships_is_all_ships():
+    """max_ships for a planet is the full ship count."""
     planets = [[0, 0, 25.0, 25.0, 1.5, 30, 2]]
     masks = compute_action_masks(_make_obs(planets), player=0)
     max_s = masks["max_ships"].squeeze(0)[0].item()
-    assert max_s == 29, f"Expected max_ships=29, got {max_s}"
-    print("test_max_ships_is_ships_minus_one: PASS")
+    assert max_s == 30, f"Expected max_ships=30, got {max_s}"
+    print("test_max_ships_is_all_ships: PASS")
 
 
 def test_angle_bins_cover_full_circle():
@@ -178,7 +178,7 @@ if __name__ == "__main__":
     test_only_owned_planets_fire()
     test_sun_crossing_masked()
     test_out_of_bounds_masked()
-    test_max_ships_is_ships_minus_one()
+    test_max_ships_is_all_ships()
     test_angle_bins_cover_full_circle()
     test_interior_planet_all_angles_legal()
     test_target_decode_masks_own_planet_before_argmax()
