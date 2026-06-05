@@ -115,9 +115,12 @@ gcloud compute scp /tmp/start_training.sh $INSTANCE:/tmp/start_training.sh --zon
 gcloud compute ssh $INSTANCE --zone=$ZONE -- \
   "tmux new-session -d -s training 'bash /tmp/start_training.sh'"
 
-# Verify it started
-sleep 10
-gcloud compute ssh $INSTANCE --zone=$ZONE -- "tmux capture-pane -t training -p | tail -10"
+# Verify it started — use log file directly, NOT tmux capture-pane.
+# tmux capture-pane shows history buffer including old failed runs.
+# The log file is the ground truth.
+sleep 30
+gcloud compute ssh $INSTANCE --zone=$ZONE -- \
+  "ls -t ~/orbit_wars_rl/gpu_run_artifacts/*/logs/train_gpu_phase1_*.log 2>/dev/null | head -1 | xargs grep '^iter\|Resumed\|Error\|Traceback' 2>/dev/null | head -5"
 ```
 
 ---

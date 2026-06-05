@@ -41,45 +41,35 @@
 | **Rev32b** | First Strike 4×t<20 (stronger/shorter window). Resume Rev31 31M. GCP L4, rollout=64. | Push step-0 firing further — 2×t<50 fixed step 1-2, try 4×t<20 for step 0. | **New Zach record: 88.7% at 6M. 20/21 loss seeds.** Ajay panel = 0.8% (same as Rev31 — intercept aiming gap structural). | Peak at 6M | **pending LB** |
 | **Rev33** | Resume Rev31 31M + `--bc-samples tempo_mix_small.pkl --bc-coef 0.05`. Jarvis H100 spot. | BC auxiliary nudge from tempo dataset (2817 samples). | Ran to 10M. Ajay quick-16: 1/16 (6.25%) — marginal improvement. Killed, checkpoints saved locally. | Peak unclear, marginal Ajay gain | — |
 | **Rev34** | Resume Rev33 7M + `--bc-samples conversion_mix_loose.pkl --bc-coef 0.05`. GCP L4. | Conversion-focused BC (1253 samples). | Killed at 2M — conversion regressed badly (us_first_cap 14→136). BC disrupted existing policy. Paused, resume tomorrow. | BC disrupted conversion | — |
-| **Rev35** | **SSDR**: 30% of resets fast-forward 1-20 random steps. First Strike removed. Resume Rev32b 6M. GCP L4, 20M steps. | Break symmetric-start passive Nash structurally. Ajay's edge = production horizon math (ΔProd×H > cost). SSDR forces training on states where deferring = losing. | Running overnight | Running | — |
+| **Rev35** | SSDR v1 (random play warmup). First Strike removed. Resume Rev32b 6M. | Break symmetric-start passive Nash. | Carpet-bomb collapse at 1M (p90fleet=2754, srcs_multi=5.8). Random 60% fire warmup taught "fleet traffic = fire more". Killed. | Fleet explosion | — |
+| **Rev35b** | SSDR v2 (asymmetric planet assignment, frac=0.3/max=2). entropy-ships 0.08. | No random play — opponent gets 1-2 extra planets at reset. Clean board, no fleet chaos. | Peaked 2.0% Ajay @ 5M. ship0 collapse at 7M. entropy fix delayed but didn't prevent. | ship0 collapse | — |
+| **Rev35c** | SSDR v2 + `--min-ship-bin 4`. Resume Rev35 5M. | Ban 1-4 ship bins to prevent degenerate 1-ship probing. | **Peaked 3.1% Ajay @ 1M** (new best). Regressed 2.0% by 4M — pool contamination. ship0=0 throughout (mask trivially enforced). | Pool contamination | — |
+| **Rev35d** | SSDR v2 + min-ship-bin=4 + **pool mask gating** (pool envs get symmetric starts). Resume Rev35c 1M. | Fix pool contamination: old checkpoints poisoned by asymmetric boards they weren't trained on. | **3.1% @ 1M, 2.3% @ 2M** — still regressing, just slower. Mask gating helped but self-play Nash reforms regardless. SSDR gives 1M burst then fades. | Self-play Nash reformation | — |
 
 **What we know:**
 - **Rev31 First Strike**: opening paralysis fixed, 918.8 LB record. Was a band-aid for symmetric-start problem.
 - **Rev32b**: First Strike 4×t<20 → Zach 88.7%, 20/21 loss seeds — new records.
-- **Ajay's strategy**: greedy production-horizon model (only fire if ΔProduction×H > ships_cost). Simple but grounded. Symmetric starts allow our agent to defer — SSDR removes that option.
-- **SSDR**: shatters symmetric-start Nash by waking learner in mid-game asymmetric states. Implemented in `torch_env.py` (`--ssdr-frac`, `--ssdr-max-steps`). Eval always on clean starts.
-- **Rev34 lesson**: BC auxiliary disrupts existing conversion even at bc_coef=0.05 when the label source (teacher openings) conflicts with current policy behavior.
-- Zach panel saturating ~88-89%. Ajay quick-16 is primary signal (currently ~1-2%).
+- **Ajay's strategy**: greedy production-horizon model (only fire if ΔProduction×H > ships_cost). Uses `orbit_lite` for targeting. Our `--target-decode` also uses orbital intercept — gap is NOT routing, it's conversion timing.
+- **SSDR verdict**: Asymmetric planet starts DO help (0.8% → 3.1% vs Ajay). But improvement is transient — peaks at ~1M then self-play Nash reforms. Min-ship-bin=4 prevents ship0 collapse. Pool mask gating slows regression but doesn't stop it. The SSDR gradient signal is real but not sustained.
+- **Best Ajay result**: Rev35c 1M = **3.1% (8/256)** — `gpu_run_artifacts/gcp_rev35c/checkpoints/torch_step_1048576_rev35c_20260605_052334.pt`
+- **Rev34 lesson**: BC auxiliary disrupts existing conversion even at bc_coef=0.05.
+- Zach panel saturating ~88-89%. Ajay full panel is primary signal.
 - Eval on training instances: always `CUDA_VISIBLE_DEVICES=""` to avoid GPU OOM.
-- Rsync symlink bug: always use `-L` flag or sync from `/home/checkpoints/` directly.
+- launch_gpu_gcp.sh: now verifies rsync landed + clears .pyc cache after sync.
 - Export requires `--target-decode` for Phase 1.
 
-**LB scores (best per run):** Rev32b 6M = pending | Rev31 10M = **918.8** ← record | Rev30 11M = 866.3 | Rev28 27M = 843.9 | 141208 (Phase 0) = 894
-**Target:** Top 10 needs ~1153. Currently at 918.8, gap = ~234 points.
+**LB scores:** Rev32b 6M = **pending** | Rev31 10M = **918.8** ← record | Rev30 11M = 866.3 | Rev28 27M = 843.9
+**Target:** Top 10 needs ~1153. Gap = ~234 points.
 
 ---
 
 ## Current State (2026-06-04)
 
-**Active runs:**
+**Active runs:** None (all terminated)
 
-**Rev35** — GCP L4 (`orbit-wars-rev35`, us-central1-c, `35.193.52.221`)
-- Resume: `seed_checkpoints/rev32b_6M_resume.pt` (Rev32b 6M — best Zach: 88.7%, 20/21 loss seeds)
-- SSDR: `--ssdr-frac 0.3 --ssdr-max-steps 20` — 30% of resets fast-forward 1-20 random steps
-- No First Strike (removed — SSDR is structural fix, not reward hack)
-- rollout=64, 512 envs, LR=0.000025, 20M total steps (~7.6 hrs overnight)
-- Panel: quick-16 vs Ajay every 500K, full panel every 5M
-- Sync: `gpu_run_artifacts/gcp_rev35/`
-
-**Paused (resume tomorrow):**
-**Rev34** — checkpoints up to 2M at `gpu_run_artifacts/gcp_rev34/checkpoints/`
-- Conversion BC disrupted policy at 1M (us_first_cap 14→136). Re-evaluate approach tomorrow.
-
-**Rev32b** — GCP L4 (`orbit-wars-rev32b`, us-central1-a, 35.193.52.221)
-- Resume: Rev31 31M, First Strike 4×t<20 2.0× → 4.0×
-- rollout=64, 512 envs, LR=0.000025
-- Best checkpoint: `gpu_run_artifacts/gcp_rev32b/checkpoints/torch_step_6815744_rev32b_20260604_112217.pt`
-  - Zach: **88.7%**, Loss seeds: **20/21**, Ajay: 0.8% — submitted (pending LB)
+**Best checkpoints locally:**
+- Rev32b 6M: `gpu_run_artifacts/gcp_rev32b/checkpoints/torch_step_6815744_rev32b_20260604_112217.pt` — Zach 88.7%, Ajay 0.8%, submitted pending LB
+- Rev35c 1M: `gpu_run_artifacts/gcp_rev35c/checkpoints/torch_step_1048576_rev35c_20260605_052334.pt` — Ajay **3.1%** (best Ajay result)
 
 **Key diagnostic tools:**
 - `orbit_wars_rl/diagnose_opening.py` — FireP per step on episode JSON
