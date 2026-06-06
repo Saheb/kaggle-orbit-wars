@@ -45,7 +45,7 @@
 | **Rev35b** | SSDR v2 (asymmetric planet assignment, frac=0.3/max=2). entropy-ships 0.08. | No random play — opponent gets 1-2 extra planets at reset. Clean board, no fleet chaos. | Peaked 2.0% Ajay @ 5M. ship0 collapse at 7M. entropy fix delayed but didn't prevent. | ship0 collapse | — |
 | **Rev35c** | SSDR v2 + `--min-ship-bin 4`. Resume Rev35 5M. | Ban 1-4 ship bins to prevent degenerate 1-ship probing. | **Peaked 3.1% Ajay @ 1M** (new best). Regressed 2.0% by 4M — pool contamination. ship0=0 throughout (mask trivially enforced). | Pool contamination | — |
 | **Rev35d** | SSDR v2 + min-ship-bin=4 + **pool mask gating** (pool envs get symmetric starts). Resume Rev35c 1M. | Fix pool contamination: old checkpoints poisoned by asymmetric boards they weren't trained on. | **3.1% @ 1M, 2.3% @ 2M** — still regressing, just slower. Mask gating helped but self-play Nash reforms regardless. SSDR gives 1M burst then fades. | Self-play Nash reformation | — |
-| **Rev38** | New pairwise features (roi_20, roi_50, enemy_contest, pairwise=15). Zero-padded warmstart from `rev32b_6M_pairwise15.pt`. 256 envs, rollout=128. GCP L4. | Test if 3 new pairwise features + rollout=128 improve Ajay win rate. | Peaked **2.7% Ajay @ 5M** (full panel 7/256), **89.1% Zach @ 5M**. Collapsed to 0% Ajay by 6M, stayed 0% through 20M. New feature weights stayed near-zero throughout (norm 0.035–0.09 vs orig 0.8–1.4). Zero-padding = dead gradient signal from iter 1. Same passive Nash pattern as Rev37. | New features never activated (zero-padded start) | — |
+| **Rev38** | New pairwise features (roi_20, roi_50, enemy_contest, pairwise=15). Zero-padded warmstart from `rev32b_6M_pairwise15.pt`. 256 envs, rollout=128. GCP L4. | Test if 3 new pairwise features + rollout=128 improve Ajay win rate. | Peaked **2.7% Ajay @ 5M** (full panel 7/256), **89.1% Zach @ 5M**. Collapsed to 0% Ajay by 6M, stayed 0% through 20M. New feature weights stayed near-zero throughout (norm 0.035–0.09 vs orig 0.8–1.4). Zero-padding = dead gradient signal from iter 1. Same passive Nash pattern as Rev37. | New features never activated (zero-padded start) | **1006.8** (first 1000+, new record) |
 | **Rev39** | BC v2 warmstart (`rev32b_6M_ajay_bc5k_v2.pt` — BC-trained on Ajay self-play with pairwise=15, new feature norms 0.17–0.24). BC aux loss: `ajay_bc_1k_v2.pkl` (78,493 samples), bc_coef=0.01→0.02→0.03. First Strike linear decay (mult=2.0, steps=200). 512 envs, rollout=128. Jarvis H100 spot. | New features activated from start (BC gave them real weights). BC aux maintains Ajay signal during PPO. Continuous FS decay instead of cliff. | Peaked **1.6% Ajay @ 8M** (4/256). Deteriorated to ~0.9% @ 12M — passive Nash reasserting. Ran to 15M (timestamp rev39_20260606_055742). New features confirmed active (roi_20=0.193, roi_50=0.215, enemy_contest=0.224 @ 4.7M). Metrics improved (fire[0] 0.17→0.19, srcs_multi 0.82→1.01) but didn't translate to wins. | Passive Nash @ ~8M despite active features | — |
 
 **What we know:**
@@ -65,7 +65,7 @@
 - launch_gpu_gcp.sh: now verifies rsync landed + clears .pyc cache after sync.
 - Export requires `--target-decode` for Phase 1.
 
-**LB scores:** Rev38 5M = **pending** (sub 53410563) | Rev32b 6M = 874.3 | Rev31 10M = **918.8** ← record | Rev30 11M = 866.3 | Rev28 27M = 843.9
+**LB scores:** Rev38 5M = **1006.8** ← record (first 1000+) | Rev32b 6M = 874.3 | Rev31 10M = 918.8 | Rev30 11M = 866.3 | Rev28 27M = 843.9
 **Target:** Top 10 needs ~1153. Gap = ~234 points.
 
 ---
