@@ -171,28 +171,31 @@ _WORKER_AGENT_FN = None  # populated per-worker in _heur_worker_init
 
 def _heur_worker_init(agent_path: str):
     """Each worker fork loads the agent module once and stashes its agent fn."""
-    import importlib.util
+    import importlib.util, sys
     spec = importlib.util.spec_from_file_location("worker_agent", agent_path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # required for @dataclass __module__ resolution
     spec.loader.exec_module(mod)
     global _WORKER_AGENT_FN
     _WORKER_AGENT_FN = mod.agent
 
 
 def _heur_worker_call(obs):
-    """Run the worker's agent on one obs. Swallows exceptions to a no-op."""
+    """Run the worker's agent on one obs. Logs exceptions and returns no-op."""
     try:
         return _WORKER_AGENT_FN(obs) or []
-    except Exception:
+    except Exception as exc:
+        import sys, traceback
+        print(f"WARNING heur_worker_call: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return []
 
 
 class HeuristicWorkerPool:
     """Persistent process pool around one external heuristic agent."""
     def __init__(self, agent_path: str, num_workers: int):
-        # Force 'fork' so child inherits already-imported torch_env etc. and
-        # the initializer can re-load the agent module cheaply.
-        ctx = _mp.get_context("fork")
+        # Use 'spawn' to avoid inheriting parent's CUDA context (fork+CUDA = deadlock).
+        ctx = _mp.get_context("spawn")
         self.pool = ctx.Pool(
             processes=num_workers,
             initializer=_heur_worker_init,
@@ -201,8 +204,15 @@ class HeuristicWorkerPool:
         self.num_workers = num_workers
         self.agent_path = agent_path
 
-    def map(self, obs_list):
-        return self.pool.map(_heur_worker_call, obs_list)
+    def map(self, obs_list, timeout: float = 30.0):
+        result = self.pool.map_async(_heur_worker_call, obs_list)
+        try:
+            return result.get(timeout=timeout)
+        except Exception as exc:
+            import sys
+            print(f"WARNING HeuristicWorkerPool.map fallback ({type(exc).__name__}: {exc})"
+                  f" — {len(obs_list)} envs will use no-op actions this rollout", file=sys.stderr)
+            return [[] for _ in obs_list]
 
     def close(self):
         self.pool.close()

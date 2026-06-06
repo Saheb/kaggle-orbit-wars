@@ -130,6 +130,11 @@ def _capture_cost(target: list, player_slot: int) -> int:
     return 0
 
 
+def _max_sendable_ships(src_ships: int) -> int:
+    """Absolute-mode action semantics: a launch may send the full ship count."""
+    return max(0, int(src_ships))
+
+
 def _slot_for_from_pid(obs: dict, player_idx: int, from_pid: int) -> int | None:
     from orbit_wars_rl.action_mask import compute_action_masks  # local import to avoid cycle
 
@@ -318,7 +323,7 @@ def build_failure_conversion_relabels(
                     continue
 
                 src = obs["planets"][from_idx]
-                max_sendable = max(1, int(src[5]) - 1)
+                max_sendable = _max_sendable_ships(src[5])
                 current_target = a.get("decoded_target")
                 current_sent = int(a.get("ships", 0))
                 if not current_target or int(current_target["planet_idx"]) >= len(obs["planets"]):

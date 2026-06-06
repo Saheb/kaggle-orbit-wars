@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,6 +111,7 @@ class OpponentPool:
         if spec is None or spec.loader is None:
             raise RuntimeError(f"Could not load opponent .py: {py_path}")
         mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod  # required for @dataclass __module__ resolution
         spec.loader.exec_module(mod)
         if not hasattr(mod, "agent"):
             raise RuntimeError(f"{py_path} has no `agent` function")

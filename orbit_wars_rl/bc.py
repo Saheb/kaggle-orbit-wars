@@ -34,6 +34,7 @@ def _load_agent_fn(agent_path: str):
     import importlib.util
     spec = importlib.util.spec_from_file_location("heuristic_agent", agent_path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # required for @dataclass __module__ resolution
     spec.loader.exec_module(module)
     if hasattr(module, "agent"):
         return module.agent
@@ -642,12 +643,17 @@ if __name__ == "__main__":
                         help="Optional substring filter for trainable params. Repeatable. "
                              "If set, only parameters whose names contain one of these "
                              "substrings are updated.")
+    parser.add_argument("--lr", type=float, default=0.0,
+                        help="Learning rate override (default: use BCConfig.learning_rate=3e-4). "
+                             "For fine-tuning from a strong checkpoint, use 1e-4.")
     args = parser.parse_args()
 
     cfg = Config()
     cfg.seed = args.seed
     cfg.bc.num_trajectories = args.num_games
     cfg.bc.num_steps = args.steps
+    if args.lr > 0:
+        cfg.bc.learning_rate = args.lr
 
     if args.samples:
         validate_bc_from_samples(cfg, args.samples, save_path=args.save,

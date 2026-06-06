@@ -45,6 +45,8 @@
 | **Rev35b** | SSDR v2 (asymmetric planet assignment, frac=0.3/max=2). entropy-ships 0.08. | No random play — opponent gets 1-2 extra planets at reset. Clean board, no fleet chaos. | Peaked 2.0% Ajay @ 5M. ship0 collapse at 7M. entropy fix delayed but didn't prevent. | ship0 collapse | — |
 | **Rev35c** | SSDR v2 + `--min-ship-bin 4`. Resume Rev35 5M. | Ban 1-4 ship bins to prevent degenerate 1-ship probing. | **Peaked 3.1% Ajay @ 1M** (new best). Regressed 2.0% by 4M — pool contamination. ship0=0 throughout (mask trivially enforced). | Pool contamination | — |
 | **Rev35d** | SSDR v2 + min-ship-bin=4 + **pool mask gating** (pool envs get symmetric starts). Resume Rev35c 1M. | Fix pool contamination: old checkpoints poisoned by asymmetric boards they weren't trained on. | **3.1% @ 1M, 2.3% @ 2M** — still regressing, just slower. Mask gating helped but self-play Nash reforms regardless. SSDR gives 1M burst then fades. | Self-play Nash reformation | — |
+| **Rev38** | New pairwise features (roi_20, roi_50, enemy_contest, pairwise=15). Zero-padded warmstart from `rev32b_6M_pairwise15.pt`. 256 envs, rollout=128. GCP L4. | Test if 3 new pairwise features + rollout=128 improve Ajay win rate. | Peaked **2.7% Ajay @ 5M** (full panel 7/256), **89.1% Zach @ 5M**. Collapsed to 0% Ajay by 6M, stayed 0% through 20M. New feature weights stayed near-zero throughout (norm 0.035–0.09 vs orig 0.8–1.4). Zero-padding = dead gradient signal from iter 1. Same passive Nash pattern as Rev37. | New features never activated (zero-padded start) | — |
+| **Rev39** | BC v2 warmstart (`rev32b_6M_ajay_bc5k_v2.pt` — BC-trained on Ajay self-play with pairwise=15, new feature norms 0.17–0.24). BC aux loss: `ajay_bc_1k_v2.pkl` (78,493 samples), bc_coef=0.01→0.02→0.03. First Strike linear decay (mult=2.0, steps=200). 512 envs, rollout=128. Jarvis H100 spot. | New features activated from start (BC gave them real weights). BC aux maintains Ajay signal during PPO. Continuous FS decay instead of cliff. | Peaked **1.6% Ajay @ 8M** (4/256). Deteriorated to ~0.9% @ 12M — passive Nash reasserting. Ran to 15M (timestamp rev39_20260606_055742). New features confirmed active (roi_20=0.193, roi_50=0.215, enemy_contest=0.224 @ 4.7M). Metrics improved (fire[0] 0.17→0.19, srcs_multi 0.82→1.01) but didn't translate to wins. | Passive Nash @ ~8M despite active features | — |
 
 **What we know:**
 - **Rev31 First Strike**: opening paralysis fixed, 918.8 LB record. Was a band-aid for symmetric-start problem.
@@ -53,23 +55,41 @@
 - **SSDR verdict**: Asymmetric planet starts DO help (0.8% → 3.1% vs Ajay). But improvement is transient — peaks at ~1M then self-play Nash reforms. Min-ship-bin=4 prevents ship0 collapse. Pool mask gating slows regression but doesn't stop it. The SSDR gradient signal is real but not sustained.
 - **Best Ajay result**: Rev35c 1M = **3.1% (8/256)** — `gpu_run_artifacts/gcp_rev35c/checkpoints/torch_step_1048576_rev35c_20260605_052334.pt`
 - **Rev34 lesson**: BC auxiliary disrupts existing conversion even at bc_coef=0.05.
-- Zach panel saturating ~88-89%. Ajay full panel is primary signal.
+- **Zero-padding new features = dead signal**: Rev38 started with roi_20/roi_50/enemy_contest zeroed out. Norms never exceeded 0.09 across 20M steps (vs 0.8–1.4 for orig features). BC warmstart needed to give new features real gradient signal from iter 1.
+- **Passive Nash cliff at ~6M**: Rev38 (and Rev37) both collapsed to 0% Ajay at exactly 6M regardless of new features or rollout=128. Self-play Nash is a structural attractor — BC aux during PPO is the proposed fix.
+- **BC aux + FS decay delays but doesn't stop Nash**: Rev39 peaked at 1.6% @ 8M (vs Rev38's 2.7% @ 5M). BC warmstart successfully activated new features, but passive Nash still reformed by ~10-12M. The delay (~8M vs ~6M cliff) is modest. Likely need stronger reward signal (higher FS mult/steps) to sustain aggression.
+- **Continuous First Strike**: linear decay from `first_strike_mult` at t=0 to 1.0 at t=`first_strike_steps`. Replaced binary cliff in torch_env.py. Better gradient at boundary.
+- **pairwise=15 feature layout**: `pair_kv.weight` is [192, 111]. Cols 96–107 = orig 12 pairwise, cols 108–110 = new 3 (roi_20, roi_50, enemy_contest).
+- Zach panel saturating ~88–89%. Ajay full panel is primary signal.
 - Eval on training instances: always `CUDA_VISIBLE_DEVICES=""` to avoid GPU OOM.
 - launch_gpu_gcp.sh: now verifies rsync landed + clears .pyc cache after sync.
 - Export requires `--target-decode` for Phase 1.
 
-**LB scores:** Rev32b 6M = **pending** | Rev31 10M = **918.8** ← record | Rev30 11M = 866.3 | Rev28 27M = 843.9
+**LB scores:** Rev38 5M = **pending** (sub 53410563) | Rev32b 6M = 874.3 | Rev31 10M = **918.8** ← record | Rev30 11M = 866.3 | Rev28 27M = 843.9
 **Target:** Top 10 needs ~1153. Gap = ~234 points.
 
 ---
 
-## Current State (2026-06-04)
+## Current State (2026-06-06)
 
-**Active runs:** None (all terminated)
+**Active runs:** None. Rev39 ended, Jarvis instance 422162 destroyed.
+
+**In progress:**
+- Rev38 checkpoint sweep: running full 256-game Ajay panels on 4M and 6M to find best checkpoint (known: 5M=2.7%, 10M=2.3%)
+- Next training run planned: Rev40 with `--first-strike-mult 4.0 --first-strike-steps 400` (user suggestion: stronger/wider FS window)
 
 **Best checkpoints locally:**
-- Rev32b 6M: `gpu_run_artifacts/gcp_rev32b/checkpoints/torch_step_6815744_rev32b_20260604_112217.pt` — Zach 88.7%, Ajay 0.8%, submitted pending LB
+- Rev32b 6M: `gpu_run_artifacts/gcp_rev32b/checkpoints/torch_step_6815744_rev32b_20260604_112217.pt` — Zach 88.7%, Ajay 0.8%, LB 874.3
 - Rev35c 1M: `gpu_run_artifacts/gcp_rev35c/checkpoints/torch_step_1048576_rev35c_20260605_052334.pt` — Ajay **3.1%** (best Ajay result)
+- Rev38 5M: `gpu_run_artifacts/rev38/checkpoints/torch_step_5242880_rev38_20260605_181635.pt` — Ajay 2.7% (7/256), Zach 89.1%, submitted (pending LB)
+
+**Rev38 Ajay panel results:**
+| Checkpoint | Ajay wins | Ajay % |
+|---|---|---|
+| 4M | in progress | — |
+| 5M | 7/256 | **2.7%** |
+| 6M | queued | — |
+| 10M | 6/256 | 2.3% |
 
 **Key diagnostic tools:**
 - `orbit_wars_rl/diagnose_opening.py` — FireP per step on episode JSON
@@ -85,9 +105,8 @@
 - Fix needed: intercept-aware action decode in `eval.py` / `export_agent.py`
 
 **Next priorities:**
-1. Monitor Rev33 — does bc-coef=0.05 nudge Ajay win rate above 2%?
-2. Implement intercept aiming in action decode (biggest structural gap)
-3. If Rev32b LB > 918.8 → Rev32b recipe is the new baseline
+1. Complete Rev38 checkpoint sweep (4M, 6M panels) — submit best
+2. Rev40: `--first-strike-mult 4.0 --first-strike-steps 400`, resume from best Rev39 checkpoint (15M: `gpu_run_artifacts/jarvis_rev39/checkpoints/torch_step_15728640_rev39_20260606_055742.pt`)
 
 **Rev30b** completed: peak 85.2% vs Zach at 4M (LR=0.000025). Best checkpoint: `torch_step_4194304_rev30b_20260603_143644.pt`
 - Resume: Rev28 22M checkpoint (=28M overall from scratch)

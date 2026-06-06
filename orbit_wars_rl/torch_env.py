@@ -1151,9 +1151,9 @@ class VecTorchEnv:
             # Overcomes value critic's "home invasion fear" — makes early captures so lucrative
             # that the policy fires at step 0 instead of waiting.
             if self.first_strike_steps > 0:
-                fs_mult = torch.where(t < self.first_strike_steps,
-                                      torch.full_like(t, self.first_strike_mult),
-                                      torch.ones_like(t))  # (N,)
+                # Linear decay from first_strike_mult at t=0 to 1.0 at t=first_strike_steps.
+                frac = (t.float() / self.first_strike_steps).clamp(max=1.0)
+                fs_mult = 1.0 + (self.first_strike_mult - 1.0) * (1.0 - frac)  # (N,)
                 effective_coef = self.early_capture_coef * decay * fs_mult  # (N,)
             else:
                 effective_coef = self.early_capture_coef * decay  # (N,)
