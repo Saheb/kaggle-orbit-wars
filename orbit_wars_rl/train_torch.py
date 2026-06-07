@@ -994,6 +994,20 @@ def train(args):
             metrics["global_feat_std"] = float(flat["global_features"].std(unbiased=False).item())
             if "pairwise_features" in flat:
                 metrics["pairwise_feat_std"] = float(flat["pairwise_features"].std(unbiased=False).item())
+            # Per-feature input-weight norms on the pairwise cross-attention. The
+            # last 3 pairwise cols are the newer features (roi_20, roi_50,
+            # enemy_contest); track whether they actually get used (norm climbing
+            # toward the ~1.1 mean of the original 12) vs stay inert (~0.05).
+            if hasattr(model, "pair_kv"):
+                fw = model.pair_kv.weight          # [2D, D + F_pair]
+                D = fw.shape[0] // 2
+                feat_cols = fw[:, D:]              # [2D, F_pair]
+                if feat_cols.shape[1] >= 3:
+                    new_norms = feat_cols[:, -3:].norm(dim=0)
+                    metrics["wnorm_roi20"] = float(new_norms[0].item())
+                    metrics["wnorm_roi50"] = float(new_norms[1].item())
+                    metrics["wnorm_enemy_contest"] = float(new_norms[2].item())
+                    metrics["wnorm_pw_orig"] = float(feat_cols[:, :-3].norm(dim=0).mean().item())
 
         total_env_steps += rollout_T * N
         iter_count += 1
@@ -1051,7 +1065,11 @@ def train(args):
                     f"featσ p/f/g/pw {metrics.get('planet_feat_std', 0):.2f}/"
                     f"{metrics.get('fleet_feat_std', 0):.2f}/"
                     f"{metrics.get('global_feat_std', 0):.2f}/"
-                    f"{metrics.get('pairwise_feat_std', 0):.2f}"
+                    f"{metrics.get('pairwise_feat_std', 0):.2f} | "
+                    f"wnorm roi20/roi50/ec {metrics.get('wnorm_roi20', 0):.3f}/"
+                    f"{metrics.get('wnorm_roi50', 0):.3f}/"
+                    f"{metrics.get('wnorm_enemy_contest', 0):.3f} "
+                    f"(orig~{metrics.get('wnorm_pw_orig', 0):.2f})"
                     + actcoef + pencoef
                 )
             # W&B logging
@@ -1065,6 +1083,10 @@ def train(args):
                     "train/lr": metrics["learning_rate"],
                     # PPO health
                     "ppo/explained_variance": metrics.get("explained_variance", 0),
+                    "feat/wnorm_roi20": metrics.get("wnorm_roi20", 0),
+                    "feat/wnorm_roi50": metrics.get("wnorm_roi50", 0),
+                    "feat/wnorm_enemy_contest": metrics.get("wnorm_enemy_contest", 0),
+                    "feat/wnorm_pw_orig": metrics.get("wnorm_pw_orig", 0),
                     "ppo/clip_frac": avg_cf,
                     "ppo/clip_frac_fire": metrics.get("clip_frac_fire", 0),
                     "ppo/approx_kl": metrics.get("approx_kl", 0),
