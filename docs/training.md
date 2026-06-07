@@ -47,6 +47,16 @@
 | **Rev35d** | SSDR v2 + min-ship-bin=4 + **pool mask gating** (pool envs get symmetric starts). Resume Rev35c 1M. | Fix pool contamination: old checkpoints poisoned by asymmetric boards they weren't trained on. | **3.1% @ 1M, 2.3% @ 2M** — still regressing, just slower. Mask gating helped but self-play Nash reforms regardless. SSDR gives 1M burst then fades. | Self-play Nash reformation | — |
 | **Rev38** | New pairwise features (roi_20, roi_50, enemy_contest, pairwise=15). Zero-padded warmstart from `rev32b_6M_pairwise15.pt`. 256 envs, rollout=128. GCP L4. | Test if 3 new pairwise features + rollout=128 improve Ajay win rate. | 5M: Ajay **2.7%** (7/256), Zach 89.1%. 6M: Ajay **3.1%** (8/256) — best panel. Collapsed to 0% Ajay by 10M. New feature weights stayed near-zero throughout. | New features never activated (zero-padded start) | **950.5** (record) |
 | **Rev39** | BC v2 warmstart (`rev32b_6M_ajay_bc5k_v2.pt` — BC-trained on Ajay self-play with pairwise=15, new feature norms 0.17–0.24). BC aux loss: `ajay_bc_1k_v2.pkl` (78,493 samples), bc_coef=0.01→0.02→0.03. First Strike linear decay (mult=2.0, steps=200). 512 envs, rollout=128. Jarvis H100 spot. | New features activated from start (BC gave them real weights). BC aux maintains Ajay signal during PPO. Continuous FS decay instead of cliff. | Peaked **1.6% Ajay @ 8M** (4/256). Deteriorated to ~0.9% @ 12M — passive Nash reasserting. Ran to 15M (timestamp rev39_20260606_055742). New features confirmed active (roi_20=0.193, roi_50=0.215, enemy_contest=0.224 @ 4.7M). Metrics improved (fire[0] 0.17→0.19, srcs_multi 0.82→1.01) but didn't translate to wins. | Passive Nash @ ~8M despite active features | — |
+| **Rev40** | Resume Rev39 15M (`rev32b_6M_ajay_bc5k_v2.pt` warmstart lineage). rollout=256, 64 envs. Hypothesis: wider rollout improves credit assignment. | Break passive Nash with longer rollout horizon. | **Carpet-bomb collapse.** srcs_multi 5–7 from start (penalty=0.001 too weak at 64 envs × rollout=256). fire[0] wildly oscillating. Full Ajay panel at 3M: **0/160 wins (0%)** — confirmed useless. Died/killed at 4.4M. | srcs_multi penalty=0.001 too weak for wide rollout config; carpet-bombing from early on | — |
+| **Rev41** | penalty=0.01 (10×), threshold=2.0. BC warmstart (ajay_bc5k_v2). 64 envs, rollout=128. GCP L4. | Suppress carpet-bombing with stronger penalty. | srcs_multi suppressed to 0.45 — OVER-penalised. fire[0]=0.14 (passive collapse, not carpet-bomb). Threshold=2.0 penalises legitimate Ajay-style play (Ajay mean=1.9 sources). Killed at 1.3M. | Penalty over-suppressed firing; threshold too low | — |
+| **Rev42** | penalty=0.01, threshold=5.0 (loosen threshold). BC warmstart. 64 envs. | Threshold=2.0 was penalising Ajay-style play; raise to 5.0 to allow normal multi-source. | Same passive collapse. srcs_multi=0.6–0.7 (fire=0 satisfies penalty at any threshold). Killed at 1M. | Penalty with floor=0 → fire=0 is Nash minimum regardless of threshold | — |
+| **Rev43** | + Ajay external opponent (fraction=0.1), 64 envs, 7 heuristic workers. | Ajay signal during training maintains aggressive prior. | **Hung at iter 12** — all 8 vCPUs saturated by 7 heuristic workers × Ajay's orbit_lite inference. GPU at 0%. CPU deadlock. Killed. | Ajay is CPU-intensive; 7 workers × orbit_lite = all CPUs gone | — |
+| **Rev44** | 32 envs, Ajay external 0.25 fraction, 2 workers (fix CPU hang). | Fewer envs + fewer workers to avoid CPU saturation. | Same passive collapse within 50 iters. srcs_multi<0.5. Ajay external doesn't prevent fire=0 Nash when both players benefit from not firing. Killed. | BC warmstart provides no aggression floor — PPO finds fire=0 beats passive self-play | — |
+| **Rev45** | Rev38 config (256 envs, rollout=128) + threshold=3.5, penalty=0.02. Jarvis H100, instance 422375. | Calibrate penalty: threshold=3.5 (above Ajay mean+1σ), stronger penalty=0.02. | **fire=0 collapse by iter 84.** srcs_multi=0.07, fire[0]≈0.02. V_loss exploded (critic shock). Both agents converged to zero-fire together — fire=0 is global Nash minimum for any symmetric penalty with floor=0. Instance 422375 destroyed. | Penalty design is fundamentally broken — any penalty with floor=0 makes fire=0 the Nash minimum in symmetric self-play | — |
+| **Rev46** | Rev38 EXACT config. penalty=0.001, threshold=2.0 (same as Rev38). 256 envs, rollout=128. Resume rev32b_6M_pairwise15.pt. Jarvis H100, instance 422380. | Rev38 reached 3.1% organically without tuning. Reproduce exactly to confirm baseline. Accept 6M peak; submit that checkpoint. | **3.1% Ajay @ ~6M** (matched Rev38 baseline). srcs_multi collapsed to 5+ after 8M, 0% by 10M. Confirmed Rev38 6M is reproducible. | Nash collapse after 8M | — |
+| **Rev47** | fleet_activity_coef=0.002 (binary: fire=any → +0.002) + srcs_multi penalty=0.005/threshold=3.5. Feature warmup on new cols. Resume rev32b_6M_pairwise15_warmed.pt. Jarvis H100. | Binary activity reward breaks fire=0 Nash; penalty caps sources at natural Ajay range. | **Token-fire Nash.** fire[0]=0.11, avgfleet=160. Agent fires 1 source to collect activity reward, hoards everywhere else. 0/16 Ajay at 3M. Nash = fire exactly 1 source (minimum cost, full reward). | Binary reward created new degenerate Nash | — |
+| **Rev48** | Proportional activity reward (each source up to threshold adds activity_coef, not binary) + aux_roi_coef=0.02. Jarvis H100, instance 422419. | Proportional reward: Nash = fire up to threshold, not 1. ROI aux loss anchors roi_20/roi_50/enemy_contest features. | srcs_multi stable 2–4 throughout 22M steps (proportional reward worked structurally!). BUT **8M Ajay = 2.3%** (6/256, below Rev46's 3.1%). Root cause: early_capture spike was count-based — prod=1 and prod=5 captures gave identical reward. No gradient to prefer high-ROI targets. ROI features stayed inert. Preempted at 22.8M. | Targeting gradient missing: count-based capture ≠ ROI-based targeting | — |
+| **Rev49** | Production-weighted capture spike: ec_rewards = production_delta (not planet_count_delta). early_capture_coef 0.30→0.10 (avg_prod=2.65 keeps magnitude ~0.27). No aux_roi_coef (caused L4 OOM — fixed by conditionally allocating `pairwise_features` storage). Resume rev32b_6M_pairwise15_warmed.pt. GCP L4. Ran full 30M steps. | prod=5 capture gives 5× reward vs prod=1 → gradient pressure for ROI targeting. roi_20/roi_50 now optimise same objective as reward. | **Worse than baseline — 0/16 Ajay at 5M, 6M, 8M (0%, vs Rev38/46's 3.1%).** Production-weighted reward caused carpet-bombing, not selective targeting: rewarding total production_delta means firing at ALL planets simultaneously maximizes reward. By 30M: clip_frac=0.878, KL=16-19, srcs_multi=5-6, fire[0]=0.57-0.63 — agent fires from majority of sources every step. Opposite of intended ROI-selective behavior. | Reward design flaw: production_delta rewards quantity not selectivity | — |
 
 **What we know:**
 - **Rev31 First Strike**: opening paralysis fixed, 918.8 LB record. Was a band-aid for symmetric-start problem.
@@ -60,54 +70,64 @@
 - **BC aux + FS decay delays but doesn't stop Nash**: Rev39 peaked at 1.6% @ 8M (vs Rev38's 2.7% @ 5M). BC warmstart successfully activated new features, but passive Nash still reformed by ~10-12M. The delay (~8M vs ~6M cliff) is modest. Likely need stronger reward signal (higher FS mult/steps) to sustain aggression.
 - **Continuous First Strike**: linear decay from `first_strike_mult` at t=0 to 1.0 at t=`first_strike_steps`. Replaced binary cliff in torch_env.py. Better gradient at boundary.
 - **pairwise=15 feature layout**: `pair_kv.weight` is [192, 111]. Cols 96–107 = orig 12 pairwise, cols 108–110 = new 3 (roi_20, roi_50, enemy_contest).
+- **srcs_multi penalty design flaw**: Any penalty with floor=0 makes fire=0 the self-play Nash minimum — both agents converge to zero-fire together. Confirmed across 5 runs (Rev41–45) with thresholds 2.0, 5.0, 3.5 and penalties 0.01, 0.02. Do NOT use srcs_multi penalty to suppress carpet-bombing. The penalty (0.001) in Rev38/Rev46 is too small to cause this — it's essentially decorative.
+- **BC warmstart provides no aggression floor**: BC trained on Ajay behavior (mean 1.9 sources). PPO immediately finds fire=0 beats passive self-play. Collapsed within 30–84 iters across Rev42–44 regardless of threshold/penalty tuning. BC warmstart cannot hold the line.
+- **Ajay CPU bottleneck**: orbit_lite makes Ajay inference CPU-intensive. With ≥7 heuristic workers, all vCPUs saturate and GPU drops to 0%. Always `--heuristic-workers 2` when using Ajay as external opponent. Fix in Rev44, but still couldn't prevent passive Nash.
+- **Rev46 = Rev38 exact**: Confirmed 3.1% Ajay at ~6M. Carpet-bombing at 8M+ is the Nash — don't fight it with penalties.
+- **Targeting root cause (Rev48 diagnosis)**: early_capture_coef spike was count-based: `planet_delta = (owned - prev_owned).clamp(-1, 1)`. prod=1 and prod=5 captures gave identical reward. ROI features (roi_20/roi_50) stayed inert because PPO never needed them. Fix: `ec_rewards = production - prev_owned_prod` (production delta instead of count delta). Scaling: 0.30→0.10 coef since avg_prod=2.65 keeps spike magnitude ~0.27.
+- **pairwise_features OOM on L4 22GB**: `pairwise_features` tensor in rollout storage (shape: rollout_T × N × P × MAX_OWNED × max_planets × pairwise_feature_dim) was unconditionally allocated even when aux_roi_coef=0. Caused OOM during backward pass (18GB baseline + 1.5GB allocation = OOM). Fix: conditional allocation — only allocate when `args.aux_roi_coef > 0` (train_torch.py line 604).
 - Zach panel saturating ~88–89%. Ajay full panel is primary signal.
 - Eval on training instances: always `CUDA_VISIBLE_DEVICES=""` to avoid GPU OOM.
 - launch_gpu_gcp.sh: now verifies rsync landed + clears .pyc cache after sync.
 - **GCP instance naming**: use `--name orbit-wars-training` (default). After training ends, delete immediately — instance left running costs ~$1.13/hr even with no jobs. Rev38 instance ran idle 19+ hrs before discovered.
 - Export requires `--target-decode` for Phase 1.
 
-**LB scores:** Rev38 5M = **950.5** ← record | Rev38 6M = pending (Ajay 3.1%) | Rev32b 6M = 872.4 | Rev31 10M = 918.8 | Rev30 11M = 866.3 | Rev28 27M = 843.9
+**LB scores:** Rev38 5M = **950.5** ← record | Rev38 6M = submitted (Ajay 3.1%, ~100 pts above 5M score, converging) | Rev32b 6M = 872.4 | Rev31 10M = 918.8 | Rev30 11M = 866.3 | Rev28 27M = 843.9
 **Target:** Top 10 needs ~1153. Gap = ~234 points.
 
 ---
 
-## Current State (2026-06-06)
+## Current State (2026-06-07)
 
-**Active runs:** None. Rev39 ended, Jarvis instance 422162 destroyed.
+**Active runs:** None. Rev49 ran to completion (30M steps) on GCP L4 (`orbit-wars-training`, 136.111.191.182) — **failed, worse than baseline** (0/16 Ajay at 5M/6M/8M vs Rev38/46's 3.1%). Instance still running — needs deletion decision pending next move.
 
-**In progress:**
-- Rev38 checkpoint sweep: running full 256-game Ajay panels on 4M and 6M to find best checkpoint (known: 5M=2.7%, 10M=2.3%)
-- Next training run planned: Rev40 with `--first-strike-mult 4.0 --first-strike-steps 400` (user suggestion: stronger/wider FS window)
+**Rev49 verdict — production-weighted capture reward backfired:**
+Rewarding `production_delta` (not count) was meant to create a gradient toward high-ROI single-target captures. Instead it rewards firing at *everything simultaneously* — total production delta is maximized by carpet-bombing every reachable planet, not by selective targeting. By 30M steps: `clip_frac=0.878`, `KL=16-19`, `srcs_multi=5-6`, `fire[0]=0.57-0.63`. This is a reward-shaping design flaw, not a training instability — it converged to a clean (bad) Nash.
+
+**Lesson for next attempt:** A per-capture reward that scales with target value will always be dominated by "capture more targets" unless it's normalized per-action or capped. Need either (a) a reward that's relative/comparative across available targets (e.g. bonus only for capturing the *highest-ROI available* target), or (b) Rev50's approach — direct behavioral signal from playing against Ajay (which already exhibits selective targeting), rather than reshaping the reward function further.
+
+**Recommended next step: Rev50** — Ajay as external pool opponent (20% of envs), already scripted at `gpu_run_artifacts/hellburner_spot/run_remote_phase1_rev50_gcp.sh`. This sidesteps reward-engineering entirely — the model sees Ajay's actual selective-targeting behavior and gets gradient from losing to it.
+
+Delete instance when done with diagnostics:
+```bash
+gcloud compute instances delete orbit-wars-training --zone=us-central1-b --quiet
+```
 
 **Best checkpoints locally:**
 - Rev32b 6M: `gpu_run_artifacts/gcp_rev32b/checkpoints/torch_step_6815744_rev32b_20260604_112217.pt` — Zach 88.7%, Ajay 0.8%, LB 874.3
-- Rev35c 1M: `gpu_run_artifacts/gcp_rev35c/checkpoints/torch_step_1048576_rev35c_20260605_052334.pt` — Ajay **3.1%** (best Ajay result)
-- Rev38 5M: `gpu_run_artifacts/rev38/checkpoints/torch_step_5242880_rev38_20260605_181635.pt` — Ajay 2.7% (7/256), Zach 89.1%, submitted (pending LB)
+- Rev35c 1M: `gpu_run_artifacts/gcp_rev35c/checkpoints/torch_step_1048576_rev35c_20260605_052334.pt` — Ajay **3.1%** (best SSDR result)
+- Rev38 5M: `gpu_run_artifacts/rev38/checkpoints/torch_step_5242880_rev38_20260605_181635.pt` — Ajay 2.7% (7/256), Zach 89.1%, LB **950.5** (record)
+- Rev38 6M: `gpu_run_artifacts/rev38/checkpoints/torch_step_6291456_rev38_20260605_181635.pt` — Ajay **3.1%** (8/256) — best panel
+- Rev48 checkpoints: `gpu_run_artifacts/rev48/checkpoints/` — 43 checkpoints (0.5M–22.8M)
 
-**Rev38 Ajay panel results:**
+**Rev38 Ajay panel results (baseline to beat):**
 | Checkpoint | Ajay wins | Ajay % |
 |---|---|---|
-| 4M | in progress | — |
 | 5M | 7/256 | **2.7%** |
-| 6M | queued | — |
+| 6M | 8/256 | **3.1%** ← best |
 | 10M | 6/256 | 2.3% |
 
-**Key diagnostic tools:**
-- `orbit_wars_rl/diagnose_opening.py` — FireP per step on episode JSON
-- `orbit_wars_rl/test_seed6462.py` — 21-seed isolation test
-- `orbit_wars_rl/step_firep.py` — compare FireP at steps 0-3 across checkpoints
-- `opponents/candidate_ajay_1200.py` + `opponents/orbit_lite/` — Ajay now works as panel opponent
-- `docs/submissions.md` — full submission log with Kaggle IDs and checkpoint paths
-
-**Ajay gap root cause (identified 2026-06-04):**
-- `orbit_lite.intercept_aim` computes where planet will BE when fleet arrives → fleets land in ~4 steps
-- Our agent fires at current planet position → fleets take ~12 steps (3× slower)
-- At step 5: Ajay has 2 planets, we have 1 → snowballs from there
-- Fix needed: intercept-aware action decode in `eval.py` / `export_agent.py`
-
 **Next priorities:**
-1. Complete Rev38 checkpoint sweep (4M, 6M panels) — submit best
-2. Rev40: `--first-strike-mult 4.0 --first-strike-steps 400`, resume from best Rev39 checkpoint (15M: `gpu_run_artifacts/jarvis_rev39/checkpoints/torch_step_15728640_rev39_20260606_055742.pt`)
+1. Rev49 first Ajay quick-panel at 5M — beat 3.1% to confirm production-weighted capture fix
+2. If ≤ 3.1%: launch Rev50 (Ajay external pool) — accept slow SPS, direct Ajay gradient
+3. If > 3.1%: run full 256-game panel, consider submit
+
+**Key diagnostic tools:**
+- `orbit_wars_rl/count_ajay_srcs.py` — Ajay source distribution analysis (mean=1.9 when firing, 48.5% steps no fire)
+- `orbit_wars_rl/diagnose_opening.py` — FireP per step on episode JSON
+- `orbit_wars_rl/step_firep.py` — compare FireP at steps 0-3 across checkpoints
+- `opponents/candidate_ajay_1200.py` + `opponents/orbit_lite/` — Ajay panel opponent
+- `docs/submissions.md` — full submission log with Kaggle IDs and checkpoint paths
 
 **Rev30b** completed: peak 85.2% vs Zach at 4M (LR=0.000025). Best checkpoint: `torch_step_4194304_rev30b_20260603_143644.pt`
 - Resume: Rev28 22M checkpoint (=28M overall from scratch)
