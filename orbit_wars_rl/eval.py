@@ -71,7 +71,8 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
 def build_agent_fn(model: EntityTransformer, device: torch.device,
                    fire_threshold: float = 0.5, sample: bool = False,
                    ship_bin_mode: str = "absolute",
-                   target_decode: bool = False):
+                   target_decode: bool = False,
+                   target_sanity_penalty: float = 0.0):
     """Return a kaggle_environments-compatible agent function wrapping the model.
 
     sample=True uses Bernoulli/Categorical sampling instead of threshold/argmax —
@@ -127,6 +128,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 fire_threshold=fire_threshold,
                 sample=sample,
                 ship_bin_mode=ship_bin_mode,
+                target_sanity_penalty=target_sanity_penalty,
             )
 
         return action_fn(
@@ -154,6 +156,7 @@ def evaluate_against_baseline(
     sample: bool = False,
     ship_bin_mode: str = "absolute",
     target_decode: bool = False,
+    target_sanity_penalty: float = 0.0,
 ) -> dict:
     """Evaluate trained policy against a baseline using kaggle_environments.
 
@@ -164,7 +167,8 @@ def evaluate_against_baseline(
     from kaggle_environments import make
 
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
-                              ship_bin_mode=ship_bin_mode, target_decode=target_decode)
+                              ship_bin_mode=ship_bin_mode, target_decode=target_decode,
+                              target_sanity_penalty=target_sanity_penalty)
     opponents = [opponent] * (num_players - 1)
     agents = [agent_fn] + opponents
 
@@ -213,6 +217,7 @@ def evaluate_panel(
     sample: bool = False,
     ship_bin_mode: str = "absolute",
     target_decode: bool = False,
+    target_sanity_penalty: float = 0.0,
 ) -> dict:
     """Stratified eval over the 128-seed community panel, playing both seats.
 
@@ -225,7 +230,8 @@ def evaluate_panel(
     from eval_panel import BY_ARCHETYPE
 
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
-                              ship_bin_mode=ship_bin_mode, target_decode=target_decode)
+                              ship_bin_mode=ship_bin_mode, target_decode=target_decode,
+                              target_sanity_penalty=target_sanity_penalty)
 
     per_arch: dict[str, dict] = {arch: {"wins": 0, "total": 0,
                                         "wins_seat0": 0, "wins_seat1": 0,
@@ -312,7 +318,8 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         seed_start: int = 0,
                         opponent: str = "random", fire_threshold: float = 0.5,
                         panel: bool = False, sample: bool = False,
-                        target_decode: bool = False):
+                        target_decode: bool = False,
+                        target_sanity_penalty: float = 0.0):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
 
@@ -336,7 +343,8 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         results = evaluate_panel(model, device, opponent=opponent,
                                  fire_threshold=fire_threshold, sample=sample,
                                  ship_bin_mode=cfg.model.ship_bin_mode,
-                                 target_decode=target_decode)
+                                 target_decode=target_decode,
+                                 target_sanity_penalty=target_sanity_penalty)
         print_panel_report(results, opponent)
         return results
 
@@ -350,12 +358,14 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         num_players=cfg.env.num_players,
         fire_threshold=fire_threshold,
         sample=sample,
+        target_sanity_penalty=target_sanity_penalty,
     )
 
     print(f"Win rate vs {opponent}: {results['win_rate']:.2%}  "
           f"({results['wins']}/{results['total_games']})")
     print(f"Fire threshold: {fire_threshold}")
     print(f"Target decode: {target_decode}")
+    print(f"Target sanity penalty: {target_sanity_penalty}")
     print(f"Avg material: {results['avg_material']:.1f}")
     for r in results["results"][:5]:
         print(f"  seed={r['seed']} win={r['win']} "
@@ -384,6 +394,9 @@ if __name__ == "__main__":
     parser.add_argument("--target-decode", action="store_true",
                         help="Aim with target_logits plus orbital intercept instead "
                              "of directly using the angle head.")
+    parser.add_argument("--target-sanity-penalty", type=float, default=0.0,
+                        help="Subtract this from dominated same-source target logits "
+                             "before target decode.")
     args = parser.parse_args()
 
     cfg = Config()
@@ -398,4 +411,5 @@ if __name__ == "__main__":
         panel=args.panel,
         sample=args.sample,
         target_decode=args.target_decode,
+        target_sanity_penalty=args.target_sanity_penalty,
     )
