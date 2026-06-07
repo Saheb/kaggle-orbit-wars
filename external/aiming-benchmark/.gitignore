@@ -1,0 +1,7 @@
+# downloaded / generated artifacts (re-fetch with:
+#   kaggle datasets download -d slawekbiel/orbit-wars-aim-benchmark -p . --unzip
+#   kaggle kernels pull slawekbiel/benchmark-for-aiming-implementation -p .)
+aim_samples.npz
+*.ipynb
+*.log
+__pycache__/

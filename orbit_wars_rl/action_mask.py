@@ -154,55 +154,51 @@ def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, playe
 
 _MAX_SHIP_SPEED = 6.0
 _ROTATION_LIMIT = 50.0
+_LAUNCH_OFFSET = 0.1
 
 
-def _fleet_speed(ships: int) -> float:
+def _fleet_speed(ships: int, max_speed: float = _MAX_SHIP_SPEED) -> float:
     if ships <= 0:
         return 1.0
-    s = 1.0 + (_MAX_SHIP_SPEED - 1.0) * (math.log(max(ships, 1)) / math.log(1000.0)) ** 1.5
-    return min(s, _MAX_SHIP_SPEED)
+    s = 1.0 + (max_speed - 1.0) * (math.log(max(ships, 1)) / math.log(1000.0)) ** 1.5
+    return min(s, max_speed)
 
 
 def _target_intercept_angle(src_planet, target_planet, ships: int, obs) -> float:
-    """Aim from src at target's ETA-predicted position."""
-    sx, sy = float(src_planet[2]), float(src_planet[3])
-    tx, ty = float(target_planet[2]), float(target_planet[3])
-    tgt_pid = int(target_planet[0])
-    tgt_radius = float(target_planet[4])
-    speed = _fleet_speed(ships)
-    angular_velocity = float(obs.get("angular_velocity", 0.0))
-    current_step = int(obs.get("step", 0))
+    """Aim from src at target's lead (intercept) position.
 
-    initial_planets = obs.get("initial_planets", obs["planets"])
-    init_by_id = {int(p[0]): p for p in initial_planets}
-    ip = init_by_id.get(tgt_pid)
-    if ip is not None:
-        irx = float(ip[2]) - CENTER
-        iry = float(ip[3]) - CENTER
-        init_angle = math.atan2(iry, irx)
-        orbital_r = math.hypot(irx, iry)
-        is_orbiting = (orbital_r + tgt_radius) < _ROTATION_LIMIT
-    else:
-        init_angle = 0.0
-        orbital_r = 0.0
-        is_orbiting = False
+    Iterative continuous lead, matching the engine. Adopted from the aim-benchmark
+    reference (~95% vs our prior ~73% on reachable shots): predict the target from
+    its CURRENT orbit position, subtract the source+target surface gap from the
+    flight distance, and run 8 continuous (non-quantised) lead iterations. The old
+    aimer over-led (full centre-to-centre distance, integer-ceil ETA, 4 iters).
+    """
+    sx, sy, s_r = float(src_planet[2]), float(src_planet[3]), float(src_planet[4])
+    tx0, ty0, t_r = float(target_planet[2]), float(target_planet[3]), float(target_planet[4])
+    max_speed = float(obs.get("ship_speed", _MAX_SHIP_SPEED))
+    speed = _fleet_speed(ships, max_speed)
+    omega = float(obs.get("angular_velocity", 0.0))
 
-    ax, ay = tx, ty
-    for _ in range(4):
-        dist = math.hypot(ax - sx, ay - sy)
-        eta = max(1, int(math.ceil(dist / speed)))
-        if is_orbiting:
-            ang = init_angle + angular_velocity * (current_step + eta)
-            nax = CENTER + orbital_r * math.cos(ang)
-            nay = CENTER + orbital_r * math.sin(ang)
-        else:
-            nax, nay = tx, ty
-        if abs(nax - ax) < 0.5 and abs(nay - ay) < 0.5:
-            ax, ay = nax, nay
-            break
-        ax, ay = nax, nay
+    # Orbit (radius + phase) about the centre, from the target's CURRENT position.
+    # Static if it sits at/beyond the rotation-radius limit (engine leaves it fixed).
+    dx0, dy0 = tx0 - CENTER, ty0 - CENTER
+    orbit_r = math.hypot(dx0, dy0)
+    static = (orbit_r + t_r) >= _ROTATION_LIMIT
+    phase0 = math.atan2(dy0, dx0)
 
-    return float(math.atan2(ay - sy, ax - sx))
+    def target_at(t):
+        if static:
+            return tx0, ty0
+        a = phase0 + omega * t
+        return CENTER + orbit_r * math.cos(a), CENTER + orbit_r * math.sin(a)
+
+    gap = s_r + _LAUNCH_OFFSET + t_r
+    t = max(0.0, (math.hypot(tx0 - sx, ty0 - sy) - gap) / speed)
+    for _ in range(8):
+        px, py = target_at(t)
+        t = max(0.0, (math.hypot(px - sx, py - sy) - gap) / speed)
+    px, py = target_at(t)
+    return float(math.atan2(py - sy, px - sx))
 
 
 def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, obs, player,
