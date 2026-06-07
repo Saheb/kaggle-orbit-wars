@@ -19,7 +19,8 @@ Ordered by submission date. Checkpoint paths relative to repo root.
 | 53359633 | 2026-06-04 | `gpu_run_artifacts/gcp_rev31/checkpoints/torch_step_31490048_rev31_20260603_173151.pt` | 914.5 | 84.4% | 2.3% | 17/21 | Rev31 31M — peak of run |
 | 53367932 | 2026-06-04 | `gpu_run_artifacts/gcp_rev32b/checkpoints/torch_step_6815744_rev32b_20260604_112217.pt` | 874.3 | **88.7%** | 0.8% | 20/21 | Rev32b — First Strike 4×t<20, new Zach record |
 | 53410563 | 2026-06-06 | `gpu_run_artifacts/rev38/checkpoints/torch_step_5242880_rev38_20260605_181635.pt` | **950.5** | 89.1% | 2.7% | — | Rev38 5M — pairwise=15 features (roi_20/roi_50/enemy_contest), rollout=128 — new record |
-| 53416454 | 2026-06-06 | `gpu_run_artifacts/rev38/checkpoints/torch_step_6291456_rev38_20260605_181635.pt` | pending | — | 3.1% | — | Rev38 6M — best Ajay panel yet (8/256), ties Rev35c |
+| 53416454 | 2026-06-06 | `gpu_run_artifacts/rev38/checkpoints/torch_step_6291456_rev38_20260605_181635.pt` | 924.5 | — | 3.1% | — | Rev38 6M — best Ajay panel yet (8/256) |
+| 53428737 | 2026-06-06 | `gpu_run_artifacts/rev46/checkpoints/torch_step_4194304_rev46_20260606_143300.pt` | pending | 86.7% | 3.1% | — | Rev46 4M — same config as Rev38, peak before carpet-bomb collapse |
 
 ---
 
