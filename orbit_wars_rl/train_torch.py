@@ -605,7 +605,13 @@ def train(args):
         "slot_valid":      torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev),
         "target_mask":     torch.zeros(rollout_T, N, P, MAX_OWNED, cfg.env.max_planets, dtype=torch.bool, device=storage_dev),
         "owned_indices":   torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
-        **({"pairwise_features": torch.zeros(rollout_T, N, P, MAX_OWNED, cfg.env.max_planets, cfg.model.pairwise_feature_dim, device=storage_dev)} if args.aux_roi_coef > 0 else {}),
+        # Store pairwise features whenever the model USES them: the target head
+        # (per-(slot,target) scorer) needs them in the PPO-update forward, or it
+        # falls back to a zeros/uniform target head that disagrees with the rollout
+        # policy → persistent rollout-vs-update mismatch (KL/clip explode, never
+        # stabilise). Must NOT be gated on aux_roi_coef (a separate aux loss); doing
+        # so silently broke the target head whenever aux_roi_coef=0 (rev49+).
+        **({"pairwise_features": torch.zeros(rollout_T, N, P, MAX_OWNED, cfg.env.max_planets, cfg.model.pairwise_feature_dim, device=storage_dev)} if cfg.model.pairwise_feature_dim > 0 else {}),
         "fire_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "ship_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "ship_count_a": torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
