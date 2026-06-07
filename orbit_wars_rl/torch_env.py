@@ -752,36 +752,52 @@ class VecTorchEnv:
         self,
         src_x: torch.Tensor,
         src_y: torch.Tensor,
+        src_r: torch.Tensor,
         ship_count: torch.Tensor,
         target_idx: torch.Tensor,
     ) -> torch.Tensor:
-        """Vectorized target-to-angle decode with a short fixed-point ETA solve."""
+        """Vectorised target->launch-angle intercept.
+
+        Mirrors action_mask._target_intercept_angle (the aim-benchmark-validated
+        ~95% aimer) so TRAINING and INFERENCE aim identically: predict the target
+        from its CURRENT orbit position, subtract the src+tgt surface gap, and run
+        8 continuous (non-quantised) lead iterations. The old version over-led
+        (centre-to-centre distance, integer-ceil ETA, 4 iters) — ~73% on the
+        benchmark.
+        """
         P = self.planets.shape[1]
         target_idx = target_idx.long().clamp(0, P - 1)
         gather_idx = target_idx.unsqueeze(-1).expand(-1, -1, 7)
         tgt = self.planets.gather(1, gather_idx)
         tx = tgt[:, :, 2]
         ty = tgt[:, :, 3]
+        tgt_r = tgt[:, :, 4]
 
-        init_ang = self._planet_initial_angle.gather(1, target_idx)
-        orb_r = self._planet_orbital_r.gather(1, target_idx)
-        is_orb = self._planet_is_orbiting.gather(1, target_idx)
         speed = _ship_speed(ship_count)
-        step_f = self.step_count.float().unsqueeze(1)
         ang_vel = self.angular_velocity.unsqueeze(1)
 
-        aim_x = tx
-        aim_y = ty
-        for _ in range(4):
-            dist = torch.sqrt((aim_x - src_x) ** 2 + (aim_y - src_y) ** 2).clamp(min=1e-6)
-            eta = torch.ceil(dist / speed).clamp(min=1.0)
-            future_ang = init_ang + ang_vel * (step_f + eta)
-            orbit_x = CENTER + orb_r * torch.cos(future_ang)
-            orbit_y = CENTER + orb_r * torch.sin(future_ang)
-            aim_x = torch.where(is_orb, orbit_x, tx)
-            aim_y = torch.where(is_orb, orbit_y, ty)
+        # Orbit (radius + phase) from the target's CURRENT position; static if at/
+        # beyond the rotation-radius limit (engine leaves it fixed).
+        dx0 = tx - CENTER
+        dy0 = ty - CENTER
+        orbit_r = torch.sqrt(dx0 * dx0 + dy0 * dy0)
+        static = (orbit_r + tgt_r) >= ROTATION_RADIUS_LIMIT
+        phase0 = torch.atan2(dy0, dx0)
 
-        return torch.atan2(aim_y - src_y, aim_x - src_x) % (2 * math.pi)
+        gap = src_r + 0.1 + tgt_r  # source surface + launch offset + target surface
+        dist0 = torch.sqrt((tx - src_x) ** 2 + (ty - src_y) ** 2)
+        t = ((dist0 - gap) / speed).clamp(min=0.0)
+        for _ in range(8):
+            a = phase0 + ang_vel * t
+            px = torch.where(static, tx, CENTER + orbit_r * torch.cos(a))
+            py = torch.where(static, ty, CENTER + orbit_r * torch.sin(a))
+            dist = torch.sqrt((px - src_x) ** 2 + (py - src_y) ** 2)
+            t = ((dist - gap) / speed).clamp(min=0.0)
+        a = phase0 + ang_vel * t
+        px = torch.where(static, tx, CENTER + orbit_r * torch.cos(a))
+        py = torch.where(static, ty, CENTER + orbit_r * torch.sin(a))
+
+        return torch.atan2(py - src_y, px - src_x) % (2 * math.pi)
 
     # ---------------------------------------------------------------------
     # Apply actions for one player. Launches fleets from owned planets.
@@ -839,7 +855,7 @@ class VecTorchEnv:
                 target_alive & (target_owner != owner_id),
                 torch.ones_like(target_alive, dtype=torch.bool),
             )
-            target_angle = self._target_intercept_angle(src_x, src_y, ship_count, target_idx)
+            target_angle = self._target_intercept_angle(src_x, src_y, src_r, ship_count, target_idx)
             angle = torch.where(use_target_decode, target_angle, angle)
 
         # Validate: planet still owned by this player AND has enough ships
