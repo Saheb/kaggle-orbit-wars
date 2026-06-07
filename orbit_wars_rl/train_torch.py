@@ -26,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 # wandb is optional — only imported when --wandb flag is passed
 try:
@@ -325,6 +326,8 @@ def train(args):
         print(f"srcs_multi penalty: coef={args.srcs_multi_penalty}, threshold={args.srcs_multi_threshold}, "
               f"decay_frac={args.srcs_multi_penalty_decay_frac} "
               f"({'cosine decay to 0' if args.srcs_multi_penalty_decay_frac > 0 else 'constant'})")
+    if args.fleet_activity_coef > 0.0:
+        print(f"fleet_activity reward: coef={args.fleet_activity_coef} (per step any planet fires)")
 
     # Honor model-config fields saved in the checkpoint (num_ship_bins,
     # ship_bin_mode, min_ship_bin) BEFORE creating env or model.
@@ -403,7 +406,16 @@ def train(args):
         else:
             print("WARNING: il_lambda > 0 but no --il-ref and no --resume — IL disabled")
 
-    learner = PPOLearner(model, cfg, device=device, frozen_il_model=frozen_il_model)
+    roi_heads = None
+    if args.aux_roi_coef > 0.0:
+        roi_heads = {
+            "kv": nn.Linear(2 * cfg.model.entity_dim, 3, bias=False),
+            "ts": nn.Linear(cfg.model.entity_dim, 3, bias=False),
+        }
+        print(f"ROI aux loss: coef={args.aux_roi_coef} (keeps pair_kv/target_scorer new cols encoding roi_20/roi_50/enemy_contest)")
+
+    learner = PPOLearner(model, cfg, device=device, frozen_il_model=frozen_il_model,
+                        roi_heads=roi_heads, aux_roi_coef=args.aux_roi_coef)
 
     # BC auxiliary supervision: load teacher samples once, sample a minibatch
     # per PPO update. Cross-entropy on teacher's actions directly penalizes
@@ -551,6 +563,7 @@ def train(args):
                     "pool_external_fraction": args.pool_external_fraction,
                     "srcs_multi_penalty": args.srcs_multi_penalty,
                     "srcs_multi_threshold": args.srcs_multi_threshold,
+                    "fleet_activity_coef": args.fleet_activity_coef,
                     "il_lambda": cfg.ppo.il_lambda,
                     "win_margin_coeff": args.win_margin_coeff,
                     "speed_coef": args.speed_coef,
@@ -588,7 +601,7 @@ def train(args):
         "slot_valid":      torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev),
         "target_mask":     torch.zeros(rollout_T, N, P, MAX_OWNED, cfg.env.max_planets, dtype=torch.bool, device=storage_dev),
         "owned_indices":   torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
-        "pairwise_features": torch.zeros(rollout_T, N, P, MAX_OWNED, cfg.env.max_planets, cfg.model.pairwise_feature_dim, device=storage_dev),
+        **({"pairwise_features": torch.zeros(rollout_T, N, P, MAX_OWNED, cfg.env.max_planets, cfg.model.pairwise_feature_dim, device=storage_dev)} if args.aux_roi_coef > 0 else {}),
         "fire_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "ship_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "ship_count_a": torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev),
@@ -741,7 +754,7 @@ def train(args):
                 storage["slot_valid"][t, :, p].copy_(feats_p["slot_valid"], non_blocking=True)
                 storage["target_mask"][t, :, p].copy_(feats_p["target_mask"], non_blocking=True)
                 storage["owned_indices"][t, :, p].copy_(feats_p["owned_indices"], non_blocking=True)
-                if "pairwise_features" in feats_p:
+                if "pairwise_features" in storage and "pairwise_features" in feats_p:
                     storage["pairwise_features"][t, :, p].copy_(feats_p["pairwise_features"], non_blocking=True)
                 storage["fire_a"][t, :, p].copy_(fire_p, non_blocking=True)
                 storage["ship_a"][t, :, p].copy_(ship_p, non_blocking=True)
@@ -779,19 +792,26 @@ def train(args):
             # penalty_t[n,p] = effective_coef * max(0, n_fires[n,p] - threshold)
             # If srcs_multi_penalty_decay_frac > 0, the coefficient cosine-decays
             # from srcs_multi_penalty to 0 over that fraction of total_steps.
-            if args.srcs_multi_penalty > 0.0:
-                if args.srcs_multi_penalty_decay_frac > 0.0:
+            if args.srcs_multi_penalty > 0.0 or args.fleet_activity_coef > 0.0:
+                if args.srcs_multi_penalty > 0.0 and args.srcs_multi_penalty_decay_frac > 0.0:
                     decay_steps = args.srcs_multi_penalty_decay_frac * args.total_steps
                     t_frac = min(total_env_steps / max(decay_steps, 1), 1.0)
-                    _coef = args.srcs_multi_penalty * 0.5 * (1.0 + math.cos(math.pi * t_frac))
+                    _pen_coef = args.srcs_multi_penalty * 0.5 * (1.0 + math.cos(math.pi * t_frac))
                 else:
-                    _coef = args.srcs_multi_penalty
+                    _pen_coef = args.srcs_multi_penalty
                 for p in range(P):
                     fires_p = storage["fire_a"][t, :, p].float()    # (N, MAX_OWNED)
                     sv_p    = storage["slot_valid"][t, :, p].float() # (N, MAX_OWNED)
                     n_fires = (fires_p * sv_p).sum(dim=-1)           # (N,)
-                    excess  = (n_fires - args.srcs_multi_threshold).clamp(min=0)
-                    storage["rewards"][t, :, p] -= _coef * excess
+                    if args.srcs_multi_penalty > 0.0:
+                        excess = (n_fires - args.srcs_multi_threshold).clamp(min=0)
+                        storage["rewards"][t, :, p] -= _pen_coef * excess
+                    if args.fleet_activity_coef > 0.0:
+                        # Proportional up to threshold: each source adds activity_coef
+                        # until threshold, then the srcs_multi penalty takes over.
+                        # Nash = fire from exactly threshold sources (not binary token-fire).
+                        activity = n_fires.clamp(max=args.srcs_multi_threshold)
+                        storage["rewards"][t, :, p] += args.fleet_activity_coef * activity
             storage["dones"][t, :, 0].copy_(done, non_blocking=True)
             storage["dones"][t, :, 1].copy_(done, non_blocking=True)
 
@@ -887,7 +907,7 @@ def train(args):
             "target_mask":     flat["target_mask"],
             "slot_valid":      flat["slot_valid"],
             "owned_indices":   flat["owned_indices"],
-            "pairwise_features": flat["pairwise_features"],
+            **( {"pairwise_features": flat["pairwise_features"]} if "pairwise_features" in flat else {}),
             "owned_count":     flat["slot_valid"].sum(dim=1).tolist(),
             "actions": {
                 "fire":   flat["fire_a"],
@@ -960,7 +980,8 @@ def train(args):
             metrics["planet_feat_std"] = float(flat["planet_features"].std(unbiased=False).item())
             metrics["fleet_feat_std"] = float(flat["fleet_features"].std(unbiased=False).item())
             metrics["global_feat_std"] = float(flat["global_features"].std(unbiased=False).item())
-            metrics["pairwise_feat_std"] = float(flat["pairwise_features"].std(unbiased=False).item())
+            if "pairwise_features" in flat:
+                metrics["pairwise_feat_std"] = float(flat["pairwise_features"].std(unbiased=False).item())
 
         total_env_steps += rollout_T * N
         iter_count += 1
@@ -992,6 +1013,7 @@ def train(args):
                 f"early_stop={metrics.get('kl_early_stop', 0):.0f} | "
                 f"fire[0]={slot0:.2f} fire[rest_max]={slot_rest_max:.2f} "
                 f"srcs_multi={metrics.get('avg_sources_multi', 0):.2f} "
+                + (f"actcoef={args.fleet_activity_coef:.4f} " if args.fleet_activity_coef > 0.0 else "")
                 + (
                     (f"pencoef={args.srcs_multi_penalty * 0.5 * (1.0 + math.cos(math.pi * min(total_env_steps / max(args.srcs_multi_penalty_decay_frac * args.total_steps, 1), 1.0))):.5f} "
                      if args.srcs_multi_penalty > 0.0 and args.srcs_multi_penalty_decay_frac > 0.0
@@ -1254,6 +1276,18 @@ if __name__ == "__main__":
                              "--srcs-multi-penalty to 0 over this fraction of --total-steps. "
                              "E.g. 0.5 = penalty is full strength at step 0, decays to 0 "
                              "by step total_steps*0.5, stays 0 after. 0 = constant penalty.")
+    parser.add_argument("--aux-roi-coef", type=float, default=0.0,
+                        help="Coefficient for ROI auxiliary regression loss. Keeps "
+                             "pair_kv.weight[:, 108:111] and target_scorer new columns "
+                             "anchored to encoding roi_20/roi_50/enemy_contest throughout "
+                             "PPO. Reg heads are transient (not saved). Typical: 0.01–0.05.")
+    parser.add_argument("--fleet-activity-coef", type=float, default=0.0,
+                        help="Per-step reward added when any planet fires (n_fires > 0). "
+                             "Breaks the fire=0 Nash created by srcs_multi penalty alone — "
+                             "fire=0 forgoes this reward, making passivity costly. "
+                             "Pair with --srcs-multi-penalty: activity reward makes firing "
+                             "attractive, penalty caps how many sources are used. "
+                             "Typical: 0.001–0.003. 0 = off.")
     # Opponent pool (PFSP self-play with optional external heuristics) ----
     parser.add_argument("--pool-mode", choices=["none", "self", "mixed"], default="none",
                         help="none: pure current-vs-current self-play (default). "

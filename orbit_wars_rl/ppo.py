@@ -19,7 +19,8 @@ from config import Config
 
 
 class PPOLearner:
-    def __init__(self, model, cfg, device="cpu", frozen_il_model=None):
+    def __init__(self, model, cfg, device="cpu", frozen_il_model=None,
+                 roi_heads=None, aux_roi_coef=0.0):
         self.model = model.to(device)
         self.cfg = cfg
         self.device = device
@@ -34,8 +35,23 @@ class PPOLearner:
         # Current IL coefficient — schedule updated externally each iter
         self.il_coef = float(getattr(cfg.ppo, "il_lambda", 0.0)) if frozen_il_model is not None else 0.0
 
+        # ROI auxiliary regression heads — keep new pairwise feature columns
+        # (pair_kv.weight[:, 108:111] and target_scorer[0].weight[:, 204:207])
+        # anchored to encoding roi_20/roi_50/enemy_contest throughout PPO.
+        # Transient: not saved to checkpoint, discarded after training.
+        self.roi_heads = roi_heads   # dict with keys "kv" and "ts", or None
+        self.aux_roi_coef = float(aux_roi_coef)
+        if self.roi_heads is not None:
+            for h in self.roi_heads.values():
+                h.to(device)
+
+        all_params = list(model.parameters())
+        if self.roi_heads is not None and self.aux_roi_coef > 0.0:
+            for h in self.roi_heads.values():
+                all_params += list(h.parameters())
+
         self.optimizer = torch.optim.Adam(
-            model.parameters(),
+            all_params,
             lr=cfg.ppo.learning_rate,
             eps=1e-5,
         )
@@ -329,6 +345,23 @@ class PPOLearner:
                         metrics[f"bc_{k}"] = v
                 else:
                     total_loss = ppo_loss
+
+                # ROI auxiliary loss: keep pair_kv.weight[:, 108:111] and
+                # target_scorer[0].weight[:, 204:207] encoding roi/contest info.
+                # Gradient flows only through those columns (other weights not in graph).
+                if self.roi_heads is not None and self.aux_roi_coef > 0.0:
+                    pairwise = batch.get("pairwise_features")
+                    if pairwise is not None:
+                        pairwise = pairwise.to(self.device)          # (B, MO, N_p, 15)
+                        x_new = pairwise[..., 12:15].reshape(-1, 3)  # (B*MO*N_p, 3)
+                        # pair_kv branch — only new columns in computational graph
+                        contrib_kv = F.linear(x_new, self.model.pair_kv.weight[:, 108:111])
+                        pred_kv = self.roi_heads["kv"](contrib_kv)
+                        # target_scorer branch
+                        contrib_ts = F.linear(x_new, self.model.target_scorer[0].weight[:, 204:207])
+                        pred_ts = self.roi_heads["ts"](contrib_ts)
+                        aux_loss = F.mse_loss(pred_kv, x_new) + F.mse_loss(pred_ts, x_new)
+                        total_loss = total_loss + self.aux_roi_coef * aux_loss
 
                 self.optimizer.zero_grad()
                 total_loss.backward()
