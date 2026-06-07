@@ -86,7 +86,6 @@ class PPOLearner:
                 to_dev(batch["planet_mask"]),
                 to_dev(batch["fleet_mask"]),
                 fire_mask=to_dev(batch["fire_mask"]),
-                angle_mask=to_dev(batch["angle_mask"]),
                 slot_valid=to_dev(batch["slot_valid"]),
                 owned_indices=batch["owned_indices"],
                 pairwise_features=pairwise,
@@ -121,7 +120,7 @@ class PPOLearner:
 
         batch keys:
             - planet_features, fleet_features, global_features
-            - planet_mask, fleet_mask, angle_mask (passed to model; not used for action)
+            - planet_mask, fleet_mask
             - fire_mask, slot_valid, owned_indices, owned_count
             - target_mask
             - actions: {fire, ship, target}
@@ -140,7 +139,6 @@ class PPOLearner:
         planet_mask = to_dev(batch["planet_mask"])
         fleet_mask = to_dev(batch["fleet_mask"])
         fire_mask = to_dev(batch["fire_mask"])
-        angle_mask = to_dev(batch["angle_mask"])  # still passed to model forward
         target_mask = batch.get("target_mask")
         if target_mask is not None:
             target_mask = to_dev(target_mask)
@@ -154,7 +152,7 @@ class PPOLearner:
         outputs = self.model(
             planet_features, fleet_features, global_features,
             planet_mask, fleet_mask,
-            fire_mask=fire_mask, angle_mask=angle_mask,
+            fire_mask=fire_mask,
             slot_valid=slot_valid_2d, owned_indices=owned_indices,
             owned_count=batch.get("owned_count"),
             pairwise_features=pairwise,
@@ -227,7 +225,7 @@ class PPOLearner:
         loss = (policy_loss
                 + cfg.value_coef * value_loss
                 - cfg.entropy_coef_fire  * fire_entropy
-                - cfg.entropy_coef_angle * target_entropy   # cfg key reused for direction head
+                - cfg.entropy_coef_target * target_entropy
                 - cfg.entropy_coef_ships * ship_entropy
                 + self.il_coef * il_kl)
 
@@ -331,7 +329,6 @@ class PPOLearner:
                         bc_batch["planet_mask"].to(self.device),
                         bc_batch["fleet_mask"].to(self.device),
                         fire_mask=bc_batch["fire_mask"].to(self.device),
-                        angle_mask=bc_batch["angle_mask"].to(self.device),
                         slot_valid=bc_batch["slot_valid"].to(self.device),
                         owned_indices=bc_batch["owned_indices"],
                         pairwise_features=bc_pairwise,

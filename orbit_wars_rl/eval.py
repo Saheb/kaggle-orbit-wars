@@ -131,15 +131,9 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 target_sanity_penalty=target_sanity_penalty,
             )
 
-        return action_fn(
-            outputs["fire_logits"].cpu(),
-            outputs["angle_logits"].cpu(),
-            outputs["ship_logits"].cpu(),
-            {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()},
-            obs, player,
-            fire_threshold=fire_threshold,
-            sample=sample,
-            ship_bin_mode=ship_bin_mode,
+        raise NotImplementedError(
+            "angle-decode path removed (angle head deleted); Phase 1 checkpoints "
+            "use target-decode. Pass target_decode=True (--target-decode)."
         )
 
     return agent_fn

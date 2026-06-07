@@ -83,11 +83,8 @@ def build_value_tracking_agent(model, device, target_decode, value_log, player_i
                 {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()},
                 obs, player, ship_bin_mode="absolute",
             )
-        return action_fn(
-            outputs["fire_logits"].cpu(), outputs["angle_logits"].cpu(),
-            outputs["ship_logits"].cpu(),
-            {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()},
-            obs, player, ship_bin_mode="absolute",
+        raise NotImplementedError(
+            "angle-decode path removed (angle head deleted); use target-decode."
         )
 
     return agent_fn

@@ -290,8 +290,13 @@ def train(args):
         cfg.ppo.clip_eps = args.clip_eps
     if args.entropy_coef_fire is not None:
         cfg.ppo.entropy_coef_fire = args.entropy_coef_fire
-    if args.entropy_coef_angle is not None:
-        cfg.ppo.entropy_coef_angle = args.entropy_coef_angle
+    # --entropy-coef-target is the honest name; --entropy-coef-angle is a deprecated
+    # alias kept so old launch scripts still work (the coef has always weighted the
+    # target head, not the now-vestigial angle head).
+    if args.entropy_coef_target is not None:
+        cfg.ppo.entropy_coef_target = args.entropy_coef_target
+    elif args.entropy_coef_angle is not None:
+        cfg.ppo.entropy_coef_target = args.entropy_coef_angle
     if args.entropy_coef_ships is not None:
         cfg.ppo.entropy_coef_ships = args.entropy_coef_ships
     if args.max_grad_norm is not None:
@@ -308,7 +313,7 @@ def train(args):
           f"num_minibatches={cfg.ppo.num_minibatches}, clip_eps={cfg.ppo.clip_eps}, "
           f"entropy_coef_fire={cfg.ppo.entropy_coef_fire}, gae_lambda={cfg.ppo.gae_lambda}, "
           f"kl_target={cfg.ppo.kl_target}")
-    print(f"Entropy coefs: fire={cfg.ppo.entropy_coef_fire}, angle={cfg.ppo.entropy_coef_angle}, "
+    print(f"Entropy coefs: fire={cfg.ppo.entropy_coef_fire}, target={cfg.ppo.entropy_coef_target}, "
           f"ships={cfg.ppo.entropy_coef_ships} | max_grad_norm={cfg.ppo.max_grad_norm}")
     print(f"Action decode: {args.action_decode}")
     print(f"Win margin coeff: {args.win_margin_coeff}")
@@ -597,7 +602,6 @@ def train(args):
         "planet_mask":     torch.zeros(rollout_T, N, P, 48, dtype=torch.bool, device=storage_dev),
         "fleet_mask":      torch.zeros(rollout_T, N, P, 128, dtype=torch.bool, device=storage_dev),
         "fire_mask":       torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev),
-        "angle_mask":      torch.zeros(rollout_T, N, P, MAX_OWNED, NUM_ANGLE_BINS, dtype=torch.bool, device=storage_dev),
         "slot_valid":      torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev),
         "target_mask":     torch.zeros(rollout_T, N, P, MAX_OWNED, cfg.env.max_planets, dtype=torch.bool, device=storage_dev),
         "owned_indices":   torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
@@ -750,7 +754,6 @@ def train(args):
                 storage["planet_mask"][t, :, p].copy_(feats_p["planet_mask"], non_blocking=True)
                 storage["fleet_mask"][t, :, p].copy_(feats_p["fleet_mask"], non_blocking=True)
                 storage["fire_mask"][t, :, p].copy_(feats_p["fire_mask"], non_blocking=True)
-                storage["angle_mask"][t, :, p].copy_(feats_p["angle_mask"], non_blocking=True)
                 storage["slot_valid"][t, :, p].copy_(feats_p["slot_valid"], non_blocking=True)
                 storage["target_mask"][t, :, p].copy_(feats_p["target_mask"], non_blocking=True)
                 storage["owned_indices"][t, :, p].copy_(feats_p["owned_indices"], non_blocking=True)
@@ -903,7 +906,6 @@ def train(args):
             "planet_mask":     flat["planet_mask"],
             "fleet_mask":      flat["fleet_mask"],
             "fire_mask":       flat["fire_mask"],
-            "angle_mask":      flat["angle_mask"],
             "target_mask":     flat["target_mask"],
             "slot_valid":      flat["slot_valid"],
             "owned_indices":   flat["owned_indices"],
@@ -974,6 +976,16 @@ def train(args):
             metrics["return_mean"] = float(flat_ret.mean().item())
             metrics["return_std"] = float(flat_ret.std(unbiased=False).item())
             metrics["adv_std"] = float(flat_adv.std(unbiased=False).item())
+            # Explained variance: how much of the return variance the value head
+            # captures. EV = 1 - Var(returns - values)/Var(returns); since
+            # returns = advantages + values, (returns - values) == advantages.
+            # The master PPO-health signal (should climb >0.8 within ~100 iters;
+            # if it never passes ~0.5, suspect obs representation / architecture).
+            _ret_var = float(flat_ret.var(unbiased=False).item())
+            metrics["explained_variance"] = (
+                1.0 - float(flat_adv.var(unbiased=False).item()) / _ret_var
+                if _ret_var > 1e-8 else 0.0
+            )
             metrics["reward_mean"] = float(flat["rewards"].mean().item())
             metrics["reward_std"] = float(flat["rewards"].std(unbiased=False).item())
             metrics["reward_nonzero"] = float((flat["rewards"].abs() > 1e-8).float().mean().item())
@@ -1001,44 +1013,47 @@ def train(args):
             psf = metrics.get("per_slot_fire_probs") or [0.0]
             slot0 = psf[0] if len(psf) > 0 else 0.0
             slot_rest_max = max(psf[1:]) if len(psf) > 1 else 0.0
+            # Primary line: the PPO-health decision set. EV / KL / clip_frac are
+            # the only three signals that tell you whether training will work;
+            # H_fire because entropy is an active lever. Everything else is
+            # diagnostic and lives on the periodic 'diag' line + W&B.
             print(
-                f"iter {iter_count:5d} | steps {total_env_steps:>11,} | "
-                f"SPS {sps:>7,.0f} | r_p0 {avg_r:+.3f} r_p1 {avg_r1:+.3f} | "
-                f"clip_frac {avg_cf:.3f}(fire:{metrics.get('clip_frac_fire', 0):.3f}) | KL {metrics.get('approx_kl', 0):.4f} | "
-                f"H_fire {metrics.get('fire_entropy', 0):.3f} "
-                f"H_ang {metrics.get('angle_entropy', 0):.2f} "
-                f"H_ship {metrics.get('ship_entropy', 0):.2f} | "
+                f"iter {iter_count:5d} | steps {total_env_steps:>11,} | SPS {sps:>7,.0f} | "
+                f"EV {metrics.get('explained_variance', 0):.3f} | KL {metrics.get('approx_kl', 0):.4f} | "
+                f"clip {avg_cf:.3f}(fire {metrics.get('clip_frac_fire', 0):.3f}) | "
+                f"H_fire {metrics.get('fire_entropy', 0):.3f} | "
                 f"V_loss {metrics.get('value_loss', 0):.4f} | "
-                f"LR {metrics['learning_rate']:.6f} | "
-                f"early_stop={metrics.get('kl_early_stop', 0):.0f} | "
-                f"fire[0]={slot0:.2f} fire[rest_max]={slot_rest_max:.2f} "
-                f"srcs_multi={metrics.get('avg_sources_multi', 0):.2f} "
-                + (f"actcoef={args.fleet_activity_coef:.4f} " if args.fleet_activity_coef > 0.0 else "")
-                + (
-                    (f"pencoef={args.srcs_multi_penalty * 0.5 * (1.0 + math.cos(math.pi * min(total_env_steps / max(args.srcs_multi_penalty_decay_frac * args.total_steps, 1), 1.0))):.5f} "
-                     if args.srcs_multi_penalty > 0.0 and args.srcs_multi_penalty_decay_frac > 0.0
-                     else "")
-                ) +
-                f"ship0={metrics.get('ship_bin0_rate', 0):.2f} "
-                f"meanshipbin={metrics.get('mean_ship_bin', 0):.1f} "
-                f"avgfleet={metrics.get('avg_fleet_size', 0):.1f} "
-                f"p90fleet={metrics.get('p90_fleet_size', 0):.1f} | "
-                f"Vμ={metrics.get('old_value_mean', 0):+.3f} "
-                f"Vσ={metrics.get('old_value_std', 0):.3f} "
-                f"Rμ={metrics.get('return_mean', 0):+.3f} "
-                f"Rσ={metrics.get('return_std', 0):.3f} "
-                f"Aσ={metrics.get('adv_std', 0):.3f} "
-                f"rewμ={metrics.get('reward_mean', 0):+.4f} "
-                f"rewσ={metrics.get('reward_std', 0):.4f} "
-                f"rewNZ={metrics.get('reward_nonzero', 0):.3f} "
-                f"featσ[p/f/g/pw]={metrics.get('planet_feat_std', 0):.3f}/"
-                f"{metrics.get('fleet_feat_std', 0):.3f}/"
-                f"{metrics.get('global_feat_std', 0):.3f}/"
-                f"{metrics.get('pairwise_feat_std', 0):.3f}"
-                + (f" | il_kl={metrics.get('il_kl', 0):.3f} "
-                   f"il_coef={metrics.get('il_coef', 0):.3f}"
+                f"r_p0 {avg_r:+.3f} r_p1 {avg_r1:+.3f} | "
+                f"LR {metrics['learning_rate']:.6f} | estop {metrics.get('kl_early_stop', 0):.0f}"
+                + (f" | il_kl {metrics.get('il_kl', 0):.3f} il_coef {metrics.get('il_coef', 0):.3f}"
                    if metrics.get('il_coef', 0) > 0 else "")
             )
+            # Secondary behavioural diagnostics — occasionally useful, not decision
+            # drivers (W&B keeps them every iter). Console-print every 20th log.
+            if iter_count == 1 or iter_count % 20 == 0:
+                pencoef = ""
+                if args.srcs_multi_penalty > 0.0 and args.srcs_multi_penalty_decay_frac > 0.0:
+                    _pc = args.srcs_multi_penalty * 0.5 * (1.0 + math.cos(math.pi * min(
+                        total_env_steps / max(args.srcs_multi_penalty_decay_frac * args.total_steps, 1), 1.0)))
+                    pencoef = f" pencoef {_pc:.5f}"
+                actcoef = f" actcoef {args.fleet_activity_coef:.4f}" if args.fleet_activity_coef > 0.0 else ""
+                print(
+                    f"   diag | fire[0] {slot0:.2f} rest_max {slot_rest_max:.2f} | "
+                    f"srcs_multi {metrics.get('avg_sources_multi', 0):.2f} "
+                    f"ship0 {metrics.get('ship_bin0_rate', 0):.2f} "
+                    f"meanshipbin {metrics.get('mean_ship_bin', 0):.1f} | "
+                    f"avgfleet {metrics.get('avg_fleet_size', 0):.1f} "
+                    f"p90 {metrics.get('p90_fleet_size', 0):.1f} | "
+                    f"H_ship {metrics.get('ship_entropy', 0):.2f} | "
+                    f"Vμ {metrics.get('old_value_mean', 0):+.2f} Rμ {metrics.get('return_mean', 0):+.2f} "
+                    f"Rσ {metrics.get('return_std', 0):.2f} Aσ {metrics.get('adv_std', 0):.2f} | "
+                    f"rewμ {metrics.get('reward_mean', 0):+.4f} rewNZ {metrics.get('reward_nonzero', 0):.3f} | "
+                    f"featσ p/f/g/pw {metrics.get('planet_feat_std', 0):.2f}/"
+                    f"{metrics.get('fleet_feat_std', 0):.2f}/"
+                    f"{metrics.get('global_feat_std', 0):.2f}/"
+                    f"{metrics.get('pairwise_feat_std', 0):.2f}"
+                    + actcoef + pencoef
+                )
             # W&B logging
             if wb is not None:
                 wb.log({
@@ -1049,6 +1064,7 @@ def train(args):
                     "train/reward_p1": avg_r1,
                     "train/lr": metrics["learning_rate"],
                     # PPO health
+                    "ppo/explained_variance": metrics.get("explained_variance", 0),
                     "ppo/clip_frac": avg_cf,
                     "ppo/clip_frac_fire": metrics.get("clip_frac_fire", 0),
                     "ppo/approx_kl": metrics.get("approx_kl", 0),
@@ -1167,9 +1183,12 @@ if __name__ == "__main__":
     parser.add_argument("--entropy-coef-fire", type=float, default=None,
                         help="Override fire-head entropy coefficient "
                              "(default: cfg.ppo.entropy_coef_fire=0.01)")
+    parser.add_argument("--entropy-coef-target", type=float, default=None,
+                        help="Override target-head entropy coefficient "
+                             "(default: cfg.ppo.entropy_coef_target=0.02)")
     parser.add_argument("--entropy-coef-angle", type=float, default=None,
-                        help="Override direction/angle-head entropy coefficient "
-                             "(default: cfg.ppo.entropy_coef_angle=0.02)")
+                        help="DEPRECATED alias for --entropy-coef-target "
+                             "(the angle head is vestigial; this coef weights the target head)")
     parser.add_argument("--entropy-coef-ships", type=float, default=None,
                         help="Override ships-head entropy coefficient "
                              "(default: cfg.ppo.entropy_coef_ships=0.01)")

@@ -74,8 +74,11 @@ class EntityTransformer(nn.Module):
 
         # Action heads (per owned planet)
         self.fire_head = nn.Linear(D, 1)
-        self.num_angle_bins = getattr(cfg, "num_angle_bins", NUM_ANGLE_BINS)
-        self.angle_head = nn.Linear(D, self.num_angle_bins)
+        # NB: the angle head was removed — Phase 1 decodes fire direction from the
+        # target via orbital-intercept geometry (target-decode), so the head was
+        # dead weight (never sampled, no gradient). NUM_ANGLE_BINS is still used by
+        # the env/action-mask geometry. Legacy checkpoints' angle_head.* keys are
+        # dropped in load_state_dict below.
         # Ship head: bin count is configurable so the fraction-head experiment
         # can swap to 10 fraction bins. Default 32 = legacy absolute counts.
         self.num_ship_bins = getattr(cfg, "num_ship_bins", NUM_SHIP_BINS)
@@ -198,12 +201,12 @@ class EntityTransformer(nn.Module):
             planet_mask: (B, N_p) bool, True = real entity
             fleet_mask: (B, N_f) bool, True = real entity
             fire_mask: (B, max_owned) bool, True = can fire
-            angle_mask: (B, max_owned, 72) bool, True = legal angle
+            angle_mask: accepted for caller compatibility but unused (angle head removed)
             slot_valid: (B, max_owned) bool, True = real owned planet slot
             owned_indices: (B, max_owned) int, indices into planet array
             owned_count: (B,) int
 
-        Returns dict with fire_logits, angle_logits, ship_logits, value.
+        Returns dict with fire_logits, ship_logits, target_logits, value.
         """
         encoded = self.encode_state(
             planet_features, fleet_features, global_features,
@@ -252,7 +255,6 @@ class EntityTransformer(nn.Module):
 
         # Action heads
         fire_logits = self.fire_head(owned_enriched).squeeze(-1)  # (B, max_owned)
-        angle_logits = self.angle_head(owned_enriched)  # (B, max_owned, 144)
         ship_logits = self.ship_head(owned_enriched)  # (B, max_owned, num_ship_bins)
         # min_ship_bin: bins below this are masked to -inf so they're never
         # sampled / argmaxed. For the fraction head (10 bins on [0.1, 1.0]),
@@ -280,13 +282,8 @@ class EntityTransformer(nn.Module):
         # Apply masks (-100 is safe in float16 on MPS; -1e9 overflows)
         if fire_mask is not None:
             fire_logits = fire_logits.masked_fill(~fire_mask, -100.0)
-        if angle_mask is not None:
-            if angle_mask.shape[-1] != angle_logits.shape[-1]:
-                angle_mask = angle_mask[..., :angle_logits.shape[-1]]
-            angle_logits = angle_logits.masked_fill(~angle_mask, -100.0)
         if slot_valid is not None:
             fire_logits = fire_logits.masked_fill(~slot_valid, -100.0)
-            angle_logits = angle_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
             ship_logits = ship_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
             target_logits = target_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
@@ -308,11 +305,18 @@ class EntityTransformer(nn.Module):
 
         return {
             "fire_logits": fire_logits,
-            "angle_logits": angle_logits,
             "ship_logits": ship_logits,
             "target_logits": target_logits,
             "value": value,
         }
+
+    def load_state_dict(self, state_dict, strict=True):
+        # Legacy checkpoints carry a now-removed angle head; drop those keys so
+        # resume/eval/export from pre-removal checkpoints (rev38, rev32b, ...) work.
+        if any(k.startswith("angle_head.") for k in state_dict):
+            state_dict = {k: v for k, v in state_dict.items()
+                          if not k.startswith("angle_head.")}
+        return super().load_state_dict(state_dict, strict=strict)
 
 
 def count_params(model):

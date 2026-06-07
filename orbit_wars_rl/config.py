@@ -62,7 +62,7 @@ class PPOConfig:
     gamma: float = 0.995
     gae_lambda: float = 0.95
     entropy_coef_fire: float = 0.01
-    entropy_coef_angle: float = 0.02
+    entropy_coef_target: float = 0.02   # entropy bonus on the target head (was misnamed entropy_coef_angle)
     entropy_coef_ships: float = 0.01
     bc_coef: float = 0.0
     # IL regularization: KL penalty between current policy and a frozen

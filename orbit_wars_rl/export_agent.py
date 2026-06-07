@@ -105,7 +105,6 @@ class _Model(nn.Module):
             self.pair_out = nn.Linear(D, D)
             self.pair_ln = nn.LayerNorm(D)
         self.fire_head = nn.Linear(D, 1)
-        self.angle_head = nn.Linear(D, NUM_ANGLE_BINS)
         self.ship_head = nn.Linear(D, NUM_SHIP_BINS)
         if self.use_pairwise:
             self.tgt_q = nn.Linear(D, D)
@@ -182,7 +181,6 @@ class _Model(nn.Module):
             )
 
         fl = self.fire_head(oe).squeeze(-1)
-        al = self.angle_head(oe)
         sl = self.ship_head(oe)
         if _MIN_SHIP_BIN > 0:
             sl[..., :_MIN_SHIP_BIN] = -100.0
@@ -201,11 +199,8 @@ class _Model(nn.Module):
 
         if fire_mask is not None:
             fl = fl.masked_fill(~fire_mask, -100.0)
-        if angle_mask is not None:
-            al = al.masked_fill(~angle_mask, -100.0)
         if slot_valid is not None:
             fl = fl.masked_fill(~slot_valid, -100.0)
-            al = al.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
             sl = sl.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
             target_logits = target_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
@@ -219,7 +214,7 @@ class _Model(nn.Module):
         v = self.value_out(F.gelu(self.value_fc2(F.gelu(self.value_fc1(
             torch.cat([global_token, owned_pool], dim=-1)
         ))))).squeeze(-1)
-        return dict(fire_logits=fl, angle_logits=al, ship_logits=sl,
+        return dict(fire_logits=fl, ship_logits=sl,
                     target_logits=target_logits, value=v)
 
 
@@ -300,14 +295,8 @@ def agent(obs, cfg=None):
             ship_bin_mode=_SHIP_BIN_MODE,
         )
     else:
-        return actions_from_policy(
-            out["fire_logits"],
-            out["angle_logits"],
-            out["ship_logits"],
-            {{k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()}},
-            obs, player,
-            fire_threshold=_FIRE_THRESHOLD,
-            ship_bin_mode=_SHIP_BIN_MODE,
+        raise NotImplementedError(
+            "angle-decode removed; this agent was exported for target-decode only"
         )
 '''
 
@@ -468,36 +457,49 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     print(f"  Target decode: {target_decode}")
     print(f"  File size: {os.path.getsize(output_path) / 1024:.1f} KB")
 
-    # --- Sanity eval: 8 games vs a random opponent to catch obvious bugs ---
-    print("\nRunning 8-game sanity eval on exported agent...")
-    _sanity_eval(checkpoint_path, target_decode=target_decode)
+    # --- Sanity eval: play the EXPORTED file vs zach to catch export bugs ---
+    print("\nRunning sanity eval on exported agent (vs zach)...")
+    _sanity_eval(output_path)
 
 
-def _sanity_eval(checkpoint_path: str, games: int = 8, target_decode: bool = False):
-    """Quick sanity check: run a few games vs a random agent and verify wins > 0."""
-    import subprocess, sys
-    src_dir = os.path.dirname(os.path.abspath(__file__))
-    quick_eval = os.path.join(src_dir, "quick_eval.py")
-    cmd = [
-        sys.executable, quick_eval,
-        "--checkpoint", checkpoint_path,
-        "--games", str(games),
-        "--action-decode", "target" if target_decode else "angle",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    except subprocess.TimeoutExpired:
-        print("  [sanity] TIMEOUT after 300s — skipping sanity check")
-        return
-    output = result.stdout + result.stderr
-    # Print just the summary lines
-    for line in output.splitlines():
-        if any(k in line for k in ("win", "Win", "WR", "wr", "Overall", "games", "Games", "ERROR", "Error", "Traceback")):
-            print(f"  [sanity] {line}")
-    if result.returncode != 0:
-        print(f"  [sanity] FAILED (rc={result.returncode}) — do NOT submit without investigating")
-    else:
-        print(f"  [sanity] OK (rc=0)")
+def _sanity_eval(output_path: str, games: int = 4,
+                 opponent: str = "opponents/candidate_zach_public.py"):
+    """Sanity-check the EXPORTED submission file: play a few games vs `opponent`
+    (default: zach) and report wins. This runs the real submission code path, so
+    it catches export bugs a checkpoint-only eval would miss. Falls back to a
+    random opponent if the opponent file is unavailable. Game count is bounded
+    (no subprocess timeout), so it can't hang the export."""
+    import kaggle_environments as ke
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    opp = opponent
+    if opp != "random":
+        opp_path = opp if os.path.isabs(opp) else os.path.join(repo_root, opp)
+        if os.path.exists(opp_path):
+            opp = opp_path
+        else:
+            print(f"  [sanity] opponent {opponent} not found — using random")
+            opp = "random"
+    label = "random" if opp == "random" else os.path.basename(opp)[:-3]
+
+    g = {}
+    exec(open(output_path).read(), g)
+    agent_fn = g["agent"]
+
+    wins = 0
+    for i in range(games):
+        try:
+            result = ke.make("orbit_wars").run([agent_fn, opp])
+            r = result[-1][0]["reward"]
+            if r is not None and r > 0:
+                wins += 1
+        except Exception as e:
+            print(f"  [sanity] game {i} ERROR: {type(e).__name__}: {e} "
+                  "— do NOT submit without investigating")
+            return
+    print(f"  [sanity] exported agent vs {label}: {wins}/{games} wins")
+    if wins == 0:
+        print("  [sanity] WARNING: 0 wins — do NOT submit without investigating")
 
 
 if __name__ == "__main__":
