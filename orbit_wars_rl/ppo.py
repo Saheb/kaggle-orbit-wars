@@ -258,6 +258,15 @@ class PPOLearner:
                 multi_owned = (sv.sum(dim=-1) >= 2).float()
                 multi_owned_sum = multi_owned.sum().clamp(min=1)
                 avg_sources_when_multi = (fires_per_state * multi_owned).sum() / multi_owned_sum
+                # owned_planets: mean planets the agent owns (expansion — the win driver).
+                # fire_fraction: on firing steps, fraction of owned planets that fired.
+                # This is the TRUE carpet-bomb signal (->1.0 = fire from everything),
+                # vs avg_sources_multi which is confounded by empire size (a 30-planet
+                # empire firing from 8 sources = 0.27, not a carpet-bomb).
+                owned_per_state = sv.sum(dim=-1)
+                owned_planets = owned_per_state.mean()
+                firing = (fires_per_state > 0).float()
+                fire_fraction = ((fires_per_state / owned_per_state.clamp(min=1)) * firing).sum() / firing.sum().clamp(min=1)
 
                 ship_argmax = ship_logits.argmax(dim=-1)
                 weighted = (ship_argmax == 0).float() * fired_mask
@@ -279,6 +288,8 @@ class PPOLearner:
                 "mean_return": returns.mean().item(),
                 "fire_rate_overall": fire_rate_overall.item(),
                 "avg_sources_multi": avg_sources_when_multi.item(),
+                "owned_planets": owned_planets.item(),
+                "fire_fraction": fire_fraction.item(),
                 "ship_bin0_rate": ship_bin0_rate.item(),
                 "mean_ship_bin": mean_ship_bin.item(),
                 "il_kl": il_kl.item() if isinstance(il_kl, torch.Tensor) else float(il_kl),

@@ -1059,6 +1059,8 @@ def train(args):
                 actcoef = f" actcoef {args.fleet_activity_coef:.4f}" if args.fleet_activity_coef > 0.0 else ""
                 print(
                     f"   diag | fire[0] {slot0:.2f} rest_max {slot_rest_max:.2f} | "
+                    f"fire_frac {metrics.get('fire_fraction', 0):.2f} "
+                    f"owned {metrics.get('owned_planets', 0):.1f} "
                     f"srcs_multi {metrics.get('avg_sources_multi', 0):.2f} "
                     f"ship0 {metrics.get('ship_bin0_rate', 0):.2f} "
                     f"meanshipbin {metrics.get('mean_ship_bin', 0):.1f} | "
@@ -1102,6 +1104,8 @@ def train(args):
                     "policy/fire_0": slot0,
                     "policy/fire_rest_max": slot_rest_max,
                     "policy/srcs_multi": metrics.get("avg_sources_multi", 0),
+                    "policy/fire_fraction": metrics.get("fire_fraction", 0),
+                    "policy/owned_planets": metrics.get("owned_planets", 0),
                     "policy/ship_bin0_rate": metrics.get("ship_bin0_rate", 0),
                     "policy/mean_ship_bin": metrics.get("mean_ship_bin", 0),
                     "policy/avg_fleet": metrics.get("avg_fleet_size", 0),
@@ -1143,6 +1147,17 @@ def train(args):
             path = f"checkpoints/torch_step_{total_env_steps}_{run_ts}.pt"
             atomic_torch_save(learner.state_dict(), path)
             print(f"  saved {path}")
+            # Checkpoint-aligned metric snapshot (latest PPO-update metrics), so the
+            # tracker can read metrics that line up exactly with each checkpoint
+            # rather than the sparse every-20-iter diag line.
+            print("  CKPT_METRICS step={} EV={:.3f} KL={:.4f} clip={:.3f} fire_frac={:.3f} "
+                  "owned={:.1f} srcs={:.2f} avgfleet={:.1f} fire_rate={:.3f} Hfire={:.3f}".format(
+                      total_env_steps,
+                      metrics.get("explained_variance", 0), metrics.get("approx_kl", 0),
+                      metrics.get("clip_frac", 0), metrics.get("fire_fraction", 0),
+                      metrics.get("owned_planets", 0), metrics.get("avg_sources_multi", 0),
+                      metrics.get("avg_fleet_size", 0), metrics.get("fire_rate_overall", 0),
+                      metrics.get("fire_entropy", 0)))
             # Persist pool alongside the disk checkpoint so spot interrupts
             # don't lose pool diversity. Naming mirrors the checkpoint stem.
             if pool is not None:
