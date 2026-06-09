@@ -47,6 +47,7 @@ class ModelConfig:
     # Value head input width. 0 = auto (2*entity_dim, new concat head).
     # Set to entity_dim when loading pre-Phase-1 checkpoints (old mean-pool head).
     value_head_in: int = 0
+    vdn_value: bool = False   # Stage 2: add a per-planet (VDN) value head
 
 
 @dataclass
