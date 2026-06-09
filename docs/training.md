@@ -1,5 +1,8 @@
 # Orbit Wars — Training State & History
 
+> 📋 **Ideas & efforts backlog:** [`docs/next-steps.md`](next-steps.md) — prioritized next experiments
+> (shaping anneal, diversity/exploiters, Ajay distillation, hyperparameter probes, VDN follow-ups).
+
 ---
 
 ## Phase 1 Run History — Quick Reference
@@ -84,6 +87,133 @@
 
 **LB scores:** Rev38 5M = **950.5** ← record | Rev38 6M = submitted (Ajay 3.1%, ~100 pts above 5M score, converging) | Rev32b 6M = 872.4 | Rev31 10M = 918.8 | Rev30 11M = 866.3 | Rev28 27M = 843.9
 **Target:** Top 10 needs ~1153. Gap = ~234 points.
+
+---
+
+## Planet-Centric Stage 1 — per-slot PPO (2026-06-08)
+
+**Stage 1 = a loss change, not a model change.** `ppo.py` `compute_loss` switched the policy
+surrogate from the **joint** log-prob ratio (one ratio over fire+ship+target summed across all
+owned planets) to a **per-slot (MAPPO) factorisation** — each owned planet's decision gets its
+own clipped surrogate against the shared global advantage. Network, heads, value head, GAE, action
+space, features are **byte-for-byte unchanged**, so rev53b checkpoints resume perfectly. Unit-tested
+(`orbit_wars_rl/tests/test_per_slot_ppo.py`).
+
+**Clean A/B (the experiment RESULTS.md prescribed):** resume rev53b 10M + the heuristic-ladder
+externals (28-member pool: 3 bots lb1084/1138/1152, `external_fraction` self-restored from the pool
+checkpoint), LR 5e-5 — **one delta** from the rev53b joint continuation. Jarvis H100 spot, run
+`stage1_ext`. Evals run **locally** (panels must never co-locate with training — see below).
+
+**Mechanistic win, no outcome win.** clip_frac decoupled from empire size exactly as designed
+(joint ~0.20–0.28 → per-slot ~0.006–0.02). But the full per-slot loss is a **modest, compounding
+regression** on both held-out opponents:
+
+| eff | Ajay (perslot) | Ajay (rev53b joint) | 1166 (perslot) | 1166 (rev53b joint) |
+|---|---|---|---|---|
+| +1M | 6.6% | 9.4% | 59.4% | ~62.5% |
+| +2M | 7.4% | 7.0% | 59.4% | ~62.9% |
+| +3M | 5.9% | 8.2% | ~47% | ~64% |
+
+**Root cause (training diags + replay audit) — it's ship-size undercommitment, NOT carpet-bomb.**
+Per-slot **ship-size** credit reinforces each planet's fleet-size choice independently against the
+global advantage, so cheap small launches riding along in winning envs get over-reinforced →
+**ships spread thin across undersized launches** → on *contested* targets no single launch is big
+enough to capture → first capture fails. Diag signature: `ship0` 0.00→0.27, `meanshipbin` 20→12,
+`srcs_multi` **dropped** 5–7→2–4 (fewer sources, smaller fleets — opposite of carpet-bomb),
+Vμ/rewμ drift negative. Replay smoking gun (`compare_tempo_checkpoints.py`, seed 11, the contested
+board): per-slot +3M **never captures**, commits **40 ships** vs the joint policy's 53–59; meanwhile
+`invalid_raw_argmax` *dropped* (valid targets, just too few ships). Fire/target per-slot is fine.
+
+**Fix — hybrid loss (implemented + unit-tested in this worktree).** Fire/target keep per-slot
+credit; **ship-size reverts to JOINT** (one clipped ratio per env, `ship_log_probs.sum(over slots)`
+= the original credit that concentrates fleets). Added `clip_frac_ship` (joint ship trust-region
+canary) alongside `clip_frac` (now the per-slot fire/target rate). New test
+`test_ship_credit_is_joint_not_per_slot` proves the split (joint ship ratio clips on a delta the
+per-slot fire/target ratio passes). Run `stage1_shipjoint` launched on H100 spot to A/B vs full
+per-slot + rev53b joint.
+
+**Ops notes (this session):**
+- **Never co-locate a panel with a live train** — both are CPU-bound (12 heuristic workers + Ajay's
+  orbit_lite) → load 34 on 24 cores, panel ~7 hr/panel, training SPS 3100→700. Eval **locally** or
+  on the box **after** training stops. (Memory: `feedback_eval_not_on_training_box`.)
+- **Jarvis L4 is 22 GB** (vs GCP L4's 24 GB) → this config OOMs on it even with
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. Use H100 spot (IN2, ₹112.59/hr, 24 cores) or
+  A100 (40 GB) to keep `--num-minibatches 16`; L4 needs `--num-minibatches 32`.
+- **jl create needs balance ≥ the on-demand rate** even for spot (H100 ⇒ ≥₹255), else "Insufficient
+  balance".
+
+**Next:** if hybrid recovers conversion → **Stage 2 = VDN per-slot value head** (a real model change:
+per-slot value outputs replacing the scalar; needs a brief critic re-warm). Memory:
+`project_stage1_per_slot_ship`.
+
+---
+
+## Stage 1 results, the collapse diagnostic, control, + Stage 2 VDN (2026-06-09)
+
+All runs: resume rev53b 10M + heuristic-ladder externals + LR 5e-5, one delta apart. Evals **local**
+(panels never co-located with training — CPU contention starves both). Ajay/1166 full panels (256g):
+
+| eff | joint-warm | per-slot | hybrid (ship-joint) | **control** (joint+fresh-critic) | VDN (running) |
+|---|---|---|---|---|---|
+| Ajay +1M | 9.4 | 6.6 | 8.2 | 8.2 | (backfilling) |
+| Ajay +2M | 7.0 | 7.4 | 5.9 | 9.4 | — |
+| Ajay +3M | 8.2 | 5.9 | **4.3** | **9.0** | — |
+| 1166 +3M | ~64 | 45.3 | **38.3** | **60.5** | — |
+
+**1. The per-slot direction underperforms — hybrid *collapses* by +3M.** The hybrid (ship-joint fix)
+had the best +1M (8.2/64.8) but then collapsed hardest (Ajay 8.2→5.9→4.3, 1166 65→55→38). Both per-slot
+variants end well below joint by +3M.
+
+**2. The collapse signature is `Vμ`/`rewμ` drifting NEGATIVE — found in the training metrics, not eval.**
+NOT instability (EV ~0.9, KL <0.02, clip ~0.005 throughout). It's a smooth policy drift: per-slot/hybrid
+**fire *more*** (`srcs_multi` 1.7→4.85, `fire_frac` 0.36→0.56) but **`Vμ` goes negative** (+0.62→−0.35),
+i.e. *over-fire ineffectively* and lose more vs the pool. Joint stays `Vμ` positive throughout. Root cause:
+per-slot **decouples** the planets' fire decisions, each optimising against the *global* advantage with no
+signal of whether *its own* fire is valuable → coordination/selectivity failure. **`Vμ` is now a
+first-class collapse canary** (watch it stay positive).
+
+**3. CONTROL (joint loss + re-initialised scalar critic) — resume is trustworthy.** VDN needs a fresh
+(cold) per-planet critic on resume; the worry was that the *cold critic itself* (not the method) breaks
+things. Control isolates exactly that: known-stable joint loss + `--reinit-critic`, one variable. **It
+stayed rock-stable (Ajay 8.2→9.4→9.0)** where per-slot/hybrid collapsed. So the cold critic is benign,
+resume is fine, and the collapse was the **method** (factorisation), not the setup. (At real scale the
+critic re-warms EV→0.9 in <300K steps with KL never spiking — no value-warmup needed.) Added
+`--reinit-critic` to `train_torch.py`.
+
+**4. Stage 2 VDN — built, tested, launched.** Per-planet value head (`V_total=Σ_p V_p`, regressed to the
+global return) + per-planet advantages for fire/target (ship stays joint on global). Gated behind
+`--vdn-value`. Per-planet GAE in **planet-id space** (scatter via `owned_indices`) — required because
+owned slots reorder by planet array index when ownership changes, so a naive per-slot value TD is corrupt
+on capture/loss steps. Tests: `test_vdn_gae.py` (single-planet≡standard GAE, Σ_k A_k=A_total, ownership
+gating), CPU smoke + resume smoke. Checkpoint-compat: backbone+policy+scalar-head load; per-planet head
+fresh. **Early read (~1M):** `Vμ` POSITIVE (+0.69, vs hybrid's declining) — per-planet credit *is*
+suppressing wasteful fires; BUT behaviour went very selective (`srcs_multi` 1.7→0.34, `avgfleet` 37→97) —
+watch for over-suppression into **passivity** (the opposite failure). Eval panels are the arbiter.
+Hypothesis test: `Vμ` stays positive AND eval stops collapsing (matches/beats joint-warm) ⇒ Stage 2 works.
+
+**5. Instrumentation added this session** (`gpu_run_artifacts/cross_eval/`):
+- **Cross-checkpoint eval panel** (`run_cross_eval.sh`) — held-out heuristics + our exported past selves
+  (rev38/rev53b) → a **cycling/forgetting detector** (self-play WR is blind to it). Run every ~1M.
+- **Diversity study** (`study_opponents.py`, ≥32 games) — finding: our opponent set is a **transitive
+  strength ladder, not diverse** (no non-transitivity); **Hellburner is surpassed** (rev38/rev53b beat it
+  100% — the old "never beat HB" was weak early agents); `candidate_zach_public.py` is a **weak old Zach
+  proxy**. Implication: fixed-heuristic diversity is limited → need **exploiters** (non-transitive) and a
+  distilled Ajay (style).
+- **Ajay distillation spec** (`docs/ajay_distillation_spec.md`) — orbit_lite can't be GPU-batched, so
+  distill Ajay→fast neural clone (DAgger) for the pool. One new tool needed (`dagger_collect.py`).
+
+**Metric discipline — `srcs_multi` REMOVED from the code (2026-06-09).** It's empire-size-confounded:
+it counts sources firing conditioned on owning ≥2 planets, so it rises naturally with empire size and
+indicates *empire-building, nothing more* — never a clean firing-intensity signal (and averaged over
+all steps incl. no-fire, so it conflates fire *rate* with fire *breadth*). Optimising it (rev5–48) never
+moved wins. **Use instead: `fire_fraction`** (sources fired ÷ owned, on firing steps — the true
+carpet-bomb signal), **`owned_planets`** (expansion), **`fire_rate`**, **`avgfleet`** (hoarding), and
+**`Vμ`/`rewμ`** (the unconfounded outcome canary). The `--srcs-multi-penalty` shaping lever still exists
+(default off; "do not use" — floor=0 → fire=0 Nash) but is a separate, deprecated knob.
+
+**Ops:** eval.py now tolerates VDN `value_pp_*` keys (eval ignores the value head); model.py prints the
+VDN fresh-critic notice once (was spamming ~123×/iter via pool-opponent loads); always wire
+**auto-destroy on training-completion** (not an intermediate checkpoint) so checkpoints aren't thrown away.
 
 ---
 
@@ -252,7 +382,9 @@ Rev9 uses `--entropy-coef-fire 0.05`. H_fire rose from ~0.09 (rev7/rev8) to 0.14
 
 ---
 
-## Leaderboard Reality Check (2026-05-31)
+## Leaderboard Reality Check (2026-05-31; our row updated 2026-06-08)
+
+Other agents' ranks/scores are a 2026-05-31 snapshot. **Our current position: submission 53451535 = 982.1** (Rev38 5M + fixed intercept aimer — new all-time record, up from the 894.4 below). Rank not re-measured.
 
 | Rank | Agent | Score | Notes |
 |---|---|---|---|
@@ -267,11 +399,30 @@ Rev9 uses `--entropy-coef-fire 0.05`. H_fire rose from ~0.09 (rev7/rev8) to 0.14
 | 962 | **Suneet Saini** | 827.4 | ← Our `candidate_suneet_lb1200.py` — **below us** |
 | N/A | Hellburner | — | Not on LB — local test bot only |
 
-**LB game type split (rev7 1M submission, 159 episodes):**
-- 1v1: 76 games — **50% WR** (we're competitive in head-to-head)
-- FFA: 83 games — **30% WR** (badly losing in 4-player games)
+**LB game-type split (current submission 53451535, 70 episodes, measured 2026-06-08):**
 
-**The FFA problem:** Our agent is trained in 2-player mode only. 52% of LB games are FFA, where it plays a game it was never trained for. This is the primary LB score drag. Top-10 team trained *separate* 2p and 4p policies.
+| Mode | Our WR | Chance baseline | Read |
+|---|---|---|---|
+| 2p | **40.5%** (15/37) | 50% | **Below par** — we shed rating in 2p |
+| 4p FFA | **42.4%** (14/33) | 25% | **Well above par** — we gain rating in 4p |
+
+4p **true** placement (by elimination order — see ⚠️ below): **1st 42% (14/33) / 2nd 24% (8) / 3rd 15% (5) / 4th 18% (6)**, mean 2.09 (random 2.5). Above average, but with a real early-elimination tail: in **18 of 19** 4p losses we were knocked out *before the game ended* (often by step ~50–130 of a 100–250 step game) — i.e. over-exposed and eliminated, not narrowly out-scored. Controlled local eval (Rev38 5M, identical Zach opponent): Zach 2p 90.6%, Zach 4p 59.4% (par 25%) — 4p mechanics are healthy vs a weak bot.
+
+> ⚠️ **Placement artifact (caught 2026-06-08):** a naive final-score placement reads "1st 42% / 2nd 58%, never 3rd/4th." That is WRONG — FFA games end with a single survivor, so all eliminated players sit at score 0 and tie for "2nd." Always rank by **elimination order**, not final-score snapshot.
+
+**Rating mechanics (resolved + confirmed by official rules + a live 4p replay header):** the LB rating is **win-based TrueSkill (μ/σ).** The env interpreter (`orbit_wars.py:703-715`) awards `reward=+1` only to the max-score agent and `-1` to everyone else, so all non-winners are a **tied 2nd** — confirmed by a real 4p replay where all three losers were labeled `[2nd]` despite different final material (148/128/129) and elimination orders. **Placement beyond 1st (3rd/4th, by material OR survival) is invisible to the rating.** Per the competition's Evaluation page: *"The score by which your bot wins or loses an Episode does not affect the skill rating updates"*; update magnitude scales with deviation from the expected result (prior μ) and each submission's σ. Consequences: (1) the 4th-place-18% tail costs **nothing directly** — only winning pays; (2) for a **top-rated agent (we're 982)**, every FFA we don't win is a slight **net drag** — non-winners "draw" with each other and a draw pulls μ toward the (usually lower) field mean, so *not finishing last is worth nothing — we must WIN*; (3) **losing to a low-rated winner costs more** than losing to a strong one (bigger surprise), so handing the game to an opportunist via over-commit is doubly bad.
+
+**But the early deaths are FFA-specific over-exposure, and they cost WINS (which do count).** Trajectory analysis of the 3 earliest deaths (ep 79067299/79093662/79064471): we expand well — *led the game* in one — then commit **65–94% of our army forward**, get hit by **two enemies at once** while a **third snowballs off the wreckage** (winner ends at 600–700 material vs our 0). This is the classic FFA mistake the 2p policy never learned: it plays winning 2p tempo (commit everything when ahead — correct vs ONE enemy) and gets ganged with three players on the board. Several of these were *winnable* games we threw. Converting even a third of the 18 over-commit deaths into survival-and-wins lifts the **win rate** on **52% of all LB games** → real, rating-relevant upside.
+
+**Reserve-cap probe — NEGATIVE (2026-06-08).** Tested the over-exposure hypothesis directly via an inference-time reserve cap (`action_mask.actions_from_target_policy(reserve_frac=...)`, default 0.0 = no change): force the agent to keep a home garrison in 4p and see if survival/win rate recovers.
+- vs Ajay (24 games, 4p): `reserve_frac=0.0` → 20.8% win, survival 0.75; `reserve_frac=0.5` → **0% win, survival 0.75 (unchanged)**.
+- vs Zach (32 games): 0.0 → 59.4%; 0.5 → 43.8% (cap hurts a weak-opponent matchup, as expected).
+
+**Conclusion:** keeping ships home did NOT reduce deaths (survival identical) — the causal over-exposure story is **not supported.** The replay correlation (we over-commit AND die) is likely **reverse causation**: a policy fires its army out *because* it's losing/threatened, so high in-flight fraction is a symptom, not the cause. **Confound:** vs Ajay×3 we survive to ~0.75 of the game — we are NOT dying early here (LB ganging deaths were at 0.37–0.65). Ajay×3 doesn't reproduce the LB gang-up; no local bot does. **Meta-finding: we cannot reproduce the LB FFA failure mode locally, so local 4p eval (survival 0.99 vs Zach, 0.75 vs Ajay) is a poor proxy for LB 4p.**
+
+**Net — FFA back on the shelf (earned, not asserted):** 4p is above par on wins (the only metric that counts), there is **no validated lever** to improve it, and **no faithful local eval** to develop one. 4p mixed co-training remains *possible* (env is 4p-ready; only `train_torch.py P=2` is 2p-locked) but is a speculative bet against dynamics we can't measure — not justified now. The **2p-vs-strong-opponents conversion/targeting gap** (below par, locally measurable) is the clearest headroom. Memory: `project_ffa_not_the_gap`.
+
+> 🗄️ **Superseded (kept for history):** earlier reading from the old 894-pt submission 53076736 (rev7-era, 159 episodes) was *1v1 50% WR / FFA 30% WR*, interpreted as "FFA is the primary LB drag, agent trained 2p-only." That was true for that weaker agent but is wrong for the current entity-transformer policy — do not act on it.
 
 **Critical implication**: Our panel opponents don't represent actual LB threats.
 - Suneet (rank 962) is below us — optimising vs Suneet adds no signal.

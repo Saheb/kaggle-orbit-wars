@@ -280,8 +280,8 @@ def agent(obs, cfg=None):
             angle_mask=masks["angle_mask"],
             slot_valid=masks["slot_valid"],
             owned_indices=masks["owned_indices"].unsqueeze(0),
-            pairwise_features=features["pairwise_features"].unsqueeze(0)
-                if "pairwise_features" in features else None,
+            pairwise_features=features["pairwise_features"][..., :_PAIRWISE_DIM].unsqueeze(0)
+                if (_PAIRWISE_DIM > 0 and "pairwise_features" in features) else None,
         )
 
     if _TARGET_DECODE:
@@ -396,6 +396,25 @@ def _apply_checkpoint_model_config(checkpoint, cfg: Config) -> dict:
         cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
     if "ship_bin_mode" in ckpt_cfg:
         cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
+
+    # --- feature projection / pairwise dims: always infer from weight shapes ---
+    # Mirrors load_checkpoint() in eval.py so older feature lineages (e.g. the
+    # pairwise-12 First Strike checkpoints rev31/rev32b) build the architecture
+    # they were trained with, instead of the current pairwise-15 default.
+    if isinstance(state_dict, dict):
+        if "planet_proj.weight" in state_dict:
+            cfg.model.planet_feature_dim = int(state_dict["planet_proj.weight"].shape[1])
+        if "fleet_proj.weight" in state_dict:
+            cfg.model.fleet_feature_dim = int(state_dict["fleet_proj.weight"].shape[1])
+        if "global_proj.weight" in state_dict:
+            cfg.model.global_feature_dim = int(state_dict["global_proj.weight"].shape[1])
+        if "pair_kv.weight" in state_dict:
+            D = int(state_dict["planet_proj.weight"].shape[0])
+            cfg.model.pairwise_feature_dim = int(state_dict["pair_kv.weight"].shape[1]) - D
+        else:
+            cfg.model.pairwise_feature_dim = 0
+        if "value_fc1.weight" in state_dict:
+            cfg.model.value_head_in = int(state_dict["value_fc1.weight"].shape[1])
 
     return state_dict
 
