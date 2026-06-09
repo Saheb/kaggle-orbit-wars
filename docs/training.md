@@ -60,6 +60,9 @@
 | **Rev47** | fleet_activity_coef=0.002 (binary: fire=any → +0.002) + srcs_multi penalty=0.005/threshold=3.5. Feature warmup on new cols. Resume rev32b_6M_pairwise15_warmed.pt. Jarvis H100. | Binary activity reward breaks fire=0 Nash; penalty caps sources at natural Ajay range. | **Token-fire Nash.** fire[0]=0.11, avgfleet=160. Agent fires 1 source to collect activity reward, hoards everywhere else. 0/16 Ajay at 3M. Nash = fire exactly 1 source (minimum cost, full reward). | Binary reward created new degenerate Nash | — |
 | **Rev48** | Proportional activity reward (each source up to threshold adds activity_coef, not binary) + aux_roi_coef=0.02. Jarvis H100, instance 422419. | Proportional reward: Nash = fire up to threshold, not 1. ROI aux loss anchors roi_20/roi_50/enemy_contest features. | srcs_multi stable 2–4 throughout 22M steps (proportional reward worked structurally!). BUT **8M Ajay = 2.3%** (6/256, below Rev46's 3.1%). Root cause: early_capture spike was count-based — prod=1 and prod=5 captures gave identical reward. No gradient to prefer high-ROI targets. ROI features stayed inert. Preempted at 22.8M. | Targeting gradient missing: count-based capture ≠ ROI-based targeting | — |
 | **Rev49** | Production-weighted capture spike: ec_rewards = production_delta (not planet_count_delta). early_capture_coef 0.30→0.10 (avg_prod=2.65 keeps magnitude ~0.27). No aux_roi_coef (caused L4 OOM — fixed by conditionally allocating `pairwise_features` storage). Resume rev32b_6M_pairwise15_warmed.pt. GCP L4. Ran full 30M steps. | prod=5 capture gives 5× reward vs prod=1 → gradient pressure for ROI targeting. roi_20/roi_50 now optimise same objective as reward. | **Worse than baseline — 0/16 Ajay at 5M, 6M, 8M (0%, vs Rev38/46's 3.1%).** Production-weighted reward caused carpet-bombing, not selective targeting: rewarding total production_delta means firing at ALL planets simultaneously maximizes reward. By 30M: clip_frac=0.878, KL=16-19, srcs_multi=5-6, fire[0]=0.57-0.63 — agent fires from majority of sources every step. Opposite of intended ROI-selective behavior. | Reward design flaw: production_delta rewards quantity not selectivity | — |
+| **Rev51** | Resume rev38 lineage, clean self-play. (Diagnostic run for the target-head bug.) | Establish clean self-play baseline with new metrics. | **KL stuck ~2 regardless of LR** — LR-independent, so not an optimiser problem. Diagnosed as the **target-head pairwise-storage bug**: rollout storage gated `pairwise_features` on `aux_roi_coef>0` (Rev49 OOM fix), so when aux was off the update forward got zeroed pairwise → uniform target head → KL blowup. | Pairwise-storage bug (fixed) | — |
+| **Rev52** | Clean self-play, entropy 0.05, target-head bug fixed. | Confirm entropy=0.05 provides collapse-resistance (not "null"). | Ran to **7M with no carpet-bomb / no fire=0 collapse** — entropy 0.05 is the stabiliser, keep it. Baseline for the selectivity experiment. | Baseline established | — |
+| **Rev53b** | **Heuristic-pool selectivity** + fixed intercept aimer + early_capture=0 + entropy 0.05. Pool mix 25% current-self / 60% snapshots / 15% heuristics (1166 ladder). Resume rev38 lineage. GCP L4. | Let the agent learn selective targeting from the 1166 heuristic ladder instead of reward-engineering it. | **Cracked the long-standing Ajay ~3% ceiling.** Held-out 1166: 50→**~62%**. Ajay: 3.9→**9.0% @ 9.4M eff**, **10.9% @ 13.6M eff** (best Ajay panel ever, vs prior 3.1% record). Wins are decisive eliminations, not timeout luck. clip stable 0.23–0.28, KL <0.025, EV ~0.9. | Still running (this session) | **TBD** |
 
 **What we know:**
 - **Rev31 First Strike**: opening paralysis fixed, 918.8 LB record. Was a band-aid for symmetric-start problem.
@@ -85,8 +88,49 @@
 - **GCP instance naming**: use `--name orbit-wars-training` (default). After training ends, delete immediately — instance left running costs ~$1.13/hr even with no jobs. Rev38 instance ran idle 19+ hrs before discovered.
 - Export requires `--target-decode` for Phase 1.
 
-**LB scores:** Rev38 5M = **950.5** ← record | Rev38 6M = submitted (Ajay 3.1%, ~100 pts above 5M score, converging) | Rev32b 6M = 872.4 | Rev31 10M = 918.8 | Rev30 11M = 866.3 | Rev28 27M = 843.9
-**Target:** Top 10 needs ~1153. Gap = ~234 points.
+**LB scores:** Rev38 5M + fixed aimer = **978.3** ← record | Rev38 5M = 950.5 | Rev38 6M = submitted (Ajay 3.1%) | Rev32b 6M = 872.4 | Rev31 10M = 918.8 | Rev30 11M = 866.3 | Rev28 27M = 843.9 | Rev53b 13.6M (Ajay 10.9%) = submitted 2026-06-08 (53471121, pending)
+**Target:** Top 10 needs ~1153. Gap = ~175 points.
+
+---
+
+## Current State (2026-06-08)
+
+**Active run:** Rev53b on GCP L4 (`orbit-wars-training`, us-central1-b), at ~11M steps (~13.6M eff). Local watcher syncing checkpoints+logs every 60s; held-out evaluator auto-runs 1166 (every 1M) + Ajay frontier panels on each checkpoint as they land.
+
+This session was a metric/evaluation overhaul plus two free bugfixes, and it **cracked the long-standing Ajay ~3% ceiling (now 10.9%)**. Highlights:
+
+### Two free bugfixes (no experiment needed)
+1. **Intercept aimer fix** — `_target_intercept_angle` in both `action_mask.py` and `torch_env.py` was a crude approximation (73% hit rate on slawekbiel's aiming benchmark). Rewrote to a proper lead/intercept fixed-point solve (surface-gap subtraction, continuous ETA, 8 iters, current-position orbit): **94.9%** on the benchmark, **+14.5pp vs the 1166 heuristic**. The two implementations verified identical (4.6e-7 rad). Re-exporting Rev38 5M with the fixed aimer alone moved LB **950.5 → 978.3** (sub 53451535).
+2. **Target-head pairwise-storage bug** — the Rev49 OOM fix gated `pairwise_features` rollout storage on `aux_roi_coef>0`. With aux off, the update-forward saw zeroed pairwise → uniform target head → **KL stuck ~2, LR-independent** (the rev51 symptom). Fixed by gating storage on `pairwise_feature_dim>0`. This unblocked all subsequent training.
+
+### Evaluation philosophy changes
+- **Zach is retired as a decision metric** (saturated ~88–89%). Primary held-out signal is now the **1166 heuristic ladder** (`opponents/orbit-wars-heuristic-bots/08_v13_3_R8_full_stack_lb1166_PEAK_HEURISTIC.py`) + the **Ajay** full panel. Both run as automatic daemons on each checkpoint (sync 60s + panel ~40min Ajay → they appear with lag, not manual triggers).
+- **Ajay-in-training is unusable** as a pool opponent: orbit_lite inference saturates all vCPUs (rev43/44 CPU deadlock). Use the heuristic ladder in the pool instead and keep Ajay strictly for held-out eval.
+- **srcs_multi is misleading** — it's empire-size-confounded (counts sources firing when ≥2 owned) and outlier-game dominated, so optimising it (rev5–rev48) never moved real wins. Replaced with **fire_fraction** (sources fired / owned, on firing steps), **owned_planets**, and **fire_rate**, computed in `ppo.py` and emitted at checkpoint time via the `CKPT_METRICS` line in `train_torch.py` (so metrics align exactly with the checkpoint, not the diag cadence). *Note: the current rev53b binary predates this code, so its fire_fr/owned columns are blank in `track.py`; they populate from the next launch.*
+- **entropy = 0.05 is the stabiliser, not "null."** It provides collapse-resistance — rev52 ran to 7M with no carpet-bomb and no fire=0 collapse. Keep it; do not zero it.
+
+### Win-mechanism finding (how/why we win, not just the aggregate)
+Profiling 32 both-seats games (rotating vs static boards) and full-game phase analysis:
+- **WINS = aggression → decisive elimination of Ajay** (~150–280 steps, fire 23–37%). Not timeout luck.
+- **LOSSES = passivity** (fire ~18%) → the agent gets eliminated, or drifts passive after going ahead.
+- **Score oscillation across checkpoints = passivity drift on rotating (hard) boards** specifically — static boards stay won.
+The takeaway: the lever is *sustained aggression / not going passive once ahead*, and the honest signals for that are fire_rate + fire_fraction, not srcs_multi.
+
+### Rev53b result (the experiment that worked)
+Heuristic-pool selectivity (15% 1166-ladder in pool) + fixed aimer + early_capture=0 + entropy 0.05:
+
+| eff (M) | 1166 % | Ajay % |
+|---|---|---|
+| 4.7 | 62.5 | — |
+| 5.2 | 64.1 | 6.6 |
+| 9.4 | — | **9.0** |
+| 10.0 | 62.9 | — |
+| 13.1 | 64.1 | 7.8 |
+| 13.6 | — | **10.9** ← best Ajay ever |
+
+vs the prior all-time Ajay record of 3.1% (Rev35c/Rev38). clip stable 0.23–0.28, KL <0.025 (mostly <0.012), EV ~0.9 — healthy throughout.
+
+**Standing intervention authority for the live run:** if `clip_frac` creeps toward ~0.32, or KL>0.05, or H_fire<0.07, **halve LR** (intervention, not kill). Night monitor polls every 10min and trips on those thresholds.
 
 ---
 
@@ -218,6 +262,8 @@ VDN fresh-critic notice once (was spamming ~123×/iter via pool-opponent loads);
 ---
 
 ## Current State (2026-06-07)
+
+> **Superseded by the 2026-06-08 section above.** Rev50 was not the path taken — the session instead fixed the aimer + target-head bug and ran the rev53b heuristic-pool selectivity experiment, which cracked the Ajay ceiling (3.1% → 10.9%). Kept below for history.
 
 **Active runs:** None. Rev49 ran to completion (30M steps) on GCP L4 (`orbit-wars-training`, 136.111.191.182) — **failed, worse than baseline** (0/16 Ajay at 5M/6M/8M vs Rev38/46's 3.1%). Instance still running — needs deletion decision pending next move.
 
