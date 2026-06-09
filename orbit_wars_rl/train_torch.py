@@ -145,47 +145,6 @@ def compute_gae(rewards: torch.Tensor, values: torch.Tensor,
     return advantages, returns
 
 
-def compute_gae_per_planet(rewards, v_pid, owned_pid, dones,
-                           next_v_pid, next_owned_pid, gamma, lam):
-    """VDN per-planet GAE in planet-id space (Stage 2).
-
-    Each owned planet is credited with an equal share r_t/N_t of the global
-    reward plus its own value dynamics, so a planet whose value rises from its
-    action gets more advantage than an idle one. By construction sum_k adv_k ≈
-    A_total (the global GAE), keeping the decomposition consistent with the
-    V_total critic.
-
-    Args (all planet-id indexed, K = max_planets; values 0 where unowned):
-      rewards:        (T, B) global per-env reward
-      v_pid:          (T, B, K) per-planet value
-      owned_pid:      (T, B, K) 1.0 where the agent owns planet k at step t
-      dones:          (T, B) episode-done flag at step t
-      next_v_pid:     (B, K) bootstrap per-planet value after the rollout
-      next_owned_pid: (B, K) ownership at the bootstrap state
-    Returns:
-      adv_pid: (T, B, K) per-planet advantages (0 where unowned)
-    """
-    T, B, K = v_pid.shape
-    adv = torch.zeros(T, B, K, device=v_pid.device)
-    last = torch.zeros(B, K, device=v_pid.device)
-    N_t = owned_pid.sum(dim=-1, keepdim=True).clamp(min=1.0)   # (T, B, 1)
-    r_share = (rewards.unsqueeze(-1) / N_t)                    # (T, B, 1) per owned planet
-    for t in range(T - 1, -1, -1):
-        nonterm = (~dones[t]).float().unsqueeze(-1)            # (B, 1)
-        if t == T - 1:
-            v_next, own_next = next_v_pid, next_owned_pid
-        else:
-            v_next, own_next = v_pid[t + 1], owned_pid[t + 1]
-        # Bootstrap only if the planet is still owned next step (else its future
-        # contribution to this agent is 0).
-        boot = gamma * v_next * own_next * nonterm             # (B, K)
-        delta = r_share[t] + boot - v_pid[t]                   # (B, K)
-        last = delta + gamma * lam * nonterm * last
-        last = last * owned_pid[t]   # no advantage / no propagation when unowned at t
-        adv[t] = last
-    return adv
-
-
 # In-training eval was removed: vs-frozen-initial gave false positives
 # (degenerate policies "improved" over the unchanged baseline). Source of
 # truth is local eval (eval.py) on downloaded checkpoints against raw
@@ -344,7 +303,6 @@ def train(args):
         cfg.ppo.max_grad_norm = args.max_grad_norm
     if args.gae_lambda is not None:
         cfg.ppo.gae_lambda = args.gae_lambda
-    cfg.model.vdn_value = bool(getattr(args, "vdn_value", False))
     if args.il_lambda is not None:
         cfg.ppo.il_lambda = args.il_lambda
     if args.il_decay_frac is not None:
@@ -672,10 +630,6 @@ def train(args):
         # Measuring planet inventories (not action sizes) is the correct passivity proxy.
         "planet_ships_snap": torch.zeros(rollout_T, N, device=storage_dev),
     }
-    # Stage 2 (VDN): per-planet values per step (per owned slot, planet-id mapped
-    # later via owned_indices for the per-planet GAE).
-    if args.vdn_value:
-        storage["value_pp"] = torch.zeros(rollout_T, N, P, MAX_OWNED, device=storage_dev)
 
     def compute_pool_actions(opp: PoolMember, player: int, env_slice: slice) -> torch.Tensor:
         """Return action tensor (N_pool, MAX_OWNED, 3) for the opponent playing
@@ -818,12 +772,7 @@ def train(args):
                 storage["lp_fire"][t, :, p].copy_(lpf_p, non_blocking=True)
                 storage["lp_ship"][t, :, p].copy_(lps_p, non_blocking=True)
                 storage["lp_target"][t, :, p].copy_(lpt_p, non_blocking=True)
-                if args.vdn_value:
-                    # V_total = sum_p V_p drives the global GAE + value loss (VDN).
-                    storage["values"][t, :, p].copy_(outs_p["value_total"], non_blocking=True)
-                    storage["value_pp"][t, :, p].copy_(outs_p["value_per_planet"], non_blocking=True)
-                else:
-                    storage["values"][t, :, p].copy_(outs_p["value"].squeeze(-1), non_blocking=True)
+                storage["values"][t, :, p].copy_(outs_p["value"].squeeze(-1), non_blocking=True)
                 # angle_p is zeros (unused in target-decode); env needs 4-col action tensor.
                 actions_per_player[p] = torch.stack([fire_p, angle_p, ship_p, target_p], dim=-1)
 
@@ -897,10 +846,6 @@ def train(args):
 
         # Bootstrap value at end of rollout — for both players
         next_value_p = torch.zeros(N, P, device=storage_dev)
-        if args.vdn_value:
-            next_vpp_p   = torch.zeros(N, P, MAX_OWNED, device=storage_dev)
-            next_oidx_p  = torch.zeros(N, P, MAX_OWNED, dtype=torch.long, device=storage_dev)
-            next_svalid_p = torch.zeros(N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev)
         with torch.no_grad():
             for p in range(P):
                 feats_final = env.get_features(p, max_planets=cfg.env.max_planets, max_fleets=128)
@@ -915,13 +860,7 @@ def train(args):
                     owned_count=feats_final["owned_count"],
                     pairwise_features=feats_final.get("pairwise_features"),
                 )
-                if args.vdn_value:
-                    next_value_p[:, p] = outs_final["value_total"].cpu()
-                    next_vpp_p[:, p] = outs_final["value_per_planet"].cpu()
-                    next_oidx_p[:, p] = feats_final["owned_indices"].cpu()
-                    next_svalid_p[:, p] = feats_final["slot_valid"].cpu()
-                else:
-                    next_value_p[:, p] = outs_final["value"].squeeze(-1).cpu()
+                next_value_p[:, p] = outs_final["value"].squeeze(-1).cpu()
 
         # --- GAE (run on CPU since storage is on CPU) -----------------------
         # Fold P into the env axis so each player-stream is an independent
@@ -934,36 +873,6 @@ def train(args):
             rewards_flat, values_flat, dones_flat,
             next_v_flat, gamma=cfg.ppo.gamma, lam=cfg.ppo.gae_lambda,
         )
-
-        # --- VDN per-planet advantages (Stage 2) ---------------------------
-        # Scatter per-slot values into planet-id space (so V_i aligns across t/t+1
-        # despite owned-slot reordering), run the per-planet GAE, gather back to
-        # per-slot. adv_per_slot_flat is (T*N*P, MAX_OWNED), aligned with `flat`.
-        adv_per_slot_flat = None
-        if args.vdn_value:
-            B = N * P
-            K = cfg.env.max_planets
-            vpp  = storage["value_pp"].reshape(rollout_T, B, MAX_OWNED)
-            oidx = storage["owned_indices"].reshape(rollout_T, B, MAX_OWNED)
-            sval = storage["slot_valid"].reshape(rollout_T, B, MAX_OWNED).float()
-            pad  = torch.full((rollout_T, B, MAX_OWNED), K, dtype=torch.long, device=storage_dev)
-            pid  = torch.where(sval.bool(), oidx.clamp(max=K - 1), pad)          # (T,B,MO) in [0,K]
-            v_pid_pad  = torch.zeros(rollout_T, B, K + 1, device=storage_dev).scatter_(2, pid, vpp)
-            own_pid_pad = torch.zeros(rollout_T, B, K + 1, device=storage_dev).scatter_(2, pid, sval)
-            # bootstrap state → planet-id space
-            n_vpp  = next_vpp_p.reshape(B, MAX_OWNED)
-            n_oidx = next_oidx_p.reshape(B, MAX_OWNED)
-            n_sval = next_svalid_p.reshape(B, MAX_OWNED).float()
-            n_pid  = torch.where(n_sval.bool(), n_oidx.clamp(max=K - 1),
-                                 torch.full((B, MAX_OWNED), K, dtype=torch.long, device=storage_dev))
-            nv_pad = torch.zeros(B, K + 1, device=storage_dev).scatter_(1, n_pid, n_vpp)
-            no_pad = torch.zeros(B, K + 1, device=storage_dev).scatter_(1, n_pid, n_sval)
-            adv_pid = compute_gae_per_planet(
-                rewards_flat, v_pid_pad[..., :K], own_pid_pad[..., :K], dones_flat,
-                nv_pad[..., :K], no_pad[..., :K],
-                gamma=cfg.ppo.gamma, lam=cfg.ppo.gae_lambda)                     # (T,B,K)
-            adv_slot = torch.gather(adv_pid, 2, oidx.clamp(max=K - 1)) * sval     # (T,B,MO)
-            adv_per_slot_flat = adv_slot.reshape(rollout_T * B, MAX_OWNED)
 
         # --- Flatten (T, N, P, ...) → (T*N*P, ...) for PPO update -----------
         # Pool-opponent slots have train_mask=False — drop them so PPO only
@@ -978,16 +887,12 @@ def train(args):
             flat[k] = v.reshape(TN, *v.shape[3:])
         flat_adv  = advantages.reshape(TN)
         flat_ret  = returns.reshape(TN)
-        if adv_per_slot_flat is None:
-            adv_per_slot_flat = torch.empty(0)
         train_idx = torch.nonzero(flat["train_mask"], as_tuple=False).squeeze(-1)
         if train_idx.numel() < TN:
             for k, v in list(flat.items()):
                 flat[k] = v[train_idx]
             flat_adv = flat_adv[train_idx]
             flat_ret = flat_ret[train_idx]
-            if args.vdn_value:
-                adv_per_slot_flat = adv_per_slot_flat[train_idx]
         TN = flat_adv.numel()
 
         fired_train_slots = flat["fire_a"].float() * flat["slot_valid"].float()
@@ -1025,9 +930,6 @@ def train(args):
             "advantages": flat_adv,
             "returns":    flat_ret,
             "old_values": flat["values"],
-            # Stage 2 (VDN): per-planet advantages (T*N*P, MAX_OWNED) for the
-            # fire/target surrogate; ship + value loss still use the global ones.
-            **({"adv_per_slot": adv_per_slot_flat} if args.vdn_value else {}),
         }
 
         # Minibatches: split TN into num_minibatches chunks. Build on CPU then
@@ -1159,6 +1061,7 @@ def train(args):
                     f"   diag | fire[0] {slot0:.2f} rest_max {slot_rest_max:.2f} | "
                     f"fire_frac {metrics.get('fire_fraction', 0):.2f} "
                     f"owned {metrics.get('owned_planets', 0):.1f} "
+                    f"srcs_multi {metrics.get('avg_sources_multi', 0):.2f} "
                     f"ship0 {metrics.get('ship_bin0_rate', 0):.2f} "
                     f"meanshipbin {metrics.get('mean_ship_bin', 0):.1f} | "
                     f"avgfleet {metrics.get('avg_fleet_size', 0):.1f} "
@@ -1200,6 +1103,7 @@ def train(args):
                     # Policy behaviour — the key kill-signal metrics
                     "policy/fire_0": slot0,
                     "policy/fire_rest_max": slot_rest_max,
+                    "policy/srcs_multi": metrics.get("avg_sources_multi", 0),
                     "policy/fire_fraction": metrics.get("fire_fraction", 0),
                     "policy/owned_planets": metrics.get("owned_planets", 0),
                     "policy/ship_bin0_rate": metrics.get("ship_bin0_rate", 0),
@@ -1247,11 +1151,11 @@ def train(args):
             # tracker can read metrics that line up exactly with each checkpoint
             # rather than the sparse every-20-iter diag line.
             print("  CKPT_METRICS step={} EV={:.3f} KL={:.4f} clip={:.3f} fire_frac={:.3f} "
-                  "owned={:.1f} avgfleet={:.1f} fire_rate={:.3f} Hfire={:.3f}".format(
+                  "owned={:.1f} srcs={:.2f} avgfleet={:.1f} fire_rate={:.3f} Hfire={:.3f}".format(
                       total_env_steps,
                       metrics.get("explained_variance", 0), metrics.get("approx_kl", 0),
                       metrics.get("clip_frac", 0), metrics.get("fire_fraction", 0),
-                      metrics.get("owned_planets", 0),
+                      metrics.get("owned_planets", 0), metrics.get("avg_sources_multi", 0),
                       metrics.get("avg_fleet_size", 0), metrics.get("fire_rate_overall", 0),
                       metrics.get("fire_entropy", 0)))
             # Persist pool alongside the disk checkpoint so spot interrupts
@@ -1336,11 +1240,6 @@ if __name__ == "__main__":
                              "(default: cfg.ppo.max_grad_norm=0.5)")
     parser.add_argument("--gae-lambda", type=float, default=None,
                         help="Override GAE lambda (default: cfg.ppo.gae_lambda=0.95)")
-    parser.add_argument("--vdn-value", action="store_true",
-                        help="Stage 2: per-planet (VDN) value head + per-planet "
-                             "advantages. V_total=sum_p V_p regressed to the global "
-                             "return; fire/target surrogate uses per-planet advantage, "
-                             "ship stays joint on the global advantage.")
     # IL regularization (KL-to-frozen-BC penalty) ------------------------
     parser.add_argument("--il-lambda", type=float, default=None,
                         help="Peak coef for KL(current||frozen_BC) penalty. "

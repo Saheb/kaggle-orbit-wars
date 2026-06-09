@@ -92,39 +92,6 @@ python orbit_wars_rl/eval.py \
 > ⚠️ `orbit_lite` package must be at `opponents/orbit_lite/` for Ajay/Producer to work.
 > ⚠️ Always `--target-decode` for Phase 1. Opponent paths relative to repo root.
 
-### Cross-checkpoint eval (cycling / forgetting detector)
-
-Evals a checkpoint vs HELD-OUT fast heuristics **and our own best past selves**
-(exported to `.py`). A drop vs a fixed heuristic = absolute regression; a drop vs
-a *past self* = forgetting/cycling — the failure self-play win-rate is blind to.
-Run every ~1M steps during training.
-
-```bash
-bash gpu_run_artifacts/cross_eval/run_cross_eval.sh <checkpoint.pt> [games=48]
-```
-
-Opponent set (all held-out, none in the training pool): zach, 1166-peak,
-1043-simple (floor), and exported `self_rev38` / `self_rev53b`.
-
-Re-export a past self as an opponent (needs same feature arch = pairwise-15; rev38+):
-```bash
-python orbit_wars_rl/export_agent.py --checkpoint <best>.pt \
-  --output opponents/ourbest/<name>.py --target-decode
-```
-
-### Pool diversity — preseed cross-run best selves
-
-Fold our best *cross-run* checkpoints into the training pool as fast GPU `self`
-members (more strategic diversity than dense same-run snapshots → less cycling).
-Symlinked under `gpu_run_artifacts/preseed_pool/` (rev38, rev53b — pairwise-15).
-Add to a training launch (keep it a *separate* delta — don't bundle with a
-method test like VDN):
-```bash
-  --preseed-pool ../preseed_pool   # appended as 'self' members; step parsed from filename
-```
-> ⚠️ Older checkpoints (rev31/rev32b = pairwise-12) won't load under the current
-> pairwise-15 model — they need the old config to export/preseed (follow-up).
-
 ### Producer-style ranking audit on replay losses
 
 ```bash
@@ -390,50 +357,6 @@ Common causes:
 ---
 
 ## 9. Review a submission's loss replays
-
-### Kaggle CLI 2.1.2+ — episodes / replays / logs (native subcommands)
-
-The simplest way to pull a submission's games — no API tokens or custom scripts needed
-(`kaggle --version` ≥ 2.0.2). The agent index matches `info.TeamNames` order in the replay.
-
-```bash
-# List episodes for a submission (find SUBMISSION_ID via `kaggle competitions submissions orbit-wars`)
-kaggle competitions episodes <SUBMISSION_ID>            # table
-kaggle competitions episodes <SUBMISSION_ID> -v         # CSV (col 1 = episode id) — for scripting
-
-# Download a replay JSON (for analysis or the viewer)
-kaggle competitions replay <EPISODE_ID>                 # -> episode-<id>-replay.json in cwd
-kaggle competitions replay <EPISODE_ID> -p ./replays    # into a dir
-
-# Download YOUR agent's logs (index 0..3; you can only fetch your own seat)
-kaggle competitions logs <EPISODE_ID> 0 -p ./logs
-```
-
-**Quick 2p-vs-4p win-rate from a submission's replays** (the FFA-baseline check, 2026-06-08):
-```bash
-mkdir -p /tmp/sub_replays
-kaggle competitions episodes <SUBMISSION_ID> -v 2>/dev/null | tail -n +2 | cut -d',' -f1 \
-  | while read ep; do kaggle competitions replay "$ep" -p /tmp/sub_replays >/dev/null 2>&1; done
-orbit_wars_rl/.venv/bin/python - <<'PY'
-import json, glob
-from collections import Counter
-pc=Counter(); n2=w2=n4=0; w4=0
-for f in glob.glob('/tmp/sub_replays/episode-*-replay.json'):
-    d=json.load(open(f)); names=d['info']['TeamNames']
-    if 'Saheb' not in names: continue
-    i=names.index('Saheb'); rew=d['rewards']; win=rew[i]==max(rew) and rew.count(max(rew))==1
-    if len(names)==2: n2+=1; w2+=win
-    elif len(names)==4:
-        n4+=1; w4+=win
-        sc=[0.0]*4                              # final placement from last-step planet ships
-        for p in d['steps'][-1][0]['observation']['planets']:
-            o=int(p[1]);  sc[o]+= p[5] if 0<=o<4 else 0
-        pc[1+sum(s>sc[i] for s in sc)]+=1
-print(f"2p {w2}/{n2} ({100*w2/max(n2,1):.0f}%, par 50%) | 4p {w4}/{n4} ({100*w4/max(n4,1):.0f}%, par 25%) | 4p placement {dict(pc)}")
-PY
-```
-> Win = our reward is the unique max (orbit_wars rewards are ±1). Mind the baselines: 2p par = 50%, 4p par = 25%.
-> ⚠️ The `4p placement` above is **naive (final-score)** and is an ARTIFACT — FFA ends with one survivor, so all eliminated players tie at score 0 and look "2nd." For real 4p placement, rank by **elimination order** (last step each player still owned a planet/fleet), not the final-score snapshot. See `project_ffa_not_the_gap`.
 
 ### One command: fetch loss replays and run the target audit
 

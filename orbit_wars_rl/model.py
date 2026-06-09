@@ -42,8 +42,6 @@ class TransformerBlock(nn.Module):
         x = self.ln2(x + self.mlp(x))
         return x
 
-_VDN_FRESH_PRINTED = False  # guard so the VDN fresh-critic notice prints once, not per pool load
-
 
 class EntityTransformer(nn.Module):
     def __init__(self, cfg):
@@ -109,16 +107,6 @@ class EntityTransformer(nn.Module):
         self.value_fc1 = nn.Linear(_vh_in, D)
         self.value_fc2 = nn.Linear(D, D // 2)
         self.value_out = nn.Linear(D // 2, 1)
-
-        # VDN per-planet value head (Stage 2). For each owned planet p it scores
-        # concat(planet_embedding, global_token) [2D] → V_p; V_total = sum_p V_p is
-        # the centralised critic (only the sum is regressed to the global return).
-        # Created only when enabled so non-VDN checkpoints carry no extra params.
-        self.vdn_value = bool(getattr(cfg, "vdn_value", False))
-        if self.vdn_value:
-            self.value_pp_fc1 = nn.Linear(2 * D, D)
-            self.value_pp_fc2 = nn.Linear(D, D // 2)
-            self.value_pp_out = nn.Linear(D // 2, 1)
 
     def encode_state(self, planet_features, fleet_features, global_features,
                      planet_mask, fleet_mask, slot_valid=None, owned_indices=None,
@@ -315,25 +303,12 @@ class EntityTransformer(nn.Module):
             value_input = torch.cat([global_token, owned_pool], dim=-1)  # (B, 2D)
         value = self.value_out(F.gelu(self.value_fc2(F.gelu(self.value_fc1(value_input))))).squeeze(-1)
 
-        out = {
+        return {
             "fire_logits": fire_logits,
             "ship_logits": ship_logits,
             "target_logits": target_logits,
             "value": value,
         }
-
-        # VDN per-planet value (Stage 2): score each owned slot from its embedding +
-        # the global token. Masked to valid slots; V_total = sum over slots.
-        if self.vdn_value:
-            gt = x[:, 0, :].unsqueeze(1).expand(-1, owned_enriched.size(1), -1)   # (B, MO, D)
-            vp_in = torch.cat([owned_enriched, gt], dim=-1)                       # (B, MO, 2D)
-            vp = self.value_pp_out(F.gelu(self.value_pp_fc2(F.gelu(self.value_pp_fc1(vp_in))))).squeeze(-1)
-            if slot_valid is not None:
-                vp = vp * slot_valid.float()
-            out["value_per_planet"] = vp                  # (B, MO)
-            out["value_total"] = vp.sum(dim=-1)           # (B,)
-
-        return out
 
     def load_state_dict(self, state_dict, strict=True):
         # Legacy checkpoints carry a now-removed angle head; drop those keys so
@@ -341,23 +316,6 @@ class EntityTransformer(nn.Module):
         if any(k.startswith("angle_head.") for k in state_dict):
             state_dict = {k: v for k, v in state_dict.items()
                           if not k.startswith("angle_head.")}
-        # Stage 2: the VDN per-planet value head is fresh when resuming a pre-VDN
-        # checkpoint. Let it stay at init instead of failing the load — but assert
-        # nothing ELSE is missing/unexpected so real mismatches still surface.
-        if getattr(self, "vdn_value", False) and not any(
-                k.startswith("value_pp_") for k in state_dict):
-            res = super().load_state_dict(state_dict, strict=False)
-            leftover = [k for k in res.missing_keys if not k.startswith("value_pp_")]
-            assert not leftover and not res.unexpected_keys, (
-                f"unexpected resume mismatch: missing={leftover} "
-                f"unexpected={list(res.unexpected_keys)}")
-            # Print once only — this path also runs every time a pool opponent loads
-            # a (scalar-critic) snapshot, which would spam the log every rollout.
-            global _VDN_FRESH_PRINTED
-            if not _VDN_FRESH_PRINTED:
-                print("  VDN value head initialised fresh (critic re-warm).")
-                _VDN_FRESH_PRINTED = True
-            return res
         return super().load_state_dict(state_dict, strict=strict)
 
 
