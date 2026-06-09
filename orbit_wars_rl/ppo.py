@@ -163,9 +163,7 @@ class PPOLearner:
         target_logits = outputs["target_logits"]
         if target_mask is not None:
             target_logits = target_logits.masked_fill(~target_mask, -1e9)
-        # VDN (Stage 2): the critic is V_total = sum_p V_p; otherwise the scalar head.
-        vdn = "adv_per_slot" in batch and "value_total" in outputs
-        values = outputs["value_total"] if vdn else outputs["value"]
+        values = outputs["value"]
 
         # Action distributions (target-decode: fire, ship, target only — no angle).
         fire_dist   = torch.distributions.Bernoulli(logits=fire_logits)
@@ -185,69 +183,27 @@ class PPOLearner:
         new_log_prob_ships  = ship_dist.log_prob(ship_action)  * fired_slots
         new_log_prob_target = target_dist.log_prob(target_action) * fired_slots
 
-        # Hybrid per-slot factorisation. The per-PLANET decisions (fire + target)
-        # are credited per-slot: each owned planet is an independent agent sharing
-        # the policy weights, clipped against the shared (global) advantage. This
-        # decouples clip_frac from empire size (the reason clip_frac_fire was a
-        # workaround). Ship-SIZE is NOT per-slot: it is a joint resource-allocation
-        # decision (how to divide ships across the board). Stage-1 replay analysis
-        # showed per-slot ship credit over-reinforces cheap small launches → ships
-        # spread thin → undercommitment fails to convert contested targets. So ship
-        # is credited JOINTLY (one ratio per env, summed over slots) exactly as the
-        # original joint loss did, while fire/target keep the per-slot factorisation.
-        new_lp_ft_slot  = new_log_prob_fire + new_log_prob_target   # (B, MO) per-slot
-        new_lp_ship_env = new_log_prob_ships.sum(dim=-1)            # (B,) joint over slots
+        # Sum across planet slots: (B, max_owned) -> (B,)
+        new_log_prob = (new_log_prob_fire + new_log_prob_ships + new_log_prob_target).sum(dim=-1)
 
         # Old log probs (stored at rollout time)
         old_fire   = to_dev(batch["old_log_probs"]["fire"])  * slot_valid.squeeze(-1)
         old_ships  = to_dev(batch["old_log_probs"]["ships"]) * fired_slots
         old_target = to_dev(batch["old_log_probs"]["target"]) * fired_slots
-        old_lp_ft_slot  = old_fire + old_target                    # (B, MO)
-        old_lp_ship_env = old_ships.sum(dim=-1)                     # (B,)
+        old_log_prob = (old_fire + old_ships + old_target).sum(dim=-1)  # (B,)
 
-        # Joint sums retained for the KL early-stop trigger + diagnostics. Total
-        # log-prob is unchanged (fire+target per-slot summed + ship summed = full
-        # joint sum), so early-stop behaviour is identical.
-        new_log_prob = new_lp_ft_slot.sum(dim=-1) + new_lp_ship_env   # (B,)
-        old_log_prob = old_lp_ft_slot.sum(dim=-1) + old_lp_ship_env   # (B,)
-
-        # Advantages (global — one per env, shared across that env's slots).
+        # Advantages
         advantages = to_dev(batch["advantages"])
         if cfg.normalize_advantages:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        sv = slot_valid_2d.float()               # (B, MO)
-        if vdn:
-            # Stage 2: each owned planet's fire/target decision is clipped against
-            # ITS OWN advantage A_p (not the global one). Normalise over valid
-            # slots; sum across slots (sum_p A_p ≈ A_total → magnitude ~|A_total|).
-            adv_slot = to_dev(batch["adv_per_slot"])                  # (B, MO)
-            if cfg.normalize_advantages:
-                svs = sv.sum().clamp(min=1)
-                mean = (adv_slot * sv).sum() / svs
-                var = (((adv_slot - mean) ** 2) * sv).sum() / svs
-                adv_slot = (adv_slot - mean) / (var.sqrt() + 1e-8)
-            adv_slot = adv_slot * sv
-            ft_reduce = lambda x: (x * sv).sum(dim=-1)               # sum over slots
-        else:
-            adv_slot = advantages.unsqueeze(-1)  # (B, 1) → broadcast over slots
-            ft_reduce = lambda x: (x * sv).sum(dim=-1) / sv.sum(dim=-1).clamp(min=1)  # mean
-
-        # (a) Per-slot fire/target surrogate. `ratio` is the per-slot fire/target
-        #     ratio (the calibrated clip_frac canary, decoupled from empire size).
-        ratio = torch.exp(new_lp_ft_slot - torch.clamp(old_lp_ft_slot, min=-50))  # (B, MO)
+        # Policy loss (clipped)
+        ratio = torch.exp(new_log_prob - torch.clamp(old_log_prob, min=-50))
         ratio = torch.clamp(ratio, 0.0, 10.0)
-        surr1 = ratio * adv_slot
-        surr2 = torch.clamp(ratio, 1.0 - cfg.clip_eps, 1.0 + cfg.clip_eps) * adv_slot
-        ft_per_env = ft_reduce(torch.min(surr1, surr2))             # (B,)
-        # (b) Joint ship-allocation surrogate: one clipped ratio per env (the
-        #     original joint ship credit — concentrates fleets, no undercommitment).
-        ratio_ship = torch.exp(new_lp_ship_env - torch.clamp(old_lp_ship_env, min=-50))  # (B,)
-        ratio_ship = torch.clamp(ratio_ship, 0.0, 10.0)
-        ship_surr1 = ratio_ship * advantages
-        ship_surr2 = torch.clamp(ratio_ship, 1.0 - cfg.clip_eps, 1.0 + cfg.clip_eps) * advantages
-        ship_per_env = torch.min(ship_surr1, ship_surr2)                    # (B,)
-        policy_loss = -(ft_per_env + ship_per_env).mean()
+
+        surr1 = ratio * advantages
+        surr2 = torch.clamp(ratio, 1.0 - cfg.clip_eps, 1.0 + cfg.clip_eps) * advantages
+        policy_loss = -torch.min(surr1, surr2).mean()
 
         # Value loss
         returns = to_dev(batch["returns"])
@@ -274,11 +230,7 @@ class PPOLearner:
                 + self.il_coef * il_kl)
 
         if return_metrics:
-            # clip_frac is the per-slot fire/target clip rate (ratio is (B, MO)),
-            # masked to valid slots — a calibrated canary, not inflated by empire
-            # size. clip_frac_ship is the joint ship-allocation trust region.
-            clip_frac = (((ratio - 1.0).abs() > cfg.clip_eps).float() * sv).sum() / sv.sum().clamp(min=1)
-            clip_frac_ship = ((ratio_ship - 1.0).abs() > cfg.clip_eps).float().mean()
+            clip_frac = ((ratio - 1.0).abs() > cfg.clip_eps).float().mean()
             # Per-slot fire clip_frac: measures whether individual fire decisions
             # would be clipped, decoupled from multi-slot joint-log-prob amplification.
             # The joint clip_frac is mechanically inflated when many owned slots are
@@ -303,11 +255,14 @@ class PPOLearner:
                 fired_mask = (fire_probs > 0.5).float() * sv
                 fire_rate_overall = fired_mask.sum() / sv_sum
                 fires_per_state = fired_mask.sum(dim=-1)
+                multi_owned = (sv.sum(dim=-1) >= 2).float()
+                multi_owned_sum = multi_owned.sum().clamp(min=1)
+                avg_sources_when_multi = (fires_per_state * multi_owned).sum() / multi_owned_sum
                 # owned_planets: mean planets the agent owns (expansion — the win driver).
-                # fire_fraction: on firing steps, fraction of owned planets that fired
-                # (the TRUE carpet-bomb signal, ->1.0 = fire from everything). Use this
-                # + owned_planets + fire_rate; do NOT add empire-size-confounded counts
-                # like the old srcs_multi (rose naturally with empire size → misleading).
+                # fire_fraction: on firing steps, fraction of owned planets that fired.
+                # This is the TRUE carpet-bomb signal (->1.0 = fire from everything),
+                # vs avg_sources_multi which is confounded by empire size (a 30-planet
+                # empire firing from 8 sources = 0.27, not a carpet-bomb).
                 owned_per_state = sv.sum(dim=-1)
                 owned_planets = owned_per_state.mean()
                 firing = (fires_per_state > 0).float()
@@ -327,14 +282,12 @@ class PPOLearner:
                 "ship_entropy": ship_entropy.item(),
                 "clip_frac": clip_frac.item(),
                 "clip_frac_fire": clip_frac_fire.item(),
-                "clip_frac_ship": clip_frac_ship.item(),
                 "approx_kl": (old_log_prob - new_log_prob).mean().item(),
-                "approx_kl_slot": (((old_lp_ft_slot - new_lp_ft_slot) * sv).sum()
-                                   / sv.sum().clamp(min=1)).item(),
                 "mean_advantage": advantages.mean().item(),
                 "mean_value": values.mean().item(),
                 "mean_return": returns.mean().item(),
                 "fire_rate_overall": fire_rate_overall.item(),
+                "avg_sources_multi": avg_sources_when_multi.item(),
                 "owned_planets": owned_planets.item(),
                 "fire_fraction": fire_fraction.item(),
                 "ship_bin0_rate": ship_bin0_rate.item(),
