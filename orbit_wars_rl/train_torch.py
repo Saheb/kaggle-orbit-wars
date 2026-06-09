@@ -173,6 +173,12 @@ _WORKER_AGENT_FN = None  # populated per-worker in _heur_worker_init
 def _heur_worker_init(agent_path: str):
     """Each worker fork loads the agent module once and stashes its agent fn."""
     import importlib.util, sys
+    # Pin each worker to ONE torch thread. With N workers each defaulting to
+    # multi-threaded intra-op parallelism on an 8-vCPU box, they oversubscribe
+    # the cores and thrash — a planner call measured 280ms vs 40ms pinned (7x).
+    # Only the workers are pinned; the main (GPU-feeding) process keeps its threads.
+    import torch
+    torch.set_num_threads(1)
     spec = importlib.util.spec_from_file_location("worker_agent", agent_path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod  # required for @dataclass __module__ resolution
@@ -321,6 +327,10 @@ def train(args):
     print(f"Expansion coeff: {args.expansion_coef}")
     print(f"Defense coeff: {args.defense_coef}")
     print(f"Early capture coeff: {args.early_capture_coef} (decay over {args.early_capture_steps} steps)")
+    if args.early_capture_anneal_frac > 0.0:
+        print(f"Early capture ANNEAL: cosine {args.early_capture_coef}→0 over "
+              f"{args.early_capture_anneal_frac * args.total_steps:,.0f} steps "
+              f"(frac {args.early_capture_anneal_frac}), then 0")
     print(f"First Strike: {args.first_strike_mult}x for t<{args.first_strike_steps} steps" if args.first_strike_steps > 0 else "First Strike: off")
     print(f"Speed coeff: {args.speed_coef}")
     if args.handicap_frac > 0:
@@ -388,6 +398,14 @@ def train(args):
         if "model" in sd: sd = sd["model"]
         model.load_state_dict(sd)
         print(f"Resumed from {Path(args.resume).resolve()}")
+        if getattr(args, "reinit_critic", False):
+            # CONTROL: re-initialise the value head to a fresh state while keeping
+            # the warm policy. Isolates the cold-critic shock — if a known-stable
+            # warm-critic method (joint) collapses with a fresh critic, resume is
+            # confounded for new-critic methods (VDN) and we should go from-scratch.
+            for _m in (model.value_fc1, model.value_fc2, model.value_out):
+                _m.reset_parameters()
+            print("  CONTROL: scalar critic re-initialised fresh (warm policy kept).")
 
     # IL regularization: load frozen reference policy if requested
     frozen_il_model = None
@@ -520,15 +538,23 @@ def train(args):
                     continue
                 pool.add_external_heuristic(name, path)
                 print(f"  pool external loaded: {name} ({path})")
-        # Create one worker pool per external heuristic. Keyed by member name
-        # so compute_pool_actions can dispatch by opp.name.
+        # Create one dispatcher per external heuristic, keyed by member name so
+        # compute_pool_actions can dispatch by opp.name. Planner-externals (heavy
+        # orbit_lite agents) use the in-process GPU adapter; the rest use CPU pools.
+        planner_names = {Path(p.strip()).stem for p in args.planner_externals.split(",") if p.strip()}
         heur_worker_pools: dict[str, HeuristicWorkerPool] = {}
+        planner_adapters: dict = {}
         nw = args.heuristic_workers if args.heuristic_workers > 0 else max(1, (os.cpu_count() or 2) - 1)
         for m in pool.members:
             if m.kind == "external_heuristic":
                 src = getattr(m, "_source_path", None) or args.external_opponents.split(",")[0].strip()
-                heur_worker_pools[m.name] = HeuristicWorkerPool(src, nw)
-                print(f"  heuristic worker pool: {m.name} × {nw} workers")
+                if m.name in planner_names:
+                    from batched_planner import BatchedPlannerOpponent
+                    planner_adapters[m.name] = BatchedPlannerOpponent(src, args.num_envs, device=str(device))
+                    print(f"  planner adapter (GPU in-process): {m.name} on {device}")
+                else:
+                    heur_worker_pools[m.name] = HeuristicWorkerPool(src, nw)
+                    print(f"  heuristic worker pool: {m.name} × {nw} workers")
         # Pre-allocate a frozen model for 'self' opponents (loaded with state_dict per rollout)
         pool_opp_model = copy.deepcopy(model).to(device)
         pool_opp_model.eval()
@@ -657,19 +683,24 @@ def train(args):
         if opp.kind == "external_heuristic":
             from torch_env import to_legacy_obs
             start, stop = env_slice.start or 0, env_slice.stop or N
-            obs_list = [to_legacy_obs(env, env_idx=e, player=player)
-                        for e in range(start, stop)]
-            wp = heur_worker_pools.get(opp.name)
-            if wp is not None:
-                moves_per_env = wp.map(obs_list)
+            pa = planner_adapters.get(opp.name)
+            if pa is not None:
+                # In-process GPU planner: no obs pickling / no CPU worker pool.
+                moves_per_env = pa.moves(env, player, env_slice=slice(start, stop))
             else:
-                # Fallback: serial path (no worker pool registered)
-                moves_per_env = []
-                for obs in obs_list:
-                    try:
-                        moves_per_env.append(opp.agent_fn(obs) or [])
-                    except Exception:
-                        moves_per_env.append([])
+                obs_list = [to_legacy_obs(env, env_idx=e, player=player)
+                            for e in range(start, stop)]
+                wp = heur_worker_pools.get(opp.name)
+                if wp is not None:
+                    moves_per_env = wp.map(obs_list)
+                else:
+                    # Fallback: serial path (no worker pool registered)
+                    moves_per_env = []
+                    for obs in obs_list:
+                        try:
+                            moves_per_env.append(opp.agent_fn(obs) or [])
+                        except Exception:
+                            moves_per_env.append([])
             # Build action tensor with the same converter the cloud eval uses,
             # but only over the env slice. _heuristic_moves_to_action_tensor
             # expects N rows so we build over the slice and return.
@@ -741,6 +772,14 @@ def train(args):
             self_mask = torch.zeros(N, dtype=torch.bool)
             self_mask[:N_self] = True
             env.set_ssdr_mask(self_mask)
+        # Training-wide anneal of early_capture_coef → 0 (dense→sparse shaping).
+        # Cosine from the base coef at step 0 to 0 at frac*total_steps, then stays 0.
+        # env.step() reads self.early_capture_coef fresh each step, so mutating the
+        # attribute here per-rollout is sufficient (no env-code change needed).
+        if args.early_capture_anneal_frac > 0.0 and args.early_capture_coef > 0.0:
+            ec_decay_steps = args.early_capture_anneal_frac * args.total_steps
+            ec_frac = min(total_env_steps / max(ec_decay_steps, 1), 1.0)
+            env.early_capture_coef = args.early_capture_coef * 0.5 * (1.0 + math.cos(math.pi * ec_frac))
         # Reset train_mask: all True by default, mark opp's slots False below
         storage["train_mask"].fill_(True)
 
@@ -1049,8 +1088,8 @@ def train(args):
                    if metrics.get('il_coef', 0) > 0 else "")
             )
             # Secondary behavioural diagnostics — occasionally useful, not decision
-            # drivers (W&B keeps them every iter). Console-print every 20th log.
-            if iter_count == 1 or iter_count % 20 == 0:
+            # drivers (W&B keeps them every iter). Console-print every 10th log.
+            if iter_count == 1 or iter_count % 10 == 0:
                 pencoef = ""
                 if args.srcs_multi_penalty > 0.0 and args.srcs_multi_penalty_decay_frac > 0.0:
                     _pc = args.srcs_multi_penalty * 0.5 * (1.0 + math.cos(math.pi * min(
@@ -1061,7 +1100,6 @@ def train(args):
                     f"   diag | fire[0] {slot0:.2f} rest_max {slot_rest_max:.2f} | "
                     f"fire_frac {metrics.get('fire_fraction', 0):.2f} "
                     f"owned {metrics.get('owned_planets', 0):.1f} "
-                    f"srcs_multi {metrics.get('avg_sources_multi', 0):.2f} "
                     f"ship0 {metrics.get('ship_bin0_rate', 0):.2f} "
                     f"meanshipbin {metrics.get('mean_ship_bin', 0):.1f} | "
                     f"avgfleet {metrics.get('avg_fleet_size', 0):.1f} "
@@ -1103,7 +1141,6 @@ def train(args):
                     # Policy behaviour — the key kill-signal metrics
                     "policy/fire_0": slot0,
                     "policy/fire_rest_max": slot_rest_max,
-                    "policy/srcs_multi": metrics.get("avg_sources_multi", 0),
                     "policy/fire_fraction": metrics.get("fire_fraction", 0),
                     "policy/owned_planets": metrics.get("owned_planets", 0),
                     "policy/ship_bin0_rate": metrics.get("ship_bin0_rate", 0),
@@ -1151,11 +1188,11 @@ def train(args):
             # tracker can read metrics that line up exactly with each checkpoint
             # rather than the sparse every-20-iter diag line.
             print("  CKPT_METRICS step={} EV={:.3f} KL={:.4f} clip={:.3f} fire_frac={:.3f} "
-                  "owned={:.1f} srcs={:.2f} avgfleet={:.1f} fire_rate={:.3f} Hfire={:.3f}".format(
+                  "owned={:.1f} avgfleet={:.1f} fire_rate={:.3f} Hfire={:.3f}".format(
                       total_env_steps,
                       metrics.get("explained_variance", 0), metrics.get("approx_kl", 0),
                       metrics.get("clip_frac", 0), metrics.get("fire_fraction", 0),
-                      metrics.get("owned_planets", 0), metrics.get("avg_sources_multi", 0),
+                      metrics.get("owned_planets", 0),
                       metrics.get("avg_fleet_size", 0), metrics.get("fire_rate_overall", 0),
                       metrics.get("fire_entropy", 0)))
             # Persist pool alongside the disk checkpoint so spot interrupts
@@ -1215,6 +1252,10 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--resume", type=str, default="")
+    parser.add_argument("--reinit-critic", action="store_true",
+                        help="CONTROL: re-initialise the value head after resume "
+                             "(warm policy + cold critic) to isolate the VDN "
+                             "cold-critic-shock confound.")
     parser.add_argument("--checkpoint-interval", type=int, default=5_000_000,
                         help="Save a periodic checkpoint every N env steps")
     parser.add_argument("--learning-rate", type=float, default=None,
@@ -1295,6 +1336,12 @@ if __name__ == "__main__":
                              "keep ≤10%% of terminal win → range 0.05-0.10. 0 = off.")
     parser.add_argument("--early-capture-steps", type=int, default=400,
                         help="Step at which the delta-capture decay reaches zero. Default 400.")
+    parser.add_argument("--early-capture-anneal-frac", type=float, default=0.0,
+                        help="Training-wide (not within-episode) anneal of --early-capture-coef to 0. "
+                             "Cosine decay from full coef at step 0 to 0 at frac*total_steps, then "
+                             "stays 0 (mirrors --srcs-multi-penalty-decay-frac). Cosine holds near full "
+                             "early (bootstrap) and fades fastest mid-run. Removes the capture-shaping "
+                             "crutch once the pool can sustain aggression. 0 = off (constant coef).")
     parser.add_argument("--first-strike-steps", type=int, default=0,
                         help="Apply first_strike_mult to capture reward for t < N steps. "
                              "Breaks opening paralysis by making early captures more lucrative. "
@@ -1394,6 +1441,11 @@ if __name__ == "__main__":
                         help="Comma-separated paths to .py heuristic agents (e.g. "
                              "'opponents/candidate_suneet_lb1200.py,opponents/candidate_zach_public.py'). "
                              "Only used when --pool-mode=mixed.")
+    parser.add_argument("--planner-externals", type=str, default="",
+                        help="Comma list of external-opponent member names (file stems, e.g. "
+                             "'candidate_flowdiff') that run via the in-process GPU "
+                             "BatchedPlannerOpponent instead of CPU worker pools. For heavy "
+                             "orbit_lite planners whose per-step cost saturates the CPU.")
     parser.add_argument("--lr-schedule-steps", type=int, default=0,
                         help="Decouple the LR cosine decay horizon from --total-steps. "
                              "Set larger than --total-steps for slow/partial decay "
