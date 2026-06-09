@@ -41,3 +41,5 @@ pytorch_docs/
 *.DS_Store
 
 opponents/*
+candidate_tests/*
+submission*
