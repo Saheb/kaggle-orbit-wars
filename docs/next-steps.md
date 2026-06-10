@@ -1,93 +1,83 @@
 # Next steps / idea backlog
 
-Living doc — efforts and ideas to invest in, roughly prioritized. Started 2026-06-09.
-Discipline: **one delta per cloud run.** Status tags: 🔵 in-flight · 🟢 ready-to-build · 🟡 idea · ✅ done · ⏸ parked.
+Living doc — efforts and ideas, roughly prioritized. Discipline: **one delta per cloud run.**
+Status tags: 🔵 in-flight · 🟢 ready-to-build · 🟡 idea · ✅ done · ⏸ parked.
+Current focus: **Phase 2 — reinforcement** (docs/phase2.md). VDN/per-slot concluded (doesn't work; back to standard arch).
 
 ---
 
-## 0. In-flight
+## No live instance (2026-06-10)
 
-- 🔵 **Stage 2 VDN run** — does per-planet credit stop the per-slot collapse? Watch `Vμ` (stays positive?)
-  + Ajay/1166 +1/2/3M (matches/beats joint-warm ~9%/~62%?). Early read: `Vμ` positive but very selective
-  (`srcs_multi`→0.34) — watch for over-suppression into **passivity**. Decision gates the rest below.
+- **rev58b flooded (~330k) → killed; GCP `orbit-wars-training` (asia-south1-b) DELETED.** Final flood
+  log preserved at `gpu_run_artifacts/rev58/logs/train_gpu_phase1_rev58b_20260610_170044.log`.
+- Phase 2 pivoted to the **Tier-1 outcome-tied design** (forward-staging mask + drop `defense_coef`
+  + small aggressive pool). Keystone built + unit-tested. See `docs/phase2.md` (top Update) and §0 below.
 
 ---
 
-## 1. Highest-value, cheap, independent of VDN result
+## 0. In-flight — Phase 2 reinforcement, Tier-1 (docs/phase2.md)
 
-- 🟢 **Dense→sparse shaping anneal** — anneal shaping coefs (First Strike / early-capture) to **0 over
-  training**, not just within-episode. Principle: shaping *bootstraps* competence but *creates degenerate
-  Nash* if kept; remove the liability once the pool can teach the same thing. Cheap (a coef schedule).
-  Best fit to our recurring failure modes. **Top non-VDN pick.**
-- 🟢 **rollout 32 + ppo_epochs 1** — a top-LB player's suggestion. Short rollout = local credit (opening/
-  tempo emphasis); ppo_epochs 1 = more on-policy. Cheap (flags). Different axis from VDN (horizon vs
-  structure) — complementary. Caveat: two deltas; separate if a clean read is needed.
-- ✅ **Cross-checkpoint eval panel** (`gpu_run_artifacts/cross_eval/run_cross_eval.sh`) — cycling/forgetting
-  detector. **Use it every ~1M during training.** Make it always-on alongside the held-out ladder.
+**rev58/58b resume probes both flooded — cost knob dead, root cause re-diagnosed.** rev58 (cost 0)
+and rev58b (cost 0.001) both *drifted* from a healthy gated start into a flood (~330–400k: reinf
+0.69–0.75, `p90` 357–408, `Vμ`→negative). Drift-from-healthy ⇒ a property of the reward **objective**
+(recurs from scratch), and the pump is **`defense_coef` itself**: in a symmetric self-play mirror,
+hold-everything-via-reinforce dominates risky attacking, so the term meant to *incentivise*
+reinforcement *is* the flood. Full write-up: `docs/phase2.md` top Update.
 
-## 2. Diversity / anti-cycling (the structural lever)
+**Tier-1 design (locked 2026-06-10) — "outcome-tied attribution":**
+- 🟢 **Forward-staging mask (BUILT + unit-tested):** own reinforce target legal only if closer to the
+  nearest enemy than the source (`--reinforce-forward-only`) → rear hoard impossible by construction.
+  `torch_env.py` + `tests/test_reinforce_mask.py`.
+- 🟢 **Drop `defense_coef`** — reinforcement gets no shaping reward; credited purely via terminal +
+  early_capture through GAE. Drop `reinforce_cost` (dead). Keep gate(3), garrison-floor(10),
+  expansion 0.03, speed 0.3, early_capture anneal, fire-entropy 0.005.
+- 🟢 **Small aggressive pool (rev53b-proven)** — held-out LB archetypes so hoarding *loses games*
+  (the asymmetry that makes reinforcement instrumentally valuable; a pure mirror gives flood OR
+  passivity). (c)-attribution removes the bad incentive; the pool supplies the attack pressure — both needed.
+- 🟢 **p2rev1 READY** (fresh Phase-2 numbering, not the rev5x lineage): snowball-BC warmstart
+  (`bc_snowball_pairwise15.pt`, aggressive winners, 53% reinforce coverage) + forward mask + drop
+  defense + pool (lb1152 hammer + debatreya_1300 @0.25). Target-head diagnostics (`H_tgt`, target
+  own/neutral/enemy share) added. Script: `gpu_run_artifacts/p2rev1/`. Awaiting launch.
 
-Cross-play study finding: our opponent set is a **transitive strength ladder, no non-transitivity** →
-fixed heuristics have limited anti-cycling power. Two complementary fixes:
+Selection stays PURE: win-rate/Elo vs the held-out ladder decides; `reinforce_rate`/game-length are
+diagnostics. Tier-2 (full causal fleet attribution) held in reserve if Tier-1 underperforms.
 
-- 🟢 **Distill Ajay → fast neural clone (DAgger)** — adds the *selective-targeting style* we lack; orbit_lite
-  can't be GPU-batched so distillation is the only way to pool it. Spec: `docs/ajay_distillation_spec.md`.
-  One new tool to build: `dagger_collect.py`. Validate with `study_opponents.py`; success = adding it to the
-  pool raises held-out real-Ajay WR.
-- 🟡 **Neural exploiters / mini-league** — the principled anti-cycling + novelty engine: train fast neural
-  agents whose job is to beat the current main agent, fold into the pool. All-neural → no slow-opponent
-  speed problem *by construction*. Heaviest, but the real endgame for "keep finding novel strategies."
-- 🟢 **Pool curation** — fold cross-run best selves (rev38/rev53b ready in `preseed_pool/`) as fast `self`
-  members; subsample within-run history (not dense recent); keep self-pool **small (8–12 diverse)** so PFSP
-  gets ≥30 games/opponent. Run as a *separate* delta (not bundled with VDN). `--preseed-pool ../preseed_pool`.
-- 🟡 **rev31/rev32b as opponents** — most distinct archetypes (First Strike), but pairwise-12 → need
-  `export_agent.py` to auto-detect feature dims. (Spawned task.) Adds real diversity to eval panel + pool.
-- ✅ **Hellburner** added to cross-eval — note: it's *surpassed* (our strong agents beat it 100%), so it's a
-  fixed **eval yardstick**, not a hard pool opponent.
+## 1. Phase 2 fallbacks / follow-ups (conditional on rev58b)
+
+- 🟢 **From-scratch (BC warmstart) run** — only if we conclude the *base* matters after all (unlikely per the drift
+  finding). BC seed options analyzed: Isaiah (controlled) vs Jake/aggressive-cohort (snowball, full 0→0.61 reinforce
+  ramp). Snowball selector to pull aggressive replays without player names: high `avg_score` + `size_bytes`<3.5MB.
+- 🟢 **Eval/export gate parity** — `action_mask.py` has NO empire gate; before submitting a Phase-2 checkpoint, add the
+  gate there so inference matches training (else the policy could reinforce <3 planets at inference). Do at export time.
+- 🟡 **Reinforce-aware BC warmstart from top-player replays** (180 games in `/tmp/fresh_validate`, 89 snowball in
+  `/tmp/snowball`; analyzer `orbit_wars_rl/fetch_analyze_top_replays.py`, timing-corrected).
+
+## 2. Diversity / anti-cycling (still the structural lever, independent of Phase 2)
+
+- 🟢 **Pool curation** — fold cross-run best selves as fast `self` members; keep self-pool small (8–12 diverse) so PFSP
+  gets ≥30 games/opponent. `--preseed-pool`.
+- 🟢 **Distill Ajay → fast neural clone (DAgger)** — adds the selective-targeting style we lack; orbit_lite can't be
+  GPU-batched. Spec: `docs/ajay_distillation_spec.md`; tool to build: `dagger_collect.py`.
+- 🟡 **Neural exploiters / mini-league** — principled anti-cycling; all-neural avoids the slow-opponent problem. Endgame.
+- ✅ **Cross-checkpoint eval panel** (`gpu_run_artifacts/cross_eval/run_cross_eval.sh`) — use every ~1M during training.
 
 ## 3. Hyperparameter / dynamics probes
 
-- 🟡 **gamma 0.999** (NOT 1.0) — longer horizon propagates the win signal earlier → less shaping dependence.
-  Avoid γ=1.0: removes "win fast" pressure → risks the passivity/timeout Nash we keep fighting. Pairs
-  naturally with #1 dense→sparse. Horizon changes shock the critic (Rev23) → expect a re-warm.
-- 🟡 **SSDR × pool** — SSDR (asymmetric starts) gave only *transient* gains because symmetric self-play
-  averages the asymmetry away. Fix: couple it with **fixed strong opponents** so the handicapped seat faces
-  a real adversary, not a co-adapting mirror. SSDR-alone = transient; SSDR×pool = potentially sustained.
-- ⏸ **Auxiliary losses** — low priority: BC aux *hurt* conversion (Rev34), ROI aux was *inert* (Rev48); they
-  help representation/sample-efficiency, not Nash drift (our actual problem). **One exception:** a per-planet
-  "will this launch capture?" predictor as a **VDN assist** if the bare per-planet value learns poorly.
+- 🟡 **gamma 0.999** (not 1.0) — longer horizon propagates the win signal earlier → less shaping dependence.
+- 🟡 **rollout 32 + ppo_epochs 1** — top-LB suggestion: short rollout = local credit; ppo_epochs 1 = more on-policy.
 
-## 4. VDN follow-ups (conditional on the in-flight result)
+## 4. Measurement / instrumentation
 
-- If **VDN works**: run longer (5M+) to find the peak (rev53b's best Ajay 10.9% was at +3.6M, *past* +3M);
-  full Ajay panel; **submit if it beats 10.9%**. Then commit VDN to main.
-- If **VDN over-suppresses → passive**: tune (raise fire entropy? scale/clip the per-planet advantage?).
-- If **VDN collapses too**: shelve the per-slot direction with a clean negative result; the win is elsewhere
-  (diversity / shaping anneal).
-- 🟢 **`export_agent.py` VDN tolerance** — needed only when exporting a VDN checkpoint to submit (mirror the
-  eval.py `value_pp_*` fix). Do it then.
+- 🟢 **Always-on held-out ladder during training** — eval vs a fixed diverse set every ~1M; self-play WR + `Vμ`/EV are
+  blind to absolute regression. Selection is PURE: win-rate decides, not shaped reward / `Vμ` / Ajay panel alone.
 
-## 5. Measurement / instrumentation
+## 5. Parked
 
-- 🟢 **Always-on held-out ladder during training** — eval vs a *fixed, diverse* set every ~1M (rev53b did
-  1166). Broaden beyond 1166 to span archetypes (a rusher, a turtle, a selective-tempo bot). Absolute-progress
-  dashboard; self-play WR and `Vμ`/EV are blind to absolute regression (EV is on-distribution only).
-- 🟡 **`V(s)` vs material-score over one game** — intuition-builder demo (where the critic foresees a bad
-  commitment before material drops). Pending offer.
+- ⏸ **FFA / 4p** — above par on wins, no validated lever, no faithful local eval. Don't spend GPU. (`project_ffa_not_the_gap`)
+- ⏸ **VDN / per-slot credit** — concluded: per-slot ship-credit → undercommitment / collapse. Back to joint-credit standard arch.
 
-## 6. Parked
+## 6. Ops / tech debt
 
-- ⏸ **FFA / 4p** — above par on wins (the only metric that counts), **no validated lever**, and **no faithful
-  local eval** (can't reproduce the LB gang-up). Don't spend GPU. 2p-vs-strong conversion is the headroom.
-  Memory: `project_ffa_not_the_gap`.
-
-## 7. Ops / tech debt
-
-- 🟢 **Commit VDN to main** once settled → GCP launcher + reproducibility "just work" (it rsyncs main, excludes
-  `.claude/` worktree).
-- 🟢 **Bake auto-destroy-on-training-completion into launch scripts** (not a separate poll; not an intermediate
-  checkpoint → don't throw away checkpoints we paid for).
-- 🟡 **Pool-opponent `state_dict` reload** fires ~123×/iter (revealed by the VDN print spam) — a pre-existing
-  rollout-throughput inefficiency. Optimize only if SPS becomes the bottleneck.
-- 🟡 **GCP for VDN-lineage runs** needs the launcher to rsync the *worktree* (or VDN committed to main) + the
-  24 GB L4 may force `--num-minibatches 32`. Prefer H100/H200/A100 (≥40 GB) for clean mb 16.
+- 🟢 **Bake auto-terminate-on-completion into launch scripts** (GCP `--terminate-on-done` not wired; manual delete required).
+- 🟡 **Run scripts + seed_checkpoints are rsync-EXCLUDED** by `launch_gpu_gcp.sh` → must scp them after launch (caught us on rev58).
+- 🟡 **Pool-opponent `state_dict` reload** fires ~123×/iter — rollout-throughput inefficiency; optimize only if SPS bottlenecks.

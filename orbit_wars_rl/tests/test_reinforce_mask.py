@@ -42,6 +42,79 @@ def test_torch_env_target_mask_reinforce_toggle():
                     f"own-target legality should equal allow_reinforce={allow}")
 
 
+def test_empire_gate_blocks_own_targets_below_threshold():
+    """Empire-size gate: with allow_reinforce=True AND reinforce_gate_min_planets=3, own
+    planets are ILLEGAL reinforce targets while the player owns < 3 planets, and become
+    legal at >= 3. Enemy/neutral targets are never gated; the source is never a target."""
+    # threshold 3: at 2 owned planets -> own targets blocked; at 3 -> allowed
+    for n_extra, expect_own_legal in ((1, False), (2, True)):  # 1+1=2 planets, 1+2=3 planets
+        te = VecTorchEnv(num_envs=1, num_players=2, device="cpu",
+                         action_decode="target", allow_reinforce=True,
+                         reinforce_gate_min_planets=3)
+        te.reset([7])
+        owner = te.planets[0, :, 1]
+        neutral = [p for p in range(te.planets.shape[1])
+                   if te.planet_alive[0, p] and owner[p] == -1]
+        for p in neutral[:n_extra]:
+            te.planets[0, p, 1] = 0
+            te.planets[0, p, 5] = 10
+        f = te.get_features(player=0)
+        tm, sv, oi = f["target_mask"], f["slot_valid"], f["owned_indices"]
+        owner = te.planets[0, :, 1]
+        enemy = [p for p in range(tm.shape[2]) if owner[p] == 1]
+        for s in range(tm.shape[1]):
+            if not sv[0, s]:
+                continue
+            src = int(oi[0, s])
+            other_own = [p for p in range(tm.shape[2]) if owner[p] == 0 and p != src]
+            for p in other_own:
+                assert bool(tm[0, s, p]) == expect_own_legal, (
+                    f"own-target legality should be {expect_own_legal} at gate=3 "
+                    f"with {1 + n_extra} planets")
+            # enemy targets are NEVER gated
+            for p in enemy:
+                assert bool(tm[0, s, p]), "enemy targets must stay legal under the gate"
+
+
+def test_forward_staging_gate_blocks_rear_reinforcement():
+    """Forward-staging gate (#4): with allow_reinforce + reinforce_forward_only, an own
+    planet is a legal reinforce target only if it is CLOSER to the nearest enemy planet
+    than the launch source. A rearward own planet (farther from the enemy) is masked; a
+    forward one (closer) stays legal; enemy targets are never constrained. With the gate
+    OFF the rear target is legal — proving the flag is what blocks it."""
+    def setup(forward_only):
+        te = VecTorchEnv(num_envs=1, num_players=2, device="cpu",
+                         action_decode="target", allow_reinforce=True,
+                         reinforce_forward_only=forward_only)
+        te.reset([7])
+        # Controlled 1-D layout on the x-axis; everything else neutral and far away so
+        # the designated enemy (planet 3) is unambiguously the nearest enemy.
+        te.planet_alive[0, :] = True
+        te.planets[0, :, 1] = -1          # all neutral
+        te.planets[0, :, 2] = 1000.0      # x far
+        te.planets[0, :, 3] = 0.0         # y
+        te.planets[0, :, 5] = 20.0        # ships
+        #             idx  owner   x       role
+        for idx, own, px in [(0, 0, 40.0),   # S  source (mine)
+                             (1, 0, 70.0),   # F  front  (mine, closer to enemy)
+                             (2, 0, 10.0),   # R  rear   (mine, farther from enemy)
+                             (3, 1, 100.0)]: # E  enemy
+            te.planets[0, idx, 1] = own
+            te.planets[0, idx, 2] = px
+        return te
+
+    for forward_only, rear_legal in ((True, False), (False, True)):
+        te = setup(forward_only)
+        f = te.get_features(player=0)
+        tm, sv, oi = f["target_mask"], f["slot_valid"], f["owned_indices"]
+        s = next(i for i in range(tm.shape[1]) if sv[0, i] and int(oi[0, i]) == 0)
+        assert bool(tm[0, s, 1]), "front own target (closer to enemy) must stay legal"
+        assert bool(tm[0, s, 2]) == rear_legal, (
+            f"rear own-target legality should be {rear_legal} (forward_only={forward_only})")
+        assert bool(tm[0, s, 3]), "enemy target must never be constrained by forward-staging"
+        assert not bool(tm[0, s, 0]), "source must never target itself"
+
+
 def test_action_mask_eval_reinforce_toggle():
     # source planet 0 at center. Own reinforce candidate (planet 1) due EAST,
     # enemy (planet 2) due NORTH — orthogonal so the chosen launch angle reveals which
@@ -168,6 +241,8 @@ def test_reinforce_rate_counts_reinforce_vs_attack_launches():
     te.step({0: act})
     assert float(te._fire_launch_count[0, 0]) == 2.0, "both launches should be counted"
     assert float(te._reinforce_launch_count[0, 0]) == 1.0, "exactly one was reinforcement"
+    # target-owner share diagnostic: the two launches were own + enemy, neither neutral
+    assert float(te._neutral_launch_count[0, 0]) == 0.0, "no launch targeted a neutral"
 
 
 def test_torch_env_reinforce_launch_creates_fleet():

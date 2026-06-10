@@ -69,6 +69,8 @@
 | **Rev57** | Resume **rev38 5M** (the 967.6 LB-record base, NOT rev54 1M) + `--allow-reinforce` + curriculum (bias −8→0 frac 0.3) + **reinforcement discipline: `--reinforce-garrison-floor 10` (#1 mask) + `--reinforce-cost 0.001` (#2 per-ship transit cost)**. Clean self-play (no external). entropy 0.05, LR 5e-5. GCP L4. | rev54 1M scored **848.6** LB (119pts UNDER the rev38 record) despite 5.5% Ajay → the whole reinforce lineage was built on an underwater base; Ajay panel 4×-confirmed not LB-predictive. Test disciplined reinforcement on our actual best. #1 (training-time veto, no Nash risk) kills the "drain-a-planet-then-lose-it" regression; #2 (per-ship cost) prices the rev56 flood — a 50-ship stage costs 0.05, a 2000-ship flood costs 2.0. Watch reinforce_rate → 0.4-0.6 (Vadasz 0.57). | Clean start (iter 1 EV 0.797/clip 0.081). **clip crept 0.25→0.285 by 1.97M** (rev54-v2 creep: entropy 0.05 + LR 5e-5). → intervention rev57b. | superseded by rev57b |
 | **Rev57b** | **Clip intervention**: resume **rev57's 1.5M checkpoint** at **HALVED LR 2.5e-5** + added the **`reinforce_rate` training metric** (diag `reinf`, CKPT_METRICS, W&B — measured over the current policy's launches, train_mask-filtered). Same discipline/curriculum. GCP L4. | clip>0.25 is the standing-authority intervention line; halving LR is the documented fix for the entropy-0.05 creep. Curriculum re-runs from −8 on the more-trained 1.5M weights (gentler re-intro). | Launched 2026-06-10. iter 1: LR 2.5e-5, clip 0.085, EV 0.783, Vμ +0.44, `reinf 0.00` (bias re-suppressed, will climb). | TBD |
 | **Rev56** | Resume **Rev54 1M** + `--allow-reinforce` + **curriculum** `--reinforce-bias-init -8 --reinforce-anneal-frac 0.3` (own-target logit bias −8→0 over 4.5M; enemy/neutral untouched) + entropy **0.05** + LR **5e-5**. GCP L4. | The curriculum stops the rev55 t=0 shock by phasing reinforcement in gradually; RL learns the reinforce value from reward as own-targets surface. | **Curriculum worked (no t=0 collapse) but the flood reasserts.** Vμ dipped then recovered to **+0.53 @1.25M**, then **declined to +0.15 @2M** as **p90 ballooned 107→368** (past rev55) and clip crept to 0.287. Eval @2M (bias=0): **reinforce_rate 0.73–0.80** (vs Vadasz 0.57; lever WORKS) but **flooding** (~30× launch volume, own→own) → Ajay WR 2.08%/material 270 (below rev54 baseline 4.17%/760, above BC-seed 0/0). **Root cause: reinforcement is near-costless** (friendly arrival can't lose ships → material conserved), so with any fire incentive the policy floods. Curriculum necessary but **not sufficient** — it times availability, adds no cost. Killed at 2M; instance deleted. | Costless-reinforce flood (no opportunity cost / garrison guard) | — |
+| **Rev58** | Resume **rev38 5M** + empire-gate(3) + `defense_coef 0.03` + fire-entropy 0.005, **`reinforce_cost 0`** (the phase2 locked "masks + defense, no cost" design). GCP L4. | Gate + defense + low fire-entropy should self-cap reinforcement without a cost tax. | Started healthy (reinf 0.21 @32k, Vμ +0.63) then **drifted into a flood** by ~400k (reinf 0.75, p90 408, Vμ→0). Drift-from-healthy ⇒ a reward-**objective** attractor (not a mature-base artifact). | `defense_coef` rewards holding → hold-via-reinforce dominates attack in a mirror | — |
+| **Rev58b** | Rev58 + **`reinforce_cost 0.001`** (only delta — the §3 back-pocket lever). GCP L4. | The small cost paired with gate+low-entropy should cap the flood. | **Flooded earlier**, ~330k (reinf 0.69, p90 357, avgfleet 175, fire_frac 0.83, Vμ −1.25), clip 0.27. **Cost knob dead** (both 0 and 0.001 flood). Killed @524k; instance deleted. → pivot to Tier-1 (forward-staging mask + drop `defense_coef` + aggressive pool); see `docs/phase2.md`. | Cost did not bind; `defense_coef` is the flood pump | — |
 
 **What we know:**
 - **Rev31 First Strike**: opening paralysis fixed, 918.8 LB record. Was a band-aid for symmetric-start problem.
@@ -101,7 +103,13 @@
 
 ## Current State (2026-06-10)
 
-**Active run:** **Rev57b** on GCP L4 (`orbit-wars-training`, asia-south1-b, 8.231.123.66) — disciplined reinforcement at **HALVED LR 2.5e-5** (rev57 clip crept 0.25→0.285), resumed from rev57's 1.5M checkpoint, now with the **live `reinforce_rate` metric** (diag `reinf` field). Clean self-play. Logs/checkpoints sync to `gpu_run_artifacts/rev57/` (same outer dir on the box). First real reinforce_rate read at ~2.5-4M as the curriculum bias releases — watch reinforce_rate (target 0.4-0.6 Vadasz-like, not 0/0.8), Vμ positive, p90/clip not ballooning. **NOTE on resume: total_env_steps resets to 0, so the curriculum + LR schedule restart from step 0 on the 1.5M weights.** Memory: `project_reinforcement_lever`.
+**Active run:** none. The reinforce-lever resume chain ran out: rev57/57b → **rev58 → rev58b, both
+flooded** (~330–400k; see run table + `docs/phase2.md` top Update). Cost knob dead; root cause
+re-diagnosed as `defense_coef` (the flood pump in a symmetric mirror). **Phase 2 pivoted to the
+Tier-1 outcome-tied design** — forward-staging mask (built + unit-tested) + drop `defense_coef` +
+small aggressive pool (rev53b-proven) + from-scratch. **p2rev1 ready** (fresh Phase-2 numbering): snowball-BC
+warmstart + forward mask + drop defense + lb1152/debatreya pool @0.25; target-head diagnostics added; `gpu_run_artifacts/p2rev1/`
+run script. GCP instance DELETED. Memory: `project_reinforcement_lever`, `project_phase2_reinforcement`.
 
 **What landed this session:**
 - **Rev54 1M is our best Ajay checkpoint to date (5.5% Ajay / 4.7% debatreya_1300)** — exported (`--target-decode` + fixed aimer) and **submitted to LB** (sub 53527873, pending). Came from Rev54 v1 (rev38 5M + 3 heuristic externals @0.25 + early_capture training-wide anneal); the run was *mistakenly* killed at 1M on a false collapse alarm (Vμ/avgfleet/srcs_multi — all non-signals), but held-out eval proved the 1M healthy.
@@ -821,6 +829,31 @@ produced a large jump (+11pp HB to 55.5%). But the *same* blitz on 141208 immedi
 - clip_frac=0.213 is lowest steady-state of any run — policy settling more stably
 - **Submission plan:** not submitting today (4/5 slots used). Submit 3M or 5M checkpoint tomorrow if fire[0] holds.
 - **Success criterion:** LB score > 894 (beat 141208 old arch)
+
+#### Rev12–Rev57 (2026-06-01 → 06-10) — see memory + git log, not duplicated here
+LB record **rev38 5M (993.9 / 967.6)** with First Strike. rev55–57 = reinforcement attempts (own-planet
+targeting), all FLOODED. Full reinforce-lever history: memory `project_reinforcement_lever`; checkpoints in
+`seed_checkpoints/` + `gpu_run_artifacts/rev*/`. VDN/per-slot credit (rev5x) concluded: doesn't work, reverted.
+
+#### Phase 2 — reinforcement via empire-size gate (2026-06-10) — docs/phase2.md
+Reinforcement (sending ships to own planets) is the #1 LB skill-gap. Replay analysis of the top tier (Isaiah #1,
+Jake #2, timing-corrected — action at steps[t] ↔ obs at steps[t-1]): reinforce ≈0 below ~3 planets, ramps with
+empire size (Isaiah plateau ~0.34, snowball cohort to ~0.61); forward-staging ~68%; full-garrison commits; no
+production targeting. → reward model where reinforcement has **NO reward term**: an empire-size GATE
+(`--reinforce-gate-min-planets 3`, NEW mask in torch_env) + `defense_coef 0.03` (outcome-tied holding = the
+instrumental incentive) + `speed_coef 0.3` + fire-entropy **0.005** (binary fire = flood pressure once reinforce
+is a costless outlet). Anneal only `early_capture`; keep expansion/defense/speed on. Selection is PURE
+(win-rate/Elo decides; reinforce_rate/game-length are diagnostics).
+
+- **Rev58** (rev38 5M + gate + defense + speed + fire-entropy 0.005, NO cost): started HEALTHY (reinf 0.21 @32k,
+  p90 99, Vμ +0.63) but **DRIFTED into a flood** (reinf 0.75, p90 408, Vμ→0) by ~400k. Killed. Drifted-in (not a
+  t=0 shock) ⇒ a **reward-landscape attractor** (safe-hoarding-via-reinforce: attacking a defended enemy is risky,
+  reinforcing is free+safe), NOT a mature-rev38 artifact ⇒ from-scratch would flood too. The dropped
+  `reinforce_cost` was load-bearing; fire-entropy (already 0.005) was not the driver.
+- **Rev58b** (IN-FLIGHT): rev58 + **`--reinforce-cost 0.001`** reinstated (now paired with the gate + low entropy
+  that rev57 lacked when 0.001 alone flooded). Tests whether the small cost caps reinforce_rate at ~0.3–0.5
+  through the ~400k window where rev58 flooded. Decision tree + live-instance handoff: **docs/next-steps.md**.
+  Run scripts: `gpu_run_artifacts/rev58{,b}/run_remote_rev58*.sh`.
 
 ---
 

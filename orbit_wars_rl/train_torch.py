@@ -331,6 +331,12 @@ def train(args):
         print(f"Reinforcement DISCIPLINE: garrison_floor={args.reinforce_garrison_floor} "
               f"(veto reinforce that drains source below this), "
               f"cost={args.reinforce_cost}/ship (reward penalty on ships reinforced)")
+    if args.allow_reinforce and args.reinforce_gate_min_planets > 0:
+        print(f"Reinforcement EMPIRE GATE: own targets legal only at >= "
+              f"{args.reinforce_gate_min_planets} planets (attack-only below; mask, no Nash risk)")
+    if args.allow_reinforce and args.reinforce_forward_only:
+        print("Reinforcement FORWARD-STAGING GATE: own targets legal only if closer to the "
+              "nearest enemy than the source (rear→front staging; mask, no Nash risk)")
     print(f"Win margin coeff: {args.win_margin_coeff}")
     print(f"Shaping coeff: {args.shaping_coef}")
     print(f"Expansion coeff: {args.expansion_coef}")
@@ -389,6 +395,8 @@ def train(args):
                       allow_reinforce=args.allow_reinforce,
                       reinforce_garrison_floor=args.reinforce_garrison_floor,
                       reinforce_cost=args.reinforce_cost,
+                      reinforce_gate_min_planets=args.reinforce_gate_min_planets,
+                      reinforce_forward_only=args.reinforce_forward_only,
                       win_margin_coeff=args.win_margin_coeff,
                       shaping_coef=args.shaping_coef,
                       expansion_coef=args.expansion_coef,
@@ -1047,7 +1055,13 @@ def train(args):
             tm = storage["train_mask"][0].to(env.device).float()   # (N, P)
             fires = (env._fire_launch_count * tm).sum()
             reinf = (env._reinforce_launch_count * tm).sum()
-            metrics["reinforce_rate"] = float((reinf / fires.clamp(min=1.0)).item())
+            neut = (env._neutral_launch_count * tm).sum()
+            denom = fires.clamp(min=1.0)
+            metrics["reinforce_rate"] = float((reinf / denom).item())   # own-target share
+            # target-owner share among the current policy's launches (own/neutral/enemy);
+            # Phase-2 target-head health — a selective head ≠ uniform across owners.
+            metrics["target_share_neutral"] = float((neut / denom).item())
+            metrics["target_share_enemy"] = float(((fires - reinf - neut) / denom).item())
         with torch.no_grad():
             metrics["old_value_mean"] = float(flat["values"].mean().item())
             metrics["old_value_std"] = float(flat["values"].std(unbiased=False).item())
@@ -1129,7 +1143,11 @@ def train(args):
                         total_env_steps / max(args.srcs_multi_penalty_decay_frac * args.total_steps, 1), 1.0)))
                     pencoef = f" pencoef {_pc:.5f}"
                 actcoef = f" actcoef {args.fleet_activity_coef:.4f}" if args.fleet_activity_coef > 0.0 else ""
-                reinfstr = f"reinf {metrics.get('reinforce_rate', 0):.2f} | " if args.allow_reinforce else ""
+                reinfstr = (
+                    f"reinf {metrics.get('reinforce_rate', 0):.2f} "
+                    f"tgt n/e {metrics.get('target_share_neutral', 0):.2f}/"
+                    f"{metrics.get('target_share_enemy', 0):.2f} | "
+                ) if args.allow_reinforce else ""
                 print(
                     f"   diag | fire[0] {slot0:.2f} rest_max {slot_rest_max:.2f} | "
                     f"fire_frac {metrics.get('fire_fraction', 0):.2f} "
@@ -1139,7 +1157,8 @@ def train(args):
                     f"avgfleet {metrics.get('avg_fleet_size', 0):.1f} "
                     f"p90 {metrics.get('p90_fleet_size', 0):.1f} | "
                     f"{reinfstr}"
-                    f"H_ship {metrics.get('ship_entropy', 0):.2f} | "
+                    f"H_ship {metrics.get('ship_entropy', 0):.2f} "
+                    f"H_tgt {metrics.get('target_entropy', 0):.2f} | "
                     f"Vμ {metrics.get('old_value_mean', 0):+.2f} Rμ {metrics.get('return_mean', 0):+.2f} "
                     f"Rσ {metrics.get('return_std', 0):.2f} Aσ {metrics.get('adv_std', 0):.2f} | "
                     f"rewμ {metrics.get('reward_mean', 0):+.4f} rewNZ {metrics.get('reward_nonzero', 0):.3f} | "
@@ -1183,9 +1202,12 @@ def train(args):
                     "policy/avg_fleet": metrics.get("avg_fleet_size", 0),
                     "policy/p90_fleet": metrics.get("p90_fleet_size", 0),
                     "policy/reinforce_rate": metrics.get("reinforce_rate", 0),
+                    "policy/target_share_neutral": metrics.get("target_share_neutral", 0),
+                    "policy/target_share_enemy": metrics.get("target_share_enemy", 0),
                     # Entropy
                     "entropy/fire": metrics.get("fire_entropy", 0),
                     "entropy/ship": metrics.get("ship_entropy", 0),
+                    "entropy/target": metrics.get("target_entropy", 0),
                     # Value / return stats
                     "value/mean": metrics.get("old_value_mean", 0),
                     "value/std": metrics.get("old_value_std", 0),
@@ -1375,6 +1397,21 @@ if __name__ == "__main__":
                              "actual flood fix (rev56: costless reinforcement floods ~30×). Scales "
                              "with waste; the calibration knob. Watch reinforce_rate → target "
                              "~0.4-0.6. 0 = off. Only active with --allow-reinforce.")
+    parser.add_argument("--reinforce-gate-min-planets", type=int, default=0,
+                        help="Reinforcement discipline #3 (empire-size gate): own planets become "
+                             "legal reinforce targets only once the player owns >= this many planets; "
+                             "below it, attack-only (must expand first). Grounded in top-player "
+                             "replays (reinforce_rate ≈0 at 1 planet, ramps with empire size). A pure "
+                             "action mask → no Nash risk; makes the early flood impossible by "
+                             "construction. 0 = off. Only active with --allow-reinforce.")
+    parser.add_argument("--reinforce-forward-only", action="store_true",
+                        help="Reinforcement discipline #4 (forward-staging gate): an own reinforce "
+                             "target is legal only if it is closer to the nearest enemy planet than "
+                             "the launch source, so reinforcement flows rear→front (staging) and a "
+                             "safe rear hoard is impossible by construction. Matches the 66-70% "
+                             "forward-staging in top-player replays; removes the costless safe-fire "
+                             "outlet that floods symmetric self-play. Enemy/neutral targets "
+                             "unconstrained. Only active with --allow-reinforce.")
     parser.add_argument("--win-margin-coeff", type=float, default=0.0,
                         help="Terminal bonus coefficient α: winner gets +1 + α*(my_score/total_score). "
                              "0 = pure ±1 reward (default). Suggested start: 0.5.")

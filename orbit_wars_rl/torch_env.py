@@ -88,6 +88,7 @@ class VecTorchEnv:
         reinforce_garrison_floor: float = 0.0,
         reinforce_cost: float = 0.0,
         reinforce_gate_min_planets: int = 0,
+        reinforce_forward_only: bool = False,
     ):
         self.num_envs = num_envs
         # Reinforcement: when True, own planets (except the launch source) are LEGAL
@@ -111,10 +112,29 @@ class VecTorchEnv:
         # (enemy/neutral) are untouched, so neither lever can distort the attack Nash.
         self.reinforce_garrison_floor = float(reinforce_garrison_floor)
         self.reinforce_cost = float(reinforce_cost)
+        #   #3 EMPIRE-SIZE GATE: own planets become legal reinforce targets only once the
+        #      player owns >= this many planets. Below it, attack-only (must expand first).
+        #      Grounded in top-player replays: reinforce_rate ≈0 at 1 planet, ~0.1 at 2,
+        #      then ramps with empire size. A pure action mask (no Nash risk) that makes
+        #      the early flood impossible by construction. 0 = off (no gate). Training-only,
+        #      like the garrison floor — the policy internalises it.
+        self.reinforce_gate_min_planets = int(reinforce_gate_min_planets)
+        #   #4 FORWARD-STAGING GATE: an own (reinforce) target is legal only if it sits
+        #      closer to the nearest enemy planet than the launch source — reinforcement
+        #      flows rear→front (staging), never into a safe rear hoard. Top-player
+        #      replays stage forward 66-70% of the time; a rear hoard is the costless
+        #      safe-fire outlet that floods symmetric self-play. Pure mask (no Nash risk),
+        #      training-only, internalised at inference. 0/False = off. Enemy/neutral
+        #      targets are never constrained.
+        self.reinforce_forward_only = bool(reinforce_forward_only)
         # reinforce_rate metric accumulators (N, num_players), allocated/zeroed per
         # rollout via reset_reinforce_stats(). None = not collecting (no overhead).
         self._reinforce_launch_count = None
         self._fire_launch_count = None
+        # target-owner share diagnostic: launches whose target is a NEUTRAL planet
+        # (own = _reinforce_launch_count; enemy = fire − own − neutral). Phase-2
+        # target-head health (is the "where" head selective or uniform?).
+        self._neutral_launch_count = None
         self.num_players = num_players
         self.episode_steps = episode_steps
         self.device = torch.device(device)
@@ -595,6 +615,35 @@ class VecTorchEnv:
             P_idx = torch.arange(owner.shape[1], device=self.device).view(1, 1, -1)
             is_source = (P_idx == owned_idx.unsqueeze(-1))  # (N, MAX_OWNED, P)
             target_mask = target_alive & slot_valid.unsqueeze(-1) & ~is_source
+            # Empire-size gate: own planets are legal reinforce targets only when the
+            # player owns >= reinforce_gate_min_planets. Enemy/neutral targets are never
+            # gated. Below the threshold the agent is attack-only (must expand first).
+            if self.reinforce_gate_min_planets > 0:
+                is_own = (target_owner == player)  # (N, MAX_OWNED, P)
+                # num_owned = true owned-planet count (uncapped, computed above)
+                gate_ok = (num_owned >= self.reinforce_gate_min_planets).view(-1, 1, 1)
+                # disallow own targets where the empire is too small
+                target_mask = target_mask & (~is_own | gate_ok)
+            # Forward-staging gate: an own (reinforce) target is legal only if it is
+            # closer to the nearest enemy planet than the launch source. Reinforcement
+            # flows rear→front (staging), never into a safe rear hoard — the outlet that
+            # floods symmetric self-play. Enemy/neutral targets are never constrained.
+            if self.reinforce_forward_only:
+                is_own = (target_owner == player)  # (N, MAX_OWNED, P)
+                enemy_planet = (owner != player) & (owner >= 0) & planet_alive  # (N, P)
+                dx = x.unsqueeze(2) - x.unsqueeze(1)   # (N, P, P): planet i vs planet j
+                dy = y.unsqueeze(2) - y.unsqueeze(1)
+                pdist = torch.sqrt(dx * dx + dy * dy)
+                INF = torch.finfo(pdist.dtype).max
+                d2e = torch.where(enemy_planet.unsqueeze(1), pdist,
+                                  torch.full_like(pdist, INF)).min(dim=2).values  # (N, P)
+                # gather source planet's enemy-distance per owned slot (owned_idx is
+                # clamped gather-safe; padded slots are dropped by slot_valid anyway)
+                src_d2e = torch.gather(d2e, 1, owned_idx)              # (N, MAX_OWNED)
+                forward_ok = d2e.unsqueeze(1) < src_d2e.unsqueeze(-1)  # (N, MAX_OWNED, P)
+                # envs with no live enemy planet: forward-staging is moot → don't constrain
+                forward_ok = forward_ok | (~enemy_planet.any(dim=1)).view(-1, 1, 1)
+                target_mask = target_mask & (~is_own | forward_ok)
         else:
             target_mask = target_alive & (target_owner != player) & slot_valid.unsqueeze(-1)
         # Per-env owned_count for the model
@@ -929,6 +978,8 @@ class VecTorchEnv:
             if self._fire_launch_count is not None:
                 self._fire_launch_count[:, owner_id] += can_fire.sum(dim=1).float()
                 self._reinforce_launch_count[:, owner_id] += (can_fire & is_reinforce).sum(dim=1).float()
+                is_neutral = use_target_decode & (target_owner < 0)  # neutral planet owner = -1
+                self._neutral_launch_count[:, owner_id] += (can_fire & is_neutral).sum(dim=1).float()
 
         # Compute launch positions (just outside planet radius along angle)
         start_x = src_x + torch.cos(angle) * (src_r + 0.1)
@@ -982,6 +1033,8 @@ class VecTorchEnv:
         self._reinforce_launch_count = torch.zeros(
             self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         self._fire_launch_count = torch.zeros(
+            self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
+        self._neutral_launch_count = torch.zeros(
             self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
 
     # ---------------------------------------------------------------------

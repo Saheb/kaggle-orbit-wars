@@ -5,7 +5,125 @@ empire-size-gated, instrumental behaviour — the #1 structural skill-gap vs the
 top tier. This is a fresh run with a redesigned reward model + one new action mask, NOT a
 resume of the rev55–57 reinforce lineage (all of which flooded).
 
-Status: **design locked, building the empire-size gate.** (2026-06-10)
+Status: **Tier-1 reward model locked + keystone built (2026-06-10).** The rev58/58b resume
+probes flooded; root cause re-diagnosed (`defense_coef` is the flood pump, not the cure); design
+pivoted to outcome-tied attribution (forward-staging mask + drop `defense_coef` + small aggressive
+pool). Forward-staging mask built + unit-tested. **p2rev1 run script READY** (`gpu_run_artifacts/p2rev1/`):
+snowball-BC warmstart + forward mask + drop defense + pool (lb1152 hammer + debatreya_1300 @0.25);
+target-head diagnostics added. Awaiting launch. See the Update below.
+
+---
+
+## Update (2026-06-10): the rev58/58b resume probes flooded → Tier-1 redesign
+
+Per the "try on rev38 5M FIRST" decision, we probed the locked design by **resuming rev38 5M**
+*before* the from-scratch run:
+- **rev58** (gate + `defense_coef 0.03` + fire-entropy 0.005, **`reinforce_cost 0`**) — the locked
+  design exactly. Started healthy (reinf 0.21 @32k, `Vμ +0.63`) then **drifted into a flood** by
+  ~400k (reinf 0.75, `p90` 408, `Vμ`→0).
+- **rev58b** (+ `reinforce_cost 0.001`, the §3 back-pocket lever) — flooded **earlier**, ~330k
+  (reinf 0.69, `p90` 357, `avgfleet` 175, `fire_frac` 0.83, `Vμ −1.25`); `clip` crept to 0.27.
+  Instance deleted.
+
+**Conclusions (both §3 bets refuted):**
+1. **The cost knob is dead** — `0` floods, `0.001` floods. Both endpoints of the back-pocket lever
+   are spent. Stop the cost debate.
+2. **The empire gate is orthogonal to the flood** — flooding sets in at owned≈8.7, well above the
+   min-3 gate. The gate only suppresses *early* reinforce; the flood is a mid/large-empire effect.
+3. **§4's "self-capping by construction" is false, and the cause is `defense_coef` itself.**
+   `defense_coef` rewards *holding* (avoiding production loss). In a symmetric self-play mirror the
+   enemy always threatens something → reinforcing-to-hold is always rewarded; losing a planet is
+   double-penalized (expansion + defense); attacking an equally-strong defended enemy is −EV. So the
+   reward-maximizing policy is **hold-everything-via-reinforce, never take a risky attack** — exactly
+   rev58's signature (reinf↑, `Vμ`↓ = not *winning*, just not losing planets). **The term §4
+   designated as "the reinforcement incentive" is the flood pump.**
+
+This is a *drift from a healthy gated start*, not a t=0 shock — i.e. a property of the reward
+**objective**, which is identical from scratch. The is_mine-untrained / "mature-equilibrium shock"
+story (§1) only ever explained the rev55 *t=0 spray*; it never explained the drift, and the drift
+recurs from scratch ⇒ a clean from-scratch run under the *unchanged* reward model would flood the
+same way.
+
+### Tier-1 design (locked) — outcome-tied attribution
+Reinforcement earns reward *only* through the outcomes it enables, and the rear-hoard outlet is
+removed structurally:
+- **Forward-staging mask (NEW — built + tested):** an own reinforce target is legal only if it is
+  closer to the nearest enemy planet than the source (`--reinforce-forward-only`). Reinforcement
+  flows rear→front; a safe rear hoard is impossible by construction. Matches the 66–70%
+  forward-staging in top-player replays. Implemented in `torch_env.py` (allow_reinforce mask
+  branch); test `tests/test_reinforce_mask.py::test_forward_staging_gate_blocks_rear_reinforcement`.
+- **Drop `defense_coef` (the pump):** reinforcement has no shaping reward at all — credited purely
+  via terminal + early_capture through GAE.
+- **Small aggressive pool (rev53b-proven):** held-out LB archetypes in the pool so hoarding actually
+  *loses games*. The asymmetry is what makes reinforcement instrumentally valuable; a pure symmetric
+  mirror yields either flood (with `defense_coef`) **or** passivity (without it), never useful
+  reinforcement. (c)-attribution alone removes the bad incentive but supplies no attack pressure →
+  the pool supplies it. Both halves are needed.
+- **Keep:** empire gate(3), garrison-floor(10), `expansion 0.03` (anti-passive, telescopes),
+  `speed 0.3`, early_capture anneal, fire-entropy 0.005. **Drop `reinforce_cost`** (dead).
+- **From-scratch** via snowball-BC warmstart (`seed_checkpoints/bc_snowball_pairwise15.pt`, aggressive
+  winners, 53% reinforce coverage); pool = lb1152 hammer + debatreya_1300 @ external-fraction 0.25.
+  Run script: `gpu_run_artifacts/p2rev1/run_remote_p2rev1.sh`.
+
+The heavier "full causal fleet attribution" (Tier 2: tag fleets, route reward from a later
+capture/defense back to the launch) is held in reserve if Tier 1 underperforms.
+
+---
+
+## Deferred track: target-head auxiliary supervision (measure first → threat head)
+
+**Hypothesis (2026-06-11):** the reward model trains `fire` ("should I act?") and `ship` ("how
+much?") adequately — both get near-immediate signal — but the `target` head ("where?") has a
+long-horizon credit-assignment problem: most targets only reveal their value many steps later.
+Reinforcement makes this acute: "which threatened frontline do I reinforce" is a pure target-head
+decision with no established competence. So the reward may value good *outcomes* without efficiently
+training the *where* head.
+
+**Principle — add auxiliary PREDICTION, never target reward.** Two hard constraints from the project's
+own graveyard:
+- **No target-specific reward** ("+reward for high-prod / nearest / weak-enemy targets"). rev49
+  (production-weighted capture) → carpet-bomb; rev47/48 (activity) → token-fire; rev41–45
+  (srcs-penalty) → fire=0 Nash. Reward-shaping the target head hard-codes degenerate heuristics.
+- **No KL toward a heuristic target distribution** (the tempting "counterfactual `softmax(target_score)`"
+  idea). This is the **rev54 crater**: BC-seeding the target head toward a strong heuristic set
+  own-target top1 6.3%→53.8% and passed every label gate, but held-out win-rate **collapsed (Ajay
+  4.17%→0%, eliminated every game)** — the shared `target_scorer` got dragged toward the heuristic's
+  enemy/neutral targeting and destroyed our aggressive winning play. **We win by targeting differently
+  from the heuristics; copying their targets craters us. Label-accuracy is a misleading proxy.**
+
+The safe form is **self-supervised prediction heads** (threat / future-owner / opportunity): they
+shape the shared transformer representation, they do NOT bias the policy toward anyone's target
+choice.
+
+**Why MEASURE before building.** It is not established that the target head is the bottleneck. The
+win-mechanism analysis says wins = aggression→decisive elimination, losses = passivity (a *fire-rate*
+lever), and the Ajay gap is **"conversion *timing*, not routing"** — i.e. attack targeting is roughly
+fine. The head's weakness, if any, is in **reinforcement** targeting specifically. So we instrument
+first and let p2rev1 tell us.
+
+**Diagnostics added (p2rev1 emits these — done 2026-06-11):**
+- `H_tgt` (target entropy) — the "is the where-head uniform/undertrained" canary.
+- target-owner share among launches: `reinf` (own) + `tgt n/e` (neutral/enemy) on the diag line;
+  `policy/target_share_*` + `entropy/target` in W&B.
+- (already present) `reinforce_rate` read by empire size.
+- **Bad signs to watch:** `H_tgt` stays high while fire looks fine; own-targeting goes uniform once
+  the empire gate opens; reinforces are mostly rear/self-loop (the forward mask should prevent this —
+  if not, a build bug); captures happen but overkill is huge.
+- **Deferred deeper diagnostics** (need multi-step fleet-outcome tracking, so they come WITH the
+  threat-head build, not before): frontline-reinforce-usefulness (fraction of reinforces arriving at
+  planets later attacked/threatened), capture-success-per-fleet, overkill/underkill ratio.
+
+**Decision gate → if undertrained, build the THREAT head first (p2rev2), nothing else.** Per owned
+planet, predict P(lost within K steps), self-supervised from the trajectory. It is the
+highest-value / lowest-risk head and directly serves reinforcement target selection (reinforce the
+planet you predict you'll lose). future-owner is costlier; `opportunity` overlaps the existing
+roi/enemy_contest features. Keep any aux weight modest and annealable — teach geometry/economics,
+don't let it override RL.
+
+**Build landmine to bank now:** per-planet prediction labels require looking ahead in the trajectory
+*and* handling that owned-planet slots reorder by planet array index on every capture/loss step —
+the exact corruption that bit the VDN per-planet GAE work (scatter in planet-id space, not slot
+space). Budget for it.
 
 ---
 
@@ -142,6 +260,10 @@ entropy_coef_fire:   0.005    # NOT 0.05 — see §4
 ```
 
 ### The two bets (overturn the rev57 approach, locked)
+> ⚠️ **Bet #1 REFUTED — see the 2026-06-10 Update at the top.** rev58 (cost 0) AND rev58b (cost
+> 0.001) both flooded; `defense_coef` itself is the pump. Tier-1 drops `defense_coef`. Kept below
+> for history.
+
 1. **`reinforce_cost = 0`** — the flood is not a reward problem; rely on the gate + `defense_coef`
    + low fire-entropy. Keep the cost in the back pocket only.
 2. **`speed_coef 0.3` replaces `win_margin 0.5`** — time-to-victory rewards efficient snowball wins;
@@ -152,9 +274,35 @@ Losing a 5-production planet hits both `expansion_coef` (Δlead = −10) and `de
 (−5·coef). Accepted: holding is the behaviour we specifically need to recover. **If the agent
 turns too conservative, lower `defense_coef` first — do NOT add a reinforce tax.**
 
+### Anneal policy
+
+We only anneal behavioural *kickstarts*, not persistent strategic gradients.
+
+- **`early_capture_coef` — annealed** (frac 0.67). It is an exploration/kickstart term that
+  teaches early expansion. Once the policy has learned to launch and capture, a large
+  planet-count spike would distort late-game behaviour. (Also has an intra-episode `exp` decay.)
+- **`expansion_coef` — stays on.** It is a production-control gradient (telescoping → low
+  distortion) and fixes self-play collapse from passive losing policies.
+- **`defense_coef` — stays on for the full run.** It is the outcome-tied reinforcement
+  incentive: reinforcement has NO direct reward and earns value only by preventing production
+  loss. Annealing defense would remove the late-training reason to reinforce and risks collapse
+  back to the no-reinforce attractor. **If reinforcement is too conservative or too frequent,
+  reduce `defense_coef` magnitude — do NOT anneal it.**
+- **`speed_coef` — stays on.** It shapes decisive wins, not action choice directly.
+
+No anneal mechanism exists on `expansion`/`defense`/`speed` (constant by construction); only
+`early_capture` has the anneal flag — so the default config already implements this. The thing to
+guard is never adding an anneal to `defense`.
+
 ---
 
 ## 4. The key design principle: reinforcement has NO reward term
+
+> ⚠️ **The "self-capping by construction" claim below was REFUTED by rev58/58b (see top Update).**
+> `defense_coef` is the flood *pump*, not the cure: in a symmetric mirror, hold-everything-via-
+> reinforce dominates risky attacking. Tier-1 drops `defense_coef` and adds a forward-staging mask +
+> aggressive pool. The "reinforcement has no *direct* reward" principle survives; the "masks +
+> `defense_coef` make it self-cap" reasoning does not. Kept below for context.
 
 Reinforcement is shaped entirely by **two hard masks on the action space**, never by a reward:
 
@@ -199,8 +347,31 @@ gate. (Eval/export parity in `action_mask.py` is a follow-up to add at export ti
 
 ## 6. Monitoring / dials
 
+### Training reward ≠ selection metric (keep selection pure)
+
+The shaped reward exists for the *gradient*. Champion/checkpoint selection runs on *outcomes
+only* — never on shaped reward (confounded by expansion/defense/speed), `Vμ` (not a collapse
+signal), or the Ajay panel alone (guardrail, not objective). This is the rev15 lesson:
+`reinforce_rate` climbed while win-rate *declined*, and reading the behaviour profiler as
+progress picked the wrong checkpoint.
+
+- **Decider:** head-to-head **win-rate / Elo** (the checkpoint ladder vs prior milestones +
+  external anchors) → ultimately **LB**. This and only this picks the champion.
+- **Diagnostics (explain & health-check, never override):** `reinforce_rate` (0.3–0.6 by empire
+  size), frontline-staging share, game length (decisive = shorter wins), capture rate,
+  `clip_frac`. A checkpoint with great reinforce metrics but lower win-rate **loses**.
+
 Primary dial = the `reinforce_rate` training metric (added rev57b; bias=0 offline read via
 `behavior_analysis.py` is decision-grade).
+
+**Caveat — `reinforce_rate` is partly mechanical.** Target choice at model init is ~uniform over
+legal targets (measured 1.01× vs uniform — no architectural own-bias), so the aggregate
+`reinforce_rate` co-moves with the board's own-fraction of legal targets, which rises as
+neutrals/enemies are consumed (late-game, large empires). A high aggregate rate is therefore NOT
+by itself a flood signal — read it **by empire size** and alongside **volume** (`avgfleet`, `p90`
+ship counts) and win-rate. The flood is high rate **+** exploding volume (rev57: `p90` 368), not a
+high rate per se. (Smoke @10k steps, untrained: reinf 0.67 at owned~6.8 with `p90`~190 = mechanical,
+not flood.)
 
 | Watch | Healthy | Action if not |
 |---|---|---|
