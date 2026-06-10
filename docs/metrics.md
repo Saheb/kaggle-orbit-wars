@@ -34,7 +34,7 @@ approximated by win-rate vs a fixed held-out panel. (Literature note: PPO implem
 | `SPS` | env steps/sec (throughput) | L4 ~600, H200 ~600–3400 (externals cap it) | ops only |
 | `EV` | explained variance of the value head (critic accuracy) | ~0.85–0.95 | **EV dropping = critic collapse** (trust) |
 | `KL` | approx KL between old/new policy this update | <0.02 healthy; target 0.05 | >0.05 sustained = unstable updates → halve LR |
-| `clip` | clip_frac (fraction of ratios clipped); `fire:` = per-slot fire rate | ~0.15–0.25 | creeping →0.32 = trust-region strain → halve LR |
+| `clip` | clip_frac (fraction of ratios clipped); `fire:` = per-slot fire rate | **≤0.25 healthy** | **HARD THRESHOLD 0.25 → halve LR** (>0.28 actively degrades; do NOT wait for 0.32). Rev54 v2 sat at ~0.3+ most of its length → late checkpoints DEAD (14.68M ~0% vs Ajay, 0.4% vs 1300); only <0.25-clip early checkpoints healthy. Raising entropy 0.02→0.05 pushes clip ~0.20→~0.30 — pair higher entropy with lower LR. |
 | `H_fire` | fire-head entropy | ~0.1–0.25 with entropy-coef 0.05 | <0.07 = deterministic fire collapse |
 | `V_loss` | value loss | <1 settled; spikes on resume/re-warm | explosion = critic divergence |
 | `r_p0 / r_p1` | mean reward of seat 0 / seat 1 this rollout | seat-asymmetric, oscillates | NOT a quality signal (zero-sum + shaping) |

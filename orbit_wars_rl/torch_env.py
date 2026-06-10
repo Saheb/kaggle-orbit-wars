@@ -84,8 +84,14 @@ class VecTorchEnv:
         handicap_ships: int = 5,
         ssdr_frac: float = 0.0,
         ssdr_max_steps: int = 20,
+        allow_reinforce: bool = False,
     ):
         self.num_envs = num_envs
+        # Reinforcement: when True, own planets (except the launch source) are LEGAL
+        # targets — ships arriving at a friendly planet add to its garrison (physics
+        # already implemented in step()). EDA of top players: ~57% of fleets reinforce;
+        # beginner agents 0%. Default False = attack-only (backward-compatible).
+        self.allow_reinforce = bool(allow_reinforce)
         self.num_players = num_players
         self.episode_steps = episode_steps
         self.device = torch.device(device)
@@ -555,11 +561,19 @@ class VecTorchEnv:
         fire_mask = slot_valid & (max_ships >= 1.0)
         # Angle mask: all angles legal (no sun-blocking for now)
         angle_mask = torch.ones(N, MAX_OWNED, NUM_ANGLE_BINS, dtype=torch.bool, device=self.device)
-        # Target mask: target-conditioned rollouts should sample a live planet
-        # that is not already ours. Per-source mask keeps padded owned slots off.
+        # Target mask: target-conditioned rollouts sample a live planet. Per-source
+        # mask keeps padded owned slots off. With reinforcement OFF (default) only
+        # non-own planets are legal; with reinforcement ON, own planets are legal too
+        # (friendly arrival reinforces the garrison — see step()), EXCLUDING the launch
+        # source planet itself (degenerate self-launch).
         target_owner = owner.unsqueeze(1).expand(-1, MAX_OWNED, -1)
         target_alive = planet_alive.unsqueeze(1).expand(-1, MAX_OWNED, -1)
-        target_mask = target_alive & (target_owner != player) & slot_valid.unsqueeze(-1)
+        if self.allow_reinforce:
+            P_idx = torch.arange(owner.shape[1], device=self.device).view(1, 1, -1)
+            is_source = (P_idx == owned_idx.unsqueeze(-1))  # (N, MAX_OWNED, P)
+            target_mask = target_alive & slot_valid.unsqueeze(-1) & ~is_source
+        else:
+            target_mask = target_alive & (target_owner != player) & slot_valid.unsqueeze(-1)
         # Per-env owned_count for the model
         owned_count = slot_valid.long().sum(dim=1).tolist()
 
@@ -850,9 +864,15 @@ class VecTorchEnv:
             tgt = self.planets.gather(1, target_gather)
             target_owner = tgt[:, :, 1].long()
             target_alive = self.planet_alive.gather(1, target_idx)
+            if self.allow_reinforce:
+                # Own planets are valid targets (friendly arrival reinforces the
+                # garrison); only the launch source planet itself is invalid.
+                tgt_ok = target_alive & (target_idx != owned_idx)
+            else:
+                tgt_ok = target_alive & (target_owner != owner_id)
             target_valid = torch.where(
                 use_target_decode,
-                target_alive & (target_owner != owner_id),
+                tgt_ok,
                 torch.ones_like(target_alive, dtype=torch.bool),
             )
             target_angle = self._target_intercept_angle(src_x, src_y, src_r, ship_count, target_idx)

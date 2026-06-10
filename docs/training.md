@@ -63,6 +63,9 @@
 | **Rev51** | Resume rev38 lineage, clean self-play. (Diagnostic run for the target-head bug.) | Establish clean self-play baseline with new metrics. | **KL stuck ~2 regardless of LR** — LR-independent, so not an optimiser problem. Diagnosed as the **target-head pairwise-storage bug**: rollout storage gated `pairwise_features` on `aux_roi_coef>0` (Rev49 OOM fix), so when aux was off the update forward got zeroed pairwise → uniform target head → KL blowup. | Pairwise-storage bug (fixed) | — |
 | **Rev52** | Clean self-play, entropy 0.05, target-head bug fixed. | Confirm entropy=0.05 provides collapse-resistance (not "null"). | Ran to **7M with no carpet-bomb / no fire=0 collapse** — entropy 0.05 is the stabiliser, keep it. Baseline for the selectivity experiment. | Baseline established | — |
 | **Rev53b** | **Heuristic-pool selectivity** + fixed intercept aimer + early_capture=0 + entropy 0.05. Pool mix 25% current-self / 60% snapshots / 15% heuristics (1166 ladder). Resume rev38 lineage. GCP L4. | Let the agent learn selective targeting from the 1166 heuristic ladder instead of reward-engineering it. | **Cracked the long-standing Ajay ~3% ceiling.** Held-out 1166: 50→**~62%**. Ajay: 3.9→**9.0% @ 9.4M eff**, **10.9% @ 13.6M eff** (best Ajay panel ever, vs prior 3.1% record). Wins are decisive eliminations, not timeout luck. clip stable 0.23–0.28, KL <0.025, EV ~0.9. | Still running (this session) | **TBD** |
+| **Rev54 (v1)** | Resume **rev38 5M** + 3 heuristic-hammer externals (lb1084/1138/1152) @0.25 + **early_capture training-wide cosine anneal** (0.3→0, frac 0.67) + metric cleanup. LR 1e-4, entropy 0.05. | Diversity from the heuristic ladder + remove the shaping liability *over training* (dense→sparse anneal: shaping bootstraps competence but creates a degenerate Nash if kept). | Ran to 1M, then **mistakenly killed on a false collapse alarm** (Vμ −0.02 + avgfleet + srcs_multi — all non-signals, see `docs/metrics.md`). Held-out eval proved the 1M **HEALTHY: 5.5% Ajay** (2× rev38's 2.7%) + **4.7% vs debatreya_1300 planner** — **best Ajay checkpoint to date.** Submitted 1M to LB (sub 53527873, 2026-06-10). | False-positive collapse alarm (non-signals) | **1M submitted (pending)** |
+| **Rev54 v2** | Resume the **Rev54 1M** + DROP the 3 heuristic hammers, ADD **debatreya_1300 @0.15 only** (1300-LB forward-sim planner, Producer/Ajay archetype) + entropy 0.05 + early_capture anneal kept. LR 1e-4. GCP L4, ran 15M. | The 1300 planner is the diversity archetype we lack and can't be out-sprayed → real pressure *without* the over-fire reward loop that beatable aggressive bots create. Target LB > 993.9. | **clip_frac sat ~0.3+ for most of the run** (entropy 0.05 + LR 1e-4). **Late checkpoints regressed to ~0% Ajay / 0.4% 1300**; early <0.25-clip checkpoints stayed healthy. **Lesson: pair higher entropy with lower LR** (entropy 0.05 pushes clip ~0.30). | clip>0.3 → late-run policy degradation | — |
+| **Rev55** | Resume **Rev54 1M** + `--allow-reinforce` (own planets become legal targets — **the reinforcement lever**). Keep v2 diversity config (1300 @0.15, early_capture anneal) but **LR 2.5e-5** and **entropy 0.05→0.03**. GCP L4. | Top-player EDA: Vadasz **reinforces ~57% of launches** (sends to own planets); our agents do **0%** (own planets were masked out of targets). Structural lever to break the ceiling — physics already supports it. | **Over-fire collapse in <400K steps** — hard t=0 unmask is too violent. `Vμ` +1.17→−0.07, `Rμ` +1.07→−0.28, `fire_frac` 0.40→0.77, `avgfleet` 52→138, `p90` 104→346, clip 0.04→0.29. Cause: the target head's `is_mine`-input weight was never trained (own-targets masked all of rev54's lineage), so at t=0 own planets are scored on generic attractiveness → policy sprays into them (safe-fire). Killed; instance deleted. | Hard-unmask shock; cutting entropy 0.05→0.03 removed collapse-resistance | — |
 
 **What we know:**
 - **Rev31 First Strike**: opening paralysis fixed, 918.8 LB record. Was a band-aid for symmetric-start problem.
@@ -88,8 +91,28 @@
 - **GCP instance naming**: use `--name orbit-wars-training` (default). After training ends, delete immediately — instance left running costs ~$1.13/hr even with no jobs. Rev38 instance ran idle 19+ hrs before discovered.
 - Export requires `--target-decode` for Phase 1.
 
-**LB scores:** Rev38 5M + fixed aimer = **978.3** ← record | Rev38 5M = 950.5 | Rev38 6M = submitted (Ajay 3.1%) | Rev32b 6M = 872.4 | Rev31 10M = 918.8 | Rev30 11M = 866.3 | Rev28 27M = 843.9 | Rev53b 13.6M (Ajay 10.9%) = submitted 2026-06-08 (53471121, pending)
-**Target:** Top 10 needs ~1153. Gap = ~175 points.
+**LB scores:** Rev38 5M + fixed aimer = **967.6** ← record (drifted from 978.3) | Rev38 5M = 950.5 | Rev53b 13.6M (Ajay 10.9%) = **953.2** | Rev38 6M = submitted (Ajay 3.1%) | Rev32b 6M = 872.4 | Rev31 10M = 918.8 | Rev30 11M = 866.3 | Rev28 27M = 843.9 | Rev54 1M (Ajay 5.5%) = submitted 2026-06-10 (53527873, pending)
+**Target:** Top 10 needs ~1153. Gap = ~185 points.
+
+---
+
+## Current State (2026-06-10)
+
+**Active run:** **Rev55** on GCP L4 (`orbit-wars-training`, asia-south1-b) — the **reinforcement lever** (`--allow-reinforce`: own planets become legal targets). Resumed from the Rev54 1M; early (~0.26M steps as of writing). Watcher syncing checkpoints/logs to `gpu_run_artifacts/rev55/`. Memory: `project_reinforcement_lever`.
+
+**What landed this session:**
+- **Rev54 1M is our best Ajay checkpoint to date (5.5% Ajay / 4.7% debatreya_1300)** — exported (`--target-decode` + fixed aimer) and **submitted to LB** (sub 53527873, pending). Came from Rev54 v1 (rev38 5M + 3 heuristic externals @0.25 + early_capture training-wide anneal); the run was *mistakenly* killed at 1M on a false collapse alarm (Vμ/avgfleet/srcs_multi — all non-signals), but held-out eval proved the 1M healthy.
+- **Rev54 v2 negative result:** resuming the 1M with the 1300 planner @0.15 at LR 1e-4 + entropy 0.05 let **clip_frac sit ~0.3+** for most of 15M; late checkpoints regressed to ~0% Ajay. **Standing lesson: entropy 0.05 pushes clip toward 0.30 — pair it with a lower LR.** Rev55 applies this (LR 2.5e-5, entropy 0.03).
+
+**LB reality check (scores drift as games play out):** the rev38 5M + aimer record now reads **967.6** (was logged 978.3/993.9) and rev53b reads **953.2** (was 933.0). Judge Rev54 1M against these current numbers when it scores.
+
+### Reinforcement lever — rev55 collapse + BC-seed dead end → curriculum (2026-06-10)
+
+Pursuing reinforcement (`--allow-reinforce`: own planets legal targets; top players reinforce ~57%, we do 0%). Two approaches failed before landing on the curriculum:
+
+1. **Hard unmask (rev55)** — over-fire collapse in <400K steps (see run table). The target head's `is_mine`-input weight was never trained (own-targets masked all of rev54's lineage), so unmasking at t=0 lets the policy spray into own planets.
+2. **BC-seed the target head — looked great, cratered play.** `ajay_bc_1k_v2.pkl` is pairwise-15 with **55,448 own-target labels** (directly usable). Target-head-only BC on rev54 1M set own-target top1 **6.3%→53.8%** and passed every BC/label gate — but held-out WR (reinforce off) **collapsed: Ajay 4.17%→0%, avg material 760→0** (eliminated every game). The shared `target_scorer` got dragged toward Ajay's enemy/neutral targeting (label-agreement *rose*), which **destroyed rev54's aggressive winning play.** ⇒ **We win by targeting differently from Ajay; copying its targets craters us. Label-accuracy is a misleading proxy** (Zach/srcs_multi trap again). The held-out WR gate caught it pre-GPU.
+3. **Curriculum (chosen)** — annealed negative bias on own-target logits *only* (`bias·is_mine`, → 0 over `--reinforce-anneal-frac`). Leaves rev54's trained enemy/neutral target head **untouched** (the thing BC broke); RL learns the reinforce value from reward as own-targets phase in. No t=0 shock, no broken attack play. Resume rev54 1M, entropy 0.05, LR 5e-5. Memory: `project_reinforcement_lever`.
 
 ---
 
@@ -130,7 +153,7 @@ Heuristic-pool selectivity (15% 1166-ladder in pool) + fixed aimer + early_captu
 
 vs the prior all-time Ajay record of 3.1% (Rev35c/Rev38). clip stable 0.23–0.28, KL <0.025 (mostly <0.012), EV ~0.9 — healthy throughout.
 
-**Standing intervention authority for the live run:** if `clip_frac` creeps toward ~0.32, or KL>0.05, or H_fire<0.07, **halve LR** (intervention, not kill). Night monitor polls every 10min and trips on those thresholds.
+**Standing intervention authority for the live run:** if `clip_frac` crosses **0.25** (hard threshold — >0.28 actively degrades the policy, confirmed Rev54 v2: it sat at ~0.3+ for most of 15M and the late checkpoints regressed to ~0% vs Ajay / 0.4% vs 1300 while early <0.25-clip checkpoints stayed healthy), or KL>0.05, or H_fire<0.07, **halve LR** (intervention, not kill). Don't wait for 0.32. Note: raising entropy (0.02→0.05) pushes clip_frac up (~0.20→~0.30) — pair higher entropy with lower LR.
 
 ---
 

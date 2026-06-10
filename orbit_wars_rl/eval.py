@@ -65,6 +65,8 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
         cfg.model.value_head_in = int(sd["value_fc1.weight"].shape[1])
 
     action_decode = str(ckpt_cfg.get("action_decode", "angle"))
+    # Reinforcement: eval must mask targets the SAME way the checkpoint was trained.
+    cfg.model.allow_reinforce = bool(ckpt_cfg.get("allow_reinforce", False))
     return sd, action_decode
 
 
@@ -72,7 +74,9 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                    fire_threshold: float = 0.5, sample: bool = False,
                    ship_bin_mode: str = "absolute",
                    target_decode: bool = False,
-                   target_sanity_penalty: float = 0.0):
+                   target_sanity_penalty: float = 0.0,
+                   reserve_frac: float = 0.0,
+                   allow_reinforce: bool = False):
     """Return a kaggle_environments-compatible agent function wrapping the model.
 
     sample=True uses Bernoulli/Categorical sampling instead of threshold/argmax —
@@ -129,6 +133,8 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 sample=sample,
                 ship_bin_mode=ship_bin_mode,
                 target_sanity_penalty=target_sanity_penalty,
+                reserve_frac=reserve_frac,
+                allow_reinforce=getattr(model, "allow_reinforce", allow_reinforce),
             )
 
         raise NotImplementedError(
@@ -326,11 +332,19 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         print("Checkpoint action_decode=target  →  enabling target_decode automatically")
 
     model = EntityTransformer(cfg.model).to(device)
+    # Carry the checkpoint's reinforcement setting onto the model so the agent's
+    # target masking matches training (build_agent_fn reads it off the model).
+    model.allow_reinforce = bool(getattr(cfg.model, "allow_reinforce", False))
+    if model.allow_reinforce:
+        print("Reinforcement: ON (own planets are legal targets)")
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     allowed_missing = {"target_head.weight", "target_head.bias"}
     bad_missing = [k for k in missing if k not in allowed_missing]
-    if bad_missing or unexpected:
-        raise RuntimeError(f"Checkpoint/model mismatch: missing={bad_missing}, unexpected={unexpected}")
+    # VDN per-planet value head (Stage 2) is never used at eval — ignore it if the
+    # checkpoint carries it but this (eval-time) model doesn't.
+    bad_unexpected = [k for k in unexpected if not k.startswith("value_pp_")]
+    if bad_missing or bad_unexpected:
+        raise RuntimeError(f"Checkpoint/model mismatch: missing={bad_missing}, unexpected={bad_unexpected}")
     model.eval()
 
     if panel:

@@ -64,6 +64,7 @@ _MIN_SHIP_BIN = {min_ship_bin}
 _FIRE_THRESHOLD = {fire_threshold}
 _SHIP_BIN_MODE = {ship_bin_mode}
 _TARGET_DECODE = {target_decode}
+_ALLOW_REINFORCE = {allow_reinforce}
 
 
 # --- Embedded parameters (base64-encoded torch state_dict) ---
@@ -293,6 +294,7 @@ def agent(obs, cfg=None):
             obs, player,
             fire_threshold=_FIRE_THRESHOLD,
             ship_bin_mode=_SHIP_BIN_MODE,
+            allow_reinforce=_ALLOW_REINFORCE,
         )
     else:
         raise NotImplementedError(
@@ -426,6 +428,12 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     action_mask_code = _read_module_body(os.path.join(src_dir, "action_mask.py"))
 
     m = cfg.model
+    # Auto-detect reinforcement from the checkpoint so the exported mask matches how
+    # the policy was trained (baked into the checkpoint config by ppo.state_dict).
+    _ckpt = _load_checkpoint(checkpoint_path)
+    allow_reinforce = bool(_ckpt.get("config", {}).get("allow_reinforce", False)) if isinstance(_ckpt, dict) else False
+    if allow_reinforce:
+        print("  Reinforcement: ON (own planets are legal targets)")
     agent_code = AGENT_TEMPLATE.format(
         num_angle_bins=NUM_ANGLE_BINS,
         num_ship_bins=m.num_ship_bins,
@@ -443,6 +451,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         fire_threshold=fire_threshold,
         ship_bin_mode=repr(m.ship_bin_mode),
         target_decode=target_decode,
+        allow_reinforce=allow_reinforce,
         params_b64=params_b64,
         features_code=features_code,
         action_mask_code=action_mask_code,

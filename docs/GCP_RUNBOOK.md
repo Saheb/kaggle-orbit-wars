@@ -120,7 +120,7 @@ gcloud compute ssh $INSTANCE --zone=$ZONE -- \
 # The log file is the ground truth.
 sleep 30
 gcloud compute ssh $INSTANCE --zone=$ZONE -- \
-  "ls -t ~/orbit_wars_rl/gpu_run_artifacts/*/logs/train_gpu_phase1_*.log 2>/dev/null | head -1 | xargs grep '^iter\|Resumed\|Error\|Traceback' 2>/dev/null | head -5"
+  "ls -t ~/orbit_wars_rl/train_gcp_phase1_*.log 2>/dev/null | head -1 | xargs grep '^iter\|Resumed\|Error\|Traceback' 2>/dev/null | head -5"
 ```
 
 ---
@@ -137,7 +137,7 @@ gcloud compute ssh $INSTANCE --zone=$ZONE -- \
 ### Sync checkpoints locally
 ```bash
 SSH_ALIAS="$INSTANCE.$ZONE.orbit-wars-rl"   # set by gcloud compute config-ssh
-rsync -az "${SSH_ALIAS}:~/orbit_wars_rl/checkpoints/" \
+rsync -azL "${SSH_ALIAS}:~/orbit_wars_rl/checkpoints/" \
   gpu_run_artifacts/hellburner_spot/checkpoints/
 ```
 
@@ -165,12 +165,12 @@ INSTANCE=orbit-wars-training; ZONE=us-central1-b
 
 # 1. Pull all checkpoints first
 SSH_ALIAS="$INSTANCE.$ZONE.orbit-wars-rl"
-rsync -az "${SSH_ALIAS}:~/orbit_wars_rl/checkpoints/" \
+rsync -azL "${SSH_ALIAS}:~/orbit_wars_rl/checkpoints/" \
   gpu_run_artifacts/hellburner_spot/checkpoints/
 echo "checkpoints: $(ls gpu_run_artifacts/hellburner_spot/checkpoints/*.pt | wc -l)"
 
 # 2. Pull training log
-rsync -az --include='train_gcp_*.log' --exclude='*' \
+rsync -azL --include='train_gcp_*.log' --exclude='*' \
   "${SSH_ALIAS}:~/orbit_wars_rl/" \
   gpu_run_artifacts/hellburner_spot/logs/
 

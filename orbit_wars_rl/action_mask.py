@@ -204,8 +204,15 @@ def _target_intercept_angle(src_planet, target_planet, ships: int, obs) -> float
 def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, obs, player,
                                fire_threshold=0.5, sample: bool = False,
                                ship_bin_mode: str = "absolute",
-                               target_sanity_penalty: float = 0.0):
-    """Convert policy outputs to actions using target planet logits for aiming."""
+                               target_sanity_penalty: float = 0.0,
+                               reserve_frac: float = 0.0,
+                               allow_reinforce: bool = False):
+    """Convert policy outputs to actions using target planet logits for aiming.
+
+    allow_reinforce: must MATCH the env's setting the checkpoint was trained with.
+    False (default) = own planets are illegal targets. True = own planets are legal
+    (reinforcement), only the launch source planet is excluded.
+    """
     planets = obs["planets"]
     owned_indices = masks["owned_indices"].cpu().numpy()
     max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
@@ -219,7 +226,9 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         if pidx >= len(planets):
             continue
         for tidx, tgt in enumerate(planets[:target_logits.shape[-1]]):
-            if int(tgt[1]) == player or int(tgt[0]) == int(planets[pidx][0]):
+            is_source = int(tgt[0]) == int(planets[pidx][0])
+            is_own = int(tgt[1]) == player
+            if is_source or (is_own and not allow_reinforce):
                 target_logits[:, slot, tidx] = -1e9
 
     if target_sanity_penalty > 0.0:
@@ -257,10 +266,17 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         tidx = int(target_indices[slot])
         if pidx >= len(planets) or tidx >= len(planets):
             continue
-        if int(planets[tidx][1]) == player or int(planets[pidx][0]) == int(planets[tidx][0]):
+        is_source = int(planets[pidx][0]) == int(planets[tidx][0])
+        is_own_target = int(planets[tidx][1]) == player
+        if is_source or (is_own_target and not allow_reinforce):
             continue
 
         ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
+        # Reserve cap (probe): keep at least reserve_frac of the source planet's
+        # current ships at home — forces a defensive garrison instead of
+        # committing the whole army forward. reserve_frac=0.0 = no change.
+        if reserve_frac > 0.0:
+            ships = min(ships, int(planets[pidx][5] * (1.0 - reserve_frac)))
         if ships <= 0 or planets[pidx][5] < ships:
             continue
 

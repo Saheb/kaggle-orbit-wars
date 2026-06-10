@@ -322,6 +322,11 @@ def train(args):
     print(f"Entropy coefs: fire={cfg.ppo.entropy_coef_fire}, target={cfg.ppo.entropy_coef_target}, "
           f"ships={cfg.ppo.entropy_coef_ships} | max_grad_norm={cfg.ppo.max_grad_norm}")
     print(f"Action decode: {args.action_decode}")
+    print(f"Reinforcement (own planets as targets): {'ON' if args.allow_reinforce else 'off'}")
+    if args.allow_reinforce and args.reinforce_anneal_frac > 0.0:
+        print(f"Reinforcement CURRICULUM: own-target logit bias {args.reinforce_bias_init}→0 over "
+              f"{args.reinforce_anneal_frac * args.total_steps:,.0f} steps "
+              f"(frac {args.reinforce_anneal_frac}), then 0 — enemy/neutral targeting untouched")
     print(f"Win margin coeff: {args.win_margin_coeff}")
     print(f"Shaping coeff: {args.shaping_coef}")
     print(f"Expansion coeff: {args.expansion_coef}")
@@ -371,11 +376,13 @@ def train(args):
     if args.min_ship_bin is not None:
         cfg.model.min_ship_bin = args.min_ship_bin
     cfg.model.action_decode = args.action_decode
+    cfg.model.allow_reinforce = args.allow_reinforce
 
     env = VecTorchEnv(num_envs=args.num_envs, num_players=2,
                       device=device, episode_steps=500,
                       ship_bin_mode=cfg.model.ship_bin_mode,
                       action_decode=args.action_decode,
+                      allow_reinforce=args.allow_reinforce,
                       win_margin_coeff=args.win_margin_coeff,
                       shaping_coef=args.shaping_coef,
                       expansion_coef=args.expansion_coef,
@@ -780,6 +787,14 @@ def train(args):
             ec_decay_steps = args.early_capture_anneal_frac * args.total_steps
             ec_frac = min(total_env_steps / max(ec_decay_steps, 1), 1.0)
             env.early_capture_coef = args.early_capture_coef * 0.5 * (1.0 + math.cos(math.pi * ec_frac))
+        # Reinforcement curriculum: anneal the own-target logit bias init→0 over
+        # reinforce_anneal_frac of training. model.forward reads reinforce_logit_bias
+        # in BOTH the rollout below and this iter's PPO update → consistent PPO ratio.
+        # Only the learning `model` is biased; pool/opponent models keep the 0.0 default.
+        if args.allow_reinforce and args.reinforce_anneal_frac > 0.0:
+            rb_decay_steps = args.reinforce_anneal_frac * args.total_steps
+            rb_frac = min(total_env_steps / max(rb_decay_steps, 1), 1.0)
+            model.reinforce_logit_bias = args.reinforce_bias_init * (1.0 - rb_frac)
         # Reset train_mask: all True by default, mark opp's slots False below
         storage["train_mask"].fill_(True)
 
@@ -1311,6 +1326,22 @@ if __name__ == "__main__":
                              "angle keeps the legacy free angle-bin action; target "
                              "samples target_logits and converts the target planet "
                              "to an intercept angle in VecTorchEnv.")
+    parser.add_argument("--allow-reinforce", action="store_true",
+                        help="Make OWN planets legal targets (reinforcement) — ships "
+                             "arriving at a friendly planet add to its garrison. Top "
+                             "players reinforce ~57%% of launches; default agents 0%%. "
+                             "Saved in the checkpoint so eval/export mask the same way. "
+                             "Off by default (attack-only, backward-compatible).")
+    parser.add_argument("--reinforce-bias-init", type=float, default=-8.0,
+                        help="Reinforcement CURRICULUM: initial additive bias on OWN-target "
+                             "logits (negative suppresses reinforcement early, ≈ a soft mask). "
+                             "Annealed linearly → 0 over --reinforce-anneal-frac. Only active "
+                             "with --allow-reinforce AND --reinforce-anneal-frac > 0.")
+    parser.add_argument("--reinforce-anneal-frac", type=float, default=0.0,
+                        help="Fraction of --total-steps over which the own-target bias anneals "
+                             "from --reinforce-bias-init → 0 (then stays 0). 0 = no curriculum "
+                             "(hard unmask at t=0 — caused the rev55 over-fire collapse). "
+                             "Suggested: 0.3.")
     parser.add_argument("--win-margin-coeff", type=float, default=0.0,
                         help="Terminal bonus coefficient α: winner gets +1 + α*(my_score/total_score). "
                              "0 = pure ±1 reward (default). Suggested start: 0.5.")
