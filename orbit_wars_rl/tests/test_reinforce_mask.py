@@ -77,6 +77,99 @@ def test_action_mask_eval_reinforce_toggle():
     assert abs(a_off - np.pi / 2) < 0.4, f"reinforce OFF should aim north (~pi/2), got {a_off}"
 
 
+def test_garrison_floor_vetoes_drain_but_spares_attacks():
+    """#1 Garrison floor: a REINFORCE launch that would drain its source below the
+    floor is vetoed (no fleet); a launch that stays at/above the floor fires; and an
+    ATTACK that drains below the floor is UNAFFECTED (floor only governs reinforcement).
+    SHIP_COUNTS: bin 3 = 4 ships, bin 9 = 10 ships."""
+    from orbit_wars_rl.torch_env import MAX_OWNED
+
+    def run(ship_bin, target_idx_fn):
+        te = VecTorchEnv(num_envs=1, num_players=2, device="cpu",
+                         action_decode="target", allow_reinforce=True,
+                         reinforce_garrison_floor=25.0)
+        te.reset([7])
+        B = _give_player0_a_second_planet(te)
+        te.planets[0, 0, 5] = 30.0          # source (home, planet 0) has 30 ships
+        oi, _ = te.owned_indices_for(0)
+        a_slot = next(s for s in range(MAX_OWNED) if int(oi[0, s]) == 0)
+        act = torch.zeros(1, MAX_OWNED, 4)
+        act[0, a_slot, 0] = 1
+        act[0, a_slot, 2] = ship_bin
+        act[0, a_slot, 3] = target_idx_fn(te, B)
+        n_before = int(te.fleet_alive[0].sum())
+        te.step({0: act})
+        return int(te.fleet_alive[0].sum()) - n_before
+
+    enemy = lambda te, B: next(p for p in range(te.planets.shape[1])
+                               if te.planet_alive[0, p] and int(te.planets[0, p, 1]) == 1)
+    own = lambda te, B: B
+
+    # reinforce sending 10 ships: 30-10=20 < floor 25 → VETOED
+    assert run(9, own) == 0, "reinforce draining below floor must be vetoed"
+    # reinforce sending 4 ships: 30-4=26 >= floor 25 → fires
+    assert run(3, own) == 1, "reinforce staying above floor must fire"
+    # ATTACK sending 10 ships: 30-10=20 < floor, but it's an attack → UNAFFECTED
+    assert run(9, enemy) == 1, "garrison floor must not touch attacks"
+
+
+def test_reinforce_transit_cost_charges_only_reinforcement():
+    """#2 Transit cost: the launching player's step reward drops by cost × ships sent
+    to OWN planets; an attack of the same size incurs no cost."""
+    from orbit_wars_rl.torch_env import MAX_OWNED
+    COST = 0.01
+
+    def reward_for(target_idx_fn):
+        te = VecTorchEnv(num_envs=1, num_players=2, device="cpu",
+                         action_decode="target", allow_reinforce=True,
+                         reinforce_cost=COST)
+        te.reset([7])
+        B = _give_player0_a_second_planet(te)
+        te.planets[0, 0, 5] = 50.0
+        oi, _ = te.owned_indices_for(0)
+        a_slot = next(s for s in range(MAX_OWNED) if int(oi[0, s]) == 0)
+        act = torch.zeros(1, MAX_OWNED, 4)
+        act[0, a_slot, 0] = 1
+        act[0, a_slot, 2] = 9          # bin 9 = 10 ships
+        act[0, a_slot, 3] = target_idx_fn(te, B)
+        _, rewards, done = te.step({0: act})
+        assert not bool(done[0]), "env should not terminate on this step"
+        return float(rewards[0, 0])
+
+    enemy = lambda te, B: next(p for p in range(te.planets.shape[1])
+                               if te.planet_alive[0, p] and int(te.planets[0, p, 1]) == 1)
+    own = lambda te, B: B
+
+    assert abs(reward_for(own) - (-COST * 10.0)) < 1e-5, "reinforce must be charged cost×ships"
+    assert abs(reward_for(enemy)) < 1e-5, "attacks must incur no transit cost"
+
+
+def test_reinforce_rate_counts_reinforce_vs_attack_launches():
+    """reinforce_rate metric: after reset_reinforce_stats, the env counts realized
+    launches per (env,player) and how many were reinforcement. Fire two sources for
+    player 0 — one reinforce (target own), one attack (target enemy) — and expect
+    fire_count=2, reinforce_count=1 (rate 0.5)."""
+    from orbit_wars_rl.torch_env import MAX_OWNED
+    te = VecTorchEnv(num_envs=1, num_players=2, device="cpu",
+                     action_decode="target", allow_reinforce=True)
+    te.reset([7])
+    B = _give_player0_a_second_planet(te)
+    te.planets[0, :, 5] = torch.clamp(te.planets[0, :, 5], min=30)  # ensure ships
+    enemy = next(p for p in range(te.planets.shape[1])
+                 if te.planet_alive[0, p] and int(te.planets[0, p, 1]) == 1)
+    oi, _ = te.owned_indices_for(0)
+    home_slot = next(s for s in range(MAX_OWNED) if int(oi[0, s]) == 0)
+    b_slot = next(s for s in range(MAX_OWNED) if int(oi[0, s]) == B)
+    act = torch.zeros(1, MAX_OWNED, 4)
+    act[0, home_slot, 0] = 1; act[0, home_slot, 2] = 8; act[0, home_slot, 3] = enemy  # attack
+    act[0, b_slot, 0] = 1;    act[0, b_slot, 2] = 8;    act[0, b_slot, 3] = 0          # reinforce home
+
+    te.reset_reinforce_stats()
+    te.step({0: act})
+    assert float(te._fire_launch_count[0, 0]) == 2.0, "both launches should be counted"
+    assert float(te._reinforce_launch_count[0, 0]) == 1.0, "exactly one was reinforcement"
+
+
 def test_torch_env_reinforce_launch_creates_fleet():
     """The training-side decode (_apply_actions) must actually CREATE a fleet for a
     reinforce launch when ON, and drop it when OFF (else reinforcement silently

@@ -85,6 +85,9 @@ class VecTorchEnv:
         ssdr_frac: float = 0.0,
         ssdr_max_steps: int = 20,
         allow_reinforce: bool = False,
+        reinforce_garrison_floor: float = 0.0,
+        reinforce_cost: float = 0.0,
+        reinforce_gate_min_planets: int = 0,
     ):
         self.num_envs = num_envs
         # Reinforcement: when True, own planets (except the launch source) are LEGAL
@@ -92,6 +95,26 @@ class VecTorchEnv:
         # already implemented in step()). EDA of top players: ~57% of fleets reinforce;
         # beginner agents 0%. Default False = attack-only (backward-compatible).
         self.allow_reinforce = bool(allow_reinforce)
+        # Reinforcement discipline (rev56 lesson: costless reinforcement floods — the
+        # curriculum times availability but adds no cost, so any fire incentive → flood).
+        #   #1 GARRISON FLOOR: a reinforce launch may not drain its source below this
+        #      many ships. Pure training-time mask (veto), NOT a penalty → no Nash risk.
+        #      Kills the "drain a planet, then lose it" regression. The real Kaggle env
+        #      has no floor, so inference is unconstrained — the policy internalises it.
+        #   #2 TRANSIT COST: subtract reinforce_cost × ships_reinforced from the
+        #      launching player's per-step reward. Scales with WASTE (a flood of
+        #      thousands of ships is expensive; one useful staging move is cheap), so it
+        #      prunes the wasteful tail rather than zeroing reinforcement — PROVIDED
+        #      credit connects a useful stage to its payoff. reinforce_cost is the
+        #      calibration knob; reinforce_rate is the dial (target ~0.4-0.6, not 0/0.8).
+        # Both only act on launches whose target is OUR OWN planet — attacks
+        # (enemy/neutral) are untouched, so neither lever can distort the attack Nash.
+        self.reinforce_garrison_floor = float(reinforce_garrison_floor)
+        self.reinforce_cost = float(reinforce_cost)
+        # reinforce_rate metric accumulators (N, num_players), allocated/zeroed per
+        # rollout via reset_reinforce_stats(). None = not collecting (no overhead).
+        self._reinforce_launch_count = None
+        self._fire_launch_count = None
         self.num_players = num_players
         self.episode_steps = episode_steps
         self.device = torch.device(device)
@@ -883,6 +906,30 @@ class VecTorchEnv:
         valid_ships = src_ships >= ship_count
         can_fire = fire & valid_owner & valid_ships & target_valid & (ship_count > 0)  # (N, MAX_OWNED)
 
+        # Reinforcement discipline (#1 garrison floor + #2 transit cost) + reinforce_rate
+        # metric. is_reinforce: a launch whose target is one of OUR OWN planets — only
+        # possible with allow_reinforce + target decode. Attacks (enemy/neutral) untouched.
+        if (self.allow_reinforce and self.action_decode == "target"
+                and actions.shape[-1] >= 4):
+            is_reinforce = use_target_decode & (target_owner == owner_id)  # (N, MAX_OWNED)
+            # #1 Garrison floor: veto any reinforce launch that would drain its source
+            # below the floor (mask, not penalty → no Nash risk).
+            if self.reinforce_garrison_floor > 0.0:
+                would_underflow = is_reinforce & ((src_ships - ship_count) < self.reinforce_garrison_floor)
+                can_fire = can_fire & ~would_underflow
+            # #2 Per-ship transit cost: accumulate ships sent to own planets this step
+            # for the launching player; the penalty is applied to the reward in step().
+            # Counts only launches that actually fire (post-floor-veto).
+            if self.reinforce_cost > 0.0:
+                reinforce_ships = (ship_count * (can_fire & is_reinforce).float()).sum(dim=1)  # (N,)
+                self._reinforce_ships[:, owner_id] = self._reinforce_ships[:, owner_id] + reinforce_ships
+            # reinforce_rate metric: per-(env,player) counts of realized launches (post
+            # floor-veto) and how many were reinforcement. train_torch combines these with
+            # train_mask → the current policy's reinforce_rate (target 0.4-0.6, Vadasz 0.57).
+            if self._fire_launch_count is not None:
+                self._fire_launch_count[:, owner_id] += can_fire.sum(dim=1).float()
+                self._reinforce_launch_count[:, owner_id] += (can_fire & is_reinforce).sum(dim=1).float()
+
         # Compute launch positions (just outside planet radius along angle)
         start_x = src_x + torch.cos(angle) * (src_r + 0.1)
         start_y = src_y + torch.sin(angle) * (src_r + 0.1)
@@ -928,6 +975,15 @@ class VecTorchEnv:
         self.fleet_alive[flat_env, flat_slot] = True
         self.next_fleet_id = self.next_fleet_id + target_valid.long().sum(dim=1)
 
+    def reset_reinforce_stats(self):
+        """Zero the reinforce_rate accumulators. Call once per rollout (before the
+        step loop); read _reinforce_launch_count / _fire_launch_count after, combine
+        with train_mask to get the current policy's reinforce_rate."""
+        self._reinforce_launch_count = torch.zeros(
+            self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
+        self._fire_launch_count = torch.zeros(
+            self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
+
     # ---------------------------------------------------------------------
     # Step — pure tensor ops, runs all N envs in one pass.
     # Phase 2 scope: orbital motion + collision/combat + action processing.
@@ -939,6 +995,11 @@ class VecTorchEnv:
         actions: optional dict {player_id: (N, MAX_OWNED, 3) tensor}.
                  Each player's fleets are launched before physics.
         """
+        # Per-step buffer for the reinforcement transit cost (#2): ships each player
+        # sent to its own planets this step. Zeroed before launches accumulate into it.
+        if self.allow_reinforce and self.reinforce_cost > 0.0:
+            self._reinforce_ships = torch.zeros(
+                self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         if actions is not None:
             for pid, act in actions.items():
                 self._apply_actions(act, pid)
@@ -1195,6 +1256,12 @@ class VecTorchEnv:
                 effective_coef = self.early_capture_coef * decay  # (N,)
             terminal_rewards = terminal_rewards + effective_coef.unsqueeze(1) * ec_rewards
             self.prev_owned = owned
+        # Reinforcement transit cost (#2): price the ships each player sent to its own
+        # planets this step. Costless reinforcement floods (rev56, ~30× launch volume);
+        # this prunes the wasteful tail. Calibrate reinforce_cost so reinforce_rate
+        # settles ~0.4-0.6 (Vadasz-like), not 0 (over-suppressed) and not 0.8 (flood).
+        if self.allow_reinforce and self.reinforce_cost > 0.0:
+            terminal_rewards = terminal_rewards - self.reinforce_cost * self._reinforce_ships
         # 12. Auto-reset done envs in-place — must come AFTER capturing rewards
         if done.any():
             self._auto_reset(done)

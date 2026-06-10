@@ -327,6 +327,10 @@ def train(args):
         print(f"Reinforcement CURRICULUM: own-target logit bias {args.reinforce_bias_init}→0 over "
               f"{args.reinforce_anneal_frac * args.total_steps:,.0f} steps "
               f"(frac {args.reinforce_anneal_frac}), then 0 — enemy/neutral targeting untouched")
+    if args.allow_reinforce and (args.reinforce_garrison_floor > 0.0 or args.reinforce_cost > 0.0):
+        print(f"Reinforcement DISCIPLINE: garrison_floor={args.reinforce_garrison_floor} "
+              f"(veto reinforce that drains source below this), "
+              f"cost={args.reinforce_cost}/ship (reward penalty on ships reinforced)")
     print(f"Win margin coeff: {args.win_margin_coeff}")
     print(f"Shaping coeff: {args.shaping_coef}")
     print(f"Expansion coeff: {args.expansion_coef}")
@@ -383,6 +387,8 @@ def train(args):
                       ship_bin_mode=cfg.model.ship_bin_mode,
                       action_decode=args.action_decode,
                       allow_reinforce=args.allow_reinforce,
+                      reinforce_garrison_floor=args.reinforce_garrison_floor,
+                      reinforce_cost=args.reinforce_cost,
                       win_margin_coeff=args.win_margin_coeff,
                       shaping_coef=args.shaping_coef,
                       expansion_coef=args.expansion_coef,
@@ -797,6 +803,10 @@ def train(args):
             model.reinforce_logit_bias = args.reinforce_bias_init * (1.0 - rb_frac)
         # Reset train_mask: all True by default, mark opp's slots False below
         storage["train_mask"].fill_(True)
+        # Zero the reinforce_rate accumulators for this rollout (env counts realized
+        # reinforce/fire launches per (env,player); combined with train_mask below).
+        if args.allow_reinforce:
+            env.reset_reinforce_stats()
 
         # --- Rollout collection (no grad) -----------------------------------
         model.eval()
@@ -1030,6 +1040,14 @@ def train(args):
                                  bc_batch=bc_batch)
         metrics["avg_fleet_size"] = float(avg_fleet_size.item())
         metrics["p90_fleet_size"] = float(fleet_size_p90.item())
+        # reinforce_rate: of the current policy's realized launches (train_mask-filtered,
+        # across both seats), the fraction sent to our own planets (Vadasz ~0.57; target
+        # 0.4-0.6). train_mask[0] is (N,P) and constant over the rollout's t.
+        if args.allow_reinforce and env._fire_launch_count is not None:
+            tm = storage["train_mask"][0].to(env.device).float()   # (N, P)
+            fires = (env._fire_launch_count * tm).sum()
+            reinf = (env._reinforce_launch_count * tm).sum()
+            metrics["reinforce_rate"] = float((reinf / fires.clamp(min=1.0)).item())
         with torch.no_grad():
             metrics["old_value_mean"] = float(flat["values"].mean().item())
             metrics["old_value_std"] = float(flat["values"].std(unbiased=False).item())
@@ -1111,6 +1129,7 @@ def train(args):
                         total_env_steps / max(args.srcs_multi_penalty_decay_frac * args.total_steps, 1), 1.0)))
                     pencoef = f" pencoef {_pc:.5f}"
                 actcoef = f" actcoef {args.fleet_activity_coef:.4f}" if args.fleet_activity_coef > 0.0 else ""
+                reinfstr = f"reinf {metrics.get('reinforce_rate', 0):.2f} | " if args.allow_reinforce else ""
                 print(
                     f"   diag | fire[0] {slot0:.2f} rest_max {slot_rest_max:.2f} | "
                     f"fire_frac {metrics.get('fire_fraction', 0):.2f} "
@@ -1119,6 +1138,7 @@ def train(args):
                     f"meanshipbin {metrics.get('mean_ship_bin', 0):.1f} | "
                     f"avgfleet {metrics.get('avg_fleet_size', 0):.1f} "
                     f"p90 {metrics.get('p90_fleet_size', 0):.1f} | "
+                    f"{reinfstr}"
                     f"H_ship {metrics.get('ship_entropy', 0):.2f} | "
                     f"Vμ {metrics.get('old_value_mean', 0):+.2f} Rμ {metrics.get('return_mean', 0):+.2f} "
                     f"Rσ {metrics.get('return_std', 0):.2f} Aσ {metrics.get('adv_std', 0):.2f} | "
@@ -1162,6 +1182,7 @@ def train(args):
                     "policy/mean_ship_bin": metrics.get("mean_ship_bin", 0),
                     "policy/avg_fleet": metrics.get("avg_fleet_size", 0),
                     "policy/p90_fleet": metrics.get("p90_fleet_size", 0),
+                    "policy/reinforce_rate": metrics.get("reinforce_rate", 0),
                     # Entropy
                     "entropy/fire": metrics.get("fire_entropy", 0),
                     "entropy/ship": metrics.get("ship_entropy", 0),
@@ -1203,13 +1224,13 @@ def train(args):
             # tracker can read metrics that line up exactly with each checkpoint
             # rather than the sparse every-20-iter diag line.
             print("  CKPT_METRICS step={} EV={:.3f} KL={:.4f} clip={:.3f} fire_frac={:.3f} "
-                  "owned={:.1f} avgfleet={:.1f} fire_rate={:.3f} Hfire={:.3f}".format(
+                  "owned={:.1f} avgfleet={:.1f} fire_rate={:.3f} Hfire={:.3f} reinf={:.3f}".format(
                       total_env_steps,
                       metrics.get("explained_variance", 0), metrics.get("approx_kl", 0),
                       metrics.get("clip_frac", 0), metrics.get("fire_fraction", 0),
                       metrics.get("owned_planets", 0),
                       metrics.get("avg_fleet_size", 0), metrics.get("fire_rate_overall", 0),
-                      metrics.get("fire_entropy", 0)))
+                      metrics.get("fire_entropy", 0), metrics.get("reinforce_rate", 0)))
             # Persist pool alongside the disk checkpoint so spot interrupts
             # don't lose pool diversity. Naming mirrors the checkpoint stem.
             if pool is not None:
@@ -1342,6 +1363,18 @@ if __name__ == "__main__":
                              "from --reinforce-bias-init → 0 (then stays 0). 0 = no curriculum "
                              "(hard unmask at t=0 — caused the rev55 over-fire collapse). "
                              "Suggested: 0.3.")
+    parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0,
+                        help="Reinforcement discipline #1: a reinforce launch may not drain its "
+                             "source planet below this many ships (training-time mask/veto, NOT a "
+                             "penalty → no Nash risk). Kills the 'drain a planet, then lose it' "
+                             "regression. Inference is unconstrained (real env has no floor). "
+                             "0 = off. Only active with --allow-reinforce.")
+    parser.add_argument("--reinforce-cost", type=float, default=0.0,
+                        help="Reinforcement discipline #2: per-ship transit cost — subtract this × "
+                             "ships_reinforced from the launching player's reward each step. The "
+                             "actual flood fix (rev56: costless reinforcement floods ~30×). Scales "
+                             "with waste; the calibration knob. Watch reinforce_rate → target "
+                             "~0.4-0.6. 0 = off. Only active with --allow-reinforce.")
     parser.add_argument("--win-margin-coeff", type=float, default=0.0,
                         help="Terminal bonus coefficient α: winner gets +1 + α*(my_score/total_score). "
                              "0 = pure ±1 reward (default). Suggested start: 0.5.")
