@@ -673,9 +673,6 @@ def train(args):
         # step t. Pool-opponent slots are False so PPO won't train on them.
         "train_mask": torch.ones(rollout_T, N, P, dtype=torch.bool, device=storage_dev),
         # Planet ship counts snapshot per step — used for avgfleet/p90fleet metrics.
-        # Shape (T, N) — mean ships per planet across all owned planets per env.
-        # Measuring planet inventories (not action sizes) is the correct passivity proxy.
-        "planet_ships_snap": torch.zeros(rollout_T, N, device=storage_dev),
     }
 
     def compute_pool_actions(opp: PoolMember, player: int, env_slice: slice) -> torch.Tensor:
@@ -816,6 +813,15 @@ def train(args):
         if args.allow_reinforce:
             env.reset_reinforce_stats()
 
+        # Hoard milestones (player 0): snapshot garrison/in-flight/planets when an env
+        # is AT episode-step 16/32/50/100. Controlled-time + scale-free → replaces the
+        # end-skewed avgfleet/p90. Accumulated on-device, synced once after the rollout.
+        _MS = (16, 32, 50, 100)
+        ms_garr = {m: torch.zeros((), device=env.device) for m in _MS}
+        ms_infl = {m: torch.zeros((), device=env.device) for m in _MS}
+        ms_plan = {m: torch.zeros((), device=env.device) for m in _MS}
+        ms_n    = {m: torch.zeros((), device=env.device) for m in _MS}
+
         # --- Rollout collection (no grad) -----------------------------------
         model.eval()
         for t in range(rollout_T):
@@ -857,14 +863,20 @@ def train(args):
                 storage["train_mask"][t, pool_slice, opp_seat] = False
 
             state, rewards, done = env.step(actions_per_player)
-            # Snapshot mean planet ships per env — used for avgfleet/p90fleet metrics.
-            # Measures actual planet inventories (passivity proxy), not action sizes.
-            planet_ships = env.planets[:, :, 5]           # (N, max_planets)
-            alive = env.planet_alive                       # (N, max_planets) bool
-            n_alive = alive.float().sum(dim=1).clamp(min=1)
-            storage["planet_ships_snap"][t].copy_(
-                (planet_ships * alive.float()).sum(dim=1) / n_alive, non_blocking=True
-            )
+            # Hoard milestones: when an env is at episode-step 16/32/50/100, accumulate
+            # player-0 garrison (parked), in-flight, and owned-planet counts for that env.
+            ownp = env.planets[:, :, 1].long()                            # (N, P) owner
+            mine_p = (ownp == 0) & env.planet_alive                       # player-0 planets
+            garr_p0 = (env.planets[:, :, 5] * mine_p.float()).sum(dim=1)  # (N,) parked ships
+            plan_p0 = mine_p.float().sum(dim=1)                           # (N,) planets owned
+            mine_f = (env.fleets[:, :, 1].long() == 0) & env.fleet_alive
+            infl_p0 = (env.fleets[:, :, 6] * mine_f.float()).sum(dim=1)   # (N,) in-flight ships
+            for _m in _MS:
+                sel = (env.step_count == _m).float()                     # (N,) at-milestone
+                ms_garr[_m] += (garr_p0 * sel).sum()
+                ms_infl[_m] += (infl_p0 * sel).sum()
+                ms_plan[_m] += (plan_p0 * sel).sum()
+                ms_n[_m]    += sel.sum()
             # rewards: (N, P); done: (N,) shared across players.
             storage["rewards"][t].copy_(rewards[:, :P], non_blocking=True)
 
@@ -951,7 +963,7 @@ def train(args):
         # learns from samples where current model picked the action.
         TN = rollout_T * N * P
         # Keys with shape (T, N) instead of (T, N, P, ...) — skip standard flatten
-        _PER_ENV_KEYS = {"planet_ships_snap"}
+        _PER_ENV_KEYS = set()
         flat = {}
         for k, v in storage.items():
             if k in _PER_ENV_KEYS:
@@ -969,12 +981,19 @@ def train(args):
 
         fired_train_slots = flat["fire_a"].float() * flat["slot_valid"].float()
         fired_count = fired_train_slots.sum().clamp(min=1.0)
-        # avgfleet/p90fleet: mean and p90 of actual planet ship inventories (passivity
-        # proxy). Previously computed from action ship sizes — that was wrong: the
-        # p90 pinned to a fixed SHIP_COUNTS bin value regardless of policy changes.
-        planet_snaps = storage["planet_ships_snap"].reshape(-1)  # (T*N,)
-        avg_fleet_size = planet_snaps.mean()
-        fleet_size_p90 = torch.quantile(planet_snaps, 0.9)
+        # Hoard milestones (player 0, controlled episode-step → no end-skew): at 16/32/50/100,
+        #   garr_frac   = parked / (parked + in-flight)   — scale-free deployment ratio
+        #   ships/planet = parked / owned planets         — pile-up per planet
+        #   planets     = owned planets                   — expansion trajectory
+        # Replaces the end-skewed avgfleet/p90. Reference (Isaiah): garr_frac ~0.5 mid-game,
+        # ~11-22 ships/planet, planets 2/6/9/10.
+        ms_metrics = {}
+        for _m in _MS:
+            g, fl, pl, nn = (ms_garr[_m].item(), ms_infl[_m].item(),
+                             ms_plan[_m].item(), ms_n[_m].item())
+            ms_metrics[f"garr_frac@{_m}"] = g / (g + fl) if (g + fl) > 0 else 0.0
+            ms_metrics[f"ships_per_planet@{_m}"] = g / pl if pl > 0 else 0.0
+            ms_metrics[f"planets@{_m}"] = pl / nn if nn > 0 else 0.0
 
         # Build PPOLearner-compatible batch (matches make_batch in self_play.py)
         batch = {
@@ -1046,8 +1065,7 @@ def train(args):
         metrics = learner.update(minibatches, scheduler=scheduler,
                                  kl_target=cfg.ppo.kl_target,
                                  bc_batch=bc_batch)
-        metrics["avg_fleet_size"] = float(avg_fleet_size.item())
-        metrics["p90_fleet_size"] = float(fleet_size_p90.item())
+        metrics.update(ms_metrics)
         # reinforce_rate: of the current policy's realized launches (train_mask-filtered,
         # across both seats), the fraction sent to our own planets (Vadasz ~0.57; target
         # 0.4-0.6). train_mask[0] is (N,P) and constant over the rollout's t.
@@ -1154,8 +1172,10 @@ def train(args):
                     f"owned {metrics.get('owned_planets', 0):.1f} "
                     f"ship0 {metrics.get('ship_bin0_rate', 0):.2f} "
                     f"meanshipbin {metrics.get('mean_ship_bin', 0):.1f} | "
-                    f"avgfleet {metrics.get('avg_fleet_size', 0):.1f} "
-                    f"p90 {metrics.get('p90_fleet_size', 0):.1f} | "
+                    f"pl@16/50/100 {metrics.get('planets@16',0):.0f}/{metrics.get('planets@50',0):.0f}/"
+                    f"{metrics.get('planets@100',0):.0f} "
+                    f"garrfrac@50 {metrics.get('garr_frac@50',0):.2f} "
+                    f"shipspp@50 {metrics.get('ships_per_planet@50',0):.0f} | "
                     f"{reinfstr}"
                     f"H_ship {metrics.get('ship_entropy', 0):.2f} "
                     f"H_tgt {metrics.get('target_entropy', 0):.2f} | "
@@ -1199,8 +1219,7 @@ def train(args):
                     "policy/owned_planets": metrics.get("owned_planets", 0),
                     "policy/ship_bin0_rate": metrics.get("ship_bin0_rate", 0),
                     "policy/mean_ship_bin": metrics.get("mean_ship_bin", 0),
-                    "policy/avg_fleet": metrics.get("avg_fleet_size", 0),
-                    "policy/p90_fleet": metrics.get("p90_fleet_size", 0),
+                    **{f"hoard/{k}": v for k, v in ms_metrics.items()},
                     "policy/reinforce_rate": metrics.get("reinforce_rate", 0),
                     "policy/target_share_neutral": metrics.get("target_share_neutral", 0),
                     "policy/target_share_enemy": metrics.get("target_share_enemy", 0),
@@ -1246,12 +1265,13 @@ def train(args):
             # tracker can read metrics that line up exactly with each checkpoint
             # rather than the sparse every-20-iter diag line.
             print("  CKPT_METRICS step={} EV={:.3f} KL={:.4f} clip={:.3f} fire_frac={:.3f} "
-                  "owned={:.1f} avgfleet={:.1f} fire_rate={:.3f} Hfire={:.3f} reinf={:.3f}".format(
+                  "owned={:.1f} garrfrac@50={:.2f} shipspp@50={:.0f} fire_rate={:.3f} Hfire={:.3f} reinf={:.3f}".format(
                       total_env_steps,
                       metrics.get("explained_variance", 0), metrics.get("approx_kl", 0),
                       metrics.get("clip_frac", 0), metrics.get("fire_fraction", 0),
                       metrics.get("owned_planets", 0),
-                      metrics.get("avg_fleet_size", 0), metrics.get("fire_rate_overall", 0),
+                      metrics.get("garr_frac@50", 0), metrics.get("ships_per_planet@50", 0),
+                      metrics.get("fire_rate_overall", 0),
                       metrics.get("fire_entropy", 0), metrics.get("reinforce_rate", 0)))
             # Persist pool alongside the disk checkpoint so spot interrupts
             # don't lose pool diversity. Naming mirrors the checkpoint stem.

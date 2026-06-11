@@ -206,17 +206,48 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
                                ship_bin_mode: str = "absolute",
                                target_sanity_penalty: float = 0.0,
                                reserve_frac: float = 0.0,
-                               allow_reinforce: bool = False):
+                               allow_reinforce: bool = False,
+                               reinforce_gate_min_planets: int = 0,
+                               reinforce_forward_only: bool = False,
+                               reinforce_garrison_floor: float = 0.0):
     """Convert policy outputs to actions using target planet logits for aiming.
 
     allow_reinforce: must MATCH the env's setting the checkpoint was trained with.
     False (default) = own planets are illegal targets. True = own planets are legal
     (reinforcement), only the launch source planet is excluded.
+
+    reinforce_gate_min_planets / reinforce_forward_only / reinforce_garrison_floor:
+    the three reinforce-DISCIPLINE masks from torch_env. They constrain only own
+    (reinforce) targets; enemy/neutral are never affected. MUST match training, else
+    the policy emits reinforce moves it was masked from at train time (e.g. reinforcing
+    a 1-2 planet opening instead of expanding) and self-sabotages at inference.
     """
     planets = obs["planets"]
     owned_indices = masks["owned_indices"].cpu().numpy()
     max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
     target_logits = target_logits.clone()
+
+    # ----- reinforce-discipline precompute (parity with torch_env) -----
+    owned_count = int(masks["owned_count"])
+    gate_block_own = (allow_reinforce and reinforce_gate_min_planets > 0
+                      and owned_count < reinforce_gate_min_planets)
+    # enemy = owner >= 0 and != player (neutrals owner < 0 excluded), matching torch_env.
+    enemy_xy = ([(float(p[2]), float(p[3])) for p in planets
+                 if int(p[1]) >= 0 and int(p[1]) != player]
+                if (allow_reinforce and reinforce_forward_only) else [])
+
+    def _nearest_enemy_dist(p):
+        px, py = float(p[2]), float(p[3])
+        return min(math.hypot(px - ex, py - ey) for ex, ey in enemy_xy)
+
+    def _own_reinforce_illegal(src_planet, tgt_planet):
+        """True if an own (reinforce) target is barred by gate/forward-staging."""
+        if gate_block_own:
+            return True
+        if reinforce_forward_only and enemy_xy:  # no live enemy -> forward moot
+            if not (_nearest_enemy_dist(tgt_planet) < _nearest_enemy_dist(src_planet)):
+                return True
+        return False
 
     # Restrict target choice to legal launch targets before argmax / sampling.
     # The prior path argmaxed over all planets and then dropped own/self picks,
@@ -228,7 +259,10 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         for tidx, tgt in enumerate(planets[:target_logits.shape[-1]]):
             is_source = int(tgt[0]) == int(planets[pidx][0])
             is_own = int(tgt[1]) == player
-            if is_source or (is_own and not allow_reinforce):
+            illegal = is_source or (is_own and not allow_reinforce)
+            if not illegal and is_own and allow_reinforce:
+                illegal = _own_reinforce_illegal(planets[pidx], tgt)
+            if illegal:
                 target_logits[:, slot, tidx] = -1e9
 
     if target_sanity_penalty > 0.0:
@@ -270,6 +304,10 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         is_own_target = int(planets[tidx][1]) == player
         if is_source or (is_own_target and not allow_reinforce):
             continue
+        # Reinforce-discipline parity: a slot whose every target was logit-masked
+        # still argmaxes to one of them; reject gated/backward own reinforces here too.
+        if is_own_target and allow_reinforce and _own_reinforce_illegal(planets[pidx], planets[tidx]):
+            continue
 
         ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
         # Reserve cap (probe): keep at least reserve_frac of the source planet's
@@ -278,6 +316,11 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         if reserve_frac > 0.0:
             ships = min(ships, int(planets[pidx][5] * (1.0 - reserve_frac)))
         if ships <= 0 or planets[pidx][5] < ships:
+            continue
+        # Garrison floor parity (torch_env): a reinforce must not drain the source
+        # below the floor. Attacks (enemy/neutral) are never garrison-limited.
+        if (is_own_target and allow_reinforce and reinforce_garrison_floor > 0.0
+                and (planets[pidx][5] - ships) < reinforce_garrison_floor):
             continue
 
         angle = _target_intercept_angle(planets[pidx], planets[tidx], ships, obs)

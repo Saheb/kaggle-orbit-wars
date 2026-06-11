@@ -6,12 +6,30 @@ Current focus: **Phase 2 — reinforcement** (docs/phase2.md). VDN/per-slot conc
 
 ---
 
-## No live instance (2026-06-10)
+## ⚠️ LIVE INSTANCE — p2rev1 (2026-06-11)
 
-- **rev58b flooded (~330k) → killed; GCP `orbit-wars-training` (asia-south1-b) DELETED.** Final flood
-  log preserved at `gpu_run_artifacts/rev58/logs/train_gpu_phase1_rev58b_20260610_170044.log`.
-- Phase 2 pivoted to the **Tier-1 outcome-tied design** (forward-staging mask + drop `defense_coef`
-  + small aggressive pool). Keystone built + unit-tested. See `docs/phase2.md` (top Update) and §0 below.
+- **GCP `orbit-wars-training` (zone `asia-south1-b`, IP 34.93.147.78) RUNNING + BILLING (~$1.13/hr).**
+  Running **p2rev1** (Phase 2 Tier-1) in tmux `training`. Watcher → `gpu_run_artifacts/p2rev1/`.
+- Config: snowball-BC warmstart + forward-staging mask + drop defense + gate(3)/garrison-floor(10) +
+  pool (**3 heuristic hammers: lb1152 + lb1138 doom_evac + lb1084 4p_relative_gap @ external-frac 0.25**)
+  + **num-envs 192, rollout 128, ppo-epochs 2, heuristic-workers 2** (6 worker procs), LR 1e-4.
+  Script: `gpu_run_artifacts/p2rev1/run_remote_p2rev1.sh` (scp'd to `~/orbit_wars_rl/`; seed scp'd to
+  `~/orbit_wars_rl/seed_checkpoints/`). SPS ~250-300 (heuristic-worker overhead), GPU ~44%, mem ~17GB.
+- **2026-06-11 relaunch:** first launch STALLED at iter 6 — the in-process `candidate_debatreya_1300`
+  planner adapter (`--planner-externals`) wedged the main thread in `batched_planner.py`'s per-env
+  `single_obs_to_tensor` Python loop (py-spy: 78% one core, GPU idle 14%). Per-env planner loop is too
+  slow to keep the rollout fed. FIX: dropped debatreya + `--planner-externals` entirely, swapped to the
+  3 fast heuristic hammers above. Relaunched 20:22 UTC, clears iter 6→9 cleanly (EV 0.47→0.67, clip
+  0.23→0.19). `batched_planner.py` no longer a dependency (its rsync/Trash ops risk is moot for this run).
+- SSH: `gcloud compute ssh orbit-wars-training --zone=asia-south1-b` (or alias
+  `orbit-wars-training.asia-south1-b.orbit-wars-rl`). Tail: `grep '^iter' <log> | tail`.
+- **WATCH (early):** cold-critic warmup — EV should climb >0.5 and clip drop <0.25 by ~iter 10-15
+  (ppo-1 + rollout-32 warms the critic slowly). If clip >0.4 + EV ~0 persists → halve LR / value warmup.
+  Then watch `reinf` (gated 0 below 3 planets, ramp with empire size), `H_tgt`/`tgt n/e` (target-head),
+  `p90` (no flood). Selection is PURE: held-out win-rate decides.
+- **TERMINATE when done:** `gcloud compute instances delete orbit-wars-training --zone=asia-south1-b`.
+- ⚠️ Latent ops bug hit this launch: `orbit_wars_rl/batched_planner.py` (debatreya dep, git-tracked) was
+  in Trash during rsync → `ModuleNotFoundError` → had to scp manually. Ensure it exists before launch.
 
 ---
 

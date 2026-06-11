@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from statistics import mean
 
@@ -135,6 +136,9 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 target_sanity_penalty=target_sanity_penalty,
                 reserve_frac=reserve_frac,
                 allow_reinforce=getattr(model, "allow_reinforce", allow_reinforce),
+                reinforce_gate_min_planets=getattr(model, "reinforce_gate_min_planets", 0),
+                reinforce_forward_only=getattr(model, "reinforce_forward_only", False),
+                reinforce_garrison_floor=getattr(model, "reinforce_garrison_floor", 0.0),
             )
 
         raise NotImplementedError(
@@ -143,6 +147,144 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
         )
 
     return agent_fn
+
+
+_CONV_MILESTONES = (16, 32, 50, 100)
+# Isaiah (#1 player) hoard reference at the same milestones. Contested phase (16-50)
+# is the clean read: ~half the army deployed, ~11-22 ships/planet. The @100 jump
+# (garr 0.87, 60 ships/planet) is won-game accumulation, not hoarding.
+_ISAIAH_HOARD_REF = "garr_frac 0.50/0.51/0.54/0.87  ships/planet 11/15/22/60"
+
+
+def _resolve_launch_target(planets, src, angle):
+    """Planet a launch from `src` at `angle` is aimed at (direction match), or None.
+    Mirrors fetch_analyze_top_replays._resolve_target so eval == replay analysis."""
+    sx, sy = src[2], src[3]
+    best, bd = None, 0.6
+    for p in planets:
+        if p[0] == src[0]:
+            continue
+        pa = math.atan2(p[3] - sy, p[2] - sx)
+        dd = abs((pa - angle + math.pi) % (2 * math.pi) - math.pi)
+        if dd < bd:
+            bd, best = dd, p
+    return best
+
+
+def game_conversion(steps, seat):
+    """Whole-game CONVERSION for `seat` from kaggle env.steps.
+
+    capture        = a planet whose owner transitions TO `seat`.
+    attack-launch  = a legal fire whose aimed target is NOT owned by `seat`.
+                     Reinforce launches (target owned by `seat`) CANNOT capture,
+                     so they are excluded from the cap/launch denominator and
+                     counted separately (reinforce_launches). Launches whose
+                     target can't be resolved by angle are skipped (matches the
+                     replay analyzer), so eval numbers compare to Isaiah/Jake.
+    Also records owned-planet count at step milestones (expansion/retention).
+    Returns per-game counts; `add_conversion` aggregates across games.
+    """
+    caps = atk = reinf = atk_ships = 0
+    planets_at = {ms: None for ms in _CONV_MILESTONES}
+    garrison_at = {ms: None for ms in _CONV_MILESTONES}   # ships parked on owned planets
+    inflight_at = {ms: None for ms in _CONV_MILESTONES}   # ships in owned fleets (deployed)
+    prev = {}
+    last = None
+    for t in range(1, len(steps)):
+        if seat >= len(steps[t]) or seat >= len(steps[t - 1]):
+            continue
+        p0 = steps[t - 1][seat].observation.get("planets")
+        p1 = steps[t][seat].observation.get("planets")
+        acts = steps[t][seat].action or []
+        if p1:
+            owned_now = garrison_now = 0
+            for p in p1:
+                pid, own = p[0], int(p[1])
+                if own == seat:
+                    owned_now += 1
+                    garrison_now += p[5]
+                if pid in prev and prev[pid] != seat and own == seat:
+                    caps += 1
+                prev[pid] = own
+            last = p1
+            if t in planets_at:
+                fleets = steps[t][seat].observation.get("fleets") or []
+                planets_at[t] = owned_now
+                garrison_at[t] = garrison_now
+                inflight_at[t] = sum(f[6] for f in fleets if int(f[1]) == seat)
+        if not p0:
+            continue
+        byid = {p[0]: p for p in p0}
+        for mv in acts:
+            if not mv or len(mv) < 3:
+                continue
+            src = byid.get(int(mv[0]))
+            if src is None:
+                continue
+            sent, ssh = int(mv[2]), float(src[5])
+            if not (ssh > 0 and sent <= ssh):       # legal launches only
+                continue
+            tgt = _resolve_launch_target(p0, src, float(mv[1]))
+            if tgt is None:
+                continue                            # unclassifiable → skip (== analyzer)
+            if int(tgt[1]) == seat:
+                reinf += 1                          # reinforce: cannot capture
+            else:
+                atk += 1
+                atk_ships += sent
+    end_planets = sum(1 for p in (last or []) if int(p[1]) == seat)
+    out = {"captures": caps, "attack_launches": atk, "reinforce_launches": reinf,
+           "attack_ships": atk_ships, "end_planets": end_planets}
+    for ms in _CONV_MILESTONES:
+        out[f"p{ms}"] = planets_at[ms]
+        out[f"g{ms}"] = garrison_at[ms]
+        out[f"if{ms}"] = inflight_at[ms]
+    return out
+
+
+def new_conversion_acc():
+    acc = {"captures": 0, "attack_launches": 0, "reinforce_launches": 0,
+           "attack_ships": 0, "end_planets": 0, "games": 0}
+    for ms in _CONV_MILESTONES:
+        acc[f"p{ms}_sum"] = 0
+        acc[f"p{ms}_n"] = 0
+        acc[f"g{ms}_sum"] = 0    # garrison (parked) ships, summed over games reaching ms
+        acc[f"if{ms}_sum"] = 0   # in-flight (deployed) ships, summed over games reaching ms
+    return acc
+
+
+def add_conversion(acc, conv):
+    for k in ("captures", "attack_launches", "reinforce_launches", "attack_ships", "end_planets"):
+        acc[k] += conv[k]
+    acc["games"] += 1
+    for ms in _CONV_MILESTONES:
+        v = conv[f"p{ms}"]
+        if v is not None:
+            acc[f"p{ms}_sum"] += v
+            acc[f"p{ms}_n"] += 1
+            acc[f"g{ms}_sum"] += conv[f"g{ms}"]
+            acc[f"if{ms}_sum"] += conv[f"if{ms}"]
+
+
+def _fmt_conversion(acc):
+    """Two-line conversion summary. cap/launch counts ATTACK launches only
+    (reinforce can't capture). Reference = Isaiah (#1 player)."""
+    n = max(acc["games"], 1)
+    c, al, rl = acc["captures"], acc["attack_launches"], acc["reinforce_launches"]
+    pl = lambda ms: (f"{acc[f'p{ms}_sum']/acc[f'p{ms}_n']:.0f}" if acc[f"p{ms}_n"] else "—")
+    # Hoard read at fixed milestones (not episode-averaged → no end-step skew):
+    # garr_frac = parked / (parked + in-flight) ; ships/planet = parked / owned planets.
+    gf = lambda ms: (f"{acc[f'g{ms}_sum']/(acc[f'g{ms}_sum']+acc[f'if{ms}_sum']):.2f}"
+                     if (acc[f'g{ms}_sum'] + acc[f'if{ms}_sum']) > 0 else "—")
+    spp = lambda ms: (f"{acc[f'g{ms}_sum']/acc[f'p{ms}_sum']:.0f}" if acc[f"p{ms}_sum"] else "—")
+    return (f"Conversion: caps/game {c/n:.1f}  atk-launch/game {al/n:.1f}  "
+            f"cap/atk-launch {c/max(al,1):.3f}  ships/cap {acc['attack_ships']/max(c,1):.0f}  "
+            f"reinf_share {rl/max(al+rl,1):.2f}\n"
+            f"  planets@16/32/50/100 {pl(16)}/{pl(32)}/{pl(50)}/{pl(100)}  end {acc['end_planets']/n:.1f}"
+            f"   [ref Isaiah: cap/atk-launch 0.59  planets 2/6/9/10  reinf 0.30]\n"
+            f"  hoard  garr_frac@ {gf(16)}/{gf(32)}/{gf(50)}/{gf(100)}  "
+            f"ships/planet@ {spp(16)}/{spp(32)}/{spp(50)}/{spp(100)}"
+            f"   [ref Isaiah: {_ISAIAH_HOARD_REF}]")
 
 
 def evaluate_against_baseline(
@@ -174,6 +316,7 @@ def evaluate_against_baseline(
 
     wins = 0
     total_material = 0
+    conv_tot = new_conversion_acc()
     results = []
 
     for seed in range(seed_start, seed_start + num_games):
@@ -181,6 +324,8 @@ def evaluate_against_baseline(
         env.run(agents)
         final = env.steps[-1]
         rewards = [s.reward for s in final]
+
+        add_conversion(conv_tot, game_conversion(env.steps, 0))
 
         obs = final[0].observation
         material = sum(p[5] for p in obs.planets if p[1] == 0)
@@ -205,6 +350,7 @@ def evaluate_against_baseline(
         "total_games": num_games,
         "win_rate": wins / num_games,
         "avg_material": total_material / num_games,
+        "conversion": conv_tot,
         "results": results,
     }
 
@@ -240,6 +386,7 @@ def evaluate_panel(
                                  for arch in BY_ARCHETYPE}
     overall = {"wins": 0, "total": 0, "wins_seat0": 0, "wins_seat1": 0,
                "total_seat0": 0, "total_seat1": 0}
+    conv_tot = new_conversion_acc()
     game_idx = 0
     total_games = sum(len(seeds) for seeds in BY_ARCHETYPE.values()) * 2
 
@@ -250,6 +397,7 @@ def evaluate_panel(
                 env = make("orbit_wars", configuration={"seed": seed}, debug=False)
                 env.run(agents)
                 final = env.steps[-1]
+                add_conversion(conv_tot, game_conversion(env.steps, my_seat))
                 rewards = [s.reward if s.reward is not None else 0.0 for s in final]
                 my_reward = rewards[my_seat]
                 opp_reward = rewards[1 - my_seat]
@@ -274,7 +422,7 @@ def evaluate_panel(
                           f"({100*overall['wins']/max(overall['total'],1):.1f}%)",
                           flush=True)
 
-    return {"overall": overall, "per_archetype": per_arch}
+    return {"overall": overall, "per_archetype": per_arch, "conversion": conv_tot}
 
 
 def print_panel_report(result: dict, opponent: str) -> None:
@@ -291,6 +439,8 @@ def print_panel_report(result: dict, opponent: str) -> None:
     print(f"  seat 1:  {o['wins_seat1']}/{o['total_seat1']}  ({s1:.1f}%)")
     asym = s0 - s1
     print(f"  asymmetry (seat0 − seat1): {asym:+.1f}pp")
+    if "conversion" in result:
+        print(_fmt_conversion(result["conversion"]))
     print()
     print("Per archetype  (8 games each = 4 seeds × 2 seats):")
     print(f"  {'archetype':<48s}  {'WR':>6s}  {'s0/s1':>10s}  {'mat':>8s}")
@@ -319,7 +469,10 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         opponent: str = "random", fire_threshold: float = 0.5,
                         panel: bool = False, sample: bool = False,
                         target_decode: bool = False,
-                        target_sanity_penalty: float = 0.0):
+                        target_sanity_penalty: float = 0.0,
+                        reinforce_gate_min_planets: int = 0,
+                        reinforce_forward_only: bool = False,
+                        reinforce_garrison_floor: float = 0.0):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
 
@@ -335,8 +488,17 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     # Carry the checkpoint's reinforcement setting onto the model so the agent's
     # target masking matches training (build_agent_fn reads it off the model).
     model.allow_reinforce = bool(getattr(cfg.model, "allow_reinforce", False))
+    # Reinforce-discipline masks (gate / forward-staging / garrison floor) — MUST match
+    # the training env, else the policy reinforces where it was masked and self-sabotages.
+    # Not stored in the checkpoint config, so they come from CLI flags.
+    model.reinforce_gate_min_planets = int(reinforce_gate_min_planets)
+    model.reinforce_forward_only = bool(reinforce_forward_only)
+    model.reinforce_garrison_floor = float(reinforce_garrison_floor)
     if model.allow_reinforce:
-        print("Reinforcement: ON (own planets are legal targets)")
+        print(f"Reinforcement: ON (own planets are legal targets) | "
+              f"gate>={model.reinforce_gate_min_planets} planets, "
+              f"forward_only={model.reinforce_forward_only}, "
+              f"garrison_floor={model.reinforce_garrison_floor}")
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     allowed_missing = {"target_head.weight", "target_head.bias"}
     bad_missing = [k for k in missing if k not in allowed_missing]
@@ -375,6 +537,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     print(f"Target decode: {target_decode}")
     print(f"Target sanity penalty: {target_sanity_penalty}")
     print(f"Avg material: {results['avg_material']:.1f}")
+    print(_fmt_conversion(results["conversion"]))
     for r in results["results"][:5]:
         print(f"  seed={r['seed']} win={r['win']} "
               f"material={r['material']} rewards={r['rewards']}")
@@ -405,6 +568,15 @@ if __name__ == "__main__":
     parser.add_argument("--target-sanity-penalty", type=float, default=0.0,
                         help="Subtract this from dominated same-source target logits "
                              "before target decode.")
+    parser.add_argument("--reinforce-gate-min-planets", type=int, default=0,
+                        help="Reinforce-discipline parity: own targets legal only at "
+                             ">= this many owned planets. MUST match training (p2rev1=3).")
+    parser.add_argument("--reinforce-forward-only", action="store_true",
+                        help="Reinforce-discipline parity: own target legal only if closer "
+                             "to the nearest enemy than the source. MUST match training.")
+    parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0,
+                        help="Reinforce-discipline parity: veto a reinforce that drains the "
+                             "source below this. MUST match training (p2rev1=10).")
     args = parser.parse_args()
 
     cfg = Config()
@@ -420,4 +592,7 @@ if __name__ == "__main__":
         sample=args.sample,
         target_decode=args.target_decode,
         target_sanity_penalty=args.target_sanity_penalty,
+        reinforce_gate_min_planets=args.reinforce_gate_min_planets,
+        reinforce_forward_only=args.reinforce_forward_only,
+        reinforce_garrison_floor=args.reinforce_garrison_floor,
     )
