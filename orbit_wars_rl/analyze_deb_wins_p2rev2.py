@@ -1,5 +1,5 @@
 """Find + profile our WINS vs debatreya at p2rev2 @4.19M (the 3 panel wins).
-Runs only the 3 archetypes that each scored 1 win (24 games), saves each win's HTML
+Runs the full 256-seed panel (WIN_FULL_PANEL=1, default) — or the 3-archetype subset — saves each win's HTML
 replay, and profiles OUR play: planets@N trajectory, material-share curve, whether we
 were ever CONTESTED (Deb led) then recovered = a real mid-game HOLD, vs an uncontested
 snowball. Goal: is the agent learning to fix the mid-game collapse, or are these lucky
@@ -110,7 +110,8 @@ def profile(steps, seat):
 wins = []
 all_acc = new_conversion_acc()
 win_acc = new_conversion_acc()
-print(f"checkpoint: {os.path.basename(CKPT)}  (running 24 games vs debatreya)\n")
+_ngames = sum(len(s) for s in ARCHES.values()) * 2
+print(f"checkpoint: {os.path.basename(CKPT)}  (running {_ngames} games vs debatreya)\n")
 for arch, seeds in ARCHES.items():
     for seed in seeds:
         for our in (0, 1):
@@ -149,6 +150,6 @@ for p in wins:
 
 print("\n=== conversion: WINS only ===")
 print(_fmt_conversion(win_acc))
-print("\n=== conversion: ALL 24 games ===")
+print(f"\n=== conversion: ALL {_ngames} games ===")
 print(_fmt_conversion(all_acc))
 print(f"\nHTML replays in {OUTDIR}/")

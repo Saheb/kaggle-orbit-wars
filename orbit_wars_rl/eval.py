@@ -12,7 +12,7 @@ import numpy as np
 
 from config import Config
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH
-from features import extract_features
+from features import extract_features, _ETA_PROBE_SPEED
 from action_mask import compute_action_masks, actions_from_policy, actions_from_target_policy
 
 
@@ -150,11 +150,11 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
 
 
 _CONV_MILESTONES = (16, 32, 50, 100)
-# redundant-launch is windowed to the OPENING: late-game surplus production re-fires at the
+# redundant/underkill are windowed to the OPENING: late-game surplus production re-fires at the
 # last enemy planets (benign — we've already won), which inflates a whole-game fraction in long
-# won games. The over-fire we care about (and the roi-deflation targets) is in the opening, where
-# wasted ships feed the mid-game collapse. <50 isolates that phase. (phase2 / metrics.md)
-_REDUNDANT_WINDOW = 50
+# won games. The launch waste we care about is in the opening, where wasted ships feed the
+# mid-game collapse. <50 isolates that phase. (phase2 / metrics.md)
+_LAUNCH_WINDOW = 50
 # Isaiah (#1 player) hoard reference at the same milestones. Contested phase (16-50)
 # is the clean read: ~half the army deployed, ~11-22 ships/planet. The @100 jump
 # (garr 0.87, 60 ships/planet) is won-game accumulation, not hoarding.
@@ -191,6 +191,22 @@ def _resolve_launch_target(planets, src, angle):
     return best
 
 
+def _cap_cost_at_arrival(src, tgt, seat):
+    """Ships needed to CAPTURE planet `tgt` from `src` by the time a fleet arrives — the
+    SAME quantity the roi-deflation feature uses (features.py compute_pairwise_features), so
+    `redundant`/`underkill` measure exactly what the deflation acts on. eta from straight-line
+    dist (the feature adds a small rotation correction for orbiting planets — second-order on
+    eta). ships_at_arrival = current + production·eta; neutral cost +1, enemy +prod·3+1.
+    Returns 0 for an own target (can't 'capture' it)."""
+    owner = int(tgt[1])
+    if owner == seat:
+        return 0.0
+    dist = math.hypot(tgt[2] - src[2], tgt[3] - src[3])
+    eta = max(1.0, math.ceil(dist / _ETA_PROBE_SPEED))
+    ships_at_arrival = min(tgt[5] + tgt[6] * eta, 500.0)
+    return ships_at_arrival + (1.0 if owner == -1 else tgt[6] * 3 + 1.0)
+
+
 def _friendly_inbound(fleets, tgt, seat):
     """Own (seat) ships in flight already HEADED toward planet `tgt` — same geometry the
     friendly-contest feature reads (along>0, perp < radius+1.5). Used to flag a *redundant*
@@ -225,13 +241,23 @@ def game_conversion(steps, seat):
     Also records owned-planet count at step milestones (expansion/retention).
     Returns per-game counts; `add_conversion` aggregates across games.
     """
-    caps = atk = reinf = atk_ships = redundant = 0
-    atk_early = redundant_early = 0      # opening window (t < _REDUNDANT_WINDOW)
+    caps = atk = reinf = atk_ships = redundant = underkill = 0
+    atk_early = redundant_early = underkill_early = 0      # opening window (t < _LAUNCH_WINDOW)
     reinf_bin = [0] * len(_REINF_BINS)   # own-target launches by empire size at launch
     atk_bin = [0] * len(_REINF_BINS)     # attack launches by empire size at launch
     planets_at = {ms: None for ms in _CONV_MILESTONES}
     garrison_at = {ms: None for ms in _CONV_MILESTONES}   # ships parked on owned planets
     inflight_at = {ms: None for ms in _CONV_MILESTONES}   # ships in owned fleets (deployed)
+    # Pre-scan ownership timeline (keyed by GLOBAL planet id → no slot-reorder issue) so a launch
+    # can look FORWARD: did its target actually become ours shortly after arrival? Used for the
+    # forward-looking underkill (a per-launch threshold mis-flags legit multi-wave as underkill).
+    T = len(steps)
+    us_pids_at = [set() for _ in range(T)]
+    for s in range(T):
+        if seat < len(steps[s]):
+            ps = steps[s][seat].observation.get("planets")
+            if ps:
+                us_pids_at[s] = {p[0] for p in ps if int(p[1]) == seat}
     prev = {}
     last = None
     for t in range(1, len(steps)):
@@ -280,23 +306,38 @@ def game_conversion(steps, seat):
                 atk += 1
                 atk_ships += sent
                 atk_bin[bidx] += 1
-                if t < _REDUNDANT_WINDOW:
+                early = t < _LAUNCH_WINDOW
+                if early:
                     atk_early += 1
-                # redundant attack-launch: target already has enough own ships inbound to
-                # capture it (a friendly fleet is already taking it). This is exactly the
-                # over-fire the friendly-coverage roi-deflation suppresses, so it should fall
-                # if the fix works. Threshold = inbound >= target's current ships (proxy for
-                # capture cost). Same-step double-fires aren't caught (neither fleet exists at
-                # decision time) — but neither can the feature prevent them, so the metric
-                # matches the fix's reach.
-                if _friendly_inbound(f0, tgt, seat) >= float(tgt[5]) > 0:
+                # Launch-waste trichotomy:
+                #   redundant (OVERKILL) = target was ALREADY covered to capture by own fleets
+                #     inbound BEFORE this launch (friendly_inbound >= cap_cost_at_arrival, the
+                #     SAME quantity the roi-deflation zeroes) → pure surplus.
+                #   underkill (INEFFECTIVE) = FORWARD-looking: the target never becomes ours
+                #     within ~eta+10 steps of the launch → the ships didn't lead to a capture
+                #     (the seed1030 18-at-23 lone-undercommit case). A per-launch threshold
+                #     mis-flags legit multi-wave (each wave < cost) — forward-looking doesn't,
+                #     since a target taken by a later wave reads as captured for all waves.
+                #   (neither = an effective launch.)
+                fin = _friendly_inbound(f0, tgt, seat)
+                capcost = _cap_cost_at_arrival(src, tgt, seat)
+                if fin >= capcost > 0:
                     redundant += 1
-                    if t < _REDUNDANT_WINDOW:
+                    if early:
                         redundant_early += 1
+                else:
+                    eta = max(1, int(math.ceil(
+                        math.hypot(tgt[2] - src[2], tgt[3] - src[3]) / _ETA_PROBE_SPEED)))
+                    pid = tgt[0]
+                    if not any(pid in us_pids_at[s] for s in range(t + 1, min(t + eta + 11, T))):
+                        underkill += 1
+                        if early:
+                            underkill_early += 1
     end_planets = sum(1 for p in (last or []) if int(p[1]) == seat)
     out = {"captures": caps, "attack_launches": atk, "reinforce_launches": reinf,
-           "attack_ships": atk_ships, "end_planets": end_planets, "redundant": redundant,
-           "atk_early": atk_early, "redundant_early": redundant_early,
+           "attack_ships": atk_ships, "end_planets": end_planets,
+           "redundant": redundant, "underkill": underkill, "atk_early": atk_early,
+           "redundant_early": redundant_early, "underkill_early": underkill_early,
            "glen": len(steps), "reinf_bin": reinf_bin, "atk_bin": atk_bin}
     for ms in _CONV_MILESTONES:
         out[f"p{ms}"] = planets_at[ms]
@@ -307,8 +348,8 @@ def game_conversion(steps, seat):
 
 def new_conversion_acc():
     acc = {"captures": 0, "attack_launches": 0, "reinforce_launches": 0,
-           "attack_ships": 0, "end_planets": 0, "redundant": 0, "glen_sum": 0, "games": 0,
-           "atk_early": 0, "redundant_early": 0,
+           "attack_ships": 0, "end_planets": 0, "redundant": 0, "underkill": 0,
+           "glen_sum": 0, "games": 0, "atk_early": 0, "redundant_early": 0, "underkill_early": 0,
            "reinf_bin": [0] * len(_REINF_BINS), "atk_bin": [0] * len(_REINF_BINS)}
     for ms in _CONV_MILESTONES:
         acc[f"p{ms}_sum"] = 0
@@ -320,7 +361,8 @@ def new_conversion_acc():
 
 def add_conversion(acc, conv):
     for k in ("captures", "attack_launches", "reinforce_launches", "attack_ships",
-              "end_planets", "redundant", "atk_early", "redundant_early"):
+              "end_planets", "redundant", "underkill", "atk_early", "redundant_early",
+              "underkill_early"):
         acc[k] += conv[k]
     acc["glen_sum"] += conv["glen"]
     for i in range(len(_REINF_BINS)):
@@ -358,20 +400,24 @@ def _fmt_conversion(acc):
     # even when holding well (Isaiah 7.1 > Jake 3.5 purely on game length). Always read with
     # game length; `churn/100st` normalizes it (caps/end per 100 steps). The clean hold signal
     # is the planets@N trajectory turning over (peak then decline), not churn alone.
-    # redundant = attack-launches at an already-being-captured target / all attack-launches
-    # (the opening over-fire the roi-deflation targets; top-player floor ~0.15, not 0). Reported
-    # OPENING-windowed (<50) as the headline — a whole-game fraction is inflated by benign
-    # end-game surplus re-fire in long won games; the `(WG x)` whole-game value is kept for context.
+    # Launch waste, both vs cap_cost_at_arrival (== the roi-deflation's own condition) and
+    # OPENING-windowed (<50) as the headline (whole-game inflated by benign end-game surplus in
+    # long won games; `(WG x)` kept for context). redundant = OVERKILL (target already covered
+    # before the launch); underkill = launch that still can't capture (e.g. 18 sent at a 23-ship
+    # neutral). Top-player opening redundant ref ~0.12.
     glen = acc["glen_sum"] / n
     churn = c / max(acc["end_planets"], 1)
     churn_n = churn / max(glen / 100.0, 1e-6)
     redf = acc["redundant_early"] / max(acc["atk_early"], 1)
     redf_wg = acc["redundant"] / max(al, 1)
+    undf = acc["underkill_early"] / max(acc["atk_early"], 1)
+    undf_wg = acc["underkill"] / max(al, 1)
     return (f"Conversion: caps/game {c/n:.1f}  atk-launch/game {al/n:.1f}  "
             f"cap/atk-launch {c/max(al,1):.3f}  ships/cap {acc['attack_ships']/max(c,1):.0f}  "
             f"reinf_share {rl/max(al+rl,1):.2f}\n"
             f"  planets@16/32/50/100 {pl(16)}/{pl(32)}/{pl(50)}/{pl(100)}  end {acc['end_planets']/n:.1f}"
-            f"   churn {churn:.2f} ({churn_n:.2f}/100st, len {glen:.0f})  redundant-launch<50 {redf:.2f} (WG {redf_wg:.2f})"
+            f"   churn {churn:.2f} ({churn_n:.2f}/100st, len {glen:.0f})"
+            f"\n  launch-waste<50  redundant {redf:.2f} (WG {redf_wg:.2f})  underkill {undf:.2f} (WG {undf_wg:.2f})"
             f"   [ref Isaiah: cap/atk-launch 0.59  planets 2/6/9/10  reinf 0.30]\n"
             f"  hoard  garr_frac@ {gf(16)}/{gf(32)}/{gf(50)}/{gf(100)}  "
             f"ships/planet@ {spp(16)}/{spp(32)}/{spp(50)}/{spp(100)}"

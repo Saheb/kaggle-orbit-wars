@@ -108,20 +108,28 @@ Conversion: caps/game X  atk-launch/game X  cap/atk-launch X  ships/cap X  reinf
   band: **Isaiah 1.59 · TonyK 1.16 · Jake 1.23 · 213tubo 1.48.** Even normalized it's a *secondary* read;
   the clean hold signal is the **planets@N trajectory turning over** (peak then decline) + the
   proximity crossover step (`deb_proximity.py`).
-- **redundant-launch<50** = OPENING (step <50) attack-launches at a target that already has ≥ its own
-  ships inbound (a friendly fleet is already capturing it) ÷ opening attack-launches. The opening
-  **over-fire** the friendly-coverage roi-deflation (`features.py`/`torch_env.py`) is built to suppress,
-  so it should **fall** if the fix works. ⚠️ **WINDOWED to the opening on purpose** — a whole-game fraction
-  is inflated by *benign end-game surplus re-fire* (once you own ~16 planets vs a dying opponent, surplus
-  production gets spent re-firing the last enemy planets; harmless, you've already won). Length-normalizing
-  does NOT fix this — it's a phase-composition confound (long won games contain more end-game), not a
-  volume one (the metric is already a fraction). The whole-game value is kept in `(WG x)` for context.
-  ⚠️ **Floor is ~0.12, not 0** — legitimate sequential reinforcement of a contested capture trips the
-  threshold. Windowed top-player ref is *tight*: **Isaiah 0.13 · TonyK 0.14 · Jake 0.11 · carpet-bomber
-  213tubo 0.12** (note 213tubo's WG 0.22 → <50 0.12: its apparent over-fire was ALL end-game, opening is
-  clean). Validation target for p2rev2 = approach ~0.12, not zero. (Same-step double-fires at one fresh
-  target aren't counted — neither fleet exists at decision time — but the feature can't prevent those
-  either, so the metric matches the fix's reach.)
+- **launch-waste<50** (printed `launch-waste<50  redundant X (WG X)  underkill X (WG X)`) — the OPENING
+  (step <50) launch-discipline pair, both keyed to `cap_cost_at_arrival` (the SAME quantity the roi-deflation
+  uses, replicated in `eval.py _cap_cost_at_arrival`/`_eta` from `_ETA_PROBE_SPEED`). Windowed to the opening
+  because a whole-game fraction is inflated by *benign end-game surplus re-fire* in long won games (a
+  phase-composition confound, not a volume one — length-normalizing does NOT fix it); the `(WG x)`
+  whole-game value is kept for context.
+  - **redundant (OVERKILL)** = attack-launch at a target ALREADY covered to capture by own fleets inbound
+    *before* the launch (`friendly_inbound ≥ cap_cost_at_arrival`) ÷ opening attack-launches → pure surplus,
+    exactly what the deflation zeroes. ⚠️ **Top-player floor is ~0.02** (Isaiah 0.02 · TonyK 0.03 · Jake 0.02
+    · 213tubo 0.02) — top players essentially never pile on. (An earlier current-ships threshold read ~0.12,
+    but that was almost all *enemy multi-wave* the deflation rightly leaves alone — the aligned metric is the
+    true one.) So our agent reading ≫0.02 = real over-fire the deflation should cut.
+  - **underkill (INEFFECTIVE)** = FORWARD-looking: the target never becomes ours within ~eta+10 steps of the
+    launch (id-keyed lookahead, no slot-reorder issue) ÷ opening attack-launches → ships that didn't lead to
+    a capture (the seed1030 18-at-23 lone-undercommit case). A per-launch `sent+inbound<cost` threshold is
+    WRONG here — it mis-flags legit multi-wave (each wave < cost) at ~0.86; forward-looking fixes that
+    (a target a later wave captures reads effective for all waves). Top-player ref **~0.43** (Isaiah 0.40 ·
+    Jake 0.43 · TonyK 0.50). Note it ≈ opening `1 − cap/atk-launch`, so it's the dominant component of the
+    conversion gap: since redundant is tiny (~0.02), a low cap/atk-launch is mostly **undercommit/ineffective
+    targeting, not overkill**. Use it to see if the next run tightens *which* opening launches we commit to.
+  (Same-step double-fires at one fresh target aren't counted for redundant — neither fleet exists at decision
+  time — matching the fix's reach.)
 - **reinf_share** = reinforce-launches ÷ all launches. ⚠️ **Opponent/success-confounded**: it co-moves
   with empire size (own planets only become legal targets above the gate, and their fraction rises as the
   empire grows — phase2 §6), so the *same policy* reads ~0.08 vs debatreya (eliminated, stuck small/
