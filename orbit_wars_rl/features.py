@@ -31,8 +31,13 @@ Pairwise features (15 per owned-slot × target-planet pair):
 from __future__ import annotations
 
 import math
+import os
 import numpy as np
 import torch
+
+# Eval-only escape hatch: measure a policy trained BEFORE the friendly-coverage roi-deflation
+# in its NATIVE feature regime (deflation off). Default off → deflation active (production path).
+_NO_FRIENDLY_DEFLATION = os.environ.get("ORBIT_NO_FRIENDLY_DEFLATION") == "1"
 
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet, Fleet, CENTER, ROTATION_RADIUS_LIMIT
 
@@ -293,10 +298,36 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
             headed = (along_ep > 0) & (perp_ep < tgt_r_p[np.newaxis, :] + 1.5)
             enemy_contest = (efships[:, np.newaxis] * headed).sum(axis=0).astype(np.float32)
 
+    # Precompute FRIENDLY fleet ships already racing toward each target — the missing
+    # symmetric counterpart of enemy_contest. Used in compute_pairwise_features to deflate
+    # capture roi for a target we ALREADY have a fleet inbound to (the planet still reads
+    # neutral/enemy until our fleet lands, so it otherwise stays the top target and we
+    # redundantly re-launch at it). Not its own channel: it modulates roi_20/roi_50 (warm
+    # features) so no new input dimension is added.
+    friendly_contest = np.zeros(n_p_pair, dtype=np.float32)
+    if n_fleets > 0 and n_p_pair > 0:
+        friend_fleet_mask = (fleet_owner == player)
+        if friend_fleet_mask.any():
+            ffx = fleet_x[friend_fleet_mask]
+            ffy = fleet_y[friend_fleet_mask]
+            ffcos = fleet_cos[friend_fleet_mask]
+            ffsin = fleet_sin[friend_fleet_mask]
+            ffships = fleet_ships_arr[friend_fleet_mask]
+            tgt_x_pf = np.array([planets[j][2] for j in range(n_p_pair)], dtype=np.float32)
+            tgt_y_pf = np.array([planets[j][3] for j in range(n_p_pair)], dtype=np.float32)
+            tgt_r_pf = np.array([planets[j][4] for j in range(n_p_pair)], dtype=np.float32)
+            vx_fp = tgt_x_pf[np.newaxis, :] - ffx[:, np.newaxis]
+            vy_fp = tgt_y_pf[np.newaxis, :] - ffy[:, np.newaxis]
+            along_fp = vx_fp * ffcos[:, np.newaxis] + vy_fp * ffsin[:, np.newaxis]
+            perp_fp  = np.abs(vx_fp * ffsin[:, np.newaxis] - vy_fp * ffcos[:, np.newaxis])
+            headed_f = (along_fp > 0) & (perp_fp < tgt_r_pf[np.newaxis, :] + 1.5)
+            friendly_contest = (ffships[:, np.newaxis] * headed_f).sum(axis=0).astype(np.float32)
+
     pairwise = compute_pairwise_features(
         planets, owned_indices, owned_count, player, max_planets=max_planets,
         max_owned=max_owned, angular_velocity=angular_velocity, step=step,
         init_by_id=init_by_id, enemy_contest=enemy_contest,
+        friendly_contest=None if _NO_FRIENDLY_DEFLATION else friendly_contest,
     )
 
     return {
@@ -339,7 +370,8 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
                               max_planets: int = 48, max_owned: int = MAX_OWNED_PLANETS,
                               angular_velocity: float = 0.0, step: int = 0,
                               init_by_id: dict | None = None,
-                              enemy_contest: np.ndarray | None = None):
+                              enemy_contest: np.ndarray | None = None,
+                              friendly_contest: np.ndarray | None = None):
     """For each (owned-slot, target-planet) pair return geometric + ownership features.
 
     These are exactly the quantities the model cannot easily compute from raw (x, y)
@@ -452,6 +484,17 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         safe_cap = np.maximum(cap_cost_at_arrival, 1.0)
         roi_20 = np.clip((tgt_prod * 20 - cap_cost_at_arrival) / safe_cap, -1.0, 1.0)
         roi_50 = np.clip((tgt_prod * 50 - cap_cost_at_arrival) / safe_cap, -1.0, 1.0)
+
+        # Deflate capture roi by friendly ships already inbound: a target we are already
+        # capturing (our fleet en route) offers ~0 marginal return to a NEW launch, so it
+        # should stop reading as attractive. coverage in [0,1] = inbound / capture-cost;
+        # own (reinforce) targets are never deflated. Keeps the head from re-launching at a
+        # planet it is already taking (the opening over-fire).
+        if friendly_contest is not None:
+            coverage = np.where(tgt_owner != player,
+                                np.minimum(friendly_contest[:n_p] / safe_cap, 1.0), 0.0)
+            roi_20 = roi_20 * (1.0 - coverage)
+            roi_50 = roi_50 * (1.0 - coverage)
 
         out[slot, :n_p, 0]  = sin_a                         # arrival direction sin
         out[slot, :n_p, 1]  = cos_a                         # arrival direction cos

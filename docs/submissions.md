@@ -21,8 +21,10 @@ Ordered by submission date. Checkpoint paths relative to repo root.
 | 53410563 | 2026-06-06 | `gpu_run_artifacts/rev38/checkpoints/torch_step_5242880_rev38_20260605_181635.pt` | **950.5** | 89.1% | 2.7% | — | Rev38 5M — pairwise=15 features (roi_20/roi_50/enemy_contest), rollout=128 — new record |
 | 53416454 | 2026-06-06 | `gpu_run_artifacts/rev38/checkpoints/torch_step_6291456_rev38_20260605_181635.pt` | 924.5 | — | 3.1% | — | Rev38 6M — best Ajay panel yet (8/256) |
 | 53428737 | 2026-06-06 | `gpu_run_artifacts/rev46/checkpoints/torch_step_4194304_rev46_20260606_143300.pt` | 854.6 | 86.7% | 3.1% | — | Rev46 4M — same config as Rev38, peak before carpet-bomb collapse |
-| 53451535 | 2026-06-07 | `gpu_run_artifacts/rev38/checkpoints/torch_step_5242880_rev38_20260605_181635.pt` (re-export) | **978.3** | **92.6%** | TBD | — | **Rev38 5M + FIXED intercept aimer** — identical policy to the 950.5 record, only the inference aimer changed (aim-benchmark 73%→95%; Zach 89.1→92.6%). Aimer fix alone = +27.8 LB over 950.5 |
-| 53471121 | 2026-06-08 | `gpu_run_artifacts/rev53b/checkpoints/torch_step_10485760_rev53b_20260607_181202.pt` | PENDING | — | **10.9%** | — | **Rev53b 13.6M eff — heuristic-pool selectivity + fixed aimer.** Ajay 10.9% = ~3.5× prior all-time record (3.1%). vs random 10/10, vs Zach 4/4 |
+| 53451535 | 2026-06-07 | `gpu_run_artifacts/rev38/checkpoints/torch_step_5242880_rev38_20260605_181635.pt` (re-export) | **993.9** | **92.6%** | 2.7% | — | **Rev38 5M + FIXED intercept aimer — ALL-TIME LB RECORD.** Identical policy to the 950.5 record, only the inference aimer changed (aim-benchmark 73%→95%; Zach 89.1→92.6%). Aimer fix alone = +46.6 LB over 947.3 (same checkpoint, old aimer). |
+| 53471121 | 2026-06-08 | `gpu_run_artifacts/rev53b/checkpoints/torch_step_10485760_rev53b_20260607_181202.pt` | **933.0** (later 953.2) | — | **10.9%** | — | **Rev53b 13.6M eff — heuristic-pool selectivity + fixed aimer. LB REGRESSION despite Ajay 10.9% (~3.5× prior panel record).** Ajay panel went up 4×, LB went DOWN ~60 pts vs rev38 5M+aimer (both fixed aimer). ⇒ Ajay/1166 heuristic-ladder panel is NOT LB-predictive — same trap as Zach/srcs_multi. |
+| 53527873 | 2026-06-10 | `gpu_run_artifacts/hellburner_spot/checkpoints/torch_step_1048576_rev54_20260609_155722.pt` | pending | — | 5.5% | — | Rev54 1M — early_capture training-wide anneal + metric cleanup. Panel: 5.5% Ajay / 4.7% 1300. This is the rev55 resume point (REINFORCE/reinforcement-lever run). target-decode + fixed aimer. |
+| 53574885 | 2026-06-11 | `gpu_run_artifacts/p2rev2/checkpoints/torch_step_8912896_p2rev2_20260611_105500.pt` | pending | — | — | — | **FIRST Phase-2 (reinforce-enabled) submission.** p2rev2 8.91M champion: reinforce gate≥3 + forward-staging + garrison-floor10, defense_coef dropped, aggressive pool. **Export fix:** now bakes reinforce-discipline parity (gate/forward/floor) into the inference mask — without it the agent reinforces <3 planets / backward / drains source = self-sabotage (these three params are NOT stored in the checkpoint, must be passed at export). Also fixed a pre-existing export crash (`os` not imported in template; surfaced by features.py module-level `os.environ` read). target-decode. Sanity: 4/4 vs zach, 10/10 vs random. |
 
 ---
 
@@ -32,4 +34,6 @@ Ordered by submission date. Checkpoint paths relative to repo root.
 - Sanity check: always run 10/10 vs random before submitting
 - Ajay panel added 2026-06-04 as harder eval metric (orbit_lite intercept aiming gives Ajay structural fleet-speed advantage)
 - Zach panel saturating ~88-89%; Ajay panel is now the signal that matters
-- Top 10 LB target: ~1153 (gap from current ~918 = ~235 points)
+- Top 10 LB target: ~1153 (gap from current record **993.9** = ~159 points)
+- **LB record = rev38 5M + fixed aimer = 993.9** (sub 53451535). Best *lineage* to build on is rev38, not rev53b.
+- **Ajay/1166 panel demoted (2026-06-09):** rev53b proved the heuristic-ladder panel is not LB-predictive (10.9% Ajay → 933 LB, below rev38's 2.7% → 993.9). Treat panels as guardrails, not the objective; the only honest LB signal is submitting.

@@ -84,8 +84,57 @@ class VecTorchEnv:
         handicap_ships: int = 5,
         ssdr_frac: float = 0.0,
         ssdr_max_steps: int = 20,
+        allow_reinforce: bool = False,
+        reinforce_garrison_floor: float = 0.0,
+        reinforce_cost: float = 0.0,
+        reinforce_gate_min_planets: int = 0,
+        reinforce_forward_only: bool = False,
     ):
         self.num_envs = num_envs
+        # Reinforcement: when True, own planets (except the launch source) are LEGAL
+        # targets — ships arriving at a friendly planet add to its garrison (physics
+        # already implemented in step()). EDA of top players: ~57% of fleets reinforce;
+        # beginner agents 0%. Default False = attack-only (backward-compatible).
+        self.allow_reinforce = bool(allow_reinforce)
+        # Reinforcement discipline (rev56 lesson: costless reinforcement floods — the
+        # curriculum times availability but adds no cost, so any fire incentive → flood).
+        #   #1 GARRISON FLOOR: a reinforce launch may not drain its source below this
+        #      many ships. Pure training-time mask (veto), NOT a penalty → no Nash risk.
+        #      Kills the "drain a planet, then lose it" regression. The real Kaggle env
+        #      has no floor, so inference is unconstrained — the policy internalises it.
+        #   #2 TRANSIT COST: subtract reinforce_cost × ships_reinforced from the
+        #      launching player's per-step reward. Scales with WASTE (a flood of
+        #      thousands of ships is expensive; one useful staging move is cheap), so it
+        #      prunes the wasteful tail rather than zeroing reinforcement — PROVIDED
+        #      credit connects a useful stage to its payoff. reinforce_cost is the
+        #      calibration knob; reinforce_rate is the dial (target ~0.4-0.6, not 0/0.8).
+        # Both only act on launches whose target is OUR OWN planet — attacks
+        # (enemy/neutral) are untouched, so neither lever can distort the attack Nash.
+        self.reinforce_garrison_floor = float(reinforce_garrison_floor)
+        self.reinforce_cost = float(reinforce_cost)
+        #   #3 EMPIRE-SIZE GATE: own planets become legal reinforce targets only once the
+        #      player owns >= this many planets. Below it, attack-only (must expand first).
+        #      Grounded in top-player replays: reinforce_rate ≈0 at 1 planet, ~0.1 at 2,
+        #      then ramps with empire size. A pure action mask (no Nash risk) that makes
+        #      the early flood impossible by construction. 0 = off (no gate). Training-only,
+        #      like the garrison floor — the policy internalises it.
+        self.reinforce_gate_min_planets = int(reinforce_gate_min_planets)
+        #   #4 FORWARD-STAGING GATE: an own (reinforce) target is legal only if it sits
+        #      closer to the nearest enemy planet than the launch source — reinforcement
+        #      flows rear→front (staging), never into a safe rear hoard. Top-player
+        #      replays stage forward 66-70% of the time; a rear hoard is the costless
+        #      safe-fire outlet that floods symmetric self-play. Pure mask (no Nash risk),
+        #      training-only, internalised at inference. 0/False = off. Enemy/neutral
+        #      targets are never constrained.
+        self.reinforce_forward_only = bool(reinforce_forward_only)
+        # reinforce_rate metric accumulators (N, num_players), allocated/zeroed per
+        # rollout via reset_reinforce_stats(). None = not collecting (no overhead).
+        self._reinforce_launch_count = None
+        self._fire_launch_count = None
+        # target-owner share diagnostic: launches whose target is a NEUTRAL planet
+        # (own = _reinforce_launch_count; enemy = fire − own − neutral). Phase-2
+        # target-head health (is the "where" head selective or uniform?).
+        self._neutral_launch_count = None
         self.num_players = num_players
         self.episode_steps = episode_steps
         self.device = torch.device(device)
@@ -555,11 +604,48 @@ class VecTorchEnv:
         fire_mask = slot_valid & (max_ships >= 1.0)
         # Angle mask: all angles legal (no sun-blocking for now)
         angle_mask = torch.ones(N, MAX_OWNED, NUM_ANGLE_BINS, dtype=torch.bool, device=self.device)
-        # Target mask: target-conditioned rollouts should sample a live planet
-        # that is not already ours. Per-source mask keeps padded owned slots off.
+        # Target mask: target-conditioned rollouts sample a live planet. Per-source
+        # mask keeps padded owned slots off. With reinforcement OFF (default) only
+        # non-own planets are legal; with reinforcement ON, own planets are legal too
+        # (friendly arrival reinforces the garrison — see step()), EXCLUDING the launch
+        # source planet itself (degenerate self-launch).
         target_owner = owner.unsqueeze(1).expand(-1, MAX_OWNED, -1)
         target_alive = planet_alive.unsqueeze(1).expand(-1, MAX_OWNED, -1)
-        target_mask = target_alive & (target_owner != player) & slot_valid.unsqueeze(-1)
+        if self.allow_reinforce:
+            P_idx = torch.arange(owner.shape[1], device=self.device).view(1, 1, -1)
+            is_source = (P_idx == owned_idx.unsqueeze(-1))  # (N, MAX_OWNED, P)
+            target_mask = target_alive & slot_valid.unsqueeze(-1) & ~is_source
+            # Empire-size gate: own planets are legal reinforce targets only when the
+            # player owns >= reinforce_gate_min_planets. Enemy/neutral targets are never
+            # gated. Below the threshold the agent is attack-only (must expand first).
+            if self.reinforce_gate_min_planets > 0:
+                is_own = (target_owner == player)  # (N, MAX_OWNED, P)
+                # num_owned = true owned-planet count (uncapped, computed above)
+                gate_ok = (num_owned >= self.reinforce_gate_min_planets).view(-1, 1, 1)
+                # disallow own targets where the empire is too small
+                target_mask = target_mask & (~is_own | gate_ok)
+            # Forward-staging gate: an own (reinforce) target is legal only if it is
+            # closer to the nearest enemy planet than the launch source. Reinforcement
+            # flows rear→front (staging), never into a safe rear hoard — the outlet that
+            # floods symmetric self-play. Enemy/neutral targets are never constrained.
+            if self.reinforce_forward_only:
+                is_own = (target_owner == player)  # (N, MAX_OWNED, P)
+                enemy_planet = (owner != player) & (owner >= 0) & planet_alive  # (N, P)
+                dx = x.unsqueeze(2) - x.unsqueeze(1)   # (N, P, P): planet i vs planet j
+                dy = y.unsqueeze(2) - y.unsqueeze(1)
+                pdist = torch.sqrt(dx * dx + dy * dy)
+                INF = torch.finfo(pdist.dtype).max
+                d2e = torch.where(enemy_planet.unsqueeze(1), pdist,
+                                  torch.full_like(pdist, INF)).min(dim=2).values  # (N, P)
+                # gather source planet's enemy-distance per owned slot (owned_idx is
+                # clamped gather-safe; padded slots are dropped by slot_valid anyway)
+                src_d2e = torch.gather(d2e, 1, owned_idx)              # (N, MAX_OWNED)
+                forward_ok = d2e.unsqueeze(1) < src_d2e.unsqueeze(-1)  # (N, MAX_OWNED, P)
+                # envs with no live enemy planet: forward-staging is moot → don't constrain
+                forward_ok = forward_ok | (~enemy_planet.any(dim=1)).view(-1, 1, 1)
+                target_mask = target_mask & (~is_own | forward_ok)
+        else:
+            target_mask = target_alive & (target_owner != player) & slot_valid.unsqueeze(-1)
         # Per-env owned_count for the model
         owned_count = slot_valid.long().sum(dim=1).tolist()
 
@@ -574,6 +660,7 @@ class VecTorchEnv:
             planets=planets, planet_alive=planet_alive, P=P,
             owned_idx=owned_idx, slot_valid=slot_valid, player=player,
             enemy_contest=enemy_contest,
+            friendly_contest=friendly_pressure,   # (N, P): own ships already inbound per target
         )
 
         return {
@@ -593,7 +680,7 @@ class VecTorchEnv:
         }
 
     def _compute_pairwise(self, planets, planet_alive, P, owned_idx, slot_valid, player,
-                          enemy_contest=None):
+                          enemy_contest=None, friendly_contest=None):
         """Vectorized counterpart of features.compute_pairwise_features().
 
         Returns (N, MAX_OWNED, P, 15) float32 on self.device. Channel order:
@@ -705,6 +792,18 @@ class VecTorchEnv:
         roi_20 = ((prod_actual * 20.0 - cap_at_arr) / safe_cap).clamp(-1.0, 1.0)
         roi_50 = ((prod_actual * 50.0 - cap_at_arr) / safe_cap).clamp(-1.0, 1.0)
 
+        # Deflate capture roi by friendly ships already inbound (symmetric to enemy_contest):
+        # a target we already have a fleet en route to offers ~0 marginal return to a NEW
+        # launch. coverage in [0,1] = inbound / capture-cost; own (reinforce) targets are never
+        # deflated. Matches features.py compute_pairwise_features (parity-tested).
+        if friendly_contest is not None:
+            fc_b = friendly_contest.unsqueeze(1).expand(-1, MO, -1)          # (N, MO, P)
+            coverage = torch.where(owner_exp != player,
+                                   (fc_b / safe_cap).clamp(max=1.0),
+                                   torch.zeros_like(safe_cap))
+            roi_20 = roi_20 * (1.0 - coverage)
+            roi_50 = roi_50 * (1.0 - coverage)
+
         # Enemy contest feature (ch 14): broadcast (N, P) → (N, MO, P)
         if enemy_contest is not None:
             contest_b = (enemy_contest / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1)
@@ -805,7 +904,8 @@ class VecTorchEnv:
     #      or (N, MAX_OWNED, 4) int — [fire, angle_bin, ship_bin, target_idx]
     # ---------------------------------------------------------------------
 
-    def _apply_actions(self, actions: torch.Tensor, owner_id: int):
+    def _apply_actions(self, actions: torch.Tensor, owner_id: int,
+                       angle_override: torch.Tensor = None):
         if actions is None:
             return
         owned_idx, slot_valid = self.owned_indices_for(owner_id)
@@ -850,18 +950,58 @@ class VecTorchEnv:
             tgt = self.planets.gather(1, target_gather)
             target_owner = tgt[:, :, 1].long()
             target_alive = self.planet_alive.gather(1, target_idx)
+            if self.allow_reinforce:
+                # Own planets are valid targets (friendly arrival reinforces the
+                # garrison); only the launch source planet itself is invalid.
+                tgt_ok = target_alive & (target_idx != owned_idx)
+            else:
+                tgt_ok = target_alive & (target_owner != owner_id)
             target_valid = torch.where(
                 use_target_decode,
-                target_alive & (target_owner != owner_id),
+                tgt_ok,
                 torch.ones_like(target_alive, dtype=torch.bool),
             )
             target_angle = self._target_intercept_angle(src_x, src_y, src_r, ship_count, target_idx)
             angle = torch.where(use_target_decode, target_angle, angle)
 
+        # Continuous-angle override (NaN = none). External heuristics emit a precise
+        # continuous intercept angle; the real engine uses it directly, but our 144-bin
+        # angle decode quantizes it (±~1.25-2.5°) and handicaps their aiming in-sim. Apply
+        # the raw angle here so aiming-heavy opponents play at true strength (matches eval).
+        if angle_override is not None:
+            has_cont = ~torch.isnan(angle_override)
+            angle = torch.where(has_cont, angle_override, angle)
+
         # Validate: planet still owned by this player AND has enough ships
         valid_owner = (src_owner == owner_id) & slot_valid
         valid_ships = src_ships >= ship_count
         can_fire = fire & valid_owner & valid_ships & target_valid & (ship_count > 0)  # (N, MAX_OWNED)
+
+        # Reinforcement discipline (#1 garrison floor + #2 transit cost) + reinforce_rate
+        # metric. is_reinforce: a launch whose target is one of OUR OWN planets — only
+        # possible with allow_reinforce + target decode. Attacks (enemy/neutral) untouched.
+        if (self.allow_reinforce and self.action_decode == "target"
+                and actions.shape[-1] >= 4):
+            is_reinforce = use_target_decode & (target_owner == owner_id)  # (N, MAX_OWNED)
+            # #1 Garrison floor: veto any reinforce launch that would drain its source
+            # below the floor (mask, not penalty → no Nash risk).
+            if self.reinforce_garrison_floor > 0.0:
+                would_underflow = is_reinforce & ((src_ships - ship_count) < self.reinforce_garrison_floor)
+                can_fire = can_fire & ~would_underflow
+            # #2 Per-ship transit cost: accumulate ships sent to own planets this step
+            # for the launching player; the penalty is applied to the reward in step().
+            # Counts only launches that actually fire (post-floor-veto).
+            if self.reinforce_cost > 0.0:
+                reinforce_ships = (ship_count * (can_fire & is_reinforce).float()).sum(dim=1)  # (N,)
+                self._reinforce_ships[:, owner_id] = self._reinforce_ships[:, owner_id] + reinforce_ships
+            # reinforce_rate metric: per-(env,player) counts of realized launches (post
+            # floor-veto) and how many were reinforcement. train_torch combines these with
+            # train_mask → the current policy's reinforce_rate (target 0.4-0.6, Vadasz 0.57).
+            if self._fire_launch_count is not None:
+                self._fire_launch_count[:, owner_id] += can_fire.sum(dim=1).float()
+                self._reinforce_launch_count[:, owner_id] += (can_fire & is_reinforce).sum(dim=1).float()
+                is_neutral = use_target_decode & (target_owner < 0)  # neutral planet owner = -1
+                self._neutral_launch_count[:, owner_id] += (can_fire & is_neutral).sum(dim=1).float()
 
         # Compute launch positions (just outside planet radius along angle)
         start_x = src_x + torch.cos(angle) * (src_r + 0.1)
@@ -908,20 +1048,40 @@ class VecTorchEnv:
         self.fleet_alive[flat_env, flat_slot] = True
         self.next_fleet_id = self.next_fleet_id + target_valid.long().sum(dim=1)
 
+    def reset_reinforce_stats(self):
+        """Zero the reinforce_rate accumulators. Call once per rollout (before the
+        step loop); read _reinforce_launch_count / _fire_launch_count after, combine
+        with train_mask to get the current policy's reinforce_rate."""
+        self._reinforce_launch_count = torch.zeros(
+            self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
+        self._fire_launch_count = torch.zeros(
+            self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
+        self._neutral_launch_count = torch.zeros(
+            self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
+
     # ---------------------------------------------------------------------
     # Step — pure tensor ops, runs all N envs in one pass.
     # Phase 2 scope: orbital motion + collision/combat + action processing.
     # ---------------------------------------------------------------------
 
-    def step(self, actions=None) -> dict:
+    def step(self, actions=None, angle_overrides=None) -> dict:
         """Advance all N envs by one tick.
 
         actions: optional dict {player_id: (N, MAX_OWNED, 3) tensor}.
                  Each player's fleets are launched before physics.
+        angle_overrides: optional dict {player_id: (N, MAX_OWNED) float tensor};
+                 NaN = no override, else a continuous launch angle that bypasses the
+                 144-bin quantization (used for external heuristics — see _apply_actions).
         """
+        # Per-step buffer for the reinforcement transit cost (#2): ships each player
+        # sent to its own planets this step. Zeroed before launches accumulate into it.
+        if self.allow_reinforce and self.reinforce_cost > 0.0:
+            self._reinforce_ships = torch.zeros(
+                self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         if actions is not None:
             for pid, act in actions.items():
-                self._apply_actions(act, pid)
+                ovr = angle_overrides.get(pid) if angle_overrides else None
+                self._apply_actions(act, pid, angle_override=ovr)
 
         # 1. Production: planet[5] += planet[6] for owned planets (owner != -1)
         owner = self.planets[:, :, 1]
@@ -1175,6 +1335,12 @@ class VecTorchEnv:
                 effective_coef = self.early_capture_coef * decay  # (N,)
             terminal_rewards = terminal_rewards + effective_coef.unsqueeze(1) * ec_rewards
             self.prev_owned = owned
+        # Reinforcement transit cost (#2): price the ships each player sent to its own
+        # planets this step. Costless reinforcement floods (rev56, ~30× launch volume);
+        # this prunes the wasteful tail. Calibrate reinforce_cost so reinforce_rate
+        # settles ~0.4-0.6 (Vadasz-like), not 0 (over-suppressed) and not 0.8 (flood).
+        if self.allow_reinforce and self.reinforce_cost > 0.0:
+            terminal_rewards = terminal_rewards - self.reinforce_cost * self._reinforce_ships
         # 12. Auto-reset done envs in-place — must come AFTER capturing rewards
         if done.any():
             self._auto_reset(done)

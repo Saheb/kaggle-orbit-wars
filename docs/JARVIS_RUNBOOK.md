@@ -105,6 +105,28 @@ for `num-envs=512 rollout-steps=64` Phase 1 training:
 Update this table as benchmarks are run. Rule of thumb: A30 is the first thing
 to try before paying more — it costs less than L4 and has ~3× the memory bandwidth.
 
+### Measured findings — p2rev2 resume + heuristic-pool (2026-06-11)
+
+**This workload is CPU-bound, NOT GPU-bound — the GPU sits at ~0%.** The model is tiny
+(391K params) and self-play envs run free on GPU; the real cost is CPU-side simulation of the
+external heuristic opponents (`--pool-external-fraction 0.25`), funnelled through a
+**single-threaded main loop** (main proc pegs ~1 core). So **GPU choice barely affects SPS —
+CPU core count and VRAM (env capacity) do.**
+
+| GPU (spot ₹/hr) | cores | VRAM | best config | SPS | notes |
+|---|---|---|---|---|---|
+| H200 (₹189) | 28 | 143 GB | 512 envs / 6 workers | **~850** | GPU 0%; 512 is the sweet spot (1024 doesn't scale — single-thread cap) |
+| A100 40 GB (₹75) | 16 | 40 GB | **256** envs / 4 workers | ~431 | **512 envs OOMs (~45 GB needed)** — must cap envs; 16 cores oversubscribe at load ~20 |
+| A100 80 GB (₹84) | ? | 80 GB | 512 envs fits (~45 GB) | TBD | no OOM; SPS gated by core count, not GPU |
+
+**Practical rules:**
+- **VRAM:** 512 envs needs **~45 GB** → 40 GB cards OOM (the historical "A100 didn't work"). Use
+  ≤256 envs on 40 GB, or an ≥80 GB card for 512.
+- **Don't pay for flagship GPU on this workload** — it runs at 0% GPU. Optimise for **many CPU
+  cores + ≥80 GB VRAM**. An A100 80 GB (₹84) likely matches the H200 (₹189) if cores are comparable.
+- **Sweet spot is ~512 envs** (amortises the single-thread per-step overhead); past that doesn't
+  scale because the main loop is the cap. Match `--heuristic-workers` to cores (~6 on 28-core, ~4 on 16-core).
+
 For **eval only**: L4 is fine. 256-game panel takes ~12-13 min solo (vs ~40 min
 on local Mac CPU). Two concurrent panels on same instance: ~20-25 min each.
 
@@ -285,6 +307,14 @@ ssh -i $KEY -o StrictHostKeyChecking=no root@$IP \
 | `jl pause <id>` | Stops compute billing | Keeps all home dir data |
 | `jl resume <id> --gpu <type>` | Restarts billing | Keeps data; can swap GPU type |
 | `jl destroy <id>` | Stops all billing | **Permanently deletes everything** |
+
+> ⚠️ **`--terminate-on-done` does NOT free a Jarvis spot instance.** The training flag runs an OS
+> `poweroff`, which Jarvis treats as the *instance still allocated* — `jl list` shows it **Running and
+> still billing** (~₹189/hr on H200) even though SSH is dead and the log printed "powering off". You MUST
+> run `jl destroy <id> --yes` explicitly after a run completes (confirmed 2026-06-11 on p2rev2/425211:
+> log said "powering off" but the instance billed for hours until destroyed). `jl destroy` prompts `[y/N]`
+> and defaults to **No** non-interactively — always pass `--yes`. Sync-verify checkpoints first (below),
+> then destroy.
 
 ```bash
 source /Users/saheb/home/.venv/bin/activate

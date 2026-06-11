@@ -107,6 +107,64 @@ def test_torch_env_target_decode_sentinel_keeps_angle_bin_mode():
     assert 1.5 < fleet_angle < 1.6
 
 
+def _two_planet_target_env():
+    env = VecTorchEnv(
+        num_envs=1, num_players=2, device="cpu",
+        ship_bin_mode="absolute", action_decode="target",
+    )
+    env.reset(seeds=[0])
+    env.planet_alive.zero_()
+    env.planets.zero_()
+    env.init_planets.zero_()
+    env.planets[0, 0] = torch.tensor([0, 0, 20.0, 20.0, 2.0, 20.0, 1.0])
+    env.planets[0, 1] = torch.tensor([1, -1, 95.0, 20.0, 2.0, 5.0, 1.0])
+    env.init_planets.copy_(env.planets)
+    env.planet_alive[0, :2] = True
+    env._precompute_orbital_params()
+    return env
+
+
+def test_continuous_angle_override_bypasses_bin_quantization():
+    """External heuristics emit a precise continuous angle; the env must use it
+    DIRECTLY, not the 144-bin quantized angle_bin. Quantizing shifts the angle to a
+    bin center (±~1.25-2.5°), which handicaps aiming-heavy opponents vs the real
+    engine (the torch_env/eval sim gap — see docs/train-eval.md)."""
+    env = _two_planet_target_env()
+
+    actions = torch.zeros(1, MAX_OWNED, 4, dtype=torch.long)
+    actions[0, 0, 0] = 1
+    actions[0, 0, 1] = 36   # bin-36 center ≈ 1.59 (what it WOULD quantize to)
+    actions[0, 0, 2] = 9
+    actions[0, 0, 3] = -1   # external sentinel: angle-bin path (not target decode)
+
+    raw = 0.9123            # a precise angle that is NOT any bin center
+    override = torch.full((1, MAX_OWNED), float("nan"))
+    override[0, 0] = raw
+
+    env._apply_actions(actions, owner_id=0, angle_override=override)
+
+    fleet_angle = env.fleets[0, 0, 4].item()
+    assert abs(fleet_angle - raw) < 1e-5, fleet_angle      # used the continuous angle
+    assert abs(fleet_angle - 1.59) > 0.5                   # NOT the bin-36 center
+
+
+def test_nan_angle_override_keeps_bin_decode():
+    """NaN override = no override → fall back to the 144-bin angle decode unchanged."""
+    env = _two_planet_target_env()
+
+    actions = torch.zeros(1, MAX_OWNED, 4, dtype=torch.long)
+    actions[0, 0, 0] = 1
+    actions[0, 0, 1] = 36
+    actions[0, 0, 2] = 9
+    actions[0, 0, 3] = -1
+
+    override = torch.full((1, MAX_OWNED), float("nan"))   # all NaN → no override
+    env._apply_actions(actions, owner_id=0, angle_override=override)
+
+    fleet_angle = env.fleets[0, 0, 4].item()
+    assert 1.5 < fleet_angle < 1.6                          # bin center, as before
+
+
 def test_torch_env_features_include_non_owned_target_mask():
     env = VecTorchEnv(num_envs=1, num_players=2, device="cpu")
     env.reset(seeds=[0])

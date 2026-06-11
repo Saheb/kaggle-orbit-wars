@@ -204,12 +204,54 @@ def _target_intercept_angle(src_planet, target_planet, ships: int, obs) -> float
 def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, obs, player,
                                fire_threshold=0.5, sample: bool = False,
                                ship_bin_mode: str = "absolute",
-                               target_sanity_penalty: float = 0.0):
-    """Convert policy outputs to actions using target planet logits for aiming."""
+                               target_sanity_penalty: float = 0.0,
+                               reserve_frac: float = 0.0,
+                               allow_reinforce: bool = False,
+                               reinforce_gate_min_planets: int = 0,
+                               reinforce_forward_only: bool = False,
+                               reinforce_garrison_floor: float = 0.0,
+                               veto_stats: dict = None):
+    """Convert policy outputs to actions using target planet logits for aiming.
+
+    allow_reinforce: must MATCH the env's setting the checkpoint was trained with.
+    False (default) = own planets are illegal targets. True = own planets are legal
+    (reinforcement), only the launch source planet is excluded.
+
+    reinforce_gate_min_planets / reinforce_forward_only / reinforce_garrison_floor:
+    the three reinforce-DISCIPLINE masks from torch_env. They constrain only own
+    (reinforce) targets; enemy/neutral are never affected. MUST match training, else
+    the policy emits reinforce moves it was masked from at train time (e.g. reinforcing
+    a 1-2 planet opening instead of expanding) and self-sabotages at inference.
+    """
     planets = obs["planets"]
     owned_indices = masks["owned_indices"].cpu().numpy()
     max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
     target_logits = target_logits.clone()
+    # Pre-discipline-mask copy: lets veto_stats see what the policy WANTS (unmasked argmax)
+    # vs what the masks allow — i.e. which mask is actually binding on intended reinforces.
+    _pre_mask_logits = target_logits.detach().clone() if veto_stats is not None else None
+
+    # ----- reinforce-discipline precompute (parity with torch_env) -----
+    owned_count = int(masks["owned_count"])
+    gate_block_own = (allow_reinforce and reinforce_gate_min_planets > 0
+                      and owned_count < reinforce_gate_min_planets)
+    # enemy = owner >= 0 and != player (neutrals owner < 0 excluded), matching torch_env.
+    enemy_xy = ([(float(p[2]), float(p[3])) for p in planets
+                 if int(p[1]) >= 0 and int(p[1]) != player]
+                if (allow_reinforce and reinforce_forward_only) else [])
+
+    def _nearest_enemy_dist(p):
+        px, py = float(p[2]), float(p[3])
+        return min(math.hypot(px - ex, py - ey) for ex, ey in enemy_xy)
+
+    def _own_reinforce_illegal(src_planet, tgt_planet):
+        """True if an own (reinforce) target is barred by gate/forward-staging."""
+        if gate_block_own:
+            return True
+        if reinforce_forward_only and enemy_xy:  # no live enemy -> forward moot
+            if not (_nearest_enemy_dist(tgt_planet) < _nearest_enemy_dist(src_planet)):
+                return True
+        return False
 
     # Restrict target choice to legal launch targets before argmax / sampling.
     # The prior path argmaxed over all planets and then dropped own/self picks,
@@ -219,7 +261,12 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         if pidx >= len(planets):
             continue
         for tidx, tgt in enumerate(planets[:target_logits.shape[-1]]):
-            if int(tgt[1]) == player or int(tgt[0]) == int(planets[pidx][0]):
+            is_source = int(tgt[0]) == int(planets[pidx][0])
+            is_own = int(tgt[1]) == player
+            illegal = is_source or (is_own and not allow_reinforce)
+            if not illegal and is_own and allow_reinforce:
+                illegal = _own_reinforce_illegal(planets[pidx], tgt)
+            if illegal:
                 target_logits[:, slot, tidx] = -1e9
 
     if target_sanity_penalty > 0.0:
@@ -257,15 +304,69 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         tidx = int(target_indices[slot])
         if pidx >= len(planets) or tidx >= len(planets):
             continue
-        if int(planets[tidx][1]) == player or int(planets[pidx][0]) == int(planets[tidx][0]):
+        is_source = int(planets[pidx][0]) == int(planets[tidx][0])
+        is_own_target = int(planets[tidx][1]) == player
+        if is_source or (is_own_target and not allow_reinforce):
+            continue
+        # Reinforce-discipline parity: a slot whose every target was logit-masked
+        # still argmaxes to one of them; reject gated/backward own reinforces here too.
+        if is_own_target and allow_reinforce and _own_reinforce_illegal(planets[pidx], planets[tidx]):
             continue
 
         ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
+        # Reserve cap (probe): keep at least reserve_frac of the source planet's
+        # current ships at home — forces a defensive garrison instead of
+        # committing the whole army forward. reserve_frac=0.0 = no change.
+        if reserve_frac > 0.0:
+            ships = min(ships, int(planets[pidx][5] * (1.0 - reserve_frac)))
         if ships <= 0 or planets[pidx][5] < ships:
+            continue
+        # Garrison floor parity (torch_env): a reinforce must not drain the source
+        # below the floor. Attacks (enemy/neutral) are never garrison-limited.
+        if (is_own_target and allow_reinforce and reinforce_garrison_floor > 0.0
+                and (planets[pidx][5] - ships) < reinforce_garrison_floor):
             continue
 
         angle = _target_intercept_angle(planets[pidx], planets[tidx], ships, obs)
         moves.append([int(planets[pidx][0]), angle, ships])
+
+    # ----- veto diagnostics: of the reinforces the policy WANTS, which mask blocks them? -----
+    # "want" = the unmasked-argmax target (over real planets, source excluded) for a fire-positive
+    # slot. If that want is an own planet (reinforce intent), attribute the block to gate / forward /
+    # garrison-floor (mutually exclusive, in production-check order). No effect on `moves`.
+    if veto_stats is not None and allow_reinforce:
+        nP = len(planets)
+        for slot in range(min(masks["owned_count"], fire_decisions.shape[0])):
+            if not fire_decisions[slot]:
+                continue
+            pidx = int(owned_indices[slot])
+            if pidx >= nP:
+                continue
+            src = planets[pidx]
+            row = _pre_mask_logits[0, slot, :nP].clone()
+            for ti in range(nP):
+                if int(planets[ti][0]) == int(src[0]):
+                    row[ti] = -1e30                      # exclude source (physically illegal)
+            want = int(torch.argmax(row))
+            wt = planets[want]
+            veto_stats["fire_slots"] = veto_stats.get("fire_slots", 0) + 1
+            if int(wt[1]) != player:
+                veto_stats["attack_intent"] = veto_stats.get("attack_intent", 0) + 1
+                continue
+            veto_stats["reinforce_intent"] = veto_stats.get("reinforce_intent", 0) + 1
+            if gate_block_own:
+                veto_stats["blocked_gate"] = veto_stats.get("blocked_gate", 0) + 1
+            elif (reinforce_forward_only and enemy_xy
+                  and not (_nearest_enemy_dist(wt) < _nearest_enemy_dist(src))):
+                veto_stats["blocked_forward"] = veto_stats.get("blocked_forward", 0) + 1
+            else:
+                sent = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
+                if reserve_frac > 0.0:
+                    sent = min(sent, int(src[5] * (1.0 - reserve_frac)))
+                if reinforce_garrison_floor > 0.0 and (src[5] - sent) < reinforce_garrison_floor:
+                    veto_stats["blocked_floor"] = veto_stats.get("blocked_floor", 0) + 1
+                else:
+                    veto_stats["reinforce_allowed"] = veto_stats.get("reinforce_allowed", 0) + 1
 
     return moves
 

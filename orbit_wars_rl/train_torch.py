@@ -173,6 +173,12 @@ _WORKER_AGENT_FN = None  # populated per-worker in _heur_worker_init
 def _heur_worker_init(agent_path: str):
     """Each worker fork loads the agent module once and stashes its agent fn."""
     import importlib.util, sys
+    # Pin each worker to ONE torch thread. With N workers each defaulting to
+    # multi-threaded intra-op parallelism on an 8-vCPU box, they oversubscribe
+    # the cores and thrash — a planner call measured 280ms vs 40ms pinned (7x).
+    # Only the workers are pinned; the main (GPU-feeding) process keeps its threads.
+    import torch
+    torch.set_num_threads(1)
     spec = importlib.util.spec_from_file_location("worker_agent", agent_path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod  # required for @dataclass __module__ resolution
@@ -222,7 +228,10 @@ class HeuristicWorkerPool:
 
 def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device):
     """Convert list-of-lists [[from_pid, angle_rad, ships], ...] per env into
-    a (num_envs, MAX_OWNED, 3) action tensor."""
+    a (num_envs, MAX_OWNED, 3) action tensor plus a (num_envs, MAX_OWNED) float
+    tensor of the raw continuous angles (NaN where no launch). The continuous
+    angles let the env bypass 144-bin quantization for these aiming-heavy
+    opponents (see torch_env._apply_actions angle_override)."""
     from torch_env import MAX_OWNED, NUM_ANGLE_BINS, ANGLE_BIN_WIDTH, SHIP_COUNTS
     import math as _math
 
@@ -231,6 +240,7 @@ def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device):
     fire = torch.zeros(N, MAX_OWNED, dtype=torch.long)
     angle_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
     ship_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
+    cont_angle = torch.full((N, MAX_OWNED), float("nan"), dtype=torch.float32)
 
     gather_idx = owned_idx.unsqueeze(-1).expand(-1, -1, 7).cpu()
     planets_cpu = env.planets.cpu()
@@ -261,7 +271,8 @@ def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device):
             fire[e, slot] = 1
             angle_bin[e, slot] = ab
             ship_bin[e, slot] = best
-    return torch.stack([fire, angle_bin, ship_bin], dim=-1).to(device)
+            cont_angle[e, slot] = ang
+    return torch.stack([fire, angle_bin, ship_bin], dim=-1).to(device), cont_angle.to(device)
 
 
 # ----------------------------------------------------------------------------
@@ -316,11 +327,30 @@ def train(args):
     print(f"Entropy coefs: fire={cfg.ppo.entropy_coef_fire}, target={cfg.ppo.entropy_coef_target}, "
           f"ships={cfg.ppo.entropy_coef_ships} | max_grad_norm={cfg.ppo.max_grad_norm}")
     print(f"Action decode: {args.action_decode}")
+    print(f"Reinforcement (own planets as targets): {'ON' if args.allow_reinforce else 'off'}")
+    if args.allow_reinforce and args.reinforce_anneal_frac > 0.0:
+        print(f"Reinforcement CURRICULUM: own-target logit bias {args.reinforce_bias_init}→0 over "
+              f"{args.reinforce_anneal_frac * args.total_steps:,.0f} steps "
+              f"(frac {args.reinforce_anneal_frac}), then 0 — enemy/neutral targeting untouched")
+    if args.allow_reinforce and (args.reinforce_garrison_floor > 0.0 or args.reinforce_cost > 0.0):
+        print(f"Reinforcement DISCIPLINE: garrison_floor={args.reinforce_garrison_floor} "
+              f"(veto reinforce that drains source below this), "
+              f"cost={args.reinforce_cost}/ship (reward penalty on ships reinforced)")
+    if args.allow_reinforce and args.reinforce_gate_min_planets > 0:
+        print(f"Reinforcement EMPIRE GATE: own targets legal only at >= "
+              f"{args.reinforce_gate_min_planets} planets (attack-only below; mask, no Nash risk)")
+    if args.allow_reinforce and args.reinforce_forward_only:
+        print("Reinforcement FORWARD-STAGING GATE: own targets legal only if closer to the "
+              "nearest enemy than the source (rear→front staging; mask, no Nash risk)")
     print(f"Win margin coeff: {args.win_margin_coeff}")
     print(f"Shaping coeff: {args.shaping_coef}")
     print(f"Expansion coeff: {args.expansion_coef}")
     print(f"Defense coeff: {args.defense_coef}")
     print(f"Early capture coeff: {args.early_capture_coef} (decay over {args.early_capture_steps} steps)")
+    if args.early_capture_anneal_frac > 0.0:
+        print(f"Early capture ANNEAL: cosine {args.early_capture_coef}→0 over "
+              f"{args.early_capture_anneal_frac * args.total_steps:,.0f} steps "
+              f"(frac {args.early_capture_anneal_frac}), then 0")
     print(f"First Strike: {args.first_strike_mult}x for t<{args.first_strike_steps} steps" if args.first_strike_steps > 0 else "First Strike: off")
     print(f"Speed coeff: {args.speed_coef}")
     if args.handicap_frac > 0:
@@ -361,11 +391,17 @@ def train(args):
     if args.min_ship_bin is not None:
         cfg.model.min_ship_bin = args.min_ship_bin
     cfg.model.action_decode = args.action_decode
+    cfg.model.allow_reinforce = args.allow_reinforce
 
     env = VecTorchEnv(num_envs=args.num_envs, num_players=2,
                       device=device, episode_steps=500,
                       ship_bin_mode=cfg.model.ship_bin_mode,
                       action_decode=args.action_decode,
+                      allow_reinforce=args.allow_reinforce,
+                      reinforce_garrison_floor=args.reinforce_garrison_floor,
+                      reinforce_cost=args.reinforce_cost,
+                      reinforce_gate_min_planets=args.reinforce_gate_min_planets,
+                      reinforce_forward_only=args.reinforce_forward_only,
                       win_margin_coeff=args.win_margin_coeff,
                       shaping_coef=args.shaping_coef,
                       expansion_coef=args.expansion_coef,
@@ -388,6 +424,14 @@ def train(args):
         if "model" in sd: sd = sd["model"]
         model.load_state_dict(sd)
         print(f"Resumed from {Path(args.resume).resolve()}")
+        if getattr(args, "reinit_critic", False):
+            # CONTROL: re-initialise the value head to a fresh state while keeping
+            # the warm policy. Isolates the cold-critic shock — if a known-stable
+            # warm-critic method (joint) collapses with a fresh critic, resume is
+            # confounded for new-critic methods (VDN) and we should go from-scratch.
+            for _m in (model.value_fc1, model.value_fc2, model.value_out):
+                _m.reset_parameters()
+            print("  CONTROL: scalar critic re-initialised fresh (warm policy kept).")
 
     # IL regularization: load frozen reference policy if requested
     frozen_il_model = None
@@ -507,6 +551,34 @@ def train(args):
                 added += 1
             print(f"  pool preseeded: {added} self-checkpoints from {preseed_dir}")
 
+        # Pinned RL champions: fixed strong opponents (e.g. rev38, rev53b), never
+        # FIFO-evicted. Appended even on resume; skip if a same-named pin already
+        # exists (e.g. restored from the saved pool).
+        if args.pool_seed_rl:
+            existing_pins = {m.name for m in pool.members if getattr(m, "pinned", False)}
+            for path in args.pool_seed_rl.split(","):
+                path = path.strip()
+                if not path:
+                    continue
+                name = Path(path).stem
+                if f"seed_{name}" in existing_pins:
+                    print(f"  pool pinned RL already present from resume: seed_{name}")
+                    continue
+                sd = torch.load(path, map_location="cpu", weights_only=False)
+                if "model" in sd:
+                    sd = sd["model"]
+                # Drop keys the current model doesn't have (e.g. rev38's deleted
+                # angle_head); fail fast if it's missing any the model needs.
+                model_keys = set(model.state_dict().keys())
+                sd = {k: v for k, v in sd.items() if k in model_keys}
+                missing = model_keys - set(sd.keys())
+                if missing:
+                    print(f"  WARN: pinned RL {name} incompatible — missing {len(missing)} keys "
+                          f"(e.g. {sorted(missing)[:3]}); skipping")
+                    continue
+                pool.add_pinned_rl(name, sd)
+                print(f"  pool pinned RL champion: seed_{name} ({path})")
+
         # External opponents come from CLI flag — appended even on resume so
         # the user can add new externals without modifying the pool file.
         if args.pool_mode == "mixed" and args.external_opponents:
@@ -520,15 +592,23 @@ def train(args):
                     continue
                 pool.add_external_heuristic(name, path)
                 print(f"  pool external loaded: {name} ({path})")
-        # Create one worker pool per external heuristic. Keyed by member name
-        # so compute_pool_actions can dispatch by opp.name.
+        # Create one dispatcher per external heuristic, keyed by member name so
+        # compute_pool_actions can dispatch by opp.name. Planner-externals (heavy
+        # orbit_lite agents) use the in-process GPU adapter; the rest use CPU pools.
+        planner_names = {Path(p.strip()).stem for p in args.planner_externals.split(",") if p.strip()}
         heur_worker_pools: dict[str, HeuristicWorkerPool] = {}
+        planner_adapters: dict = {}
         nw = args.heuristic_workers if args.heuristic_workers > 0 else max(1, (os.cpu_count() or 2) - 1)
         for m in pool.members:
             if m.kind == "external_heuristic":
                 src = getattr(m, "_source_path", None) or args.external_opponents.split(",")[0].strip()
-                heur_worker_pools[m.name] = HeuristicWorkerPool(src, nw)
-                print(f"  heuristic worker pool: {m.name} × {nw} workers")
+                if m.name in planner_names:
+                    from batched_planner import BatchedPlannerOpponent
+                    planner_adapters[m.name] = BatchedPlannerOpponent(src, args.num_envs, device=str(device))
+                    print(f"  planner adapter (GPU in-process): {m.name} on {device}")
+                else:
+                    heur_worker_pools[m.name] = HeuristicWorkerPool(src, nw)
+                    print(f"  heuristic worker pool: {m.name} × {nw} workers")
         # Pre-allocate a frozen model for 'self' opponents (loaded with state_dict per rollout)
         pool_opp_model = copy.deepcopy(model).to(device)
         pool_opp_model.eval()
@@ -626,9 +706,6 @@ def train(args):
         # step t. Pool-opponent slots are False so PPO won't train on them.
         "train_mask": torch.ones(rollout_T, N, P, dtype=torch.bool, device=storage_dev),
         # Planet ship counts snapshot per step — used for avgfleet/p90fleet metrics.
-        # Shape (T, N) — mean ships per planet across all owned planets per env.
-        # Measuring planet inventories (not action sizes) is the correct passivity proxy.
-        "planet_ships_snap": torch.zeros(rollout_T, N, device=storage_dev),
     }
 
     def compute_pool_actions(opp: PoolMember, player: int, env_slice: slice) -> torch.Tensor:
@@ -652,24 +729,29 @@ def train(args):
             fire_a, angle_a, ship_a, target_a, *_ = sample_action_batched(
                 outs, feats["fire_mask"], feats.get("target_mask")
             )
-            return torch.stack([fire_a, angle_a, ship_a, target_a], dim=-1)[env_slice]
+            return torch.stack([fire_a, angle_a, ship_a, target_a], dim=-1)[env_slice], None
 
         if opp.kind == "external_heuristic":
             from torch_env import to_legacy_obs
             start, stop = env_slice.start or 0, env_slice.stop or N
-            obs_list = [to_legacy_obs(env, env_idx=e, player=player)
-                        for e in range(start, stop)]
-            wp = heur_worker_pools.get(opp.name)
-            if wp is not None:
-                moves_per_env = wp.map(obs_list)
+            pa = planner_adapters.get(opp.name)
+            if pa is not None:
+                # In-process GPU planner: no obs pickling / no CPU worker pool.
+                moves_per_env = pa.moves(env, player, env_slice=slice(start, stop))
             else:
-                # Fallback: serial path (no worker pool registered)
-                moves_per_env = []
-                for obs in obs_list:
-                    try:
-                        moves_per_env.append(opp.agent_fn(obs) or [])
-                    except Exception:
-                        moves_per_env.append([])
+                obs_list = [to_legacy_obs(env, env_idx=e, player=player)
+                            for e in range(start, stop)]
+                wp = heur_worker_pools.get(opp.name)
+                if wp is not None:
+                    moves_per_env = wp.map(obs_list)
+                else:
+                    # Fallback: serial path (no worker pool registered)
+                    moves_per_env = []
+                    for obs in obs_list:
+                        try:
+                            moves_per_env.append(opp.agent_fn(obs) or [])
+                        except Exception:
+                            moves_per_env.append([])
             # Build action tensor with the same converter the cloud eval uses,
             # but only over the env slice. _heuristic_moves_to_action_tensor
             # expects N rows so we build over the slice and return.
@@ -684,16 +766,16 @@ def train(args):
                     oi, sv = env.owned_indices_for(player)
                     return oi[self._slc], sv[self._slc]
             view = _SliceView(env, env_slice)
-            act = _heuristic_moves_to_action_tensor(moves_per_env, view, player, device)
+            act, cont_angle = _heuristic_moves_to_action_tensor(moves_per_env, view, player, device)
             if args.action_decode == "target":
-                # External heuristics already emit explicit angles. Use -1 as a
-                # sentinel so VecTorchEnv keeps angle-bin decoding for these rows
-                # even when the learned policy uses target decoding.
+                # Target_idx = -1 sentinel so VecTorchEnv keeps angle decoding for these
+                # rows (not target decoding). The continuous angle (cont_angle) is applied
+                # separately via angle_overrides so it bypasses 144-bin quantization.
                 pad_target = torch.full(
                     act.shape[:-1] + (1,), -1, dtype=act.dtype, device=act.device
                 )
                 act = torch.cat([act, pad_target], dim=-1)
-            return act
+            return act, cont_angle
 
         raise ValueError(f"unknown opponent kind: {opp.kind}")
 
@@ -741,8 +823,37 @@ def train(args):
             self_mask = torch.zeros(N, dtype=torch.bool)
             self_mask[:N_self] = True
             env.set_ssdr_mask(self_mask)
+        # Training-wide anneal of early_capture_coef → 0 (dense→sparse shaping).
+        # Cosine from the base coef at step 0 to 0 at frac*total_steps, then stays 0.
+        # env.step() reads self.early_capture_coef fresh each step, so mutating the
+        # attribute here per-rollout is sufficient (no env-code change needed).
+        if args.early_capture_anneal_frac > 0.0 and args.early_capture_coef > 0.0:
+            ec_decay_steps = args.early_capture_anneal_frac * args.total_steps
+            ec_frac = min(total_env_steps / max(ec_decay_steps, 1), 1.0)
+            env.early_capture_coef = args.early_capture_coef * 0.5 * (1.0 + math.cos(math.pi * ec_frac))
+        # Reinforcement curriculum: anneal the own-target logit bias init→0 over
+        # reinforce_anneal_frac of training. model.forward reads reinforce_logit_bias
+        # in BOTH the rollout below and this iter's PPO update → consistent PPO ratio.
+        # Only the learning `model` is biased; pool/opponent models keep the 0.0 default.
+        if args.allow_reinforce and args.reinforce_anneal_frac > 0.0:
+            rb_decay_steps = args.reinforce_anneal_frac * args.total_steps
+            rb_frac = min(total_env_steps / max(rb_decay_steps, 1), 1.0)
+            model.reinforce_logit_bias = args.reinforce_bias_init * (1.0 - rb_frac)
         # Reset train_mask: all True by default, mark opp's slots False below
         storage["train_mask"].fill_(True)
+        # Zero the reinforce_rate accumulators for this rollout (env counts realized
+        # reinforce/fire launches per (env,player); combined with train_mask below).
+        if args.allow_reinforce:
+            env.reset_reinforce_stats()
+
+        # Hoard milestones (player 0): snapshot garrison/in-flight/planets when an env
+        # is AT episode-step 16/32/50/100. Controlled-time + scale-free → replaces the
+        # end-skewed avgfleet/p90. Accumulated on-device, synced once after the rollout.
+        _MS = (16, 32, 50, 100)
+        ms_garr = {m: torch.zeros((), device=env.device) for m in _MS}
+        ms_infl = {m: torch.zeros((), device=env.device) for m in _MS}
+        ms_plan = {m: torch.zeros((), device=env.device) for m in _MS}
+        ms_n    = {m: torch.zeros((), device=env.device) for m in _MS}
 
         # --- Rollout collection (no grad) -----------------------------------
         model.eval()
@@ -779,20 +890,34 @@ def train(args):
             # Pool opponent override: in pool envs, replace `opp_seat`'s action
             # with the pool member's action, and mark its storage slot as
             # not-trainable so PPO ignores it.
+            angle_overrides = None
             if pool_opp is not None and N_pool > 0:
-                opp_action = compute_pool_actions(pool_opp, opp_seat, pool_slice)
+                opp_action, opp_cont = compute_pool_actions(pool_opp, opp_seat, pool_slice)
                 actions_per_player[opp_seat][pool_slice] = opp_action
                 storage["train_mask"][t, pool_slice, opp_seat] = False
+                if opp_cont is not None:
+                    # Continuous-angle override for the external opponent's slice (NaN
+                    # elsewhere) → bypasses 144-bin quantization for its aiming.
+                    full_ovr = torch.full(actions_per_player[opp_seat].shape[:2],
+                                          float("nan"), device=env.device)
+                    full_ovr[pool_slice] = opp_cont
+                    angle_overrides = {opp_seat: full_ovr}
 
-            state, rewards, done = env.step(actions_per_player)
-            # Snapshot mean planet ships per env — used for avgfleet/p90fleet metrics.
-            # Measures actual planet inventories (passivity proxy), not action sizes.
-            planet_ships = env.planets[:, :, 5]           # (N, max_planets)
-            alive = env.planet_alive                       # (N, max_planets) bool
-            n_alive = alive.float().sum(dim=1).clamp(min=1)
-            storage["planet_ships_snap"][t].copy_(
-                (planet_ships * alive.float()).sum(dim=1) / n_alive, non_blocking=True
-            )
+            state, rewards, done = env.step(actions_per_player, angle_overrides=angle_overrides)
+            # Hoard milestones: when an env is at episode-step 16/32/50/100, accumulate
+            # player-0 garrison (parked), in-flight, and owned-planet counts for that env.
+            ownp = env.planets[:, :, 1].long()                            # (N, P) owner
+            mine_p = (ownp == 0) & env.planet_alive                       # player-0 planets
+            garr_p0 = (env.planets[:, :, 5] * mine_p.float()).sum(dim=1)  # (N,) parked ships
+            plan_p0 = mine_p.float().sum(dim=1)                           # (N,) planets owned
+            mine_f = (env.fleets[:, :, 1].long() == 0) & env.fleet_alive
+            infl_p0 = (env.fleets[:, :, 6] * mine_f.float()).sum(dim=1)   # (N,) in-flight ships
+            for _m in _MS:
+                sel = (env.step_count == _m).float()                     # (N,) at-milestone
+                ms_garr[_m] += (garr_p0 * sel).sum()
+                ms_infl[_m] += (infl_p0 * sel).sum()
+                ms_plan[_m] += (plan_p0 * sel).sum()
+                ms_n[_m]    += sel.sum()
             # rewards: (N, P); done: (N,) shared across players.
             storage["rewards"][t].copy_(rewards[:, :P], non_blocking=True)
 
@@ -879,7 +1004,7 @@ def train(args):
         # learns from samples where current model picked the action.
         TN = rollout_T * N * P
         # Keys with shape (T, N) instead of (T, N, P, ...) — skip standard flatten
-        _PER_ENV_KEYS = {"planet_ships_snap"}
+        _PER_ENV_KEYS = set()
         flat = {}
         for k, v in storage.items():
             if k in _PER_ENV_KEYS:
@@ -897,12 +1022,19 @@ def train(args):
 
         fired_train_slots = flat["fire_a"].float() * flat["slot_valid"].float()
         fired_count = fired_train_slots.sum().clamp(min=1.0)
-        # avgfleet/p90fleet: mean and p90 of actual planet ship inventories (passivity
-        # proxy). Previously computed from action ship sizes — that was wrong: the
-        # p90 pinned to a fixed SHIP_COUNTS bin value regardless of policy changes.
-        planet_snaps = storage["planet_ships_snap"].reshape(-1)  # (T*N,)
-        avg_fleet_size = planet_snaps.mean()
-        fleet_size_p90 = torch.quantile(planet_snaps, 0.9)
+        # Hoard milestones (player 0, controlled episode-step → no end-skew): at 16/32/50/100,
+        #   garr_frac   = parked / (parked + in-flight)   — scale-free deployment ratio
+        #   ships/planet = parked / owned planets         — pile-up per planet
+        #   planets     = owned planets                   — expansion trajectory
+        # Replaces the end-skewed avgfleet/p90. Reference (Isaiah): garr_frac ~0.5 mid-game,
+        # ~11-22 ships/planet, planets 2/6/9/10.
+        ms_metrics = {}
+        for _m in _MS:
+            g, fl, pl, nn = (ms_garr[_m].item(), ms_infl[_m].item(),
+                             ms_plan[_m].item(), ms_n[_m].item())
+            ms_metrics[f"garr_frac@{_m}"] = g / (g + fl) if (g + fl) > 0 else 0.0
+            ms_metrics[f"ships_per_planet@{_m}"] = g / pl if pl > 0 else 0.0
+            ms_metrics[f"planets@{_m}"] = pl / nn if nn > 0 else 0.0
 
         # Build PPOLearner-compatible batch (matches make_batch in self_play.py)
         batch = {
@@ -974,8 +1106,21 @@ def train(args):
         metrics = learner.update(minibatches, scheduler=scheduler,
                                  kl_target=cfg.ppo.kl_target,
                                  bc_batch=bc_batch)
-        metrics["avg_fleet_size"] = float(avg_fleet_size.item())
-        metrics["p90_fleet_size"] = float(fleet_size_p90.item())
+        metrics.update(ms_metrics)
+        # reinforce_rate: of the current policy's realized launches (train_mask-filtered,
+        # across both seats), the fraction sent to our own planets (Vadasz ~0.57; target
+        # 0.4-0.6). train_mask[0] is (N,P) and constant over the rollout's t.
+        if args.allow_reinforce and env._fire_launch_count is not None:
+            tm = storage["train_mask"][0].to(env.device).float()   # (N, P)
+            fires = (env._fire_launch_count * tm).sum()
+            reinf = (env._reinforce_launch_count * tm).sum()
+            neut = (env._neutral_launch_count * tm).sum()
+            denom = fires.clamp(min=1.0)
+            metrics["reinforce_rate"] = float((reinf / denom).item())   # own-target share
+            # target-owner share among the current policy's launches (own/neutral/enemy);
+            # Phase-2 target-head health — a selective head ≠ uniform across owners.
+            metrics["target_share_neutral"] = float((neut / denom).item())
+            metrics["target_share_enemy"] = float(((fires - reinf - neut) / denom).item())
         with torch.no_grad():
             metrics["old_value_mean"] = float(flat["values"].mean().item())
             metrics["old_value_std"] = float(flat["values"].std(unbiased=False).item())
@@ -1049,24 +1194,32 @@ def train(args):
                    if metrics.get('il_coef', 0) > 0 else "")
             )
             # Secondary behavioural diagnostics — occasionally useful, not decision
-            # drivers (W&B keeps them every iter). Console-print every 20th log.
-            if iter_count == 1 or iter_count % 20 == 0:
+            # drivers (W&B keeps them every iter). Console-print every 10th log.
+            if iter_count == 1 or iter_count % 10 == 0:
                 pencoef = ""
                 if args.srcs_multi_penalty > 0.0 and args.srcs_multi_penalty_decay_frac > 0.0:
                     _pc = args.srcs_multi_penalty * 0.5 * (1.0 + math.cos(math.pi * min(
                         total_env_steps / max(args.srcs_multi_penalty_decay_frac * args.total_steps, 1), 1.0)))
                     pencoef = f" pencoef {_pc:.5f}"
                 actcoef = f" actcoef {args.fleet_activity_coef:.4f}" if args.fleet_activity_coef > 0.0 else ""
+                reinfstr = (
+                    f"reinf {metrics.get('reinforce_rate', 0):.2f} "
+                    f"tgt n/e {metrics.get('target_share_neutral', 0):.2f}/"
+                    f"{metrics.get('target_share_enemy', 0):.2f} | "
+                ) if args.allow_reinforce else ""
                 print(
                     f"   diag | fire[0] {slot0:.2f} rest_max {slot_rest_max:.2f} | "
                     f"fire_frac {metrics.get('fire_fraction', 0):.2f} "
                     f"owned {metrics.get('owned_planets', 0):.1f} "
-                    f"srcs_multi {metrics.get('avg_sources_multi', 0):.2f} "
                     f"ship0 {metrics.get('ship_bin0_rate', 0):.2f} "
                     f"meanshipbin {metrics.get('mean_ship_bin', 0):.1f} | "
-                    f"avgfleet {metrics.get('avg_fleet_size', 0):.1f} "
-                    f"p90 {metrics.get('p90_fleet_size', 0):.1f} | "
-                    f"H_ship {metrics.get('ship_entropy', 0):.2f} | "
+                    f"pl@16/32/50/100 {metrics.get('planets@16',0):.0f}/{metrics.get('planets@32',0):.0f}/"
+                    f"{metrics.get('planets@50',0):.0f}/{metrics.get('planets@100',0):.0f} "
+                    f"garrfrac@50 {metrics.get('garr_frac@50',0):.2f} "
+                    f"shipspp@50 {metrics.get('ships_per_planet@50',0):.0f} | "
+                    f"{reinfstr}"
+                    f"H_ship {metrics.get('ship_entropy', 0):.2f} "
+                    f"H_tgt {metrics.get('target_entropy', 0):.2f} | "
                     f"Vμ {metrics.get('old_value_mean', 0):+.2f} Rμ {metrics.get('return_mean', 0):+.2f} "
                     f"Rσ {metrics.get('return_std', 0):.2f} Aσ {metrics.get('adv_std', 0):.2f} | "
                     f"rewμ {metrics.get('reward_mean', 0):+.4f} rewNZ {metrics.get('reward_nonzero', 0):.3f} | "
@@ -1103,16 +1256,18 @@ def train(args):
                     # Policy behaviour — the key kill-signal metrics
                     "policy/fire_0": slot0,
                     "policy/fire_rest_max": slot_rest_max,
-                    "policy/srcs_multi": metrics.get("avg_sources_multi", 0),
                     "policy/fire_fraction": metrics.get("fire_fraction", 0),
                     "policy/owned_planets": metrics.get("owned_planets", 0),
                     "policy/ship_bin0_rate": metrics.get("ship_bin0_rate", 0),
                     "policy/mean_ship_bin": metrics.get("mean_ship_bin", 0),
-                    "policy/avg_fleet": metrics.get("avg_fleet_size", 0),
-                    "policy/p90_fleet": metrics.get("p90_fleet_size", 0),
+                    **{f"hoard/{k}": v for k, v in ms_metrics.items()},
+                    "policy/reinforce_rate": metrics.get("reinforce_rate", 0),
+                    "policy/target_share_neutral": metrics.get("target_share_neutral", 0),
+                    "policy/target_share_enemy": metrics.get("target_share_enemy", 0),
                     # Entropy
                     "entropy/fire": metrics.get("fire_entropy", 0),
                     "entropy/ship": metrics.get("ship_entropy", 0),
+                    "entropy/target": metrics.get("target_entropy", 0),
                     # Value / return stats
                     "value/mean": metrics.get("old_value_mean", 0),
                     "value/std": metrics.get("old_value_std", 0),
@@ -1151,13 +1306,14 @@ def train(args):
             # tracker can read metrics that line up exactly with each checkpoint
             # rather than the sparse every-20-iter diag line.
             print("  CKPT_METRICS step={} EV={:.3f} KL={:.4f} clip={:.3f} fire_frac={:.3f} "
-                  "owned={:.1f} srcs={:.2f} avgfleet={:.1f} fire_rate={:.3f} Hfire={:.3f}".format(
+                  "owned={:.1f} garrfrac@50={:.2f} shipspp@50={:.0f} fire_rate={:.3f} Hfire={:.3f} reinf={:.3f}".format(
                       total_env_steps,
                       metrics.get("explained_variance", 0), metrics.get("approx_kl", 0),
                       metrics.get("clip_frac", 0), metrics.get("fire_fraction", 0),
-                      metrics.get("owned_planets", 0), metrics.get("avg_sources_multi", 0),
-                      metrics.get("avg_fleet_size", 0), metrics.get("fire_rate_overall", 0),
-                      metrics.get("fire_entropy", 0)))
+                      metrics.get("owned_planets", 0),
+                      metrics.get("garr_frac@50", 0), metrics.get("ships_per_planet@50", 0),
+                      metrics.get("fire_rate_overall", 0),
+                      metrics.get("fire_entropy", 0), metrics.get("reinforce_rate", 0)))
             # Persist pool alongside the disk checkpoint so spot interrupts
             # don't lose pool diversity. Naming mirrors the checkpoint stem.
             if pool is not None:
@@ -1215,6 +1371,10 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--resume", type=str, default="")
+    parser.add_argument("--reinit-critic", action="store_true",
+                        help="CONTROL: re-initialise the value head after resume "
+                             "(warm policy + cold critic) to isolate the VDN "
+                             "cold-critic-shock confound.")
     parser.add_argument("--checkpoint-interval", type=int, default=5_000_000,
                         help="Save a periodic checkpoint every N env steps")
     parser.add_argument("--learning-rate", type=float, default=None,
@@ -1270,6 +1430,49 @@ if __name__ == "__main__":
                              "angle keeps the legacy free angle-bin action; target "
                              "samples target_logits and converts the target planet "
                              "to an intercept angle in VecTorchEnv.")
+    parser.add_argument("--allow-reinforce", action="store_true",
+                        help="Make OWN planets legal targets (reinforcement) — ships "
+                             "arriving at a friendly planet add to its garrison. Top "
+                             "players reinforce ~57%% of launches; default agents 0%%. "
+                             "Saved in the checkpoint so eval/export mask the same way. "
+                             "Off by default (attack-only, backward-compatible).")
+    parser.add_argument("--reinforce-bias-init", type=float, default=-8.0,
+                        help="Reinforcement CURRICULUM: initial additive bias on OWN-target "
+                             "logits (negative suppresses reinforcement early, ≈ a soft mask). "
+                             "Annealed linearly → 0 over --reinforce-anneal-frac. Only active "
+                             "with --allow-reinforce AND --reinforce-anneal-frac > 0.")
+    parser.add_argument("--reinforce-anneal-frac", type=float, default=0.0,
+                        help="Fraction of --total-steps over which the own-target bias anneals "
+                             "from --reinforce-bias-init → 0 (then stays 0). 0 = no curriculum "
+                             "(hard unmask at t=0 — caused the rev55 over-fire collapse). "
+                             "Suggested: 0.3.")
+    parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0,
+                        help="Reinforcement discipline #1: a reinforce launch may not drain its "
+                             "source planet below this many ships (training-time mask/veto, NOT a "
+                             "penalty → no Nash risk). Kills the 'drain a planet, then lose it' "
+                             "regression. Inference is unconstrained (real env has no floor). "
+                             "0 = off. Only active with --allow-reinforce.")
+    parser.add_argument("--reinforce-cost", type=float, default=0.0,
+                        help="Reinforcement discipline #2: per-ship transit cost — subtract this × "
+                             "ships_reinforced from the launching player's reward each step. The "
+                             "actual flood fix (rev56: costless reinforcement floods ~30×). Scales "
+                             "with waste; the calibration knob. Watch reinforce_rate → target "
+                             "~0.4-0.6. 0 = off. Only active with --allow-reinforce.")
+    parser.add_argument("--reinforce-gate-min-planets", type=int, default=0,
+                        help="Reinforcement discipline #3 (empire-size gate): own planets become "
+                             "legal reinforce targets only once the player owns >= this many planets; "
+                             "below it, attack-only (must expand first). Grounded in top-player "
+                             "replays (reinforce_rate ≈0 at 1 planet, ramps with empire size). A pure "
+                             "action mask → no Nash risk; makes the early flood impossible by "
+                             "construction. 0 = off. Only active with --allow-reinforce.")
+    parser.add_argument("--reinforce-forward-only", action="store_true",
+                        help="Reinforcement discipline #4 (forward-staging gate): an own reinforce "
+                             "target is legal only if it is closer to the nearest enemy planet than "
+                             "the launch source, so reinforcement flows rear→front (staging) and a "
+                             "safe rear hoard is impossible by construction. Matches the 66-70% "
+                             "forward-staging in top-player replays; removes the costless safe-fire "
+                             "outlet that floods symmetric self-play. Enemy/neutral targets "
+                             "unconstrained. Only active with --allow-reinforce.")
     parser.add_argument("--win-margin-coeff", type=float, default=0.0,
                         help="Terminal bonus coefficient α: winner gets +1 + α*(my_score/total_score). "
                              "0 = pure ±1 reward (default). Suggested start: 0.5.")
@@ -1295,6 +1498,12 @@ if __name__ == "__main__":
                              "keep ≤10%% of terminal win → range 0.05-0.10. 0 = off.")
     parser.add_argument("--early-capture-steps", type=int, default=400,
                         help="Step at which the delta-capture decay reaches zero. Default 400.")
+    parser.add_argument("--early-capture-anneal-frac", type=float, default=0.0,
+                        help="Training-wide (not within-episode) anneal of --early-capture-coef to 0. "
+                             "Cosine decay from full coef at step 0 to 0 at frac*total_steps, then "
+                             "stays 0 (mirrors --srcs-multi-penalty-decay-frac). Cosine holds near full "
+                             "early (bootstrap) and fades fastest mid-run. Removes the capture-shaping "
+                             "crutch once the pool can sustain aggression. 0 = off (constant coef).")
     parser.add_argument("--first-strike-steps", type=int, default=0,
                         help="Apply first_strike_mult to capture reward for t < N steps. "
                              "Breaks opening paralysis by making early captures more lucrative. "
@@ -1390,10 +1599,20 @@ if __name__ == "__main__":
                              "(e.g. torch_step_5013504.pt -> step=5013504). Useful "
                              "for diluting the heuristic-share early in training "
                              "and for resuming pool diversity across runs.")
+    parser.add_argument("--pool-seed-rl", type=str, default="",
+                        help="Comma-separated .pt checkpoints to PIN into the pool as fixed RL "
+                             "champion opponents (e.g. our rev38/rev53b). Run via the GPU 'self' "
+                             "path (fast, sim-gap-immune) and NEVER FIFO-evicted, unlike --preseed-pool. "
+                             "Must match the current model architecture (pairwise dim etc.).")
     parser.add_argument("--external-opponents", type=str, default="",
                         help="Comma-separated paths to .py heuristic agents (e.g. "
                              "'opponents/candidate_suneet_lb1200.py,opponents/candidate_zach_public.py'). "
                              "Only used when --pool-mode=mixed.")
+    parser.add_argument("--planner-externals", type=str, default="",
+                        help="Comma list of external-opponent member names (file stems, e.g. "
+                             "'candidate_flowdiff') that run via the in-process GPU "
+                             "BatchedPlannerOpponent instead of CPU worker pools. For heavy "
+                             "orbit_lite planners whose per-step cost saturates the CPU.")
     parser.add_argument("--lr-schedule-steps", type=int, default=0,
                         help="Decouple the LR cosine decay horizon from --total-steps. "
                              "Set larger than --total-steps for slow/partial decay "
