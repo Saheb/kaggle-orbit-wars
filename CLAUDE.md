@@ -66,6 +66,10 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ---
 
+## venv
+
+orbit_wars_rl/.venv
+
 ## Repo Map
 
 ```

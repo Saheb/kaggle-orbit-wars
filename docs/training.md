@@ -101,7 +101,44 @@
 
 ---
 
-## Current State (2026-06-10)
+## Current State (2026-06-11)
+
+**Active run:** none — both Phase-2 runs COMPLETE; Jarvis H200 spot 425211 **destroyed** (billing stopped).
+All checkpoints synced + the 10.03M final verified-loadable locally (`gpu_run_artifacts/p2rev2/checkpoints/`).
+⚠️ `--terminate-on-done` only OS-poweroffs a Jarvis spot — it keeps **billing** until `jl destroy --yes`
+(now warned in JARVIS_RUNBOOK).
+
+**Phase 2 progress: p2rev1 → 10M done · p2rev2 → 10.03M done.**
+- **p2rev1 (from-scratch, 10M):** snowball-BC warmstart + forward-staging mask + drop `defense_coef` +
+  3 fast heuristic hammers pool (lb1152/lb1138/lb1084 @0.25). Recovered general strength (strong vs Zach)
+  but weak vs strong planners (~0.8% debatreya @9.8M). Diagnosed a concrete **opening over-fire** (re-firing
+  at the same near-neutral until the in-flight fleet lands).
+- **p2rev2 (resume p2rev1@10.3M + ONE delta: friendly-coverage roi-deflation, 10.03M):** deflate `roi_20/roi_50`
+  by own ships already inbound so a planet we're already capturing stops reading attractive. Run healthy
+  throughout (EV 0.57→0.91, V_loss→0.08, no degeneracy, reinf ~0.54 no flood; **watch clip_frac creep
+  0.21→0.237**, halve LR at 0.25).
+
+**Key findings this session (diagnosis sharpened — full detail in `project_phase2_reinforcement` + docs/phase2.md):**
+- **`planets@N` is THE win/loss discriminator.** vs Zach (win) it climbs 2/4/7/10; vs debatreya (loss) it
+  peaks then collapses 2/4/6/3. **Opening is identical win OR lose (2/4) — the gap is the MID-GAME (steps
+  50→100) hold, NOT the opening** (corrects the earlier "we lose the opening" framing).
+- **debatreya WR is climbing with training: 1.2% (4.19M, 3 wins) → 3.1% (8.9M, 8 wins),** evenly across
+  seats. The 3 wins @4.19M are **real contested comebacks** (Deb led 53–58% material, we held and won —
+  not lucky snowballs). Mechanism: **deploy-not-hoard** — `garr_frac@50` fell from 0.63–0.66 → **0.54
+  (Isaiah-level)** by 8.9M; the mid-game over-garrison we pinned as the collapse cause is normalizing.
+- **roi-deflation verdict = INCONCLUSIVE** (not "not working" — a controlled A/B used a `redundant`
+  metric broader than the fix's actual condition; being re-aligned to `cap_cost_at_arrival`). Opening
+  over-fire was modest to begin with (p2rev1 native ~0.17 vs ~0.12 elite floor).
+- **Next lever (p2rev3) = `--pool-seed-rl`** (pin rev38 aggressor + rev53b as sim-gap-immune RL selves) to
+  punish the mid-game over-garrison and force holding — better-aimed at the `planets@N` collapse than more deflation.
+- **New eval tooling:** `eval.py game_conversion` now emits `churn` (length-confounded — read `churn/100st`)
+  + `redundant-launch<50` (opening-windowed); `conversion_from_replays.py` (top-2 baseline, eval==replay);
+  `analyze_deb_wins_p2rev2.py` (win profiler + banner replays); `ORBIT_NO_FRIENDLY_DEFLATION` eval toggle.
+  Always full 256-game `--panel` for WR. Defs/confounds in docs/metrics.md.
+
+---
+
+## Prior State (2026-06-10)
 
 **Active run:** none. The reinforce-lever resume chain ran out: rev57/57b → **rev58 → rev58b, both
 flooded** (~330–400k; see run table + `docs/phase2.md` top Update). Cost knob dead; root cause

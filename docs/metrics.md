@@ -100,6 +100,28 @@ Conversion: caps/game X  atk-launch/game X  cap/atk-launch X  ships/cap X  reinf
 - **ships/cap** = attack-ships ÷ captures — *force per capture*. ⚠️ **Deflated by churn**: re-captures
   of flip-flopping planets are cheap, so a low value can mean efficiency **or** churn. Always read with
   caps/game vs `end`: caps/game ≫ end_planets = churn.
+- **churn** = gross captures ÷ end_planets (capture-then-lose-then-recapture the same flip-flopping
+  planets — the "can't hold the lead" signal). ⚠️ **LENGTH-CONFOUNDED** like the removed `avgfleet`: more
+  steps → more gross re-captures, so the longest games read highest *regardless of holding skill*. Top-2
+  raw churn is **Isaiah 7.1 > Jake 3.5 purely because Isaiah's games run 447 vs 284 steps.** Read the
+  printed **`churn/100st`** (caps/end normalized per 100 steps) instead — it collapses to a tight elite
+  band: **Isaiah 1.59 · TonyK 1.16 · Jake 1.23 · 213tubo 1.48.** Even normalized it's a *secondary* read;
+  the clean hold signal is the **planets@N trajectory turning over** (peak then decline) + the
+  proximity crossover step (`deb_proximity.py`).
+- **redundant-launch<50** = OPENING (step <50) attack-launches at a target that already has ≥ its own
+  ships inbound (a friendly fleet is already capturing it) ÷ opening attack-launches. The opening
+  **over-fire** the friendly-coverage roi-deflation (`features.py`/`torch_env.py`) is built to suppress,
+  so it should **fall** if the fix works. ⚠️ **WINDOWED to the opening on purpose** — a whole-game fraction
+  is inflated by *benign end-game surplus re-fire* (once you own ~16 planets vs a dying opponent, surplus
+  production gets spent re-firing the last enemy planets; harmless, you've already won). Length-normalizing
+  does NOT fix this — it's a phase-composition confound (long won games contain more end-game), not a
+  volume one (the metric is already a fraction). The whole-game value is kept in `(WG x)` for context.
+  ⚠️ **Floor is ~0.12, not 0** — legitimate sequential reinforcement of a contested capture trips the
+  threshold. Windowed top-player ref is *tight*: **Isaiah 0.13 · TonyK 0.14 · Jake 0.11 · carpet-bomber
+  213tubo 0.12** (note 213tubo's WG 0.22 → <50 0.12: its apparent over-fire was ALL end-game, opening is
+  clean). Validation target for p2rev2 = approach ~0.12, not zero. (Same-step double-fires at one fresh
+  target aren't counted — neither fleet exists at decision time — but the feature can't prevent those
+  either, so the metric matches the fix's reach.)
 - **reinf_share** = reinforce-launches ÷ all launches. ⚠️ **Opponent/success-confounded**: it co-moves
   with empire size (own planets only become legal targets above the gate, and their fraction rises as the
   empire grows — phase2 §6), so the *same policy* reads ~0.08 vs debatreya (eliminated, stuck small/
@@ -123,9 +145,10 @@ controlled, comparable points (immune to game length / end-state), and the **rat
 
 ### Top-player reference (timing-corrected replays: action@t paired with obs@t-1)
 
-Computed over **269 replays** (`/tmp/fresh_validate` 180 + `/tmp/snowball` 89) via
-`fetch_analyze_top_replays.py`; `n` = games each player appears in (all outcomes, not just wins).
-Per-milestone values are medians; ratios are pooled over all that player's games.
+Computed over **269 replays** (`/tmp/fresh_validate` 180 + `/tmp/snowball` 89) by running the eval's own
+`game_conversion()` over the replays — driver `conversion_from_replays.py <dirs> [--player NAME]`, so the
+top-player numbers and the eval numbers come from the *same function* (true eval == replay parity).
+`n` = games each player appears in (all outcomes, not just wins); ratios are pooled over all those games.
 
 | player | rank | n | cap/atk-launch | ships/cap | reinf_share | planets@16/32/50/100 | garr_frac@16/32/50/100 | ships/planet@16/32/50/100 |
 |---|---|---|---|---|---|---|---|---|
@@ -172,8 +195,14 @@ at inference: `--reinforce-gate-min-planets 3 --reinforce-forward-only --reinfor
   (controlled-time, scale-free). Don't reintroduce a raw fleet-size average.
 - **`srcs_multi`** — REMOVED (2026-06-09). Empire-size-confounded, outlier-dominated. Optimising it never
   moved wins. (The `--srcs-multi-penalty` shaping knob is separately deprecated — floor=0 → fire=0 Nash.)
-- **Zach panel** — saturated ~88–89% as a *win-rate* metric; but the **conversion line vs zach is still
-  useful** (long games expose the hoard). Use zach for conversion/hoard diagnostics, not for WR headroom.
+- **Zach panel** — saturated ~88–89% as a *win-rate* metric **for the Phase-1 lineage only** (rev32b 88.7%,
+  rev31/38 ~85%). ⚠️ **NOT saturated for Phase 2:** the reinforcement lineage (p2rev1/p2rev2) started from
+  snowball-BC and trades general Zach-beating strength for reinforcement-skill acquisition vs the aggressive
+  pool, so it sits far below ~88% (p2rev2 @1M was ~37% on the first 16 games). For Phase 2, Zach WR is an
+  **informative, non-ceiling signal** — the gap to Phase-1's ~88% measures how much general strength the
+  lineage has (re)gained; track it climbing as a real progress signal, don't dismiss it as saturated. The
+  **conversion line vs zach** is useful for either lineage (long games expose the hoard). Use zach for
+  conversion/hoard diagnostics + (Phase-2) general-strength tracking, not as a Phase-1 WR headroom ceiling.
 - **Ajay/1166 panel as the *objective*** — NOT LB-predictive (rev53b 10.9% Ajay → 933 LB < rev38 2.7% →
   994). Guardrail/yardstick, not north star. Only honest LB signal is submitting (`docs/submissions.md`).
 - **In-training pool `wr` / `ema_wr`** — NOT a performance metric. Measured inside `torch_env` with

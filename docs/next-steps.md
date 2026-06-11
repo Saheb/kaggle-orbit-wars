@@ -35,13 +35,20 @@ Current focus: **Phase 2 — reinforcement** (docs/phase2.md). VDN/per-slot conc
 
 ## ⭐ 2026-06-11 session — findings + next levers (prioritized)
 
-**Biggest finding — the gap vs strong planners is the OPENING, not conversion/hoarding.** Replay
-analysis of p2rev1 9.8M's wins vs debatreya (`/tmp/analyze_deb_wins.py`) shows competence is
-**bimodal**: wins = decisive snowball (led 80–90% of the game, eliminate the opp by step ~220, end
-19–24 planets) — real strategy, zero timeout-luck. Losses = we lose the opening and get eliminated
-**fast** (~90–107 steps, led 1–6%). When ahead we convert dominantly; we just lose the early exchange
-~99% of the time vs a 1300-planner. **Lever = early-game strength/survival (First-Strike-style opening
-pressure), NOT hoarding/late conversion.** Won-game HTML replays: `/tmp/p2rev1_WIN_*_seed{1948,9013}.html`.
+**Biggest finding — the gap vs strong planners is the MID-GAME (steps 50→100) hold, NOT the opening.**
+⚠️ **CORRECTED 2026-06-11 by the conversion metrics** (was "the gap is the opening"). p2rev2 @4.7M
+conversion eval (masks-on) vs Zach 64g (77% WR) and Deb 32g (0% WR): **`planets@16/32/50/100` is the
+clean win/loss discriminator** — Zach **2/4/7/10** (monotone, end 17) vs Deb **2/4/6/3** (peaks @50,
+collapses to 3 by @100, end 0.1, dead ~step 122). **The opening is IDENTICAL win/loss (2/4 at steps
+16/32) — we do NOT lose the early exchange; the divergence is the mid-game.** Metric verdicts:
+`redundant-launch` is at the elite floor in BOTH (0.12/0.17; ref ~0.15) → **the over-fire /
+friendly-coverage roi-deflation p2rev2 is built on is a non-bottleneck, no headroom** (not hurting,
+but misdirected for the Deb gap). `cap/atk-launch` fine (0.59/0.44). `churn` degenerate on elimination
+(end→0). Mechanism: we over-garrison mid-game (garr_frac@50 0.63–0.75, ships/pp 34–46 vs Isaiah 0.54/22);
+Deb's planner peels the parked planets, Zach can't. **Lever the data points to = `--pool-seed-rl`** (a
+strong RL self in the loop that punishes the over-garrison → forces holding), not deflation or First-Strike.
+Tooling: `churn`+`redundant-launch` added to `eval.py game_conversion()`; `conversion_from_replays.py`
+for the top-2 baseline; defs/confounds in `docs/metrics.md`. Won-game HTML: `/tmp/p2rev1_WIN_*_seed{1948,9013}.html`.
 p2rev1 9.8M panels (masks-on): **Ajay 0.4% · debatreya 0.8% · Zach ~62%** — weak vs strong planners
 (opening), strong vs Zach. (Ajay/debatreya NOT LB-predictive — yardstick, not objective. Best-ever
 Ajay refs: rev53b 10.9%, rev54 1M 5.5%, rev38 3.1%.)

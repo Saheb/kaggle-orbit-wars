@@ -660,6 +660,7 @@ class VecTorchEnv:
             planets=planets, planet_alive=planet_alive, P=P,
             owned_idx=owned_idx, slot_valid=slot_valid, player=player,
             enemy_contest=enemy_contest,
+            friendly_contest=friendly_pressure,   # (N, P): own ships already inbound per target
         )
 
         return {
@@ -679,7 +680,7 @@ class VecTorchEnv:
         }
 
     def _compute_pairwise(self, planets, planet_alive, P, owned_idx, slot_valid, player,
-                          enemy_contest=None):
+                          enemy_contest=None, friendly_contest=None):
         """Vectorized counterpart of features.compute_pairwise_features().
 
         Returns (N, MAX_OWNED, P, 15) float32 on self.device. Channel order:
@@ -790,6 +791,18 @@ class VecTorchEnv:
         safe_cap = cap_at_arr.clamp(min=1.0)
         roi_20 = ((prod_actual * 20.0 - cap_at_arr) / safe_cap).clamp(-1.0, 1.0)
         roi_50 = ((prod_actual * 50.0 - cap_at_arr) / safe_cap).clamp(-1.0, 1.0)
+
+        # Deflate capture roi by friendly ships already inbound (symmetric to enemy_contest):
+        # a target we already have a fleet en route to offers ~0 marginal return to a NEW
+        # launch. coverage in [0,1] = inbound / capture-cost; own (reinforce) targets are never
+        # deflated. Matches features.py compute_pairwise_features (parity-tested).
+        if friendly_contest is not None:
+            fc_b = friendly_contest.unsqueeze(1).expand(-1, MO, -1)          # (N, MO, P)
+            coverage = torch.where(owner_exp != player,
+                                   (fc_b / safe_cap).clamp(max=1.0),
+                                   torch.zeros_like(safe_cap))
+            roi_20 = roi_20 * (1.0 - coverage)
+            roi_50 = roi_50 * (1.0 - coverage)
 
         # Enemy contest feature (ch 14): broadcast (N, P) → (N, MO, P)
         if enemy_contest is not None:
