@@ -891,7 +891,8 @@ class VecTorchEnv:
     #      or (N, MAX_OWNED, 4) int — [fire, angle_bin, ship_bin, target_idx]
     # ---------------------------------------------------------------------
 
-    def _apply_actions(self, actions: torch.Tensor, owner_id: int):
+    def _apply_actions(self, actions: torch.Tensor, owner_id: int,
+                       angle_override: torch.Tensor = None):
         if actions is None:
             return
         owned_idx, slot_valid = self.owned_indices_for(owner_id)
@@ -949,6 +950,14 @@ class VecTorchEnv:
             )
             target_angle = self._target_intercept_angle(src_x, src_y, src_r, ship_count, target_idx)
             angle = torch.where(use_target_decode, target_angle, angle)
+
+        # Continuous-angle override (NaN = none). External heuristics emit a precise
+        # continuous intercept angle; the real engine uses it directly, but our 144-bin
+        # angle decode quantizes it (±~1.25-2.5°) and handicaps their aiming in-sim. Apply
+        # the raw angle here so aiming-heavy opponents play at true strength (matches eval).
+        if angle_override is not None:
+            has_cont = ~torch.isnan(angle_override)
+            angle = torch.where(has_cont, angle_override, angle)
 
         # Validate: planet still owned by this player AND has enough ships
         valid_owner = (src_owner == owner_id) & slot_valid
@@ -1042,11 +1051,14 @@ class VecTorchEnv:
     # Phase 2 scope: orbital motion + collision/combat + action processing.
     # ---------------------------------------------------------------------
 
-    def step(self, actions=None) -> dict:
+    def step(self, actions=None, angle_overrides=None) -> dict:
         """Advance all N envs by one tick.
 
         actions: optional dict {player_id: (N, MAX_OWNED, 3) tensor}.
                  Each player's fleets are launched before physics.
+        angle_overrides: optional dict {player_id: (N, MAX_OWNED) float tensor};
+                 NaN = no override, else a continuous launch angle that bypasses the
+                 144-bin quantization (used for external heuristics — see _apply_actions).
         """
         # Per-step buffer for the reinforcement transit cost (#2): ships each player
         # sent to its own planets this step. Zeroed before launches accumulate into it.
@@ -1055,7 +1067,8 @@ class VecTorchEnv:
                 self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         if actions is not None:
             for pid, act in actions.items():
-                self._apply_actions(act, pid)
+                ovr = angle_overrides.get(pid) if angle_overrides else None
+                self._apply_actions(act, pid, angle_override=ovr)
 
         # 1. Production: planet[5] += planet[6] for owned planets (owner != -1)
         owner = self.planets[:, :, 1]

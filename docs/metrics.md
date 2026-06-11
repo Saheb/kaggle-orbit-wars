@@ -87,6 +87,7 @@ and hoarding?* Implementation: `eval.py:game_conversion()`; training side mirror
 Conversion: caps/game X  atk-launch/game X  cap/atk-launch X  ships/cap X  reinf_share X
   planets@16/32/50/100 a/b/c/d  end X
   hoard  garr_frac@ a/b/c/d  ships/planet@ a/b/c/d
+  reinf by empire size  1:r(n)  2-3:r(n)  4-6:r(n)  7-9:r(n)  10-12:r(n)  13+:r(n)   [ref ramp @1:0.00 @2:0.10 @9-12:0.30 @13+:0.34-0.61]
 ```
 
 **Definitions** (a "launch" = a legal fire, `sent ≤ source ships`):
@@ -99,7 +100,15 @@ Conversion: caps/game X  atk-launch/game X  cap/atk-launch X  ships/cap X  reinf
 - **ships/cap** = attack-ships ÷ captures — *force per capture*. ⚠️ **Deflated by churn**: re-captures
   of flip-flopping planets are cheap, so a low value can mean efficiency **or** churn. Always read with
   caps/game vs `end`: caps/game ≫ end_planets = churn.
-- **reinf_share** = reinforce-launches ÷ all launches.
+- **reinf_share** = reinforce-launches ÷ all launches. ⚠️ **Opponent/success-confounded**: it co-moves
+  with empire size (own planets only become legal targets above the gate, and their fraction rises as the
+  empire grows — phase2 §6), so the *same policy* reads ~0.08 vs debatreya (eliminated, stuck small/
+  below-gate), ~0.23 vs a winnable opponent, ~0.5 in self-play training. Don't compare the aggregate
+  across opponents — use the per-empire-size ramp below.
+- **reinf by empire size** = own-target share among launches made *at that owned-planet count* (with the
+  launch count in parens — low-count bins are noisy). This is the apples-to-apples comparison to the
+  top-player ramp (phase2 §2): @1 ≈0.00, @2 ≈0.10, @9-12 ≈0.30, @13+ 0.34-0.61. Empire size is measured
+  at decision time (obs@t-1). The aggregate `reinf_share` is empire-mix-weighted; the ramp decouples it.
 - **planets@N** = owned planets at episode-step N — the expansion/retention trajectory.
 - **garr_frac@N** = parked ÷ (parked + in-flight) at step N — scale-free deployment ratio; high = army
   parked. (Snapshot mid-game; at the terminal step everything lands → 1.0 trivially.)
@@ -167,6 +176,10 @@ at inference: `--reinforce-gate-min-planets 3 --reinforce-forward-only --reinfor
   useful** (long games expose the hoard). Use zach for conversion/hoard diagnostics, not for WR headroom.
 - **Ajay/1166 panel as the *objective*** — NOT LB-predictive (rev53b 10.9% Ajay → 933 LB < rev38 2.7% →
   994). Guardrail/yardstick, not north star. Only honest LB signal is submitting (`docs/submissions.md`).
+- **In-training pool `wr` / `ema_wr`** — NOT a performance metric. Measured inside `torch_env` with
+  sampled actions; aiming-heavy heuristics play far weaker there than in the real env (p2rev1 8.25M:
+  pool ema 0.48 vs kaggle 0/6% vs lb1152). It's a PFSP sampling signal only. For the comparable number
+  use cross-eval. **Full analysis: `docs/train-eval.md`.**
 
 ## The honest hierarchy of "is it working"
 

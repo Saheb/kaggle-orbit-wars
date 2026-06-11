@@ -228,7 +228,10 @@ class HeuristicWorkerPool:
 
 def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device):
     """Convert list-of-lists [[from_pid, angle_rad, ships], ...] per env into
-    a (num_envs, MAX_OWNED, 3) action tensor."""
+    a (num_envs, MAX_OWNED, 3) action tensor plus a (num_envs, MAX_OWNED) float
+    tensor of the raw continuous angles (NaN where no launch). The continuous
+    angles let the env bypass 144-bin quantization for these aiming-heavy
+    opponents (see torch_env._apply_actions angle_override)."""
     from torch_env import MAX_OWNED, NUM_ANGLE_BINS, ANGLE_BIN_WIDTH, SHIP_COUNTS
     import math as _math
 
@@ -237,6 +240,7 @@ def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device):
     fire = torch.zeros(N, MAX_OWNED, dtype=torch.long)
     angle_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
     ship_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
+    cont_angle = torch.full((N, MAX_OWNED), float("nan"), dtype=torch.float32)
 
     gather_idx = owned_idx.unsqueeze(-1).expand(-1, -1, 7).cpu()
     planets_cpu = env.planets.cpu()
@@ -267,7 +271,8 @@ def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device):
             fire[e, slot] = 1
             angle_bin[e, slot] = ab
             ship_bin[e, slot] = best
-    return torch.stack([fire, angle_bin, ship_bin], dim=-1).to(device)
+            cont_angle[e, slot] = ang
+    return torch.stack([fire, angle_bin, ship_bin], dim=-1).to(device), cont_angle.to(device)
 
 
 # ----------------------------------------------------------------------------
@@ -546,6 +551,34 @@ def train(args):
                 added += 1
             print(f"  pool preseeded: {added} self-checkpoints from {preseed_dir}")
 
+        # Pinned RL champions: fixed strong opponents (e.g. rev38, rev53b), never
+        # FIFO-evicted. Appended even on resume; skip if a same-named pin already
+        # exists (e.g. restored from the saved pool).
+        if args.pool_seed_rl:
+            existing_pins = {m.name for m in pool.members if getattr(m, "pinned", False)}
+            for path in args.pool_seed_rl.split(","):
+                path = path.strip()
+                if not path:
+                    continue
+                name = Path(path).stem
+                if f"seed_{name}" in existing_pins:
+                    print(f"  pool pinned RL already present from resume: seed_{name}")
+                    continue
+                sd = torch.load(path, map_location="cpu", weights_only=False)
+                if "model" in sd:
+                    sd = sd["model"]
+                # Drop keys the current model doesn't have (e.g. rev38's deleted
+                # angle_head); fail fast if it's missing any the model needs.
+                model_keys = set(model.state_dict().keys())
+                sd = {k: v for k, v in sd.items() if k in model_keys}
+                missing = model_keys - set(sd.keys())
+                if missing:
+                    print(f"  WARN: pinned RL {name} incompatible — missing {len(missing)} keys "
+                          f"(e.g. {sorted(missing)[:3]}); skipping")
+                    continue
+                pool.add_pinned_rl(name, sd)
+                print(f"  pool pinned RL champion: seed_{name} ({path})")
+
         # External opponents come from CLI flag — appended even on resume so
         # the user can add new externals without modifying the pool file.
         if args.pool_mode == "mixed" and args.external_opponents:
@@ -696,7 +729,7 @@ def train(args):
             fire_a, angle_a, ship_a, target_a, *_ = sample_action_batched(
                 outs, feats["fire_mask"], feats.get("target_mask")
             )
-            return torch.stack([fire_a, angle_a, ship_a, target_a], dim=-1)[env_slice]
+            return torch.stack([fire_a, angle_a, ship_a, target_a], dim=-1)[env_slice], None
 
         if opp.kind == "external_heuristic":
             from torch_env import to_legacy_obs
@@ -733,16 +766,16 @@ def train(args):
                     oi, sv = env.owned_indices_for(player)
                     return oi[self._slc], sv[self._slc]
             view = _SliceView(env, env_slice)
-            act = _heuristic_moves_to_action_tensor(moves_per_env, view, player, device)
+            act, cont_angle = _heuristic_moves_to_action_tensor(moves_per_env, view, player, device)
             if args.action_decode == "target":
-                # External heuristics already emit explicit angles. Use -1 as a
-                # sentinel so VecTorchEnv keeps angle-bin decoding for these rows
-                # even when the learned policy uses target decoding.
+                # Target_idx = -1 sentinel so VecTorchEnv keeps angle decoding for these
+                # rows (not target decoding). The continuous angle (cont_angle) is applied
+                # separately via angle_overrides so it bypasses 144-bin quantization.
                 pad_target = torch.full(
                     act.shape[:-1] + (1,), -1, dtype=act.dtype, device=act.device
                 )
                 act = torch.cat([act, pad_target], dim=-1)
-            return act
+            return act, cont_angle
 
         raise ValueError(f"unknown opponent kind: {opp.kind}")
 
@@ -857,12 +890,20 @@ def train(args):
             # Pool opponent override: in pool envs, replace `opp_seat`'s action
             # with the pool member's action, and mark its storage slot as
             # not-trainable so PPO ignores it.
+            angle_overrides = None
             if pool_opp is not None and N_pool > 0:
-                opp_action = compute_pool_actions(pool_opp, opp_seat, pool_slice)
+                opp_action, opp_cont = compute_pool_actions(pool_opp, opp_seat, pool_slice)
                 actions_per_player[opp_seat][pool_slice] = opp_action
                 storage["train_mask"][t, pool_slice, opp_seat] = False
+                if opp_cont is not None:
+                    # Continuous-angle override for the external opponent's slice (NaN
+                    # elsewhere) → bypasses 144-bin quantization for its aiming.
+                    full_ovr = torch.full(actions_per_player[opp_seat].shape[:2],
+                                          float("nan"), device=env.device)
+                    full_ovr[pool_slice] = opp_cont
+                    angle_overrides = {opp_seat: full_ovr}
 
-            state, rewards, done = env.step(actions_per_player)
+            state, rewards, done = env.step(actions_per_player, angle_overrides=angle_overrides)
             # Hoard milestones: when an env is at episode-step 16/32/50/100, accumulate
             # player-0 garrison (parked), in-flight, and owned-planet counts for that env.
             ownp = env.planets[:, :, 1].long()                            # (N, P) owner
@@ -1558,6 +1599,11 @@ if __name__ == "__main__":
                              "(e.g. torch_step_5013504.pt -> step=5013504). Useful "
                              "for diluting the heuristic-share early in training "
                              "and for resuming pool diversity across runs.")
+    parser.add_argument("--pool-seed-rl", type=str, default="",
+                        help="Comma-separated .pt checkpoints to PIN into the pool as fixed RL "
+                             "champion opponents (e.g. our rev38/rev53b). Run via the GPU 'self' "
+                             "path (fast, sim-gap-immune) and NEVER FIFO-evicted, unlike --preseed-pool. "
+                             "Must match the current model architecture (pairwise dim etc.).")
     parser.add_argument("--external-opponents", type=str, default="",
                         help="Comma-separated paths to .py heuristic agents (e.g. "
                              "'opponents/candidate_suneet_lb1200.py,opponents/candidate_zach_public.py'). "

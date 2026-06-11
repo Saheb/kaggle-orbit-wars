@@ -34,6 +34,7 @@ class PoolMember:
     state_dict: Optional[dict] = None        # for 'self'
     agent_fn: Optional[Callable] = None      # for 'external_heuristic'
     step_saved: int = 0                      # training step when added (self only)
+    pinned: bool = False                      # fixed RL opponent (seeded champion): never FIFO-evicted
     wins: int = 0
     losses: int = 0
     draws: int = 0
@@ -98,11 +99,21 @@ class OpponentPool:
             name=f"self_step_{step}", kind="self",
             state_dict=cpu_sd, step_saved=step,
         ))
-        # Evict oldest self if over cap (externals are untouched here)
-        self_members = [m for m in self.members if m.kind == "self"]
+        # Evict oldest self if over cap (externals AND pinned champions are untouched)
+        self_members = [m for m in self.members if m.kind == "self" and not m.pinned]
         if len(self_members) > self.max_self_members:
             oldest = min(self_members, key=lambda m: m.step_saved)
             self.members.remove(oldest)
+
+    def add_pinned_rl(self, name: str, state_dict: dict) -> None:
+        """Add a FIXED RL champion (e.g. rev38, rev53b) as a never-evicted 'self'
+        opponent. Runs through the same GPU 'self' forward path; pinned so organic
+        self-snapshot FIFO never drops it. step_saved=-1 keeps it out of FIFO order."""
+        cpu_sd = {k: v.detach().cpu().clone() for k, v in state_dict.items()}
+        self.members.append(PoolMember(
+            name=f"seed_{name}", kind="self", state_dict=cpu_sd,
+            step_saved=-1, pinned=True,
+        ))
 
     def add_external_heuristic(self, name: str, py_path: str) -> None:
         """Load a .py file (must define `agent(obs)` or `agent(obs, config)`)."""
@@ -219,7 +230,8 @@ class OpponentPool:
                 "name": m.name, "wins": m.wins, "losses": m.losses, "draws": m.draws,
             }
             if m.kind == "self":
-                self_members.append({**base, "step_saved": m.step_saved, "state_dict": m.state_dict})
+                self_members.append({**base, "step_saved": m.step_saved,
+                                     "state_dict": m.state_dict, "pinned": m.pinned})
             elif m.kind == "external_heuristic":
                 # We need the path to re-import on load. Resolution happens at
                 # add time; we store it as an attribute when loading externals.
@@ -274,6 +286,7 @@ class OpponentPool:
             pool.members.append(PoolMember(
                 name=m["name"], kind="self",
                 state_dict=m["state_dict"], step_saved=m["step_saved"],
+                pinned=m.get("pinned", False),
                 wins=m["wins"], losses=m["losses"], draws=m["draws"],
             ))
         if reload_externals:

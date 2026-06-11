@@ -33,6 +33,50 @@ Current focus: **Phase 2 — reinforcement** (docs/phase2.md). VDN/per-slot conc
 
 ---
 
+## ⭐ 2026-06-11 session — findings + next levers (prioritized)
+
+**Biggest finding — the gap vs strong planners is the OPENING, not conversion/hoarding.** Replay
+analysis of p2rev1 9.8M's wins vs debatreya (`/tmp/analyze_deb_wins.py`) shows competence is
+**bimodal**: wins = decisive snowball (led 80–90% of the game, eliminate the opp by step ~220, end
+19–24 planets) — real strategy, zero timeout-luck. Losses = we lose the opening and get eliminated
+**fast** (~90–107 steps, led 1–6%). When ahead we convert dominantly; we just lose the early exchange
+~99% of the time vs a 1300-planner. **Lever = early-game strength/survival (First-Strike-style opening
+pressure), NOT hoarding/late conversion.** Won-game HTML replays: `/tmp/p2rev1_WIN_*_seed{1948,9013}.html`.
+p2rev1 9.8M panels (masks-on): **Ajay 0.4% · debatreya 0.8% · Zach ~62%** — weak vs strong planners
+(opening), strong vs Zach. (Ajay/debatreya NOT LB-predictive — yardstick, not objective. Best-ever
+Ajay refs: rev53b 10.9%, rev54 1M 5.5%, rev38 3.1%.)
+
+- 🟢 **`--pool-seed-rl` BUILT + TESTED — use next run.** Pins fixed RL champions into the pool via the
+  GPU "self" path (fast, **sim-gap-immune** — unlike the heuristics). Never FIFO-evicted, survives
+  save/load. `opponent_pool.py` (`add_pinned_rl` + `pinned` flag), `tests/test_pool_pinned.py`. Next run:
+  `--pool-seed-rl gpu_run_artifacts/rev38/checkpoints/torch_step_5242880_rev38_20260605_181635.pt,gpu_run_artifacts/preseed_pool/torch_step_10485760_rev53b.pt`
+  (rev38 = first-strike aggressor → opening pressure; rev53b = selective). **Keep rev31/rev32b
+  HELD-OUT** (cross-eval forgetting detector). p2rev1 loses to all four (cross-eval 7.7M) → real
+  pressure. Compat verified (pairwise15; rev38's stale `angle_head` keys auto-filtered).
+- 🟡 **Opening-strength shaping** — if the pinned aggressors aren't enough, revisit First-Strike
+  (`--first-strike-steps/--first-strike-mult`) for the from-scratch reward to win the early exchange
+  more often. The 9.8M analysis says this is THE lever vs strong planners.
+- ⏸ **Train/eval sim gap — documented + PARKED** (`docs/train-eval.md`, memory
+  `project_train_eval_sim_gap`). Pool wr is torch_env fiction (cross-eval: all 3 hammers **2–4% in
+  kaggle** vs training ema 0.40–0.48). Found+fixed the **144-bin angle quantization** of opponents
+  (continuous-angle override via `torch_env.step(angle_overrides=…)`, `tests/test_ship_bin_decode.py`)
+  BUT a hammer-vs-hammer A/B = 52.6% (noise) → it's a **minor** contributor. Real gap likely our agent
+  **overfitting torch_env physics** + win/timeout resolution. Decisive probe (parked): same checkpoint
+  vs a hammer in BOTH engines, then diff one shared-seed trajectory. Aim fix kept (correct + free).
+- 🟡 **clip_frac creep on p2rev1** — 0.069 (8.0M) → 0.158 (9.4M), first KL/EV wobble @9.4M (the
+  entropy-0.05 / LR-1e-4 drift). Standing authority: **halve LR at 0.25**. Wait 2–3 checkpoints
+  (9.2/9.8/10.3M panels) before concluding; conversion dipped slightly (cap/atk 0.56→0.51), likely the
+  same drift.
+- ✅ **Eval hygiene fixed:** debatreya watcher now masks-on + newest-first (`sort -rV`) + `MIN_STEP`
+  watermark (backlog cleared at 9.2M); conversion eval prints a **reinf-by-empire-size ramp** vs the
+  top-player ramp (aggregate `reinf_share` is opponent/empire-confounded — read the ramp; `eval.py` +
+  `docs/metrics.md`); `cross_eval` now includes the pool hammers (`pool_lb1152/1138/1084`) + masks.
+- ⏸ **orbit_lite candidate opponents parked** — locutus + producerlite (Kaggle kernels) ≈ 11 ms/call
+  (vs hammer 0.7, ~debatreya 9.3) → too slow for the pool, eval-only. Rule: imports `orbit_lite` ⇒
+  slow, conclude from imports (memory `feedback_orbit_lite_is_slow`). At `/tmp/{locutus,producerlite}_x/`.
+
+---
+
 ## 0. In-flight — Phase 2 reinforcement, Tier-1 (docs/phase2.md)
 
 **rev58/58b resume probes both flooded — cost knob dead, root cause re-diagnosed.** rev58 (cost 0)

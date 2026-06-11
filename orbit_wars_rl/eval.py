@@ -155,6 +155,21 @@ _CONV_MILESTONES = (16, 32, 50, 100)
 # (garr 0.87, 60 ships/planet) is won-game accumulation, not hoarding.
 _ISAIAH_HOARD_REF = "garr_frac 0.50/0.51/0.54/0.87  ships/planet 11/15/22/60"
 
+# reinforce-by-empire-size bins (owned planets AT LAUNCH TIME). The aggregate reinf_share
+# is opponent/success-confounded (it co-moves with empire size — phase2 §6); bucketing by
+# empire size makes it directly comparable to the top-player ramp (phase2 §2 / metrics.md):
+# @1 ≈0.00, @2 ≈0.10, @9-12 ≈0.30, @13+ 0.34-0.61.
+_REINF_BINS = [(1, 1, "1"), (2, 3, "2-3"), (4, 6, "4-6"),
+               (7, 9, "7-9"), (10, 12, "10-12"), (13, 10**9, "13+")]
+_REINF_RAMP_REF = "@1:0.00 @2:0.10 @9-12:0.30 @13+:0.34-0.61"
+
+
+def _reinf_bin_idx(owned):
+    for i, (lo, hi, _) in enumerate(_REINF_BINS):
+        if lo <= owned <= hi:
+            return i
+    return 0  # owned 0 can't launch; guard
+
 
 def _resolve_launch_target(planets, src, angle):
     """Planet a launch from `src` at `angle` is aimed at (direction match), or None.
@@ -185,6 +200,8 @@ def game_conversion(steps, seat):
     Returns per-game counts; `add_conversion` aggregates across games.
     """
     caps = atk = reinf = atk_ships = 0
+    reinf_bin = [0] * len(_REINF_BINS)   # own-target launches by empire size at launch
+    atk_bin = [0] * len(_REINF_BINS)     # attack launches by empire size at launch
     planets_at = {ms: None for ms in _CONV_MILESTONES}
     garrison_at = {ms: None for ms in _CONV_MILESTONES}   # ships parked on owned planets
     inflight_at = {ms: None for ms in _CONV_MILESTONES}   # ships in owned fleets (deployed)
@@ -215,6 +232,7 @@ def game_conversion(steps, seat):
         if not p0:
             continue
         byid = {p[0]: p for p in p0}
+        bidx = _reinf_bin_idx(sum(1 for p in p0 if int(p[1]) == seat))  # empire size at decision
         for mv in acts:
             if not mv or len(mv) < 3:
                 continue
@@ -229,12 +247,15 @@ def game_conversion(steps, seat):
                 continue                            # unclassifiable → skip (== analyzer)
             if int(tgt[1]) == seat:
                 reinf += 1                          # reinforce: cannot capture
+                reinf_bin[bidx] += 1
             else:
                 atk += 1
                 atk_ships += sent
+                atk_bin[bidx] += 1
     end_planets = sum(1 for p in (last or []) if int(p[1]) == seat)
     out = {"captures": caps, "attack_launches": atk, "reinforce_launches": reinf,
-           "attack_ships": atk_ships, "end_planets": end_planets}
+           "attack_ships": atk_ships, "end_planets": end_planets,
+           "reinf_bin": reinf_bin, "atk_bin": atk_bin}
     for ms in _CONV_MILESTONES:
         out[f"p{ms}"] = planets_at[ms]
         out[f"g{ms}"] = garrison_at[ms]
@@ -244,7 +265,8 @@ def game_conversion(steps, seat):
 
 def new_conversion_acc():
     acc = {"captures": 0, "attack_launches": 0, "reinforce_launches": 0,
-           "attack_ships": 0, "end_planets": 0, "games": 0}
+           "attack_ships": 0, "end_planets": 0, "games": 0,
+           "reinf_bin": [0] * len(_REINF_BINS), "atk_bin": [0] * len(_REINF_BINS)}
     for ms in _CONV_MILESTONES:
         acc[f"p{ms}_sum"] = 0
         acc[f"p{ms}_n"] = 0
@@ -256,6 +278,9 @@ def new_conversion_acc():
 def add_conversion(acc, conv):
     for k in ("captures", "attack_launches", "reinforce_launches", "attack_ships", "end_planets"):
         acc[k] += conv[k]
+    for i in range(len(_REINF_BINS)):
+        acc["reinf_bin"][i] += conv["reinf_bin"][i]
+        acc["atk_bin"][i] += conv["atk_bin"][i]
     acc["games"] += 1
     for ms in _CONV_MILESTONES:
         v = conv[f"p{ms}"]
@@ -277,6 +302,12 @@ def _fmt_conversion(acc):
     gf = lambda ms: (f"{acc[f'g{ms}_sum']/(acc[f'g{ms}_sum']+acc[f'if{ms}_sum']):.2f}"
                      if (acc[f'g{ms}_sum'] + acc[f'if{ms}_sum']) > 0 else "—")
     spp = lambda ms: (f"{acc[f'g{ms}_sum']/acc[f'p{ms}_sum']:.0f}" if acc[f"p{ms}_sum"] else "—")
+    # reinforce ramp by empire size: own-target share among launches made at that size,
+    # with launch count in parens (low-count bins are noisy). Compare to the top-player ramp.
+    def rb(i):
+        r, a = acc["reinf_bin"][i], acc["atk_bin"][i]
+        return f"{r/(r+a):.2f}({r+a})" if (r + a) else f"—(0)"
+    ramp = "  ".join(f"{_REINF_BINS[i][2]}:{rb(i)}" for i in range(len(_REINF_BINS)))
     return (f"Conversion: caps/game {c/n:.1f}  atk-launch/game {al/n:.1f}  "
             f"cap/atk-launch {c/max(al,1):.3f}  ships/cap {acc['attack_ships']/max(c,1):.0f}  "
             f"reinf_share {rl/max(al+rl,1):.2f}\n"
@@ -284,7 +315,8 @@ def _fmt_conversion(acc):
             f"   [ref Isaiah: cap/atk-launch 0.59  planets 2/6/9/10  reinf 0.30]\n"
             f"  hoard  garr_frac@ {gf(16)}/{gf(32)}/{gf(50)}/{gf(100)}  "
             f"ships/planet@ {spp(16)}/{spp(32)}/{spp(50)}/{spp(100)}"
-            f"   [ref Isaiah: {_ISAIAH_HOARD_REF}]")
+            f"   [ref Isaiah: {_ISAIAH_HOARD_REF}]\n"
+            f"  reinf by empire size  {ramp}   [ref ramp {_REINF_RAMP_REF}]")
 
 
 def evaluate_against_baseline(
