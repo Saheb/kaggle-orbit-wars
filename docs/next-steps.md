@@ -6,30 +6,25 @@ Current focus: **Phase 2 — reinforcement** (docs/phase2.md). VDN/per-slot conc
 
 ---
 
-## ⚠️ LIVE INSTANCE — p2rev1 (2026-06-11)
+## ⚠️ LIVE INSTANCE — p2rev4 (2026-06-11)
 
-- **GCP `orbit-wars-training` (zone `asia-south1-b`, IP 34.93.147.78) RUNNING + BILLING (~$1.13/hr).**
-  Running **p2rev1** (Phase 2 Tier-1) in tmux `training`. Watcher → `gpu_run_artifacts/p2rev1/`.
-- Config: snowball-BC warmstart + forward-staging mask + drop defense + gate(3)/garrison-floor(10) +
-  pool (**3 heuristic hammers: lb1152 + lb1138 doom_evac + lb1084 4p_relative_gap @ external-frac 0.25**)
-  + **num-envs 192, rollout 128, ppo-epochs 2, heuristic-workers 2** (6 worker procs), LR 1e-4.
-  Script: `gpu_run_artifacts/p2rev1/run_remote_p2rev1.sh` (scp'd to `~/orbit_wars_rl/`; seed scp'd to
-  `~/orbit_wars_rl/seed_checkpoints/`). SPS ~250-300 (heuristic-worker overhead), GPU ~44%, mem ~17GB.
-- **2026-06-11 relaunch:** first launch STALLED at iter 6 — the in-process `candidate_debatreya_1300`
-  planner adapter (`--planner-externals`) wedged the main thread in `batched_planner.py`'s per-env
-  `single_obs_to_tensor` Python loop (py-spy: 78% one core, GPU idle 14%). Per-env planner loop is too
-  slow to keep the rollout fed. FIX: dropped debatreya + `--planner-externals` entirely, swapped to the
-  3 fast heuristic hammers above. Relaunched 20:22 UTC, clears iter 6→9 cleanly (EV 0.47→0.67, clip
-  0.23→0.19). `batched_planner.py` no longer a dependency (its rsync/Trash ops risk is moot for this run).
-- SSH: `gcloud compute ssh orbit-wars-training --zone=asia-south1-b` (or alias
-  `orbit-wars-training.asia-south1-b.orbit-wars-rl`). Tail: `grep '^iter' <log> | tail`.
-- **WATCH (early):** cold-critic warmup — EV should climb >0.5 and clip drop <0.25 by ~iter 10-15
-  (ppo-1 + rollout-32 warms the critic slowly). If clip >0.4 + EV ~0 persists → halve LR / value warmup.
-  Then watch `reinf` (gated 0 below 3 planets, ramp with empire size), `H_tgt`/`tgt n/e` (target-head),
-  `p90` (no flood). Selection is PURE: held-out win-rate decides.
-- **TERMINATE when done:** `gcloud compute instances delete orbit-wars-training --zone=asia-south1-b`.
-- ⚠️ Latent ops bug hit this launch: `orbit_wars_rl/batched_planner.py` (debatreya dep, git-tracked) was
-  in Trash during rsync → `ModuleNotFoundError` → had to scp manually. Ensure it exists before launch.
+- **Jarvis A100-40GB SPOT, IP 217.18.55.74, IN2, name `orbit-wars-p2rev4`, RUNNING + BILLING (~₹179/hr).**
+  Running **p2rev4** in tmux `training`. The ONE delta vs p2rev3: **`--reinforce-garrison-floor 10 → 0`**
+  (unblock reinforcement — veto probe showed the floor blocked 62% of wanted reinforces). Resume of the
+  p2rev3 4M checkpoint (`seed_checkpoints/p2rev4_resume.pt`). Forced throughput-only deviation: **256 envs
+  / 4 workers** (was 512/6 — this box is 40GB, 512 OOMs >40GB). Script: `gpu_run_artifacts/p2rev4/run_remote_p2rev4.sh`.
+  iter 1 healthy: EV 0.706, clip 0.141, no OOM. Launched ~18:01 UTC.
+- **⚠️ BALANCE ≈ ₹524 at launch → only ~3hr runtime (~5M steps).** Won't reach 10M without a top-up; spot-out
+  loses ≤500k (watcher syncs every 60s). Enough for the decisive `lost-cap` read (floor effect shows by 1-2M).
+- **WATCH:** EV recovery + clip<0.25 (resume warmup), then the PAYOFF metrics — **`lost-cap` should FALL /
+  `median-hold` should RISE** (reinforcement now unblocked → can hold) and **`reinf@13+` should climb**.
+  Caveat: floor=0 lets hard-commit reinforces strip a source to 0 → if `lost-cap` WORSENS, that's over-drain
+  → add a small floor back (2-3). Selection PURE: held-out win-rate.
+- Watchers (local): sync `P2REV4_IP=217.18.55.74 watch_p2rev4_sync.sh` (real-dir `/home/checkpoints/` fix),
+  deb panel/ckpt, zach panel/2M, cross-eval/3M → `gpu_run_artifacts/p2rev4/`.
+- SSH: `ssh -i ~/.ssh/jarvis-labs-key root@217.18.55.74`. Tail: `grep '^iter' /home/train_gpu_phase1_p2rev4_*.log | tail`.
+- **TERMINATE when done:** `JL_API_KEY=$JARVIS_API_KEY jl destroy <id> --yes` (find id via `jl list`; was 425420-class).
+  ⚠️ SPOT — destroy, never pause.
 
 ---
 
@@ -63,6 +58,36 @@ Ajay refs: rev53b 10.9%, rev54 1M 5.5%, rev38 3.1%.)
 - 🟡 **Opening-strength shaping** — if the pinned aggressors aren't enough, revisit First-Strike
   (`--first-strike-steps/--first-strike-mult`) for the from-scratch reward to win the early exchange
   more often. The 9.8M analysis says this is THE lever vs strong planners.
+- 🟢 **RELAX `--reinforce-garrison-floor` (TOP lever — evidence-backed, cheapest).** Veto probe
+  (`orbit_wars_rl/garrison_floor_probe.py`, 4M ckpt vs deb, 2026-06-11): the policy WANTS to reinforce 26%
+  of fire-decisions but only **13% are allowed — the garrison-floor blocks 62%** (82% of forward-legal
+  reinforces); at floor=0 allowed jumps to 55%. The floor=10 directly FIGHTS forward-staging (drain-rear vs
+  keep-10) and the policy commits hard so nearly any reinforce trips it. **Next single-delta run: resume
+  p2rev3 4M with garrison_floor dropped to 0 (or 2-3), else identical; watch `lost-cap`/`median-hold`.**
+  Caveat: no floor → hard-commit can strip a source to 0 → policy must re-learn commitment. **Secondary
+  blocker = `--reinforce-forward-only`** (blocks pulling ships BACK to defend a peeled rear planet; 23%→42%
+  of intents once the floor is gone) — relax next if floor-relax alone isn't enough. **Sequencing: relax
+  masks BEFORE/WITH deb-as-pool** — a peeler in the pool is useless if 87% of intended reinforces are masked out.
+- 🟢 **THREAT HEAD (retention lever — strongest principled candidate).** Per owned planet, predict
+  P(lost within K steps), self-supervised from the trajectory; feeds reinforce target selection
+  (reinforce the planet you predict you'll lose). Full spec: `docs/phase2.md` "Deferred track". **Decision
+  gate = is the target head undertrained?** Evidence as of p2rev3 ~2.5M: **`H_tgt` is RISING 1.07→1.70**
+  (the documented "where-head going uniform" canary) AND aggregate reinf is high (0.5+) while empire-binned
+  `reinf@13+` is LOW (0.25) with poor retention ⇒ **reinforce is mis-TARGETED, not under-rate** — exactly
+  the threat head's domain. Build it ONLY as a self-supervised PREDICTION head (NOT target reward = rev49
+  carpet-bomb graveyard; NOT KL-to-heuristic-targets = rev54 crater). Build landmine: per-planet labels hit
+  the VDN planet-id-reorder corruption (scatter in planet-id space, not slot space). Highest-value/lowest-risk
+  per phase2.md; do this if the p2rev3 retention metric (`lost-cap`) stays bad through 5M.
+- 🟡 **Deb (or Ajay/producer) as the ONLY external pool opponent — "learn by losing to the exploit."**
+  Fast hammers don't peel mid-game planets the way a planner does → never punish our retention weakness; a
+  planner would. MECHANICALLY FEASIBLE: route via the `--external-opponents X --heuristic-workers N`
+  SUBPROCESS path (NOT in-process `--planner-externals`, which stalls) — rev56 ran debatreya_1300 as sole
+  external stably (256 envs / 4 workers / ext-frac 0.15, SPS ~400-660). Tradeoffs: **(1) deb is our HELD-OUT
+  eval — training on it forfeits the clean generalization signal; swap in Ajay/producer as the new held-out.
+  (2) sim-gap — deb-in-torch_env plays weaker than in Kaggle, so transfer to LB is not guaranteed (still a
+  stronger/differently-exploiting opponent than hammers). (3) throughput retune** vs the 512/6 fast-hammer
+  config. Queue as a single-delta experiment after p2rev3 concludes. (rev56 mechanism: memory
+  `feedback_orbit_lite_is_slow`.)
 - ⏸ **Train/eval sim gap — documented + PARKED** (`docs/train-eval.md`, memory
   `project_train_eval_sim_gap`). Pool wr is torch_env fiction (cross-eval: all 3 hammers **2–4% in
   kaggle** vs training ema 0.40–0.48). Found+fixed the **144-bin angle quantization** of opponents
@@ -116,8 +141,14 @@ diagnostics. Tier-2 (full causal fleet attribution) held in reserve if Tier-1 un
 - 🟢 **From-scratch (BC warmstart) run** — only if we conclude the *base* matters after all (unlikely per the drift
   finding). BC seed options analyzed: Isaiah (controlled) vs Jake/aggressive-cohort (snowball, full 0→0.61 reinforce
   ramp). Snowball selector to pull aggressive replays without player names: high `avg_score` + `size_bytes`<3.5MB.
-- 🟢 **Eval/export gate parity** — `action_mask.py` has NO empire gate; before submitting a Phase-2 checkpoint, add the
-  gate there so inference matches training (else the policy could reinforce <3 planets at inference). Do at export time.
+- ✅ **Eval/export gate parity (DONE 2026-06-11, first Phase-2 submit sub 53574885).** Correction: `action_mask.py`
+  `actions_from_target_policy` ALREADY had the full reinforce-discipline parity (gate/forward-only/garrison-floor, both
+  logit-mask + post-argmax reject). The real gap was `export_agent.py`: it baked only `allow_reinforce` and let the three
+  discipline params fall to their off-defaults (gate0/forward-off/floor0) → exported agent would reinforce <3 planets /
+  backward / drain source = self-sabotage. The three params are NOT stored in the checkpoint (only `allow_reinforce` is),
+  so export now takes them as CLI flags defaulting to the locked Tier-1 values (gate3/forward/floor10) and bakes them into
+  the template. Also fixed a pre-existing export crash: the template didn't `import os`, surfaced by features.py's
+  module-level `os.environ` (friendly-deflation) read. Verify after any reinforce export: grep `_REINFORCE_GATE_MIN`/etc.
 - 🟡 **Reinforce-aware BC warmstart from top-player replays** (180 games in `/tmp/fresh_validate`, 89 snowball in
   `/tmp/snowball`; analyzer `orbit_wars_rl/fetch_analyze_top_replays.py`, timing-corrected).
 

@@ -86,6 +86,7 @@ and hoarding?* Implementation: `eval.py:game_conversion()`; training side mirror
 ```
 Conversion: caps/game X  atk-launch/game X  cap/atk-launch X  ships/cap X  reinf_share X
   planets@16/32/50/100 a/b/c/d  end X   churn X (X/100st, len X)
+  retention  lost-cap X (lost/total caps)  median-hold Xst
   launch-waste<50  redundant X (WG X)  underkill X (WG X)
   hoard  garr_frac@ a/b/c/d  ships/planet@ a/b/c/d
   reinf by empire size  1:r(n)  2-3:r(n)  4-6:r(n)  7-9:r(n)  10-12:r(n)  13+:r(n)   [ref ramp @1:0.00 @2:0.10 @9-12:0.30 @13+:0.34-0.61]
@@ -111,6 +112,16 @@ defined below; all compute identically from top-player replays via `conversion_f
   band: **Isaiah 1.59 · TonyK 1.16 · Jake 1.23 · 213tubo 1.48.** Even normalized it's a *secondary* read;
   the clean hold signal is the **planets@N trajectory turning over** (peak then decline) + the
   proximity crossover step (`deb_proximity.py`).
+- **retention** (`retention  lost-cap X (lost/total caps)  median-hold Xst`, added 2026-06-11) — the
+  **denominator-free** hold signal, built to replace churn's degeneracy. `lost-cap` = of the planets we
+  CAPTURE, the fraction we then lose (`lost_caps ÷ captures`); `median-hold` = median steps from capture to
+  loss over LOST episodes (held-to-end is censored, not counted). **Why it beats churn:** normalized by
+  *captures* (≈stable ~14/game), not `end_planets` → it does NOT inflate as `end→0` on elimination. churn
+  rising 16→26 across p2rev3 500k→2.6M was almost entirely `end` falling 0.9→0.5 (caps flat) — a denominator
+  artifact, NOT worsening turnover; lost-cap/median-hold measure the turnover directly. Read: lost-cap→1 +
+  short hold = capture-and-lose ("can't hold the lead"); lost-cap low + hold≈game-length = sticky. Home/
+  initial planets excluded by construction (only planets that entered `cap_step` count). Diagnostic of the
+  Phase-2 retention gap; expect high lost-cap/short hold vs a strong planner (deb), low/long vs weak (Zach).
 - **launch-waste<50** (printed `launch-waste<50  redundant X (WG X)  underkill X (WG X)`) — the OPENING
   (step <50) launch-discipline pair, both keyed to `cap_cost_at_arrival` (the SAME quantity the roi-deflation
   uses, replicated in `eval.py _cap_cost_at_arrival`/`_eta` from `_ETA_PROBE_SPEED`). Windowed to the opening

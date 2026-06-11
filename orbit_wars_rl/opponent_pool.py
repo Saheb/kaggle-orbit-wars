@@ -333,8 +333,9 @@ class OpponentPool:
             w = self._pfsp_weight(m)
             tag = " [fixed]" if (m.kind == "external_heuristic"
                                  and self.external_fraction > 0) else ""
-            if m.kind == "external_heuristic":
+            if m.uses_ema:
                 # Show both EMA (recent) and lifetime win-rate so drift is visible.
+                # uses_ema = externals AND pinned RL champions (both PFSP-weight off EMA).
                 ema_str = f" ema_wr={m.ema_win_rate:.2f}(n={m.ema_games})"
                 lines.append(
                     f"    {m.kind:20s} {m.name:30s} "

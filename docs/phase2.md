@@ -5,12 +5,16 @@ empire-size-gated, instrumental behaviour — the #1 structural skill-gap vs the
 top tier. This is a fresh run with a redesigned reward model + one new action mask, NOT a
 resume of the rev55–57 reinforce lineage (all of which flooded).
 
-Status: **Tier-1 reward model locked + keystone built (2026-06-10).** The rev58/58b resume
-probes flooded; root cause re-diagnosed (`defense_coef` is the flood pump, not the cure); design
-pivoted to outcome-tied attribution (forward-staging mask + drop `defense_coef` + small aggressive
-pool). Forward-staging mask built + unit-tested. **p2rev1 run script READY** (`gpu_run_artifacts/p2rev1/`):
-snowball-BC warmstart + forward mask + drop defense + pool (lb1152 hammer + debatreya_1300 @0.25);
-target-head diagnostics added. Awaiting launch. See the Update below.
+Status (2026-06-11): **p2rev1→p2rev2→p2rev3 run; the blockade = beating PLANNER-class agents
+(deb/ajay), and the mechanism is PEEL-DEFENSE (capture-then-lose).** p2rev2 8.91M submitted to LB
+(first Phase-2 submission, sub 53574885, score pending). Key findings: (1) we hold fine vs Zach
+(planets climb 2→9) but collapse vs deb (lost-cap 0.96, median-hold 17st) — a *targeted* gap, not
+general; (2) pool-seed-rl (pinned aggressors) is the WRONG pressure — aggressors race, they don't
+*peel*; (3) **DECISIVE: `garrison_floor=10` blocks 62% of the reinforces the policy WANTS** (veto probe
+`garrison_floor_probe.py`) — it fights forward-staging. **→ p2rev4 RUNNING (Jarvis A100, garrison_floor
+10→0, resume p2rev3 4M); watch lost-cap↓/median-hold↑.** Next levers if needed: relax forward-only,
+deb-as-pool (worker-pool path), threat head. Full live status + DESTROY reminder: `docs/next-steps.md`.
+Retention metric (`lost-cap`/`median-hold`) defined in `docs/metrics.md`. Tier-1 design history below.
 
 ---
 

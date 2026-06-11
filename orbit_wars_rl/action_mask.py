@@ -209,7 +209,8 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
                                allow_reinforce: bool = False,
                                reinforce_gate_min_planets: int = 0,
                                reinforce_forward_only: bool = False,
-                               reinforce_garrison_floor: float = 0.0):
+                               reinforce_garrison_floor: float = 0.0,
+                               veto_stats: dict = None):
     """Convert policy outputs to actions using target planet logits for aiming.
 
     allow_reinforce: must MATCH the env's setting the checkpoint was trained with.
@@ -226,6 +227,9 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
     owned_indices = masks["owned_indices"].cpu().numpy()
     max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
     target_logits = target_logits.clone()
+    # Pre-discipline-mask copy: lets veto_stats see what the policy WANTS (unmasked argmax)
+    # vs what the masks allow — i.e. which mask is actually binding on intended reinforces.
+    _pre_mask_logits = target_logits.detach().clone() if veto_stats is not None else None
 
     # ----- reinforce-discipline precompute (parity with torch_env) -----
     owned_count = int(masks["owned_count"])
@@ -325,6 +329,44 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
 
         angle = _target_intercept_angle(planets[pidx], planets[tidx], ships, obs)
         moves.append([int(planets[pidx][0]), angle, ships])
+
+    # ----- veto diagnostics: of the reinforces the policy WANTS, which mask blocks them? -----
+    # "want" = the unmasked-argmax target (over real planets, source excluded) for a fire-positive
+    # slot. If that want is an own planet (reinforce intent), attribute the block to gate / forward /
+    # garrison-floor (mutually exclusive, in production-check order). No effect on `moves`.
+    if veto_stats is not None and allow_reinforce:
+        nP = len(planets)
+        for slot in range(min(masks["owned_count"], fire_decisions.shape[0])):
+            if not fire_decisions[slot]:
+                continue
+            pidx = int(owned_indices[slot])
+            if pidx >= nP:
+                continue
+            src = planets[pidx]
+            row = _pre_mask_logits[0, slot, :nP].clone()
+            for ti in range(nP):
+                if int(planets[ti][0]) == int(src[0]):
+                    row[ti] = -1e30                      # exclude source (physically illegal)
+            want = int(torch.argmax(row))
+            wt = planets[want]
+            veto_stats["fire_slots"] = veto_stats.get("fire_slots", 0) + 1
+            if int(wt[1]) != player:
+                veto_stats["attack_intent"] = veto_stats.get("attack_intent", 0) + 1
+                continue
+            veto_stats["reinforce_intent"] = veto_stats.get("reinforce_intent", 0) + 1
+            if gate_block_own:
+                veto_stats["blocked_gate"] = veto_stats.get("blocked_gate", 0) + 1
+            elif (reinforce_forward_only and enemy_xy
+                  and not (_nearest_enemy_dist(wt) < _nearest_enemy_dist(src))):
+                veto_stats["blocked_forward"] = veto_stats.get("blocked_forward", 0) + 1
+            else:
+                sent = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
+                if reserve_frac > 0.0:
+                    sent = min(sent, int(src[5] * (1.0 - reserve_frac)))
+                if reinforce_garrison_floor > 0.0 and (src[5] - sent) < reinforce_garrison_floor:
+                    veto_stats["blocked_floor"] = veto_stats.get("blocked_floor", 0) + 1
+                else:
+                    veto_stats["reinforce_allowed"] = veto_stats.get("reinforce_allowed", 0) + 1
 
     return moves
 

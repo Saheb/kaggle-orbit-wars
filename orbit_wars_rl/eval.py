@@ -77,7 +77,8 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                    target_decode: bool = False,
                    target_sanity_penalty: float = 0.0,
                    reserve_frac: float = 0.0,
-                   allow_reinforce: bool = False):
+                   allow_reinforce: bool = False,
+                   veto_stats: dict = None):
     """Return a kaggle_environments-compatible agent function wrapping the model.
 
     sample=True uses Bernoulli/Categorical sampling instead of threshold/argmax —
@@ -139,6 +140,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 reinforce_gate_min_planets=getattr(model, "reinforce_gate_min_planets", 0),
                 reinforce_forward_only=getattr(model, "reinforce_forward_only", False),
                 reinforce_garrison_floor=getattr(model, "reinforce_garrison_floor", 0.0),
+                veto_stats=veto_stats,
             )
 
         raise NotImplementedError(
@@ -243,6 +245,13 @@ def game_conversion(steps, seat):
     """
     caps = atk = reinf = atk_ships = redundant = underkill = 0
     atk_early = redundant_early = underkill_early = 0      # opening window (t < _LAUNCH_WINDOW)
+    # Retention: of the planets we CAPTURE, how many do we then lose, and how long did we hold
+    # them? cap_step[pid] = step we (most recently) took pid; on a later loss we close the episode.
+    # lost_caps/captures is the recapture/turnover rate — immune to the end->0 churn degeneracy.
+    # Home/initial planets are excluded by construction (never entered cap_step).
+    cap_step: dict = {}
+    lost_caps = 0
+    hold_durations: list = []   # steps held before losing (lost episodes only; held-to-end censored)
     reinf_bin = [0] * len(_REINF_BINS)   # own-target launches by empire size at launch
     atk_bin = [0] * len(_REINF_BINS)     # attack launches by empire size at launch
     planets_at = {ms: None for ms in _CONV_MILESTONES}
@@ -273,8 +282,14 @@ def game_conversion(steps, seat):
                 if own == seat:
                     owned_now += 1
                     garrison_now += p[5]
-                if pid in prev and prev[pid] != seat and own == seat:
+                was = prev.get(pid)
+                if was is not None and was != seat and own == seat:
                     caps += 1
+                    cap_step[pid] = t                  # open a hold episode
+                elif was == seat and own != seat and pid in cap_step:
+                    hold_durations.append(t - cap_step[pid])   # lost what we took
+                    lost_caps += 1
+                    del cap_step[pid]
                 prev[pid] = own
             last = p1
             if t in planets_at:
@@ -338,6 +353,7 @@ def game_conversion(steps, seat):
            "attack_ships": atk_ships, "end_planets": end_planets,
            "redundant": redundant, "underkill": underkill, "atk_early": atk_early,
            "redundant_early": redundant_early, "underkill_early": underkill_early,
+           "lost_caps": lost_caps, "hold_durations": hold_durations,
            "glen": len(steps), "reinf_bin": reinf_bin, "atk_bin": atk_bin}
     for ms in _CONV_MILESTONES:
         out[f"p{ms}"] = planets_at[ms]
@@ -350,6 +366,7 @@ def new_conversion_acc():
     acc = {"captures": 0, "attack_launches": 0, "reinforce_launches": 0,
            "attack_ships": 0, "end_planets": 0, "redundant": 0, "underkill": 0,
            "glen_sum": 0, "games": 0, "atk_early": 0, "redundant_early": 0, "underkill_early": 0,
+           "lost_caps": 0, "hold_durations": [],
            "reinf_bin": [0] * len(_REINF_BINS), "atk_bin": [0] * len(_REINF_BINS)}
     for ms in _CONV_MILESTONES:
         acc[f"p{ms}_sum"] = 0
@@ -362,8 +379,9 @@ def new_conversion_acc():
 def add_conversion(acc, conv):
     for k in ("captures", "attack_launches", "reinforce_launches", "attack_ships",
               "end_planets", "redundant", "underkill", "atk_early", "redundant_early",
-              "underkill_early"):
+              "underkill_early", "lost_caps"):
         acc[k] += conv[k]
+    acc["hold_durations"].extend(conv["hold_durations"])
     acc["glen_sum"] += conv["glen"]
     for i in range(len(_REINF_BINS)):
         acc["reinf_bin"][i] += conv["reinf_bin"][i]
@@ -408,6 +426,12 @@ def _fmt_conversion(acc):
     glen = acc["glen_sum"] / n
     churn = c / max(acc["end_planets"], 1)
     churn_n = churn / max(glen / 100.0, 1e-6)
+    # Retention (denominator-free, unlike churn): of planets we CAPTURE, the fraction we then lose,
+    # and the median steps we held a lost planet (short = peeled fast). lost-cap rate→1 = pure
+    # capture-and-lose turnover (the "can't hold the midgame lead" disease); hold→game length = sticky.
+    hd = acc["hold_durations"]
+    lost_rate = acc["lost_caps"] / max(c, 1)
+    med_hold = (sorted(hd)[len(hd) // 2] if hd else 0)
     redf = acc["redundant_early"] / max(acc["atk_early"], 1)
     redf_wg = acc["redundant"] / max(al, 1)
     undf = acc["underkill_early"] / max(acc["atk_early"], 1)
@@ -417,6 +441,7 @@ def _fmt_conversion(acc):
             f"reinf_share {rl/max(al+rl,1):.2f}\n"
             f"  planets@16/32/50/100 {pl(16)}/{pl(32)}/{pl(50)}/{pl(100)}  end {acc['end_planets']/n:.1f}"
             f"   churn {churn:.2f} ({churn_n:.2f}/100st, len {glen:.0f})"
+            f"\n  retention  lost-cap {lost_rate:.2f} ({acc['lost_caps']}/{c} caps)  median-hold {med_hold}st"
             f"\n  launch-waste<50  redundant {redf:.2f} (WG {redf_wg:.2f})  underkill {undf:.2f} (WG {undf_wg:.2f})"
             f"   [ref Isaiah: cap/atk-launch 0.59  planets 2/6/9/10  reinf 0.30]\n"
             f"  hoard  garr_frac@ {gf(16)}/{gf(32)}/{gf(50)}/{gf(100)}  "

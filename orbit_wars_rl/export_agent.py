@@ -33,6 +33,7 @@ AGENT_TEMPLATE = '''\
 import base64
 import io
 import math
+import os
 
 import numpy as np
 import torch
@@ -65,6 +66,11 @@ _FIRE_THRESHOLD = {fire_threshold}
 _SHIP_BIN_MODE = {ship_bin_mode}
 _TARGET_DECODE = {target_decode}
 _ALLOW_REINFORCE = {allow_reinforce}
+# Reinforce-DISCIPLINE masks — MUST match training values (not stored in the checkpoint).
+# Inert unless _ALLOW_REINFORCE; constrain only own (reinforce) targets.
+_REINFORCE_GATE_MIN = {reinforce_gate_min_planets}
+_REINFORCE_FORWARD_ONLY = {reinforce_forward_only}
+_REINFORCE_GARRISON_FLOOR = {reinforce_garrison_floor}
 
 
 # --- Embedded parameters (base64-encoded torch state_dict) ---
@@ -295,6 +301,9 @@ def agent(obs, cfg=None):
             fire_threshold=_FIRE_THRESHOLD,
             ship_bin_mode=_SHIP_BIN_MODE,
             allow_reinforce=_ALLOW_REINFORCE,
+            reinforce_gate_min_planets=_REINFORCE_GATE_MIN,
+            reinforce_forward_only=_REINFORCE_FORWARD_ONLY,
+            reinforce_garrison_floor=_REINFORCE_GARRISON_FLOOR,
         )
     else:
         raise NotImplementedError(
@@ -414,7 +423,10 @@ def load_model(checkpoint_path: str, cfg: Config) -> EntityTransformer:
 
 
 def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_threshold: float = 0.5,
-                 target_decode: bool = False):
+                 target_decode: bool = False,
+                 reinforce_gate_min_planets: int = 3,
+                 reinforce_forward_only: bool = True,
+                 reinforce_garrison_floor: float = 10.0):
     model = load_model(checkpoint_path, cfg)
 
     # Encode state_dict as base64
@@ -434,6 +446,9 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     allow_reinforce = bool(_ckpt.get("config", {}).get("allow_reinforce", False)) if isinstance(_ckpt, dict) else False
     if allow_reinforce:
         print("  Reinforcement: ON (own planets are legal targets)")
+        print(f"  Reinforce DISCIPLINE (must match training): gate_min_planets="
+              f"{reinforce_gate_min_planets} forward_only={reinforce_forward_only} "
+              f"garrison_floor={reinforce_garrison_floor}")
     agent_code = AGENT_TEMPLATE.format(
         num_angle_bins=NUM_ANGLE_BINS,
         num_ship_bins=m.num_ship_bins,
@@ -452,6 +467,9 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         ship_bin_mode=repr(m.ship_bin_mode),
         target_decode=target_decode,
         allow_reinforce=allow_reinforce,
+        reinforce_gate_min_planets=reinforce_gate_min_planets,
+        reinforce_forward_only=reinforce_forward_only,
+        reinforce_garrison_floor=reinforce_garrison_floor,
         params_b64=params_b64,
         features_code=features_code,
         action_mask_code=action_mask_code,
@@ -520,10 +538,20 @@ if __name__ == "__main__":
     parser.add_argument("--target-decode", action="store_true",
                         help="Use target-planet aiming (actions_from_target_policy). "
                              "Required for checkpoints trained with --action-decode target.")
+    # Reinforce-discipline masks. Defaults = the locked Tier-1/Phase-2 training values.
+    # Inert for non-reinforce checkpoints; for reinforce checkpoints they MUST match
+    # training or the policy self-sabotages (reinforces <gate planets, backward, drains source).
+    parser.add_argument("--reinforce-gate-min-planets", type=int, default=3)
+    parser.add_argument("--reinforce-forward-only", action=argparse.BooleanOptionalAction,
+                        default=True, help="Own reinforce target must be closer to enemy than source.")
+    parser.add_argument("--reinforce-garrison-floor", type=float, default=10.0)
     args = parser.parse_args()
 
     cfg = Config()
     cfg.seed = args.seed
     export_agent(args.checkpoint, args.output, cfg,
                  fire_threshold=args.fire_threshold,
-                 target_decode=args.target_decode)
+                 target_decode=args.target_decode,
+                 reinforce_gate_min_planets=args.reinforce_gate_min_planets,
+                 reinforce_forward_only=args.reinforce_forward_only,
+                 reinforce_garrison_floor=args.reinforce_garrison_floor)
