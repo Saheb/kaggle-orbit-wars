@@ -85,10 +85,13 @@ and hoarding?* Implementation: `eval.py:game_conversion()`; training side mirror
 
 ```
 Conversion: caps/game X  atk-launch/game X  cap/atk-launch X  ships/cap X  reinf_share X
-  planets@16/32/50/100 a/b/c/d  end X
+  planets@16/32/50/100 a/b/c/d  end X   churn X (X/100st, len X)
+  launch-waste<50  redundant X (WG X)  underkill X (WG X)
   hoard  garr_frac@ a/b/c/d  ships/planet@ a/b/c/d
   reinf by empire size  1:r(n)  2-3:r(n)  4-6:r(n)  7-9:r(n)  10-12:r(n)  13+:r(n)   [ref ramp @1:0.00 @2:0.10 @9-12:0.30 @13+:0.34-0.61]
 ```
+Printed on **every** eval (`--panel` and baseline). `churn`, `launch-waste<50 (redundant/underkill)` are
+defined below; all compute identically from top-player replays via `conversion_from_replays.py`.
 
 **Definitions** (a "launch" = a legal fire, `sent ≤ source ships`):
 - **capture** = a planet whose owner transitions **to us**. Counts re-captures, so it's gross, not net.
