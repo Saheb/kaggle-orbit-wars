@@ -38,16 +38,24 @@ class PoolMember:
     wins: int = 0
     losses: int = 0
     draws: int = 0
-    # EMA win-rate for external opponents — updated per game, decoupled from the
-    # lifetime win/loss counters.  Starts at 0.5 (uninformative).  Only used
-    # when kind == 'external_heuristic'; for self-checkpoints the lifetime rate
-    # is more stable and is used instead.
+    # EMA win-rate — updated per game, decoupled from the lifetime win/loss counters.
+    # Starts at 0.5 (uninformative). Used for opponents that LIVE THE WHOLE RUN, where a
+    # lifetime rate goes stale as the policy improves (early-run losses averaged in forever):
+    # fixed externals AND pinned RL champions (see `uses_ema`). Transient self-snapshots are
+    # FIFO-evicted within a bounded window, so their lifetime rate stays fresh and is used.
     ema_win_rate: float = 0.5
     ema_games: int = 0   # number of EMA updates (games) so far
 
     @property
     def n_games(self) -> int:
         return self.wins + self.losses + self.draws
+
+    @property
+    def uses_ema(self) -> bool:
+        """Whether PFSP reads the EMA (recent) win-rate vs the lifetime rate. True for
+        long-lived FIXED opponents — externals and pinned RL champions — whose lifetime
+        rate goes stale as the policy improves; False for transient (evictable) self-snapshots."""
+        return self.kind == "external_heuristic" or self.pinned
 
     @property
     def win_rate(self) -> float:
@@ -167,10 +175,11 @@ class OpponentPool:
         return r.choices(candidates, weights=weights, k=1)[0]
 
     def _pfsp_weight(self, m: PoolMember) -> float:
-        # External opponents: use EMA win-rate (reflects recent performance).
-        # Use uninformative prior until enough EMA games to trust the estimate.
-        # Self-checkpoints: use lifetime win-rate (stable given smaller n).
-        if m.kind == "external_heuristic":
+        # Long-lived fixed opponents (externals + pinned RL champions): EMA win-rate, so the
+        # weight tracks RECENT performance and doesn't go stale as the policy improves.
+        # Transient self-snapshots: lifetime win-rate (fresh given their bounded lifespan).
+        # Either way, use the uninformative 0.5 prior until enough games to trust the estimate.
+        if m.uses_ema:
             wr = 0.5 if m.ema_games < self.pfsp_min_games else m.ema_win_rate
         else:
             wr = 0.5 if m.n_games < self.pfsp_min_games else m.win_rate
@@ -183,9 +192,9 @@ class OpponentPool:
         if result == "win":   member.wins += 1
         elif result == "loss": member.losses += 1
         else:                  member.draws += 1
-        # Update EMA win-rate for external opponents so PFSP stays responsive to
-        # recent performance rather than the full accumulated history.
-        if member.kind == "external_heuristic":
+        # Update EMA win-rate for long-lived fixed opponents (externals + pinned RL champions)
+        # so PFSP stays responsive to recent performance rather than the full accumulated history.
+        if member.uses_ema:
             win_val = 1.0 if result == "win" else 0.0
             member.ema_win_rate = (
                 (1.0 - self.ema_alpha) * member.ema_win_rate + self.ema_alpha * win_val
@@ -231,7 +240,8 @@ class OpponentPool:
             }
             if m.kind == "self":
                 self_members.append({**base, "step_saved": m.step_saved,
-                                     "state_dict": m.state_dict, "pinned": m.pinned})
+                                     "state_dict": m.state_dict, "pinned": m.pinned,
+                                     "ema_win_rate": m.ema_win_rate, "ema_games": m.ema_games})
             elif m.kind == "external_heuristic":
                 # We need the path to re-import on load. Resolution happens at
                 # add time; we store it as an attribute when loading externals.
@@ -288,6 +298,7 @@ class OpponentPool:
                 state_dict=m["state_dict"], step_saved=m["step_saved"],
                 pinned=m.get("pinned", False),
                 wins=m["wins"], losses=m["losses"], draws=m["draws"],
+                ema_win_rate=m.get("ema_win_rate", 0.5), ema_games=m.get("ema_games", 0),
             ))
         if reload_externals:
             for m in data.get("external_members", []):
