@@ -115,8 +115,14 @@ All checkpoints synced + the 10.03M final verified-loadable locally (`gpu_run_ar
   at the same near-neutral until the in-flight fleet lands).
 - **p2rev2 (resume p2rev1@10.3M + ONE delta: friendly-coverage roi-deflation, 10.03M):** deflate `roi_20/roi_50`
   by own ships already inbound so a planet we're already capturing stops reading attractive. Run healthy
-  throughout (EV 0.57→0.91, V_loss→0.08, no degeneracy, reinf ~0.54 no flood; **watch clip_frac creep
-  0.21→0.237**, halve LR at 0.25).
+  throughout (EV 0.57→0.91, V_loss→0.08, no degeneracy, reinf ~0.54 no flood; iter-clip peaked 0.242, never
+  crossed 0.25). **⭐ CHAMPION = 8.91M (`torch_step_8912896`), NOT the 10.03M `_final` — export/submit 8.91M.**
+  Deb panel WR PEAKED at 8.9M (3.1%, 8/256) then the last ~1M REGRESSED to 0.4%: eval `garr_frac@50` rebounded
+  0.54→0.63 (re-hoard) as the **self-play hoarding Nash reformed** (same transient shape as SSDR). WR tracks
+  `garr_frac@50` inversely run-wide (deploy→win; garr@50 = leading indicator). The regression = the policy
+  CONVERGED into the hoarding Nash (NOT LR — it barely moved under the 200M schedule; KL stayed low). The
+  per-ckpt clip fell 0.27→0.155 because the policy settled — into hoarding. Deploy was a transient excursion.
+  **Lesson: deploy is not a stable attractor under 75%-self/25%-weak-heuristic — → `--pool-seed-rl` for p2rev3.**
 
 **Key findings this session (diagnosis sharpened — full detail in `project_phase2_reinforcement` + docs/phase2.md):**
 - **`planets@N` is THE win/loss discriminator.** vs Zach (win) it climbs 2/4/7/10; vs debatreya (loss) it
