@@ -1121,6 +1121,16 @@ def train(args):
             # Phase-2 target-head health — a selective head ≠ uniform across owners.
             metrics["target_share_neutral"] = float((neut / denom).item())
             metrics["target_share_enemy"] = float(((fires - reinf - neut) / denom).item())
+            # reinf-by-step: own-target share by episode-window [<50, 50-100, >100]. Winners
+            # peak MID-game (0.29/0.41/0.31); ours was back-loaded (0.05/0.19/0.42). The deb-in-pool
+            # run should shift reinforcement EARLIER/MID — watch these climb at <50 and 50-100.
+            if env._reinf_step is not None:
+                tmu = tm.unsqueeze(-1)                                  # (N, players, 1)
+                rs = (env._reinf_step * tmu).sum(dim=(0, 1))           # (3,)
+                fs = (env._fire_step * tmu).sum(dim=(0, 1)).clamp(min=1.0)
+                metrics["reinf_step_e"] = float((rs[0] / fs[0]).item())
+                metrics["reinf_step_m"] = float((rs[1] / fs[1]).item())
+                metrics["reinf_step_l"] = float((rs[2] / fs[2]).item())
         with torch.no_grad():
             metrics["old_value_mean"] = float(flat["values"].mean().item())
             metrics["old_value_std"] = float(flat["values"].std(unbiased=False).item())
@@ -1194,8 +1204,8 @@ def train(args):
                    if metrics.get('il_coef', 0) > 0 else "")
             )
             # Secondary behavioural diagnostics — occasionally useful, not decision
-            # drivers (W&B keeps them every iter). Console-print every 10th log.
-            if iter_count == 1 or iter_count % 10 == 0:
+            # drivers (W&B keeps them every iter). Console-print every 5th log.
+            if iter_count == 1 or iter_count % 5 == 0:
                 pencoef = ""
                 if args.srcs_multi_penalty > 0.0 and args.srcs_multi_penalty_decay_frac > 0.0:
                     _pc = args.srcs_multi_penalty * 0.5 * (1.0 + math.cos(math.pi * min(
@@ -1204,6 +1214,9 @@ def train(args):
                 actcoef = f" actcoef {args.fleet_activity_coef:.4f}" if args.fleet_activity_coef > 0.0 else ""
                 reinfstr = (
                     f"reinf {metrics.get('reinforce_rate', 0):.2f} "
+                    f"step<50/50-100/>100 {metrics.get('reinf_step_e',0):.2f}/"
+                    f"{metrics.get('reinf_step_m',0):.2f}/{metrics.get('reinf_step_l',0):.2f} "
+                    f"[ref:win 0.29/0.41/0.31] "
                     f"tgt n/e {metrics.get('target_share_neutral', 0):.2f}/"
                     f"{metrics.get('target_share_enemy', 0):.2f} | "
                 ) if args.allow_reinforce else ""

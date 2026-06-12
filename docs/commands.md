@@ -303,15 +303,19 @@ bash gpu_run_artifacts/hellburner_spot/launch_phase1_rev7.sh
 # The launch script handles: EC2 launch, rsync, W&B auth, seed checkpoint upload, tmux start
 ```
 
-**After launch — start local watcher** (syncs checkpoints every 3 min):
+**After launch — start watchers via the CONTROLLER** (sync + held-out eval; never ad-hoc per-run scripts — they go stale and watch the *previous* run's folder):
 ```bash
-nohup bash gpu_run_artifacts/hellburner_spot/watch_phase1.sh \
-  > gpu_run_artifacts/hellburner_spot/logs/watcher_rev7.log 2>&1 &
-echo "Watcher PID: $!"
+# platform = jarvis (target=IP) | gcp (target=config-ssh alias) | custom (set RSYNC_SSH/HOST/REMOTE_*_DIR env)
+bash gpu_run_artifacts/run_watchers.sh start <run> jarvis <IP>      # e.g. start p2rev5 jarvis 217.18.55.11
+bash gpu_run_artifacts/run_watchers.sh status                       # active run + live procs
+bash gpu_run_artifacts/run_watchers.sh stop                         # kill all
 ```
 
-> ⚠️ Edit `watch_phase1.sh` first — hardcode `INSTANCE_ID` and `PUB_IP` from the launch output.
-> ⚠️ Use `nohup bash ...` not `nohup python ...`. The watcher is a shell script.
+> `start` tears down ALL existing watchers first, and each watcher self-terminates when `.active_run`
+> changes — so stale prior-run watchers can't accumulate. Held-out eval defaults to Ajay full-panel with
+> masks gate3/floor0/no-forward-only (override via `REINFORCE_MASKS` if a run trains different masks).
+> Launch scripts should end with a `run_watchers.sh start` call so this is never forgotten. Old ad-hoc
+> `watch_phase1.sh`/`*_watch.sh`/`sync_watcher.sh` are DEPRECATED.
 
 ---
 

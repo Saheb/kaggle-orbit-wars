@@ -251,27 +251,24 @@ No venv activation needed — PyTorch is in system Python on the pytorch templat
 
 ---
 
-## Local watcher (sync checkpoints + logs + panels)
+## Local watcher (sync checkpoints + logs + held-out eval)
+
+Use the **controller** — never hand-roll an ad-hoc rsync loop (those survive across runs and end up
+watching the *previous* run's folder, the recurring stale-watcher bug):
 
 ```bash
-KEY=~/.ssh/jarvis-labs-key
-IP=<public_ip>
-ART=/Users/saheb/home/kaggle-orbit-wars/gpu_run_artifacts/jarvis
-mkdir -p "$ART/checkpoints" "$ART/logs" "$ART/panels"
-
-nohup bash -c "
-  while true; do
-    rsync -az -e 'ssh -i $KEY -o StrictHostKeyChecking=no' \
-      root@${IP}:/home/orbit_wars_rl/checkpoints/ '$ART/checkpoints/' 2>/dev/null
-    rsync -az -e 'ssh -i $KEY -o StrictHostKeyChecking=no' \
-      root@${IP}:/home/train_gpu_phase1_*.log '$ART/logs/' 2>/dev/null
-    rsync -az -e 'ssh -i $KEY -o StrictHostKeyChecking=no' \
-      root@${IP}:/home/orbit_wars_rl/panels/ '$ART/panels/' 2>/dev/null
-    sleep 180
-  done
-" > "$ART/logs/watcher_$(date +%Y%m%d_%H%M%S).log" 2>&1 &
-echo "Watcher PID: $!"
+bash gpu_run_artifacts/run_watchers.sh start <run> jarvis <IP>   # e.g. start p2rev5 jarvis 217.18.55.11
+bash gpu_run_artifacts/run_watchers.sh status                    # active run + live procs
+bash gpu_run_artifacts/run_watchers.sh stop                      # kill all
 ```
+
+`start` tears down ALL existing watchers first; each watcher self-terminates when `.active_run` changes
+(so stale watchers can't accumulate). The `jarvis` preset resolves to `root@<IP>` + `/home/...` paths.
+It syncs `train_gpu_phase1_<run>_*.log` + `torch_step_*/pool_step_*/torch_best_*` every 120s into
+`gpu_run_artifacts/<run>/{logs,checkpoints}`, and auto-runs the held-out Ajay full-panel on each new
+checkpoint (masks gate3/floor0/no-forward-only; override via `REINFORCE_MASKS`). Launch scripts should
+end with a `run_watchers.sh start` call. (Still create the `/home/orbit_wars_rl/checkpoints` symlink in
+the training script — see above — so checkpoints land where the watcher pulls from.)
 
 ---
 

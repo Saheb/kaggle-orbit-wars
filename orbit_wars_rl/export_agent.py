@@ -425,8 +425,8 @@ def load_model(checkpoint_path: str, cfg: Config) -> EntityTransformer:
 def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_threshold: float = 0.5,
                  target_decode: bool = False,
                  reinforce_gate_min_planets: int = 3,
-                 reinforce_forward_only: bool = True,
-                 reinforce_garrison_floor: float = 10.0):
+                 reinforce_forward_only: bool = False,
+                 reinforce_garrison_floor: float = 0.0):
     model = load_model(checkpoint_path, cfg)
 
     # Encode state_dict as base64
@@ -538,13 +538,16 @@ if __name__ == "__main__":
     parser.add_argument("--target-decode", action="store_true",
                         help="Use target-planet aiming (actions_from_target_policy). "
                              "Required for checkpoints trained with --action-decode target.")
-    # Reinforce-discipline masks. Defaults = the locked Tier-1/Phase-2 training values.
+    # Reinforce-discipline masks. Defaults = the current locked Tier-1/Phase-2 training values
+    # (p2rev4/p2rev5: forward-only DROPPED so the policy can pull ships back to defend, floor=0).
     # Inert for non-reinforce checkpoints; for reinforce checkpoints they MUST match
     # training or the policy self-sabotages (reinforces <gate planets, backward, drains source).
+    # For OLD forward-only/floor=10 checkpoints (p2rev1-3) pass --reinforce-forward-only
+    # --reinforce-garrison-floor 10 explicitly.
     parser.add_argument("--reinforce-gate-min-planets", type=int, default=3)
     parser.add_argument("--reinforce-forward-only", action=argparse.BooleanOptionalAction,
-                        default=True, help="Own reinforce target must be closer to enemy than source.")
-    parser.add_argument("--reinforce-garrison-floor", type=float, default=10.0)
+                        default=False, help="Own reinforce target must be closer to enemy than source.")
+    parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0)
     args = parser.parse_args()
 
     cfg = Config()

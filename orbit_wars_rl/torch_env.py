@@ -131,6 +131,10 @@ class VecTorchEnv:
         # rollout via reset_reinforce_stats(). None = not collecting (no overhead).
         self._reinforce_launch_count = None
         self._fire_launch_count = None
+        # reinf-by-step: reinforce & all launches binned by episode step-window
+        # [<50, 50-100, >100] — surfaces the back-loaded reinforce timing (session 06-12).
+        self._reinf_step = None        # (N, num_players, 3)
+        self._fire_step = None         # (N, num_players, 3)
         # target-owner share diagnostic: launches whose target is a NEUTRAL planet
         # (own = _reinforce_launch_count; enemy = fire − own − neutral). Phase-2
         # target-head health (is the "where" head selective or uniform?).
@@ -998,8 +1002,19 @@ class VecTorchEnv:
             # floor-veto) and how many were reinforcement. train_torch combines these with
             # train_mask → the current policy's reinforce_rate (target 0.4-0.6, Vadasz 0.57).
             if self._fire_launch_count is not None:
-                self._fire_launch_count[:, owner_id] += can_fire.sum(dim=1).float()
-                self._reinforce_launch_count[:, owner_id] += (can_fire & is_reinforce).sum(dim=1).float()
+                fire_per = can_fire.sum(dim=1).float()                       # (N,)
+                reinf_per = (can_fire & is_reinforce).sum(dim=1).float()     # (N,)
+                self._fire_launch_count[:, owner_id] += fire_per
+                self._reinforce_launch_count[:, owner_id] += reinf_per
+                # reinf-by-step: bin this step's launches by episode step-window [<50,50-100,>100]
+                sc = self.step_count
+                w0 = (sc < 50).float(); w1 = ((sc >= 50) & (sc < 100)).float(); w2 = (sc >= 100).float()
+                self._fire_step[:, owner_id, 0] += fire_per * w0
+                self._fire_step[:, owner_id, 1] += fire_per * w1
+                self._fire_step[:, owner_id, 2] += fire_per * w2
+                self._reinf_step[:, owner_id, 0] += reinf_per * w0
+                self._reinf_step[:, owner_id, 1] += reinf_per * w1
+                self._reinf_step[:, owner_id, 2] += reinf_per * w2
                 is_neutral = use_target_decode & (target_owner < 0)  # neutral planet owner = -1
                 self._neutral_launch_count[:, owner_id] += (can_fire & is_neutral).sum(dim=1).float()
 
@@ -1058,6 +1073,10 @@ class VecTorchEnv:
             self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         self._neutral_launch_count = torch.zeros(
             self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
+        self._reinf_step = torch.zeros(
+            self.num_envs, self.num_players, 3, dtype=torch.float32, device=self.device)
+        self._fire_step = torch.zeros(
+            self.num_envs, self.num_players, 3, dtype=torch.float32, device=self.device)
 
     # ---------------------------------------------------------------------
     # Step — pure tensor ops, runs all N envs in one pass.

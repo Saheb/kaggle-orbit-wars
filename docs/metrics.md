@@ -44,7 +44,7 @@ trusted ones.
 | `r_p0 / r_p1` | mean reward seat 0 / 1 | seat-asymmetric, oscillates | NOT a quality signal (zero-sum + shaping) |
 | `LR` / `estop` | learning rate / KL early-stop | per schedule / 0 | ops; frequent estop=1 = updates too big |
 
-## The `diag` line (every 10 iters — `train_torch.py`)
+## The `diag` line (every 5 iters — `train_torch.py`)
 
 | Field | Meaning | Normal | Signal |
 |---|---|---|---|
@@ -63,6 +63,7 @@ trusted ones.
 | `rewμ / rewNZ` | mean per-step reward / fraction nonzero | shaping-dependent | weak |
 | `featσ p/f/g/pw` | feature std | ~0.3–0.45 | →0 = representation collapse |
 | `reinf / tgt n/e` | reinforce rate / target-share neutral/enemy (if `--allow-reinforce`) | ramps with empire size | flood = high reinf **+ ballooning hoard** (read with garrfrac/shipspp) |
+| `reinf step<50/50-100/>100` | reinforce own-target share by episode-window (added 06-12; `[ref:win 0.29/0.41/0.31]`) | peaks MID (50-100) | our pre-deb-run shape was back-loaded (0.05/0.19/0.42) — too little early/mid. Watch <50 and 50-100 **climb** with deb-in-pool. Same metric as eval `reinf by step`. |
 
 `pl@`, `garrfrac@`, `shipspp@` are player-0 snapshots taken **at the exact episode step** (16/32/50/100),
 accumulated across the rollout — controlled-time, so not skewed by episode length or end-state. Full set
@@ -84,10 +85,12 @@ win-rate alone can't give you: *are we capturing efficiently, expanding, and dep
 and hoarding?* Implementation: `eval.py:game_conversion()`; training side mirrors it for player 0.
 
 ```
-Conversion: caps/game X  atk-launch/game X  cap/atk-launch X  ships/cap X  reinf_share X
+Conversion: caps/game X  atk-launch/game X  cap/atk-launch X (open<50 X)  ships/cap X  reinf_share X
   planets@16/32/50/100 a/b/c/d  end X   churn X (X/100st, len X)
   retention  lost-cap X (lost/total caps)  median-hold Xst
   launch-waste<50  redundant X (WG X)  underkill X (WG X)
+  fire-rate  launch_rate X  fire_frac X   [ref Isaiah 0.036 / 0.17]
+     WON(Ng) lr X ff X  |  LOST(Ng) lr X ff X   (read WON; ff inflates on losses)
   hoard  garr_frac@ a/b/c/d  ships/planet@ a/b/c/d
   reinf by empire size  1:r(n)  2-3:r(n)  4-6:r(n)  7-9:r(n)  10-12:r(n)  13+:r(n)   [ref ramp @1:0.00 @2:0.10 @9-12:0.30 @13+:0.34-0.61]
 ```
@@ -101,6 +104,16 @@ defined below; all compute identically from top-player replays via `conversion_f
   the ratio (was the original bug). Launches whose target can't be resolved by angle are skipped
   (matches `fetch_analyze_top_replays._resolve_target`, so eval == replay analysis).
 - **cap/atk-launch** = captures ÷ attack-launches — per-attack conversion *efficiency* (the skill axis).
+  ⚠️ **PHASE-CONFOUNDED — read `(open<50 X)`, the opening-windowed value printed beside it (added
+  2026-06-12).** The whole-game number averages a catastrophic opening with easy late-game cleanup
+  captures, so it lands reassuringly even when the opening (which decides the expansion race) is failing.
+  **Winners are FLAT (opening ≈ whole-game): snowball winners 0.51/0.53. Losers COLLAPSE in the opening:
+  our losing replay 0.26 open vs 0.46 whole-game**; p2rev4 500k read 0.442 whole-game while its
+  `underkill 0.41` (opening waste) was the tell. The disease behind a low opening value =
+  **under-commitment / fragments fired *under* the target's defense** (e.g. 6 ships at a 43-ship neutral
+  → annihilated, ships wasted, never captured) → poor opening conversion → under-expansion → loss. NOT
+  the same as legitimate combining multi-wave (4+6 vs an 8-ship neutral captures fine). Pairs with
+  `underkill<50`. (Mild window-edge bias: a t~48 launch capturing at t~55 deflates it slightly.)
 - **ships/cap** = attack-ships ÷ captures — *force per capture*. ⚠️ **Deflated by churn**: re-captures
   of flip-flopping planets are cheap, so a low value can mean efficiency **or** churn. Always read with
   caps/game vs `end`: caps/game ≫ end_planets = churn.
@@ -139,9 +152,15 @@ defined below; all compute identically from top-player replays via `conversion_f
     a capture (the seed1030 18-at-23 lone-undercommit case). A per-launch `sent+inbound<cost` threshold is
     WRONG here — it mis-flags legit multi-wave (each wave < cost) at ~0.86; forward-looking fixes that
     (a target a later wave captures reads effective for all waves). Top-player ref **~0.43** (Isaiah 0.40 ·
-    Jake 0.43 · TonyK 0.50). Note it ≈ opening `1 − cap/atk-launch`, so it's the dominant component of the
-    conversion gap: since redundant is tiny (~0.02), a low cap/atk-launch is mostly **undercommit/ineffective
-    targeting, not overkill**. Use it to see if the next run tightens *which* opening launches we commit to.
+    Jake 0.43 · TonyK 0.50). ⚠️ **CORRECTION (2026-06-12): underkill does NOT discriminate winners from
+    losers** — winners sit ~0.40–0.43 and our p2rev4 aggregate is 0.41 (*below* winners) yet loses; ~40%
+    of opening attacks "not capturing within eta+10" is just normal probing/multi-wave/contested-neutral
+    play. Do NOT alarm on underkill ~0.4, and don't read it as "the conversion gap." **The real opening
+    discriminator is `open<50 cap/atk-launch`** (captures *per launch*): winners ~0.51, our losses ~0.26 —
+    i.e. we need ~4 launches per captured planet, winners need ~2. The disease is **launches-per-capture
+    (over-launching / fragments under the target's defense), not "launches that never capture."** Anchor to
+    the WINNER ref, never the `(WG)` self-reference (which normalizes a bad opening against our own padded
+    whole-game average).
   (Same-step double-fires at one fresh target aren't counted for redundant — neither fleet exists at decision
   time — matching the fix's reach.)
 - **reinf_share** = reinforce-launches ÷ all launches. ⚠️ **Opponent/success-confounded**: it co-moves
@@ -192,6 +211,22 @@ The contested phase (steps 16–50) is the clean window; @100 is endgame accumul
 | Isaiah (#1) | **0.036** | 0.25 | 0.17 |
 | Jake (#2) | 0.081 | 0.43 | 0.17 |
 | 213tubo (mid) | 0.41 | 0.77 | 0.47 |
+
+As of 2026-06-11 `launch_rate` + `fire_frac` are emitted on the **eval** conversion line too (the
+`fire-rate` row), not just the training diag — so spray (high rate, low `cap/atk-launch`) is now
+visible on the metric we judge submissions on. Both compute identically from top-player replays via
+`conversion_from_replays.py`, so eval reads are apples-to-apples with the Isaiah 0.036 / 0.17 reference.
+
+⚠️ **`fire_frac` is WIN/LOSS-confounded — read the WON-game value** (the `WON(Ng) … | LOST(Ng) …`
+sub-line, added 2026-06-12). `fire_frac` = fraction of *owned* planets firing; when you lose you get
+cornered to few planets, so firing from "many of few" inflates it. Measured on the SAME boards in the
+snowball replays: **winners `fire_frac` ~0.19–0.21, losers ~0.31–0.33.** Consequences: (1) the BC
+clone's apparent 0.39 spray was largely a losing-position artifact (it loses 97% vs zach) — *not* a
+contaminated seed (snowball winners median 0.19); (2) our p2rev3-4M reads 0.29 vs zach (84% WR) but
+0.34 vs deb (6% WR) — the deb number is inflated by losing. **The honest "are we sprayers?" signal is
+the WON-game `fire_frac`** (~0.21–0.29 vs Isaiah 0.17 = a small residual gap), and the lever that pulls
+it down is *winning more* (retention), not a fire tax (rev41–45 Nash graveyard) or a BC re-curation.
+This is the same length/position-confound class as `churn` (end→0) and `atk-launch/game`.
 
 **The top players fire RARELY** (Isaiah 3.6%). A *high* fire rate (213tubo 41%) is a *losing* trait.
 So our `fire[0] ~0.09` is top-player-normal, even slightly high — **firing more is the wrong lever**;

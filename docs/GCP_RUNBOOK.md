@@ -134,7 +134,24 @@ gcloud compute ssh $INSTANCE --zone=$ZONE -- \
   "grep '^iter' ~/orbit_wars_rl/train_gcp_phase1_*.log | tail -3"
 ```
 
-### Sync checkpoints locally
+### Live watchers — use the CONTROLLER (sync + held-out eval)
+Never hand-roll an ad-hoc rsync loop (those survive across runs → watch the *previous* run's folder, the
+recurring stale-watcher bug; this literally happened with p2rev4). Use the `gcp` preset:
+```bash
+gcloud compute config-ssh                              # ensures the SSH alias exists
+SSH_ALIAS="$INSTANCE.$ZONE.orbit-wars-rl"
+bash gpu_run_artifacts/run_watchers.sh start <run> gcp "$SSH_ALIAS"   # target = the SSH alias
+bash gpu_run_artifacts/run_watchers.sh status          # active run + live procs
+bash gpu_run_artifacts/run_watchers.sh stop            # kill all
+```
+`start` tears down all existing watchers first; each self-terminates when `.active_run` changes. The `gcp`
+preset resolves to `ssh <alias>` + `~/orbit_wars_rl/...` paths and syncs every 120s into
+`gpu_run_artifacts/<run>/{logs,checkpoints}`, auto-running the held-out Ajay full-panel per checkpoint
+(masks gate3/floor0/no-forward-only; override `REINFORCE_MASKS`). **Name the GCP training log
+`train_gpu_phase1_<run>_*.log`** (the phase-2 convention p2rev4 used) so the sync glob matches. Launch
+scripts should end with a `run_watchers.sh start` call.
+
+### Sync checkpoints locally (one-off, e.g. final pull before terminate)
 ```bash
 SSH_ALIAS="$INSTANCE.$ZONE.orbit-wars-rl"   # set by gcloud compute config-ssh
 rsync -azL "${SSH_ALIAS}:~/orbit_wars_rl/checkpoints/" \

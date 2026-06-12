@@ -157,6 +157,7 @@ _CONV_MILESTONES = (16, 32, 50, 100)
 # won games. The launch waste we care about is in the opening, where wasted ships feed the
 # mid-game collapse. <50 isolates that phase. (phase2 / metrics.md)
 _LAUNCH_WINDOW = 50
+_MID_WINDOW = 100      # mid-game cap/atk window = [_LAUNCH_WINDOW, _MID_WINDOW) = steps 50-100
 # Isaiah (#1 player) hoard reference at the same milestones. Contested phase (16-50)
 # is the clean read: ~half the army deployed, ~11-22 ships/planet. The @100 jump
 # (garr 0.87, 60 ships/planet) is won-game accumulation, not hoarding.
@@ -169,6 +170,7 @@ _ISAIAH_HOARD_REF = "garr_frac 0.50/0.51/0.54/0.87  ships/planet 11/15/22/60"
 _REINF_BINS = [(1, 1, "1"), (2, 3, "2-3"), (4, 6, "4-6"),
                (7, 9, "7-9"), (10, 12, "10-12"), (13, 10**9, "13+")]
 _REINF_RAMP_REF = "@1:0.00 @2:0.10 @9-12:0.30 @13+:0.34-0.61"
+_REINF_STEP_REF = "<50:0.29 · 50-100:0.41 · >100:0.31"   # snowball winners; peaks mid-game
 
 
 def _reinf_bin_idx(owned):
@@ -244,7 +246,10 @@ def game_conversion(steps, seat):
     Returns per-game counts; `add_conversion` aggregates across games.
     """
     caps = atk = reinf = atk_ships = redundant = underkill = 0
-    atk_early = redundant_early = underkill_early = 0      # opening window (t < _LAUNCH_WINDOW)
+    atk_early = redundant_early = underkill_early = caps_early = 0   # opening window (t < _LAUNCH_WINDOW)
+    atk_mid = caps_mid = 0                                           # mid-game window [50, 100)
+    reinf_early = reinf_mid = 0                                      # reinforce launches by step-window
+    reinf_fwd = reinf_rear = reinf_dirn = 0                          # reinforce direction (vs enemy centroid)
     # Retention: of the planets we CAPTURE, how many do we then lose, and how long did we hold
     # them? cap_step[pid] = step we (most recently) took pid; on a later loss we close the episode.
     # lost_caps/captures is the recapture/turnover rate — immune to the end->0 churn degeneracy.
@@ -254,6 +259,11 @@ def game_conversion(steps, seat):
     hold_durations: list = []   # steps held before losing (lost episodes only; held-to-end censored)
     reinf_bin = [0] * len(_REINF_BINS)   # own-target launches by empire size at launch
     atk_bin = [0] * len(_REINF_BINS)     # attack launches by empire size at launch
+    # launch_rate / fire_frac (vs Isaiah 0.036 / 0.17): ALL legal launches (attack+reinforce),
+    # counted BEFORE target resolution (a fire is a fire). launch_rate = launches /
+    # owned-planet-steps; fire_frac = on firing steps, mean fraction of owned planets that fired.
+    launch_states = launch_count = fire_steps = 0
+    fire_frac_sum = 0.0
     planets_at = {ms: None for ms in _CONV_MILESTONES}
     garrison_at = {ms: None for ms in _CONV_MILESTONES}   # ships parked on owned planets
     inflight_at = {ms: None for ms in _CONV_MILESTONES}   # ships in owned fleets (deployed)
@@ -285,6 +295,10 @@ def game_conversion(steps, seat):
                 was = prev.get(pid)
                 if was is not None and was != seat and own == seat:
                     caps += 1
+                    if t < _LAUNCH_WINDOW:
+                        caps_early += 1                # opening captures (for opening cap/atk-launch)
+                    elif t < _MID_WINDOW:
+                        caps_mid += 1                  # mid-game (50-100) captures
                     cap_step[pid] = t                  # open a hold episode
                 elif was == seat and own != seat and pid in cap_step:
                     hold_durations.append(t - cap_step[pid])   # lost what we took
@@ -301,7 +315,14 @@ def game_conversion(steps, seat):
             continue
         byid = {p[0]: p for p in p0}
         f0 = steps[t - 1][seat].observation.get("fleets") or []   # in-flight at decision time
-        bidx = _reinf_bin_idx(sum(1 for p in p0 if int(p[1]) == seat))  # empire size at decision
+        owned_dec = sum(1 for p in p0 if int(p[1]) == seat)  # empire size at decision
+        bidx = _reinf_bin_idx(owned_dec)
+        launch_states += owned_dec
+        fired_this_step = 0
+        # enemy centroid for reinforce-direction (forward-staging) — enemy = other players' planets
+        _enemy = [p for p in p0 if int(p[1]) != seat and int(p[1]) >= 0]
+        _ecx = sum(p[2] for p in _enemy) / len(_enemy) if _enemy else None
+        _ecy = sum(p[3] for p in _enemy) / len(_enemy) if _enemy else None
         for mv in acts:
             if not mv or len(mv) < 3:
                 continue
@@ -311,12 +332,23 @@ def game_conversion(steps, seat):
             sent, ssh = int(mv[2]), float(src[5])
             if not (ssh > 0 and sent <= ssh):       # legal launches only
                 continue
+            fired_this_step += 1                    # counted before target resolution
             tgt = _resolve_launch_target(p0, src, float(mv[1]))
             if tgt is None:
                 continue                            # unclassifiable → skip (== analyzer)
             if int(tgt[1]) == seat:
                 reinf += 1                          # reinforce: cannot capture
                 reinf_bin[bidx] += 1
+                if _ecx is not None:               # direction: target vs source distance to enemy
+                    dS = math.hypot(src[2] - _ecx, src[3] - _ecy)
+                    dT = math.hypot(tgt[2] - _ecx, tgt[3] - _ecy)
+                    reinf_dirn += 1
+                    if dT < dS - 3: reinf_fwd += 1      # toward enemy (forward-staging)
+                    elif dT > dS + 3: reinf_rear += 1   # away from enemy (rear-defense)
+                if t < _LAUNCH_WINDOW:
+                    reinf_early += 1                # reinforce by step-window (when does it matter?)
+                elif t < _MID_WINDOW:
+                    reinf_mid += 1
             else:
                 atk += 1
                 atk_ships += sent
@@ -324,6 +356,8 @@ def game_conversion(steps, seat):
                 early = t < _LAUNCH_WINDOW
                 if early:
                     atk_early += 1
+                elif t < _MID_WINDOW:
+                    atk_mid += 1                       # mid-game (50-100) attack launches
                 # Launch-waste trichotomy:
                 #   redundant (OVERKILL) = target was ALREADY covered to capture by own fleets
                 #     inbound BEFORE this launch (friendly_inbound >= cap_cost_at_arrival, the
@@ -348,13 +382,22 @@ def game_conversion(steps, seat):
                         underkill += 1
                         if early:
                             underkill_early += 1
+        if fired_this_step > 0 and owned_dec > 0:
+            fire_steps += 1
+            fire_frac_sum += fired_this_step / owned_dec
+        launch_count += fired_this_step
     end_planets = sum(1 for p in (last or []) if int(p[1]) == seat)
     out = {"captures": caps, "attack_launches": atk, "reinforce_launches": reinf,
            "attack_ships": atk_ships, "end_planets": end_planets,
            "redundant": redundant, "underkill": underkill, "atk_early": atk_early,
+           "caps_early": caps_early, "atk_mid": atk_mid, "caps_mid": caps_mid,
+           "reinf_early": reinf_early, "reinf_mid": reinf_mid,
+           "reinf_fwd": reinf_fwd, "reinf_rear": reinf_rear, "reinf_dirn": reinf_dirn,
            "redundant_early": redundant_early, "underkill_early": underkill_early,
            "lost_caps": lost_caps, "hold_durations": hold_durations,
-           "glen": len(steps), "reinf_bin": reinf_bin, "atk_bin": atk_bin}
+           "glen": len(steps), "reinf_bin": reinf_bin, "atk_bin": atk_bin,
+           "launch_states": launch_states, "launch_count": launch_count,
+           "fire_steps": fire_steps, "fire_frac_sum": fire_frac_sum}
     for ms in _CONV_MILESTONES:
         out[f"p{ms}"] = planets_at[ms]
         out[f"g{ms}"] = garrison_at[ms]
@@ -365,22 +408,53 @@ def game_conversion(steps, seat):
 def new_conversion_acc():
     acc = {"captures": 0, "attack_launches": 0, "reinforce_launches": 0,
            "attack_ships": 0, "end_planets": 0, "redundant": 0, "underkill": 0,
-           "glen_sum": 0, "games": 0, "atk_early": 0, "redundant_early": 0, "underkill_early": 0,
+           "glen_sum": 0, "games": 0, "atk_early": 0, "caps_early": 0, "redundant_early": 0, "underkill_early": 0,
            "lost_caps": 0, "hold_durations": [],
+           "launch_states": 0, "launch_count": 0, "fire_steps": 0, "fire_frac_sum": 0.0,
+           # fire-rate split by game outcome — fire_frac inflates on losses (cornered to few
+           # planets → firing from "many of few"), so the won-game value is the honest spray read.
+           "launch_states_won": 0, "launch_count_won": 0, "fire_steps_won": 0, "fire_frac_sum_won": 0.0,
+           "launch_states_lost": 0, "launch_count_lost": 0, "fire_steps_lost": 0, "fire_frac_sum_lost": 0.0,
+           # retention split by outcome — lost-cap → 1 on elimination (lose every planet because you
+           # LOST the game), so the won-game value is the honest "can we hold mid-game?" read.
+           "captures_won": 0, "captures_lost": 0, "lost_caps_won": 0, "lost_caps_lost": 0,
+           "hold_durations_won": [], "hold_durations_lost": [],
+           # conversion + expansion split by outcome (planets@/open-cap aggregates are dominated by
+           # the majority class — mostly losses vs a strong opp — so the won-game ramp is the real read)
+           "attack_launches_won": 0, "attack_launches_lost": 0,
+           "atk_early_won": 0, "atk_early_lost": 0, "caps_early_won": 0, "caps_early_lost": 0,
+           "atk_mid": 0, "caps_mid": 0, "reinf_early": 0, "reinf_mid": 0,
+           "reinf_fwd": 0, "reinf_rear": 0, "reinf_dirn": 0,
+           "atk_mid_won": 0, "atk_mid_lost": 0, "caps_mid_won": 0, "caps_mid_lost": 0,
+           "games_won": 0, "games_lost": 0,
            "reinf_bin": [0] * len(_REINF_BINS), "atk_bin": [0] * len(_REINF_BINS)}
     for ms in _CONV_MILESTONES:
         acc[f"p{ms}_sum"] = 0
         acc[f"p{ms}_n"] = 0
         acc[f"g{ms}_sum"] = 0    # garrison (parked) ships, summed over games reaching ms
         acc[f"if{ms}_sum"] = 0   # in-flight (deployed) ships, summed over games reaching ms
+        acc[f"p{ms}_sum_won"] = 0; acc[f"p{ms}_n_won"] = 0
+        acc[f"p{ms}_sum_lost"] = 0; acc[f"p{ms}_n_lost"] = 0
     return acc
 
 
-def add_conversion(acc, conv):
+def add_conversion(acc, conv, won=None):
     for k in ("captures", "attack_launches", "reinforce_launches", "attack_ships",
-              "end_planets", "redundant", "underkill", "atk_early", "redundant_early",
-              "underkill_early", "lost_caps"):
+              "end_planets", "redundant", "underkill", "atk_early", "caps_early", "redundant_early",
+              "underkill_early", "lost_caps", "launch_states", "launch_count",
+              "fire_steps", "fire_frac_sum", "atk_mid", "caps_mid", "reinf_early", "reinf_mid",
+              "reinf_fwd", "reinf_rear", "reinf_dirn"):
         acc[k] += conv[k]
+    # route the fire-rate fields into won/lost buckets so spray can be read free of the
+    # losing-position confound (won=None from non-eval callers → overall only, no split)
+    if won is not None:
+        suf = "won" if won else "lost"
+        for k in ("launch_states", "launch_count", "fire_steps", "fire_frac_sum",
+                  "captures", "lost_caps", "attack_launches", "atk_early", "caps_early",
+                  "atk_mid", "caps_mid"):
+            acc[f"{k}_{suf}"] += conv[k]
+        acc[f"hold_durations_{suf}"].extend(conv["hold_durations"])
+        acc["games_won" if won else "games_lost"] += 1
     acc["hold_durations"].extend(conv["hold_durations"])
     acc["glen_sum"] += conv["glen"]
     for i in range(len(_REINF_BINS)):
@@ -394,6 +468,10 @@ def add_conversion(acc, conv):
             acc[f"p{ms}_n"] += 1
             acc[f"g{ms}_sum"] += conv[f"g{ms}"]
             acc[f"if{ms}_sum"] += conv[f"if{ms}"]
+            if won is not None:
+                suf = "won" if won else "lost"
+                acc[f"p{ms}_sum_{suf}"] += v
+                acc[f"p{ms}_n_{suf}"] += 1
 
 
 def _fmt_conversion(acc):
@@ -401,7 +479,20 @@ def _fmt_conversion(acc):
     (reinforce can't capture). Reference = Isaiah (#1 player)."""
     n = max(acc["games"], 1)
     c, al, rl = acc["captures"], acc["attack_launches"], acc["reinforce_launches"]
+    # reinforce SHARE by step-window (own-target launches ÷ all launches in that window) — shows
+    # WHEN reinforcement kicks in. late = whole − early − mid (counts derived from totals).
+    re_e, re_m = acc["reinf_early"], acc["reinf_mid"]
+    re_l = rl - re_e - re_m
+    at_e, at_m = acc["atk_early"], acc["atk_mid"]
+    at_l = al - at_e - at_m
+    rsh_e = re_e / max(re_e + at_e, 1)
+    rsh_m = re_m / max(re_m + at_m, 1)
+    rsh_l = re_l / max(re_l + at_l, 1)
+    rdf = 100 * acc["reinf_fwd"] / max(acc["reinf_dirn"], 1)   # forward-staging % of reinforces
+    rdr = 100 * acc["reinf_rear"] / max(acc["reinf_dirn"], 1)  # rear-defense % (forward-only blocks these)
     pl = lambda ms: (f"{acc[f'p{ms}_sum']/acc[f'p{ms}_n']:.0f}" if acc[f"p{ms}_n"] else "—")
+    plw = lambda ms: (f"{acc[f'p{ms}_sum_won']/acc[f'p{ms}_n_won']:.0f}" if acc[f"p{ms}_n_won"] else "—")
+    pll = lambda ms: (f"{acc[f'p{ms}_sum_lost']/acc[f'p{ms}_n_lost']:.0f}" if acc[f"p{ms}_n_lost"] else "—")
     # Hoard read at fixed milestones (not episode-averaged → no end-step skew):
     # garr_frac = parked / (parked + in-flight) ; ships/planet = parked / owned planets.
     gf = lambda ms: (f"{acc[f'g{ms}_sum']/(acc[f'g{ms}_sum']+acc[f'if{ms}_sum']):.2f}"
@@ -432,22 +523,65 @@ def _fmt_conversion(acc):
     hd = acc["hold_durations"]
     lost_rate = acc["lost_caps"] / max(c, 1)
     med_hold = (sorted(hd)[len(hd) // 2] if hd else 0)
+    # retention split by outcome (lost-cap → 1 on elimination = you lost the GAME, not a hold-skill
+    # signal). Won-game lost-cap = do we drop planets even when winning? = the real retention read.
+    _med = lambda h: (sorted(h)[len(h) // 2] if h else 0)
+    lostr_w = acc["lost_caps_won"] / max(acc["captures_won"], 1)
+    lostr_l = acc["lost_caps_lost"] / max(acc["captures_lost"], 1)
+    medh_w, medh_l = _med(acc["hold_durations_won"]), _med(acc["hold_durations_lost"])
     redf = acc["redundant_early"] / max(acc["atk_early"], 1)
     redf_wg = acc["redundant"] / max(al, 1)
     undf = acc["underkill_early"] / max(acc["atk_early"], 1)
     undf_wg = acc["underkill"] / max(al, 1)
+    # opening (t<50) cap/atk-launch: the whole-game value is PHASE-confounded (easy late-game
+    # cleanup captures mask a catastrophic opening). The opening decides expansion → read this.
+    # caps_early/atk_early; mild window-edge bias (a t~48 launch capturing at t~55 deflates it).
+    cap_open = acc["caps_early"] / max(acc["atk_early"], 1)
+    cap_open_w = acc["caps_early_won"] / max(acc["atk_early_won"], 1)
+    cap_open_l = acc["caps_early_lost"] / max(acc["atk_early_lost"], 1)
+    capw = acc["captures_won"] / max(acc["attack_launches_won"], 1)
+    capl = acc["captures_lost"] / max(acc["attack_launches_lost"], 1)
+    # mid-game (50-100) cap/atk — the collapse window; the missing read for "why planets go 6→4"
+    cap_mid = acc["caps_mid"] / max(acc["atk_mid"], 1)
+    cap_mid_w = acc["caps_mid_won"] / max(acc["atk_mid_won"], 1)
+    cap_mid_l = acc["caps_mid_lost"] / max(acc["atk_mid_lost"], 1)
+    # spray read: launch_rate = launches / owned-planet-steps; fire_frac = on firing steps,
+    # mean fraction of owned planets that fired. Length-confound-free (rate, not total) BUT
+    # WIN/LOSS-confounded: fire_frac inflates on losses (cornered to few planets). Read the
+    # WON-game value as the honest "are we sprayers?" signal (snowball losers 0.31 vs winners 0.19).
+    lr = acc["launch_count"] / max(acc["launch_states"], 1)
+    ff = acc["fire_frac_sum"] / max(acc["fire_steps"], 1)
+    lr_w = acc["launch_count_won"] / max(acc["launch_states_won"], 1)
+    ff_w = acc["fire_frac_sum_won"] / max(acc["fire_steps_won"], 1)
+    lr_l = acc["launch_count_lost"] / max(acc["launch_states_lost"], 1)
+    ff_l = acc["fire_frac_sum_lost"] / max(acc["fire_steps_lost"], 1)
+    gw, gl = acc["games_won"], acc["games_lost"]
+    wl = (f"     WON({gw}g) lr {lr_w:.3f} ff {ff_w:.2f}  |  LOST({gl}g) lr {lr_l:.3f} ff {ff_l:.2f}"
+          f"   (read WON; ff inflates on losses)\n") if (gw + gl) > 0 else ""
+    rwl = (f"     WON({gw}g) peel-rate {lostr_w:.2f} hold {medh_w}st  |  LOST({gl}g) peel-rate {lostr_l:.2f} hold {medh_l}st"
+           f"   (read WON; peel-rate→1 on elimination)\n") if (gw + gl) > 0 else ""
+    pwl = (f"     WON({gw}g) {plw(16)}/{plw(32)}/{plw(50)}/{plw(100)}  cap/atk open<50 {cap_open_w:.2f} mid50-100 {cap_mid_w:.2f} (whole {capw:.2f})"
+           f"\n     LOST({gl}g) {pll(16)}/{pll(32)}/{pll(50)}/{pll(100)}  cap/atk open<50 {cap_open_l:.2f} mid50-100 {cap_mid_l:.2f} (whole {capl:.2f})\n"
+           if (gw + gl) > 0 else "")
     return (f"Conversion: caps/game {c/n:.1f}  atk-launch/game {al/n:.1f}  "
-            f"cap/atk-launch {c/max(al,1):.3f}  ships/cap {acc['attack_ships']/max(c,1):.0f}  "
+            f"cap/atk-launch {c/max(al,1):.3f} (open<50 {cap_open:.3f}  mid50-100 {cap_mid:.3f})  ships/cap {acc['attack_ships']/max(c,1):.0f}  "
             f"reinf_share {rl/max(al+rl,1):.2f}\n"
             f"  planets@16/32/50/100 {pl(16)}/{pl(32)}/{pl(50)}/{pl(100)}  end {acc['end_planets']/n:.1f}"
-            f"   churn {churn:.2f} ({churn_n:.2f}/100st, len {glen:.0f})"
-            f"\n  retention  lost-cap {lost_rate:.2f} ({acc['lost_caps']}/{c} caps)  median-hold {med_hold}st"
-            f"\n  launch-waste<50  redundant {redf:.2f} (WG {redf_wg:.2f})  underkill {undf:.2f} (WG {undf_wg:.2f})"
-            f"   [ref Isaiah: cap/atk-launch 0.59  planets 2/6/9/10  reinf 0.30]\n"
+            f"   churn {churn:.2f} ({churn_n:.2f}/100st, len {glen:.0f})\n"
+            f"{pwl}"
+            f"\n  retention  peel-rate {lost_rate:.2f} ({acc['lost_caps']}/{c} caps lost)  median-hold {med_hold}st\n"
+            f"{rwl}"
+            f"  launch-waste<50  redundant {redf:.2f} (WG {redf_wg:.2f})  underkill {undf:.2f} (WG {undf_wg:.2f})"
+            f"   [⚠ underkill NON-discriminating: winners also ~0.40. THE signal = open<50 cap/atk above]\n"
+            f"   [ref:winner  cap/atk whole 0.53 · open<50 0.51 · mid50-100 0.47 · planets 2/6/9/10 · reinf 0.30]\n"
+            f"  fire-rate  launch_rate {lr:.3f}  fire_frac {ff:.2f}   [ref:Isaiah 0.036 / 0.17]\n"
+            f"{wl}"
             f"  hoard  garr_frac@ {gf(16)}/{gf(32)}/{gf(50)}/{gf(100)}  "
             f"ships/planet@ {spp(16)}/{spp(32)}/{spp(50)}/{spp(100)}"
-            f"   [ref Isaiah: {_ISAIAH_HOARD_REF}]\n"
-            f"  reinf by empire size  {ramp}   [ref ramp {_REINF_RAMP_REF}]")
+            f"   [ref:Isaiah {_ISAIAH_HOARD_REF}]\n"
+            f"  reinf by empire size  {ramp}   [ref:ramp {_REINF_RAMP_REF}]\n"
+            f"  reinf by step  <50:{rsh_e:.2f}  50-100:{rsh_m:.2f}  >100:{rsh_l:.2f}   [ref:winner {_REINF_STEP_REF}]\n"
+            f"  reinf direction  fwd {rdf:.0f}%  rear {rdr:.0f}%  (n={acc['reinf_dirn']})   [ref:winner fwd ~57% · rear ~26%]")
 
 
 def evaluate_against_baseline(
@@ -488,8 +622,6 @@ def evaluate_against_baseline(
         final = env.steps[-1]
         rewards = [s.reward for s in final]
 
-        add_conversion(conv_tot, game_conversion(env.steps, 0))
-
         obs = final[0].observation
         material = sum(p[5] for p in obs.planets if p[1] == 0)
         material += sum(f[6] for f in obs.fleets if f[1] == 0)
@@ -498,6 +630,8 @@ def evaluate_against_baseline(
         my_reward = rewards[0] if rewards[0] is not None else 0.0
         best_opp = max((r for r in rewards[1:] if r is not None), default=0.0)
         is_win = my_reward > best_opp
+
+        add_conversion(conv_tot, game_conversion(env.steps, 0), won=is_win)
 
         wins += int(is_win)
         total_material += material
@@ -560,11 +694,11 @@ def evaluate_panel(
                 env = make("orbit_wars", configuration={"seed": seed}, debug=False)
                 env.run(agents)
                 final = env.steps[-1]
-                add_conversion(conv_tot, game_conversion(env.steps, my_seat))
                 rewards = [s.reward if s.reward is not None else 0.0 for s in final]
                 my_reward = rewards[my_seat]
                 opp_reward = rewards[1 - my_seat]
                 is_win = my_reward > opp_reward
+                add_conversion(conv_tot, game_conversion(env.steps, my_seat), won=is_win)
                 # Material on the model's side
                 obs = final[0].observation
                 material = sum(p[5] for p in obs.planets if p[1] == my_seat)
