@@ -120,16 +120,19 @@ we hoard-to-win and where planets@50→100 collapses for real. We were overfitti
   byte-faithful for whole games incl comets. Tests: `tests/test_comet_fidelity.py`. Full write-up: `docs/train-eval.md`.
 - **Board distribution ruled out (2026-06-13):** self-play boards = real LB boards (same generate_planets,
   symmetric — no SSDR/handicap in p2rev9); the eval PANEL's board features (count/production/orbiting/big-planet)
-  also match the natural distribution. So boards are NOT the gap — physics (comets) was. (WR A/B random-vs-panel
-  confirming.)
+  also match the natural distribution. **WR A/B confirmed it** (`board_dist_ab.py`, p2rev5 4M vs Ajay, both seats):
+  PANEL 5.9% (256g) vs RANDOM ~8% — roughly comparable (random marginally higher, within noise), NOT the 10×+ that
+  would explain the gap. So boards are NOT the gap — physics (comets) was. The low WR vs strong opponents is genuine
+  skill, not a board/seat artifact.
 
-**Active run:** **p2rev9 RELAUNCHED on the comet-faithful engine** — GCP L4 (`orbit-wars-p2rev9`, **8.231.115.108**,
-asia-south1-b). Resume p2rev5 4M + the POOL pivot (pin rev38+rev53b, deb 0.10, 35% self, clean reward), now on the
-FIXED engine. iter 1 ran past the step-50 comet spawn cleanly; SPS ~485, comets active in the full loop. **Early
-behavioral signal: in-training pin WR moved DOWN with comets** (rev38 ema 0.60→0.53, rev53b 0.70→0.60) — the fix
-recalibrating training difficulty toward kaggle reality (not yet the full drop to cross-eval 27–37%; resumed policy
-mid-adapt + sampled-vs-decode). DELETE: `gcloud compute instances delete orbit-wars-p2rev9 --zone=asia-south1-b`.
-Old comet-free p2rev9 artifacts archived to `gpu_run_artifacts/p2rev9_cometfree_old/`. (p2rev7+p2rev8 KILLED.)
+**Active run:** NONE. **p2rev9 (comet-faithful relaunch) KILLED @1.28M 2026-06-13** after confirming the fix works
+live — GCP box `orbit-wars-p2rev9` DELETED (no billing). It was a validation run (resume p2rev5 4M + the POOL pivot
+on the FIXED engine): iter 1 ran past the step-50 comet spawn cleanly, SPS ~485, comets active in the full loop,
+and the **in-training pin WR moved DOWN with comets** (rev38 ema 0.60→0.53, rev53b 0.70→0.60) — the fix
+recalibrating training difficulty toward kaggle reality (not the full drop to cross-eval 27–37% yet; resumed policy
+mid-adapt + sampled-vs-decode). Harvested 524k+1M ckpts → `gpu_run_artifacts/p2rev9/`; old comet-free artifacts in
+`p2rev9_cometfree_old/`. (p2rev7+p2rev8 also KILLED 2026-06-13.) **The fix itself is committed (branch
+`comet-sim-fidelity-fix`), tested, and documented — the next run is the FEATURE phase below, ideally from-scratch.**
 
 **NEXT (deliberate phase):** comet FEATURES — populate `is_comet` (channel exists, was 0) + add comet-expiry
 awareness (top players read path_index to avoid investing in a departing comet), with train/eval/export PARITY;

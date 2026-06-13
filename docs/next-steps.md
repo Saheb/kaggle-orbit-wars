@@ -3,9 +3,10 @@
 Living doc — efforts and ideas, roughly prioritized. Discipline: **one delta per cloud run.**
 Status tags: 🔵 in-flight · 🟢 ready-to-build · 🟡 idea · ✅ done · ⏸ parked.
 Current focus: **⭐ COMET FIX (2026-06-13) — the train/eval sim gap was MISSING COMETS in torch_env, now FIXED**
-(byte-faithful to kaggle, `docs/train-eval.md` + `docs/training.md`). This was the root blocker. p2rev9 RELAUNCHED
-on the faithful engine (IP 8.231.115.108). Next: comet FEATURES (is_comet + expiry) then from-scratch. Boards ruled
-out (self-play = LB = panel). Prior framing below (pool pivot) still valid but now sits on a faithful sim.
+(byte-faithful to kaggle, `docs/train-eval.md` + `docs/training.md`). This was the root blocker. p2rev9 was relaunched
+on the faithful engine and **validated the fix works live** (pin WR recalibrated down), then killed. **Next: comet
+FEATURES (is_comet + expiry, train/eval/export parity) then a from-scratch run.** Boards ruled out (self-play = LB =
+panel, WR A/B confirmed). Prior framing below (pool pivot) still valid but now sits on a faithful sim.
 Current focus: **Phase 2 — the POOL/CURRICULUM pivot** (p2rev9 LIVE, 2026-06-13). 4 reward/mask levers all left
 `planets@50=6` → the ceiling is STRUCTURAL because of **win-starvation** (can't learn from a peeler we never beat;
 deb ~5%). Fix the SIGNAL: pin winnable RL selves (rev38/rev53b — cross-eval 27%/37.5%, NOT deb-like) instead of
@@ -260,14 +261,16 @@ sufficient-commit/commitment lever FAILED, #2) → revisit the quantity gradient
 
 ---
 
-## 🔵 LIVE — p2rev9 on GCP L4 — RELAUNCHED on the COMET-FAITHFUL engine (2026-06-13)
+## ✅ CONCLUDED — p2rev9 comet-faithful relaunch (KILLED @1.28M 2026-06-13, box DELETED, no billing)
 
-- **⭐ This is the comet-fixed relaunch.** Old comet-free p2rev9 box was gone; relaunched fresh on the fixed
-  torch_env (comets simulated). Old artifacts archived → `gpu_run_artifacts/p2rev9_cometfree_old/` (20 ckpts).
-  iter 1 ran past the step-50 comet spawn cleanly; comets active in the full training loop; SPS ~485.
-  **Early signal:** in-training pin WR dropped with comets (rev38 ema 0.60→0.53, rev53b 0.70→0.60) — difficulty
-  recalibrating toward kaggle reality. Watch held-out planets@50/WR per ckpt (now meaningful).
-- **GCP L4 `g2-standard-8`, name `orbit-wars-p2rev9`, IP `8.231.115.108`, zone asia-south1-b. RUNNING + BILLING.**
+- **⭐ This was the comet-fixed validation relaunch** (resume p2rev5 4M + POOL pivot on the FIXED torch_env).
+  **Verdict: the fix works live** — iter 1 ran past the step-50 comet spawn cleanly, comets active in the full
+  loop (SPS ~485), and **in-training pin WR dropped with comets** (rev38 ema 0.60→0.53, rev53b 0.70→0.60),
+  difficulty recalibrating toward kaggle reality. Harvested 524k+1M ckpts → `gpu_run_artifacts/p2rev9/`; old
+  comet-free artifacts → `p2rev9_cometfree_old/`. Killed after confirming the fix (it was a validation run, not a
+  result run). **Next = the comet FEATURE phase (is_comet + expiry, parity) then from-scratch.** Original live
+  block kept below for reference.
+- **GCP L4 `g2-standard-8`, name `orbit-wars-p2rev9`, IP `8.231.115.108`, zone asia-south1-b. DELETED.**
 - **DELETE (manual):** `gcloud compute instances delete orbit-wars-p2rev9 --zone=asia-south1-b`.
 - **Run = the POOL pivot (NOT a reward delta).** Resume **p2rev5 4M** + ONE delta = the pool: `--pool-seed-rl
   rev38_5M.pt,rev53b_10M.pt` (winnable RL champions) + **deb demoted 0.25→0.10** (`--pool-external-fraction 0.15`
