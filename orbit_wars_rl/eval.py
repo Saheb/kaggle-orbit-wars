@@ -140,6 +140,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 reinforce_gate_min_planets=getattr(model, "reinforce_gate_min_planets", 0),
                 reinforce_forward_only=getattr(model, "reinforce_forward_only", False),
                 reinforce_garrison_floor=getattr(model, "reinforce_garrison_floor", 0.0),
+                sufficient_commit_factor=getattr(model, "sufficient_commit_factor", 0.0),
                 veto_stats=veto_stats,
             )
 
@@ -769,7 +770,8 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         target_sanity_penalty: float = 0.0,
                         reinforce_gate_min_planets: int = 0,
                         reinforce_forward_only: bool = False,
-                        reinforce_garrison_floor: float = 0.0):
+                        reinforce_garrison_floor: float = 0.0,
+                        sufficient_commit_factor: float = 0.0):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
 
@@ -791,11 +793,16 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     model.reinforce_gate_min_planets = int(reinforce_gate_min_planets)
     model.reinforce_forward_only = bool(reinforce_forward_only)
     model.reinforce_garrison_floor = float(reinforce_garrison_floor)
+    # Sufficient-commit mask (attacks) — also MUST match training. Independent of reinforce.
+    model.sufficient_commit_factor = float(sufficient_commit_factor)
     if model.allow_reinforce:
         print(f"Reinforcement: ON (own planets are legal targets) | "
               f"gate>={model.reinforce_gate_min_planets} planets, "
               f"forward_only={model.reinforce_forward_only}, "
               f"garrison_floor={model.reinforce_garrison_floor}")
+    if model.sufficient_commit_factor > 0.0:
+        print(f"Sufficient-commit mask: ON | veto attacks with ships <= "
+              f"target_defense × {model.sufficient_commit_factor}")
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     allowed_missing = {"target_head.weight", "target_head.bias"}
     bad_missing = [k for k in missing if k not in allowed_missing]
@@ -874,6 +881,9 @@ if __name__ == "__main__":
     parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0,
                         help="Reinforce-discipline parity: veto a reinforce that drains the "
                              "source below this. MUST match training (p2rev1=10).")
+    parser.add_argument("--sufficient-commit-factor", type=float, default=0.0,
+                        help="Sufficient-commit parity: veto an attack whose ships <= target "
+                             "defense × this factor. MUST match training (1.0 = strict).")
     args = parser.parse_args()
 
     cfg = Config()
@@ -892,4 +902,5 @@ if __name__ == "__main__":
         reinforce_gate_min_planets=args.reinforce_gate_min_planets,
         reinforce_forward_only=args.reinforce_forward_only,
         reinforce_garrison_floor=args.reinforce_garrison_floor,
+        sufficient_commit_factor=args.sufficient_commit_factor,
     )

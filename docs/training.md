@@ -101,7 +101,119 @@
 
 ---
 
-## Current State (2026-06-11)
+## Current State (2026-06-13)
+
+### ⭐⭐ THE BIG ONE — the train/eval sim gap = MISSING COMETS in torch_env (FOUND + FIXED 2026-06-13)
+
+This is the root blocker behind the whole "panel not LB-predictive / pool wr is fiction / planets@50=6 / hoarding"
+cluster. **torch_env never simulated comets** (`# comets not implemented in Phase 3a`); the real kaggle env spawns
+4-comet groups at steps [50,150,250,350,450] — **collidable, capturable (carry ships+production), moving**. So
+every torch_env game from step 50 on was a DIFFERENT, simpler game than kaggle — exactly the mid/late window where
+we hoard-to-win and where planets@50→100 collapses for real. We were overfitting a comet-free world.
+- **Found** via a new trajectory-diff harness (`orbit_wars_rl/sim_gap_probe.py`): drive both engines from one seed
+  (shared generate_planets+RNG → identical board), replay a real game's EXACT actions in torch_env, diff every
+  step. Byte-identical ~50–77 steps, then one fleet diverged — it hit a comet kaggle had and torch didn't. Proven
+  independently in kaggle's own engine (fleets fly INTO comets and capture them). This also EXONERATED orbital
+  motion, fleet movement, spawn, combat, win-resolution (all byte-match given identical actions).
+- **Fixed:** comets implemented in `torch_env.py` (reuse kaggle generate_comet_paths; slots 44–47 so the policy
+  observes them; lazy per-spawn compute; **vectorized 7.5× byte-identical** via `_comet_paths_fast`). Now
+  byte-faithful for whole games incl comets. Tests: `tests/test_comet_fidelity.py`. Full write-up: `docs/train-eval.md`.
+- **Board distribution ruled out (2026-06-13):** self-play boards = real LB boards (same generate_planets,
+  symmetric — no SSDR/handicap in p2rev9); the eval PANEL's board features (count/production/orbiting/big-planet)
+  also match the natural distribution. So boards are NOT the gap — physics (comets) was. (WR A/B random-vs-panel
+  confirming.)
+
+**Active run:** **p2rev9 RELAUNCHED on the comet-faithful engine** — GCP L4 (`orbit-wars-p2rev9`, **8.231.115.108**,
+asia-south1-b). Resume p2rev5 4M + the POOL pivot (pin rev38+rev53b, deb 0.10, 35% self, clean reward), now on the
+FIXED engine. iter 1 ran past the step-50 comet spawn cleanly; SPS ~485, comets active in the full loop. **Early
+behavioral signal: in-training pin WR moved DOWN with comets** (rev38 ema 0.60→0.53, rev53b 0.70→0.60) — the fix
+recalibrating training difficulty toward kaggle reality (not yet the full drop to cross-eval 27–37%; resumed policy
+mid-adapt + sampled-vs-decode). DELETE: `gcloud compute instances delete orbit-wars-p2rev9 --zone=asia-south1-b`.
+Old comet-free p2rev9 artifacts archived to `gpu_run_artifacts/p2rev9_cometfree_old/`. (p2rev7+p2rev8 KILLED.)
+
+**NEXT (deliberate phase):** comet FEATURES — populate `is_comet` (channel exists, was 0) + add comet-expiry
+awareness (top players read path_index to avoid investing in a departing comet), with train/eval/export PARITY;
+then a from-scratch run that learns comets from step 0. The pool-pivot logic is now well-founded on a faithful sim.
+
+**Why the pivot (the win-starvation finding):** 4 reward/mask levers all left `planets@50` pinned at 6 — the
+opening ceiling is STRUCTURAL because we can't learn to beat a peeler we never beat (deb ~5%, all-loss = no
+win-contrast; rare sim-wins are easy-board fiction). **Cross-eval 2026-06-13 confirmed the pins are the fix:
+p2rev5 4M beats rev38 27% / rev53b 37.5%** (vs deb ~5%) — matched difficulty, a REAL transferable win-gradient.
+rev38 (aggressor) punishes under-expansion at a beatable difficulty → the terminal win-contrast early_capture
+lacked. See [[feedback_win_starvation]]. **WATCH:** `planets@50` climbs toward 9 + WR climbs from the 27-37%
+base. If the pool moves it, early_capture/defense return as clean *win-anchored* follow-ups.
+
+**⭐ WHY BOTH KILLED — the win-starvation finding (2026-06-13, user insight, the session's real conclusion):**
+We can't learn to beat a peeler we almost never beat. In-training sim WR vs deb is ~0.25 BUT that's
+sim-inflated (held-out Ajay ~5%, p2rev7 *declining* 5.9→3.1) AND the sim-wins are the wrong games (archetype
+breakdown: wins on `low_prod__static` snowball boards, **0% on contested high_prod/mixed** where holding-under-peel
+matters). So 75–95% of deb games are terminal −1 with no learnable win-contrast, and the rare wins teach
+"snowball the easy board," not the skill. Consequences, now proven:
+- **p2rev8 (early_capture 0.2): FAILED.** `planets@50` DEAD FLAT at **6** across all 9 held-out ckpts (524k→4.7M;
+  winner 9), `open<50 cap/atk` flat ~0.37 (winner 0.51), WR flat ~4.5%. early_capture's within-game expansion
+  reward has no terminal win that *requires* 9 planets to anchor it → no breakthrough. Same non-response as the
+  p2rev6 mask.
+- **p2rev7 (defense_coef 0.02): hold metric moved, but it's a self-play MIRROR artifact, not transferable.**
+  `peel WON` declined 0.64→0.61→0.57→**0.52** (toward winner 0.43) — first lineage result to move it, flood
+  guard GREEN (reinf ramp winner-like, garr_frac BELOW Isaiah) — BUT **WR DECLINED 5.9→3.1** and `planets@50`
+  slipped 6→5 while `mid cap/atk` rose to 0.71. defense_coef + perpetual-deb-loss = the policy gets good at
+  *converting/holding a SMALL empire* but expands less (the conservatism the design warned of). The peel gain is
+  self-play copies symmetrically out-holding *each other*, which is exactly why it does NOT lift WR vs deb.
+- **`planets@50 = 6` is now invariant across FOUR levers** (deb-pool p2rev5, sufficient-commit mask p2rev6,
+  defense_coef p2rev7, early_capture p2rev8) → the opening-expansion ceiling is **STRUCTURAL** (a property of the
+  pool/board/self-play setup), not reward-tunable. **Stop shaping past it with reward knobs; fix the SIGNAL.**
+
+**THE PIVOT (next run): pool-seed-RL** — pin strong-but-BEATABLE, sim-immune RL selves (rev38 aggressor +
+rev53b) so winning is achievable at matched difficulty AND demands the right play; keep ~30-40% self-play
+(auto-curriculum); **demote deb to a small peel-flavor fraction or drop it** (cranking the unbeatable opponent
+starves the win-gradient). Built+tested (`opponent_pool.py add_pinned_rl`). See `docs/next-steps.md` pool levers.
+
+**Phase-2 lineage p2rev3 → p2rev9** (resume-chained; the gap = beating PLANNER-class peelers deb/ajay,
+mechanism = capture-then-lose / mid-game hold; selection PURE on held-out, never self-play wr):
+- **p2rev3** — the deb-era resume base. **0.5M = best-vs-deb (3.9%)** before the self-play Nash erased holding;
+  the documented resume base for p2rev4/p2rev5. (config detail: `docs/phase2.md`.)
+- **p2rev4** (GCP L4, resume p2rev3 4M, **garrison_floor 10→0**): unblock reinforcement (veto probe: floor=10
+  blocked 62% of wanted reinforces). **Verdict: quantity ≠ the fix** — floor0 raised reinforce (mid 0.11→0.19)
+  but peel did NOT drop (0.61→0.64), churn WORSE (16→23) ⇒ we reinforce *incorrectly* (wrong target/timing),
+  not too little. Box deleted (synced through 1.5M). **floor=0 KEPT as the validated default.**
+- **p2rev5** (Jarvis A100, resume p2rev3 0.5M, **deb peeler external @0.25**, floor0/no-forward): learn
+  holding-under-peeling natively. Ran ~9.44M (box destroyed; held-out Ajay panels backfilled through 9.44M).
+  **Verdict: deb-in-pool moved reinforce-SHAPE metrics (direction fwd 58%, less hoard) but NOT the two OUTCOME
+  levers** — `open<50 cap/atk WON` FLAT ~0.38 (winner 0.51) and peel ~0.6 (winner 0.43). **Read held-out PANEL
+  logs, not self-play diag** (the rising-H_tgt / reinf>100 "threat head" signal was a mirror artifact → threat
+  head PARKED). **4M = the held-out WR peak (5.9% Ajay)** → the resume base for BOTH p2rev6 + p2rev7.
+- **p2rev6** (Jarvis A100, resume p2rev5 4M, **`--sufficient-commit-factor 1.0`**): veto fragment launches
+  (ships ≤ target defense) → force opening concentration. **CONCLUDED at 7.8M, box destroyed 2026-06-12.
+  Verdict: FAILED — `open<50 cap/atk WON` FLAT ~0.34 over all 9 held-out ckpts** (≤ the p2rev5 base ~0.40),
+  `planets@50` stuck at 6 (winner 9). A veto removes the bad behavior (fragments) but doesn't supply the good
+  one (concentration) — agent just fired *less* ([[feedback_veto_mask_removes_not_teaches]]). None beat the
+  p2rev5 4M base → that stays the resume point. clip resolved benign (peaked 0.27, receded). 14 ckpts harvested.
+- **p2rev7** (GCP L4, resume p2rev5 4M, **`--defense-coef 0.02`**, sufficient-commit OFF): **KILLED @4M 2026-06-13.**
+  Verdict above (win-starvation section): `peel WON` moved 0.64→0.52 but it's a self-play mirror artifact —
+  WR DECLINED 5.9→3.1, `planets@50` 6→5 (conservatism: holds a small empire better, expands less). flood guard
+  was green. Harvested 7 ckpts → 3.67M.
+- **p2rev8** (Jarvis A100-80GB spot, resume **p2rev7 1M** + **`--early-capture-coef 0.2`** always-on, defense_coef
+  0.02 carried fwd): the QUANTITY/opening lever (clean A/B off p2rev7 1M — p2rev7 = hold only, p2rev8 = + opening).
+  **KILLED @5.77M 2026-06-13. Verdict: FAILED** — `planets@50` DEAD FLAT at 6 over all 9 ckpts, opening conversion
+  flat ~0.37 (winner 0.51), WR flat ~4.5%. early_capture 0.2 did not break the opening ceiling (no terminal win
+  needs 9 planets to anchor it — the win-starvation finding). Harvested 11 ckpts → 5.77M. (ran ~800 SPS, 28-core
+  A100; fixed a watcher symlink-sync bug mid-run — [[feedback_watcher_symlink_ckpt_sync]].)
+- **p2rev9** (GCP L4, resume p2rev5 4M, **POOL PIVOT**): the first NON-reward delta — pin rev38+rev53b (winnable
+  RL champions, cross-eval 27/37% vs deb ~5%) + deb 0.25→0.10 + 35% self; reward reverted to p2rev5 clean
+  baseline (early_capture/defense OFF). **LIVE** (full status in Current State above + `docs/next-steps.md`). 500k
+  panel = baseline (planets@50 6, WR 4.7% — too early); watch the 1.5M–2.5M trend for planets@50 climbing.
+
+**Decision rules confirmed this session:** (1) judge a delta by whether its OWN target metric trends toward
+goal across MANY held-out checkpoints — flat over many ckpts = it isn't working → end + harvest (don't burn GPU
+to 10M). (2) **improve-then-degrade** (held-out peaks ~500k–1M then drifts) = self-play Nash reforming around a
+misaligned objective; durable gains need changing the ATTRACTOR (always-on structural masks + asymmetric pool
+pressure that makes the bad behavior LOSE), not shaping the gradient — a transient gain is itself the signal
+the delta is a nudge, not a structural fix. **Queued next levers** (`docs/next-steps.md`): pool-seed-RL + deb
+(anti-drift), K-nearest reinforce-target mask, relaxed sufficient-commit 0.6.
+
+---
+
+## Prior State (2026-06-11)
 
 **Active run:** none — both Phase-2 runs COMPLETE; Jarvis H200 spot 425211 **destroyed** (billing stopped).
 All checkpoints synced + the 10.03M final verified-loadable locally (`gpu_run_artifacts/p2rev2/checkpoints/`).

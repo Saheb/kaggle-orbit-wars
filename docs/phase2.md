@@ -5,16 +5,18 @@ empire-size-gated, instrumental behaviour — the #1 structural skill-gap vs the
 top tier. This is a fresh run with a redesigned reward model + one new action mask, NOT a
 resume of the rev55–57 reinforce lineage (all of which flooded).
 
-Status (2026-06-11): **p2rev1→p2rev2→p2rev3 run; the blockade = beating PLANNER-class agents
-(deb/ajay), and the mechanism is PEEL-DEFENSE (capture-then-lose).** p2rev2 8.91M submitted to LB
-(first Phase-2 submission, sub 53574885, score pending). Key findings: (1) we hold fine vs Zach
-(planets climb 2→9) but collapse vs deb (lost-cap 0.96, median-hold 17st) — a *targeted* gap, not
-general; (2) pool-seed-rl (pinned aggressors) is the WRONG pressure — aggressors race, they don't
-*peel*; (3) **DECISIVE: `garrison_floor=10` blocks 62% of the reinforces the policy WANTS** (veto probe
-`garrison_floor_probe.py`) — it fights forward-staging. **→ p2rev4 RUNNING (Jarvis A100, garrison_floor
-10→0, resume p2rev3 4M); watch lost-cap↓/median-hold↑.** Next levers if needed: relax forward-only,
-deb-as-pool (worker-pool path), threat head. Full live status + DESTROY reminder: `docs/next-steps.md`.
-Retention metric (`lost-cap`/`median-hold`) defined in `docs/metrics.md`. Tier-1 design history below.
+Status (2026-06-12): **the blockade = beating PLANNER-class peelers (deb/ajay); mechanism = capture-then-lose /
+mid-game hold.** Lineage p2rev3→p2rev7 with per-run verdicts now lives in **`docs/training.md` Current State**
++ live status/DESTROY reminders in **`docs/next-steps.md`**. Quick recap of the lever verdicts: **floor 10→0
+(p2rev4)** = quantity isn't the fix (peel didn't drop) → floor0 kept; **deb-peeler-in-pool (p2rev5)** moved
+reinforce-SHAPE not OUTCOME (opening conversion + hold both flat) → 4M = held-out WR peak, the resume base;
+**sufficient-commit mask (p2rev6)** FAILED — a veto removes fragments but doesn't supply concentration, flat
+over 9 ckpts → CONCLUDED. **LIVE: p2rev7** = resume p2rev5 4M + `defense_coef 0.02` (sibling A/B vs the dropped
+p2rev6); tests the never-isolated "defense_coef + aggressive pool" combo (rev58's flood was pool-LESS). **Note
+on the old "pool-seed-rl is the WRONG pressure" finding:** pinned aggressors ALONE don't peel — but the queued
+**pool-seed-RL + deb** lever pairs them (RL = fast diverse pressure; deb = the peel archetype), which is
+different. Threat-head PARKED (held-out reinforce already winner-like; the rising-H_tgt signal was a self-play
+mirror artifact). Retention metric (`peel-rate`/`median-hold`) in `docs/metrics.md`. Tier-1 design history below.
 
 ---
 

@@ -342,6 +342,9 @@ def train(args):
     if args.allow_reinforce and args.reinforce_forward_only:
         print("Reinforcement FORWARD-STAGING GATE: own targets legal only if closer to the "
               "nearest enemy than the source (rear→front staging; mask, no Nash risk)")
+    if args.sufficient_commit_factor > 0.0:
+        print(f"SUFFICIENT-COMMIT MASK: veto attack launches with ships <= target_defense × "
+              f"{args.sufficient_commit_factor} (force concentration; mask, no Nash risk)")
     print(f"Win margin coeff: {args.win_margin_coeff}")
     print(f"Shaping coeff: {args.shaping_coef}")
     print(f"Expansion coeff: {args.expansion_coef}")
@@ -402,6 +405,7 @@ def train(args):
                       reinforce_cost=args.reinforce_cost,
                       reinforce_gate_min_planets=args.reinforce_gate_min_planets,
                       reinforce_forward_only=args.reinforce_forward_only,
+                      sufficient_commit_factor=args.sufficient_commit_factor,
                       win_margin_coeff=args.win_margin_coeff,
                       shaping_coef=args.shaping_coef,
                       expansion_coef=args.expansion_coef,
@@ -1486,6 +1490,14 @@ if __name__ == "__main__":
                              "forward-staging in top-player replays; removes the costless safe-fire "
                              "outlet that floods symmetric self-play. Enemy/neutral targets "
                              "unconstrained. Only active with --allow-reinforce.")
+    parser.add_argument("--sufficient-commit-factor", type=float, default=0.0,
+                        help="SUFFICIENT-COMMIT MASK: veto an ATTACK launch (enemy/neutral target) "
+                             "whose ship count <= target's current defense × this factor → fragments "
+                             "fired under a target's garrison are impossible by construction, forcing "
+                             "concentration (the opening under-commitment fix). 1.0 = strict (need "
+                             "strictly more than current defense); 0.6 = relaxed fallback; 0 = off. "
+                             "Pure mask (no reward tax → no fire=0 Nash); internalised at inference. "
+                             "Independent of --allow-reinforce (acts on attacks, not reinforces).")
     parser.add_argument("--win-margin-coeff", type=float, default=0.0,
                         help="Terminal bonus coefficient α: winner gets +1 + α*(my_score/total_score). "
                              "0 = pure ±1 reward (default). Suggested start: 0.5.")

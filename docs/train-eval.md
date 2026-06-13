@@ -1,5 +1,42 @@
 # The Train/Eval Gap — why pool win-rates don't translate
 
+## ✅ RESOLVED (2026-06-13) — the gap was MISSING COMETS in torch_env
+
+The dominant cause of the torch_env↔kaggle fidelity gap was found and fixed: **`torch_env` did not
+simulate comets at all** (`# comets not implemented in Phase 3a`). The real kaggle env spawns 4-comet
+symmetric groups at steps **[50, 150, 250, 350, 450]** — they are **collidable** (fleets die hitting
+them), **capturable** (they carry ships + production 1), and **moving** (elliptical paths). So **every
+torch_env game from step 50 on was a different, simpler game than kaggle** — exactly the mid/late window
+where our policy "wins" by hoarding and where `planets@50→100` collapses in reality. The policy overfit a
+comet-free world; in kaggle, comets disrupt the hoard and add contested material → tactics don't transfer.
+
+**How it was found (decisive, not by elimination):** a new trajectory-diff harness
+(`orbit_wars_rl/sim_gap_probe.py`) drives BOTH engines from the same seed (they share `generate_planets`
++ RNG order → identical boards) and replays a real kaggle game's **exact action stream** in torch_env,
+diffing state every step. Result: byte-identical for ~50–77 steps, then a single fleet diverged — it had
+hit a **comet** in kaggle that didn't exist in torch (confirmed: a comet sat 1.5–2.1 units from the
+diverging fleet). **This also exonerated everything else** — orbital motion, fleet movement, spawn,
+combat resolution, and win-resolution all match byte-for-byte given identical actions.
+
+**The fix:** comets implemented in `torch_env.py` (reuse kaggle's `generate_comet_paths` for byte-exact
+ellipse math + RNG order; reserved planet slots 44–47 so the policy *observes* them; lazy per-spawn
+compute for throughput). After the fix the harness is **faithful for entire games incl. comets** across
+all seeds. Regression test: `tests/test_comet_fidelity.py`. **Expected consequence (validate on the next
+run): in-training difficulty should now match cross-eval** (the rev38/rev53b pins were easy in torch_env
+60–70% but 27–37% in kaggle — that split should shrink), and the hoarding/`planets@50` pathologies should
+become trainable because the agent now faces the real comet-ful mid-game. **Perf:** comet-path generation
+is vectorized (`_comet_paths_fast`, numpy — **7.5× faster, byte-identical to kaggle**, verified on 2000
+seed/spawn combos; `np.cos/np.sin` match `math` bit-for-bit and segments ≪ comet_speed so the resample
+searchsorted == kaggle's sequential append) **plus** lazy per-spawn compute (only spawns a game reaches).
+Net: the one-time synchronized spawn-50 spike is ~3s and steady-state per-step comet cost is negligible
+(~13ms when one env crosses a spawn). Byte-identity guarded by `tests/test_comet_fidelity.py`.
+
+Everything below predates the fix (kept for the investigation record). The "two larger suspects" it
+couldn't isolate (our overfitting / win-timeout) were **both downstream of the missing-comet game
+divergence**, not independent causes.
+
+---
+
 **TL;DR (2026-06-11):** the in-training opponent-pool win-rate is measured **inside `torch_env`**
 (our vectorised GPU reimplementation of the kaggle env), with **sampled** actions, as an **EMA/
 cumulative** stat. It is a **PFSP sampling signal, not a performance metric.** For aiming-heavy

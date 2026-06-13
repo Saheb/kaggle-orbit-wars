@@ -71,6 +71,8 @@ _ALLOW_REINFORCE = {allow_reinforce}
 _REINFORCE_GATE_MIN = {reinforce_gate_min_planets}
 _REINFORCE_FORWARD_ONLY = {reinforce_forward_only}
 _REINFORCE_GARRISON_FLOOR = {reinforce_garrison_floor}
+# Sufficient-commit mask (ATTACKS) — also MUST match training. Independent of reinforce.
+_SUFFICIENT_COMMIT_FACTOR = {sufficient_commit_factor}
 
 
 # --- Embedded parameters (base64-encoded torch state_dict) ---
@@ -304,6 +306,7 @@ def agent(obs, cfg=None):
             reinforce_gate_min_planets=_REINFORCE_GATE_MIN,
             reinforce_forward_only=_REINFORCE_FORWARD_ONLY,
             reinforce_garrison_floor=_REINFORCE_GARRISON_FLOOR,
+            sufficient_commit_factor=_SUFFICIENT_COMMIT_FACTOR,
         )
     else:
         raise NotImplementedError(
@@ -426,7 +429,8 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
                  target_decode: bool = False,
                  reinforce_gate_min_planets: int = 3,
                  reinforce_forward_only: bool = False,
-                 reinforce_garrison_floor: float = 0.0):
+                 reinforce_garrison_floor: float = 0.0,
+                 sufficient_commit_factor: float = 0.0):
     model = load_model(checkpoint_path, cfg)
 
     # Encode state_dict as base64
@@ -470,6 +474,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         reinforce_gate_min_planets=reinforce_gate_min_planets,
         reinforce_forward_only=reinforce_forward_only,
         reinforce_garrison_floor=reinforce_garrison_floor,
+        sufficient_commit_factor=sufficient_commit_factor,
         params_b64=params_b64,
         features_code=features_code,
         action_mask_code=action_mask_code,
@@ -548,6 +553,8 @@ if __name__ == "__main__":
     parser.add_argument("--reinforce-forward-only", action=argparse.BooleanOptionalAction,
                         default=False, help="Own reinforce target must be closer to enemy than source.")
     parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0)
+    # Sufficient-commit mask (ATTACKS). MUST match training (p2rev6 = 1.0). 0 = off.
+    parser.add_argument("--sufficient-commit-factor", type=float, default=0.0)
     args = parser.parse_args()
 
     cfg = Config()
@@ -557,4 +564,5 @@ if __name__ == "__main__":
                  target_decode=args.target_decode,
                  reinforce_gate_min_planets=args.reinforce_gate_min_planets,
                  reinforce_forward_only=args.reinforce_forward_only,
-                 reinforce_garrison_floor=args.reinforce_garrison_floor)
+                 reinforce_garrison_floor=args.reinforce_garrison_floor,
+                 sufficient_commit_factor=args.sufficient_commit_factor)

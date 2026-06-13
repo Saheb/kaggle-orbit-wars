@@ -2,7 +2,14 @@
 
 Living doc — efforts and ideas, roughly prioritized. Discipline: **one delta per cloud run.**
 Status tags: 🔵 in-flight · 🟢 ready-to-build · 🟡 idea · ✅ done · ⏸ parked.
-Current focus: **Phase 2 — reinforcement** (docs/phase2.md). VDN/per-slot concluded (doesn't work; back to standard arch).
+Current focus: **⭐ COMET FIX (2026-06-13) — the train/eval sim gap was MISSING COMETS in torch_env, now FIXED**
+(byte-faithful to kaggle, `docs/train-eval.md` + `docs/training.md`). This was the root blocker. p2rev9 RELAUNCHED
+on the faithful engine (IP 8.231.115.108). Next: comet FEATURES (is_comet + expiry) then from-scratch. Boards ruled
+out (self-play = LB = panel). Prior framing below (pool pivot) still valid but now sits on a faithful sim.
+Current focus: **Phase 2 — the POOL/CURRICULUM pivot** (p2rev9 LIVE, 2026-06-13). 4 reward/mask levers all left
+`planets@50=6` → the ceiling is STRUCTURAL because of **win-starvation** (can't learn from a peeler we never beat;
+deb ~5%). Fix the SIGNAL: pin winnable RL selves (rev38/rev53b — cross-eval 27%/37.5%, NOT deb-like) instead of
+shaping. See `docs/training.md` Current State + [[feedback_win_starvation]]. VDN/per-slot concluded (back to standard arch).
 
 ---
 
@@ -59,7 +66,13 @@ all conversion metrics **outcome-split (WON/LOST)** — `planets@`, `cap/atk` by
 
 ---
 
-## ⭐ NEXT RUN (after p2rev5) — SUFFICIENT-COMMIT MASK (set 2026-06-12 from the held-out panel trend)
+## ✅ SUPERSEDED (historical) — was "NEXT RUN: SUFFICIENT-COMMIT MASK"
+
+> This plan ran as **p2rev6 and FAILED** (planets@50 flat at 6 — a veto removes fragments but doesn't teach
+> concentration). Then defense_coef (p2rev7) + early_capture (p2rev8) also failed → all four levers left
+> `planets@50=6` → the win-starvation finding → **pivot to pool-seed-RL (p2rev9 LIVE)**. Kept below for history.
+
+### original plan (set 2026-06-12 from the held-out panel trend)
 
 p2rev5's 12-ckpt held-out panel trend (live-instance block below) shows deb-in-pool did NOT move the two
 outcome levers: **opening conversion `opnWON` flat ~0.38 vs winner 0.51**, and `peelW` ~0.6 vs 0.43.
@@ -91,29 +104,277 @@ neutral → annihilated) and **split forces** across several neutrals → each t
 under-expansion. Winners hard-commit (frac-sent 1.00, send everything at *one* target). Already ruled
 out as an architecture bug (ship-head credit, joint AND per-slot, both undercommit) → it's **learned**.
 
+**⭐ P-OPEN ↔ P-HOLD coupling (2026-06-12, user insight) — NOT universal, two regimes.** `planets@50 = 6`
+is **invariant** across p2rev5/6/7 in our wins AND losses (winner 9). So: **(regime A) same 6-planet board,
+holding alone decides** — won 6→10 vs lost 6→3 @50→100; here a pure holding fix (defense_coef) gets us far,
+P-OPEN is NOT the blocker. **(regime B) opening gates holding** — a 6-planet empire is intrinsically harder to
+hold than a 9-planet one (less depth to stage from, less production to *fund* reinforcement, peeler concentrates
+on a smaller frontier, no margin for loss); here holding has a **ceiling set by the opening** — you can't hold
+what you didn't expand to. **Implication:** holding (p2rev7) is a real lever, but its payoff plateaus once
+regime-B dominates → **falsifiable read: if p2rev7's `peel-rate WON` improves then plateaus while `planets@50`
+stays 6, that's the ceiling** → opening becomes the priority. The gap is **QUANTITY (6→9), not commitment** (the
+sufficient-commit/commitment lever FAILED, #2) → revisit the quantity gradient (#3).
+
 1. 🟢 **deb-in-pool may fix it for free (check FIRST).** deb is a strong *expander*, not just a peeler —
    it out-expands a fragment-dribbler (replay: 9 vs our 5 by step 48). So the peeler run punishes opening
    under-expansion *and* mid-game peeling with the same gradient. **Read `open<50 cap/atk` (WON) after the
    deb run before adding a dedicated opening lever** — it may already lift toward 0.51.
-2. 🟢 **Sufficient-commit MASK (the dedicated lever, if deb isn't enough).** Veto an attack launch whose
-   `ships ≤ target's current defense` → fragments become impossible by construction, forces concentration
+2. ❌ **Sufficient-commit MASK — TESTED & FAILED (p2rev6, CONCLUDED 2026-06-12).** `open<50 cap/atk WON` FLAT
+   ~0.34 over all 9 ckpts, `planets@50` stuck at 6 → the veto removed fragments but the agent fired *less*, did
+   NOT concentrate ([[feedback_veto_mask_removes_not_teaches]]) ⇒ **commitment was not the bottleneck; quantity
+   is** (see #3). Relaxed 0.6 / neutrals-only is a low-priority remaining variant. Original spec kept below.
+   Veto an attack launch whose
+   `ships ≤ target's current defense × factor` → fragments impossible by construction, forces concentration
    (attack only a target you can actually take, else accumulate first). Structural like the reinforce
    masks — **no reward tax** (avoids the rev41–45 fire=0 Nash). **Aligns with measured winner behavior**
-   (hard-commit). Training-only, internalized, eval/export parity like floor/forward-only. UNBUILT.
+   (hard-commit). Training-only, internalized, eval/export parity like floor/forward-only.
+   **Impl:** `--sufficient-commit-factor` (1.0 strict / 0.6 relaxed / 0 off) — post-decode veto in
+   `torch_env.py _apply_actions` (alongside garrison_floor); parity in `action_mask.py`, `eval.py`,
+   `export_agent.py` (bakes `_SUFFICIENT_COMMIT_FACTOR`); test `tests/test_sufficient_commit.py` (veto/fire/off,
+   passing). Applies to BOTH self-play seats (near-no-op for strong opponents, who hard-commit). **Launch ready:**
+   `gpu_run_artifacts/p2rev6/{run_remote,launch}_p2rev6_jarvis.sh` — resume p2rev5 best + ONE delta (factor 1.0),
+   else identical to p2rev5 (deb pool, gate3/floor0/no-forward). ⚠️ update RESUME_CKPT to p2rev5's FINAL best
+   after it concludes. Watch: `open<50 cap/atk` (WON) should lift toward 0.51; guard against forced-passive
+   opening (if no neutral is takeable from the start garrison → relax to 0.6 or neutrals-only).
    Risks: (a) strict — blocks sub-threshold *softening* waves, but winners barely use those; (b) enemy
    planets reinforce in transit so "sufficient at launch" can fall short on arrival — **exact for neutrals**
    (the opening expansion targets, which don't regrow), approximate for enemy planets; (c) untested —
    masks have surprised us before. A relaxed variant (`ships > defense × 0.6`, or neutrals-only) is the
    fallback if it over-constrains.
-3. ⏸ **early_capture / first_strike — DROPPED for P-OPEN.** They reward capture *count* (front-loaded),
-   not *commitment* — could even *increase* fragment-attempts. Not a commitment fix. (Separately fine as
-   an opening-aggression carrot, but that's not this problem.)
+3. 🟡 **early_capture / first_strike — REVISIT as the QUANTITY lever (reframed 2026-06-12), conditional.** Was
+   parked as "rewards count not commitment" — but the sufficient-commit (commitment) lever FAILED and the data
+   says **the gap IS count: `planets@50` 6 vs winner 9.** `early_capture 0.30` was literally the rev28 breakthrough
+   that took the agent passive→expanding; the p2rev5/6/7 base runs it at **0** (no opening-expansion gradient at
+   all). So re-introduce it as a dedicated **P-OPEN delta** (consider **always-on, not annealed**) with success =
+   `planets@50` → 9, NOT as a holding lever. **TRIGGER (user, 2026-06-12): try this IF the opening doesn't improve**
+   (i.e. p2rev7/holding plateaus against the regime-B ceiling above). Watch it doesn't regress to carpet-bomb
+   (rev49) or 1-ship spray — pair with `--min-ship-bin`. The eventual winning config likely needs BOTH a 9-planet
+   opening AND good holding, solved as separate clean deltas; opening arguably first since it *gates* regime B.
 4. ⏸ **Capture-efficiency reward — graveyard.** Penalizing wasted/inefficient fires = a conditional
    fire-tax → passivity / fire=0 Nash. Do not. The mask (#2) is the non-tax way to encode the same intent.
 
+### Reinforce-targeting levers
+
+1. 🟡 **K-nearest own-target mask (NEW idea 2026-06-12) — structural "bucket-brigade" staging.** An own
+   (reinforce) target is legal only if it is among the **K nearest** owned planets to the source (K=2–3);
+   ships then cascade rear→front in short hops over successive turns instead of any one planet shipping far.
+   Same structural family as `--reinforce-forward-only` / `--sufficient-commit-factor` — a legality **MASK,
+   NO reward / NO target-ranking shaping** (biasing the target distribution via reward/KL = rev49 carpet-bomb /
+   rev54 crater; the mask is the non-shaping way to encode "prefer near"). Motivation: (a) replay winners
+   target by **distance rank ~0.3** (prefer near, NOT by production value); (b) short hops keep ships ON
+   planets (defensible) vs long transits (idle/vulnerable); (c) **it sidesteps the reinforce credit-assignment
+   void** — reinforce earns no reward at arrival (value is delayed+counterfactual: only "avoided a future
+   loss"), so the agent can't efficiently *learn* the cascade is good; a mask just *makes* it stage in short
+   forward hops. **Distinct from forward-only:** "nearest" does NOT force forward, so it still permits pulling
+   ships BACK to defend a peeled rear planet (the exact behavior forward-only blocked → why we dropped it).
+   Impl: slots next to the gate/forward block in `torch_env.py` (~line 636, the `allow_reinforce` target-mask
+   branch) — per source slot, keep own-targets only among the K-smallest src→tgt distances; parity in
+   `action_mask.py` / `eval.py` / `export_agent.py` like the other masks; test in `tests/`. Caution: real
+   boards are scattered (not a clean front line) so K=1 is too rigid → start **K=2–3**. ⚠️ Risk per
+   [[feedback_veto_mask_removes_not_teaches]]: banning far-reinforce may just make it reinforce *less*, not
+   cascade — pair with a reason the cascade pays off. Sequencing: a single delta AFTER p2rev6 concludes.
+
+2. 🟡 **Empire-gate threshold (`reinforce_gate_min_planets`) — UNTUNED knob + a misleading metric (user, 2026-06-12).**
+   The gate is **3** ("expand first, never reinforce a tiny empire" — replay ramp reinforce@1=0.00, @2=0.10,
+   @9-12=0.30); a "felt logical" pick, never swept. **Metric caveat to fix FIRST:** with gate=3, reinforce is
+   MASKED at 1–2 planets, so the eval's **"reinf@2-3" bin is diluted by the gated 2s — the true reinf@3 is ~2× the
+   reported number** (0.07 bin ≈ 0.13–0.14 @3). Stop comparing our *gated* "2-3" against the winner's *ungated*
+   @2 → **split the @2/@3 bins in `eval.py game_conversion`** so reinf@3 reads cleanly. **On lowering 3→2:** it
+   would match the replay's @2=0.10 (winners reinforce a little at 2 planets; we ban it), BUT it **fights our
+   under-expansion problem** — at 2 planets the right move is to grab the 3rd, and gate=3 *forces* that; lowering
+   gives a reason to reinforce-not-expand exactly when smallest. AND the gate isn't the early-reinforce lever
+   anyway (the `<50` deficit is downstream of slow expansion; per-empire rates are already ~winner when legal).
+   **Verdict: PARK the threshold sweep** — gate=3 is defensible / maybe-right-for-us; revisit only if we become a
+   fast expander (planets@50→9) and early reinforce is STILL gated-short. Winner's @2=0.10 is affordable once
+   you're already expanding fast — we're not there. (Do the cheap metric-split regardless.)
+
+### Pool / anti-drift levers (training pressure, NOT reward)
+
+1. 🔵 **pool-seed-RL + deb — LIVE as p2rev9 (2026-06-13).** Cross-eval validated the pins are winnable (p2rev5 4M
+   beats rev38 27% / rev53b 37.5%, vs deb ~5%) → real win-gradient. Config: pins rev38+rev53b, deb 0.25→0.10, 35%
+   self, clean reward (early_capture/defense OFF). See the LIVE block above. Original rationale below.
+   **Motivation:** the improve-then-degrade pattern (held-out metric peaks ~500k–1M then drifts down) is the
+   self-play **Nash reforming around a misaligned objective** (the documented "SSDR transient / Nash reforms
+   ~2M" — [[feedback_selfplay_collapse_metrics]], [[project_phase2_reinforcement]]). The fix is MORE
+   *asymmetric non-self* pressure so the degenerate behavior actually loses games. BUT you can't just crank the
+   external fraction: deb/orbit_lite is CPU-slow (~11 ms/call, [[feedback_orbit_lite_is_slow]]) so SPS already
+   654→~250 at just ~0.19 deb; pure-external also over-fits one **sim-gap archetype** ([[project_train_eval_sim_gap]])
+   AND starves the win-signal (we beat deb ~4% → high-deb = nearly all-loss = no win-gradient + passivity
+   collapse). **The throughput-viable version:** add **`--pool-seed-rl`** (GPU-fast, sim-gap-IMMUNE, diverse RL
+   champions — same fast path as self-play) **+ keep deb as the peeler external.** Pin **rev38** (first-strike
+   aggressor → opening pressure) + **rev53b** (selective) [± more]; **KEEP rev31/rev32b HELD-OUT** as the
+   cross-eval forgetting detector (do NOT pin them). Optionally bump external **0.25→~0.4** but keep **~30–40%
+   self-play** (the matched-difficulty auto-curriculum + winnable games — do NOT go pure-external). Both halves
+   needed: pinned-RL = cheap diverse strong pressure; deb = the specific peeler that punishes bad holding.
+   **BUILT + TESTED** (`opponent_pool.py add_pinned_rl`, `tests/test_pool_pinned.py`; the p2rev4 GCP script
+   already wired `--pool-seed-rl rev38_5M.pt,rev53b_10M.pt`). **Read:** held-out trend PAST 2M — if it stops
+   drifting (holds/climbs past the early peak) we changed the attractor (the rare durable-win signal); if it
+   still peaks-then-falls, the pressure still isn't enough. Sequencing: a single composite "pool" delta off the
+   p2rev5 4M base (or whichever base wins the p2rev6-vs-p2rev7 A/B).
+
 ---
 
-## 🔵 LIVE INSTANCE — p2rev5 on Jarvis A100-80GB SPOT (launched 2026-06-12 ~08:22 UTC)
+## ✅ CONCLUDED — p2rev6 on Jarvis A100 (sufficient-commit mask DID NOT lift opening conversion; box destroyed 2026-06-12)
+
+- **VERDICT (ended at 7.8M, box 425850 destroyed):** the sufficient-commit mask (factor 1.0) **failed to move
+  its own target metric.** `open<50 cap/atk WON` was **FLAT ~0.33–0.35 across all 9 held-out Ajay checkpoints**
+  (500k→6.8M; winner 0.51) — at or *below* the p2rev5 4M base (~0.40). WR flat-to-declining (5.5→1.6). **Why:**
+  `planets@50` stayed **6** throughout (winner 9) — opening *expansion never sped up*. The veto removes fragment
+  launches but the agent responded by firing *fewer*, NOT by *concentrating* → a veto-mask removes the bad
+  behavior but doesn't supply the good one (aggregation). No degeneracy (fire_frac WON 0.17, garrison low).
+  Best ckpt is noise-level, none beat the p2rev5 4M base → **future runs still resume p2rev5 4M.** 14 ckpts +
+  log harvested to `gpu_run_artifacts/p2rev6/`. **Narrow remaining hope for the IDEA (new run, not this one):**
+  relaxed factor **0.6 / neutrals-only** (1.0 may over-constrain, blocking softening waves). Lower priority than
+  p2rev7 (defense_coef) + the K-nearest-mask idea. **DECISION RULE confirmed:** a delta's target metric flat over
+  many checkpoints = it isn't working; end + harvest (don't burn GPU to 10M hoping a pinned metric unsticks).
+
+- **Jarvis A100-80GB ON-DEMAND, machine id `425850`, IP `217.18.55.147`, 28 cores. ⚠️ ON-DEMAND (not
+  spot) — DESTROY when done (it bills ~₹2x/hr while Running, even after the run auto-stops at 10M).**
+  ⚠️ **The local `gpu_run_artifacts/p2rev6/{instance.txt,.watch_env,launch.out}` initially referenced a
+  DEAD spot box (425837 / 217.18.55.30) — a prior spot launch that died; the on-demand box was re-created.
+  Always reconcile with `jl list` before trusting those files. instance.txt now fixed to 425850/.147.**
+- **DESTROY:** `jl destroy 425850 --yes` (after final ckpts sync; needs venv + key — see JARVIS_RUNBOOK §Auth).
+- **Run = the SUFFICIENT-COMMIT MASK delta** (`docs/phase2.md` §P-OPEN #2): resume **p2rev5 4M**
+  (`seed_checkpoints/torch_step_4194304_p2rev5_20260612_083540.pt` — p2rev5's held-out Ajay WR peak, 5.9%)
+  + **ONE delta `--sufficient-commit-factor 1.0`** (veto attack launches whose ships ≤ target defense →
+  fragments impossible, forces concentration). Everything else IDENTICAL to p2rev5: deb-only pool @0.25,
+  gate3 / **garrison-floor 0** / **no forward-only**, early_capture OFF, speed 0.3, expansion 0.03,
+  fire-entropy 0.005, LR 5e-5, gae-lambda 0.99, 256 envs / rollout 128 / ppo-epochs 2 / 8 heuristic workers.
+  Script: `gpu_run_artifacts/p2rev6/run_remote_p2rev6_jarvis.sh` (cwd `/home`).
+- **TARGETS the held-out panel's dominant unmoved gap: opening conversion** — `open<50 cap/atk (WON)`
+  stuck ~0.38 vs winner 0.51 across all of p2rev5's 12 ckpts. WATCH: `open<50 cap/atk (WON)` should lift
+  toward 0.51. GUARD: if the opening goes forced-passive (no neutral takeable from the start garrison),
+  relax factor 1.0→0.6 (or neutrals-only). Threat head = PARKED (held-out panel showed reinforce already
+  winner-like vs Ajay — not the indicated lever).
+- **LAUNCH NOTES (2026-06-12, took over a half-finished setup):** (1) `kaggle_environments` was missing on
+  the box (a pause/resume wiped conda site-packages while `/home` persisted) → reinstalled via
+  `pip install -q kaggle-environments && bash setup/install_orbit_wars.sh`. (2) tmux does NOT survive SSH
+  disconnect on this image + a `pkill -f train_torch.py` over SSH self-kills the shell → left duplicate runs;
+  cleaned to ONE tmux-managed run. Verify single run: `pgrep -c -f "[t]rain_torch"` == 1. iter 1 healthy
+  (EV 0.69, clip 0.095, KL 0.008, SPS ~600–755 once de-duped). See memory `feedback_ssh_pkill_selfkill`.
+- **Watchers via the CONTROLLER** repointed to .147: `bash gpu_run_artifacts/run_watchers.sh start p2rev6
+  jarvis 217.18.55.147` (tore down the stale .30 watchers). Held-out **Ajay** full panel per ckpt, masks
+  **gate3 / floor 0 / NO forward-only** (match training) → `gpu_run_artifacts/p2rev6/eval_ajay_1200.csv` +
+  `eval_logs/`. `… status` / `… stop` as usual. First eval = step 500k.
+- Monitor: `ssh -i ~/.ssh/jarvis-labs-key root@217.18.55.147 "grep '^iter' /home/train_gpu_phase1_p2rev6_*.log | tail"`.
+
+---
+
+## 🔵 LIVE — p2rev9 on GCP L4 — RELAUNCHED on the COMET-FAITHFUL engine (2026-06-13)
+
+- **⭐ This is the comet-fixed relaunch.** Old comet-free p2rev9 box was gone; relaunched fresh on the fixed
+  torch_env (comets simulated). Old artifacts archived → `gpu_run_artifacts/p2rev9_cometfree_old/` (20 ckpts).
+  iter 1 ran past the step-50 comet spawn cleanly; comets active in the full training loop; SPS ~485.
+  **Early signal:** in-training pin WR dropped with comets (rev38 ema 0.60→0.53, rev53b 0.70→0.60) — difficulty
+  recalibrating toward kaggle reality. Watch held-out planets@50/WR per ckpt (now meaningful).
+- **GCP L4 `g2-standard-8`, name `orbit-wars-p2rev9`, IP `8.231.115.108`, zone asia-south1-b. RUNNING + BILLING.**
+- **DELETE (manual):** `gcloud compute instances delete orbit-wars-p2rev9 --zone=asia-south1-b`.
+- **Run = the POOL pivot (NOT a reward delta).** Resume **p2rev5 4M** + ONE delta = the pool: `--pool-seed-rl
+  rev38_5M.pt,rev53b_10M.pt` (winnable RL champions) + **deb demoted 0.25→0.10** (`--pool-external-fraction 0.15`
+  × `--pool-fraction 0.65` ≈ 10%) + **35% self-play** (pool-fraction 0.65). Reward = p2rev5 CLEAN baseline:
+  **`--early-capture-coef 0` + defense_coef OFF** (both p2rev7/p2rev8 levers DROPPED). gate3/floor0/no-forward,
+  speed 0.3, expansion 0.03, LR 5e-5, 256 envs/128 rollout/ppo-2, 4 workers. Script:
+  `gpu_run_artifacts/p2rev9/run_remote_p2rev9_gcp.sh`.
+- **WHY:** win-starvation ([[feedback_win_starvation]]) — 4 reward/mask levers all left `planets@50` at 6 because
+  we can't learn from a peeler (deb) we never beat. **Cross-eval 2026-06-13: p2rev5 4M beats rev38 27% / rev53b
+  37.5%** (vs deb ~5%) = matched difficulty, a real transferable win-gradient; rev38 (aggressor) punishes
+  under-expansion at a beatable difficulty. Also confirmed p2rev7 1M (27%/25%) — picked p2rev5 4M (cleaner reward
+  lineage, no defense_coef baggage, slightly more winnable vs rev53b).
+- **WATCH (held-out Ajay panel):** **`planets@50` climbs toward 9** (pins' target) + **WR climbs from the 27-37%
+  base**. Secondary `peel-rate WON` (deb). GUARD: clip<0.25 (resume into new pool = warmup); ship0 ~0. KILL read:
+  `planets@50` flat over many ckpts = pins didn't break it either → the ceiling is deeper than the pool.
+- **Controller watcher** (sync + held-out Ajay per ckpt): `bash gpu_run_artifacts/run_watchers.sh start p2rev9 gcp
+  orbit-wars-p2rev9.asia-south1-b.orbit-wars-rl` → `gpu_run_artifacts/p2rev9/`. iter 1 healthy (EV 0.70 warmup, KL
+  0.007, clip 0.08, both pins + deb loaded, GPU 100%, SPS ~580 pre-warmup). GCP ckpt dir is a real dir (no symlink
+  sync bug). ~6-7h to 10M (deb only 0.10 → less CPU than p2rev7).
+- Monitor: `gcloud compute ssh orbit-wars-p2rev9 --zone=asia-south1-b -- "grep '^iter' ~/orbit_wars_rl/train_gpu_phase1_p2rev9_*.log | tail"`.
+
+---
+
+## ✅ CONCLUDED — p2rev8 on Jarvis A100-80GB SPOT (KILLED @5.77M 2026-06-13, box 425956 destroyed)
+
+**VERDICT: FAILED — early_capture 0.2 did NOT move `planets@50` (dead flat at 6 over all 9 held-out ckpts;
+winner 9), opening conversion flat ~0.37, WR flat ~4.5%.** Killed together with p2rev7 on the **win-starvation
+finding** (`docs/training.md` Current State): we can't learn to beat a peeler we almost never beat — early_capture's
+within-game expansion reward has no terminal deb-win that *requires* 9 planets to anchor it. `planets@50=6` is now
+invariant across FOUR levers → opening ceiling is STRUCTURAL, not reward-tunable. 11 ckpts harvested → 5.77M.
+**Next = pool-seed-RL pivot, not another reward delta** (see pool levers below). Original live block kept for
+config reference:
+
+
+
+- **Jarvis A100-80GB SPOT, machine id `425956`, IP `217.18.55.39`, 28 cores. ⚠️ SPOT — DESTROY, never pause
+  (preemption may lose data; the sync watcher below is mandatory).**
+- **DESTROY:** `jl destroy 425956 --yes` (from the launch box; needs venv + key — JARVIS_RUNBOOK §Auth).
+- **Run = the QUANTITY/opening lever** (`docs/next-steps.md` P-OPEN #3): resume **p2rev7 1M**
+  (`torch_step_1048576_p2rev7_20260612_144503.pt`) + **ONE delta `--early-capture-coef 0.2`** (0→0.2,
+  always-on / anneal-frac 0). Everything else IDENTICAL to p2rev7 incl. **`--defense-coef 0.02` carried
+  forward** (the 1M base was trained with it → keeping it is what makes early_capture the single delta).
+  deb-only pool @0.25, gate3 / floor0 / no-forward, speed 0.3, expansion 0.03, LR 5e-5, 256 envs / 8 workers.
+  Script: `gpu_run_artifacts/p2rev8/run_remote_p2rev8_jarvis.sh`.
+- **CLEAN A/B:** p2rev7 continues on GCP from the SAME 1M point with defense_coef ONLY; p2rev8 branches here
+  adding early_capture, so the divergence past 1M isolates early_capture's marginal effect.
+- **WHY:** `planets@50` is stuck at **6** (winner 9) across p2rev5/6/7 in BOTH wins and losses — the QUANTITY
+  gap. The sufficient-commit MASK (p2rev6) failed to lift it (veto removes fragments, supplies no
+  concentration → [[feedback_veto_mask_removes_not_teaches]]). early_capture rewards the successful-capture
+  OUTCOME (clamped count delta, NOT rev49's production-weighted delta → carpet-bomb) so failed fragments pay
+  0 → positive gradient toward real commitment. It was the rev28 breakthrough (passive→expanding).
+- **WATCH (held-out panel):** `planets@50` should climb toward 9 + `open<50 cap/atk WON` toward 0.51.
+  **GUARD:** `ship0` must stay ~0 (1-ship spray canary — NOT using min-ship-bin; early_capture self-punishes
+  probes since they capture nothing); `fire_frac`/`shipspp@50` must NOT balloon (carpet-bomb). KILL read:
+  `planets@50` flat over 3–4 ckpts = failed like the mask.
+- **Watchers via the CONTROLLER:** `bash gpu_run_artifacts/run_watchers.sh start p2rev8 jarvis 217.18.55.39`
+  (sync + auto held-out **Ajay** full panel per ckpt, masks gate3/floor0/no-forward) → `gpu_run_artifacts/p2rev8/`.
+  iter 1 healthy (EV 0.57 resume-warmup, KL 0.008, clip 0.08, single proc, `Early capture coeff: 0.2` confirmed).
+- Monitor: `ssh -i ~/.ssh/jarvis-labs-key root@217.18.55.39 "grep '^iter' /home/train_gpu_phase1_p2rev8_*.log | tail"`.
+  ⚠️ At 10M the run auto-stops but the SPOT box keeps billing — `jl destroy 425956 --yes` after final ckpts sync.
+
+---
+
+## ✅ CONCLUDED — p2rev7 on GCP L4 (KILLED @4M 2026-06-13, instance orbit-wars-p2rev7 deleted)
+
+**VERDICT: hold metric moved but it's a self-play MIRROR artifact, not transferable.** `peel WON` declined
+0.64→0.52 (toward winner 0.43, first lineage result to move it; flood guard GREEN) BUT **WR DECLINED 5.9→3.1**
+and `planets@50` slipped 6→5 (`mid cap/atk` rose to 0.71) — defense_coef + perpetual-deb-loss = good at holding a
+SMALL empire, expands less (conservatism). The peel gain is self-play copies out-holding *each other*, which is why
+it does NOT lift WR vs deb. Killed on the win-starvation finding (`docs/training.md`). 7 ckpts harvested → 3.67M.
+Original live block kept for config reference:
+
+
+
+- **GCP L4 `g2-standard-8` (23 GB, 8 vCPU), zone asia-south1-b, name `orbit-wars-p2rev7`, IP 34.100.224.184,
+  RUNNING + BILLING (~$1.13/hr, on-demand).**
+- **DESTROY (manual, no auto):** `gcloud compute instances delete orbit-wars-p2rev7 --zone=asia-south1-b`
+  (DELETE not stop — stopped instances still bill for disk; [[feedback_gcp_instance_cleanup]]).
+- **Run = the defense_coef test** (`docs/phase2.md` flood history): resume **p2rev5 4M** (same base as p2rev6)
+  + **ONE delta `--defense-coef 0.02`**, `--sufficient-commit-factor` OFF, else IDENTICAL to p2rev6
+  (deb-only pool @0.25, gate3 / floor0 / no-forward, early_capture 0, speed 0.3, expansion 0.03, LR 5e-5,
+  4 heuristic-workers for the L4's 8 cores). Script: `gpu_run_artifacts/p2rev7/run_remote_p2rev7_gcp.sh`.
+- **WHY (the untested combo):** defense_coef is the one reward term that gives reinforcing/holding a
+  near-immediate signal (avoid production lost) → fills the reinforce credit-assignment void. rev58 said it's
+  the *flood pump*, BUT that was a **symmetric, pool-LESS mirror**; Tier-1 then dropped defense_coef AND added
+  the aggressive pool in one move, so **defense_coef + peeler-pool was never isolated**. The deb pool should
+  now punish hoarding. **A/B framing:** p2rev6 = sufficient-commit (opening), p2rev7 = defense_coef (hold),
+  both single-delta off the SAME p2rev5 4M base → read which lever moves the gap.
+- **WATCH:** **peel-rate WON should FALL** (winner 0.43 vs our ~0.6) — the payoff. **FLOOD GUARD:** flood =
+  reinf rate up **WITH** volume exploding (`p90`/`shipspp@`); healthy = reinf up, volume flat, peel down.
+  Magnitude 0.02 (rev58's 0.03 floods pool-less; started smaller). If it floods → it's the pump again (pool
+  insufficient); if too conservative (game length rises, attacks drop) → lower it.
+- **MONITORING = the CONTROLLER (since 2026-06-12, after p2rev6 concluded and freed it).** p2rev7 now owns the
+  single-run controller: sync + auto held-out **Ajay** panel per checkpoint, masks gate3/floor0/no-forward (NO
+  sufficient-commit — matches training). Procs were 51273/51274 → `gpu_run_artifacts/p2rev7/{logs,checkpoints,eval_ajay_1200.csv}`.
+  **Restart if the laptop bounces:** `bash gpu_run_artifacts/run_watchers.sh start p2rev7 gcp orbit-wars-p2rev7.asia-south1-b.orbit-wars-rl`
+  (`… status` / `… stop`). The launch script's original standalone sync loop (PID 41464) was RETIRED to avoid
+  double-sync. ⚠️ If a SECOND concurrent run starts, it can't use the controller (single-run) — give it the
+  standalone-sync + manual-eval treatment instead, and DON'T `start` the controller for it (that tears down
+  p2rev7's). Cross-eval vs the 4M baseline is still MANUAL + needs a solo window (thrashes swap alongside the panels).
+- iter 1→3 healthy (EV 0.69→0.84, KL low, clip 0.10→0.20 warmup, `Defense coeff: 0.02` confirmed).
+  **SPS ~250** (deb/orbit_lite is CPU-bound on 8 cores; ~½ the A100's rate) → ~11 h for 10M, first 500k ckpt ~1 h.
+- Monitor: `gcloud compute ssh orbit-wars-p2rev7 --zone=asia-south1-b -- "grep '^iter' ~/orbit_wars_rl/train_gpu_phase1_p2rev7_*.log | tail"`.
+
+---
+
+## ✅ CONCLUDED — p2rev5 on Jarvis A100-80GB SPOT (launched 2026-06-12 ~08:22 UTC; verdict → p2rev6 sufficient-commit mask)
 
 - **Jarvis A100-80GB SPOT, machine id `425730`, IP `217.18.55.11`, 28 cores. ⚠️ SPOT — DESTROY, never pause
   (preemption may lose data; that's why the sync watcher below is mandatory).**

@@ -42,7 +42,10 @@ write_env() {  # write_env <run> <platform> <target> <opp>
   case "$PLAT" in
     jarvis)
       RSYNC_SSH="ssh -i $HOME/.ssh/jarvis-labs-key -o StrictHostKeyChecking=no -o ConnectTimeout=10"
-      HOST="root@$TGT"; RLOG="/home/"; RCKPT="/home/orbit_wars_rl/checkpoints/" ;;
+      # checkpoints save to /home/checkpoints (cwd-relative); /home/orbit_wars_rl/checkpoints is a
+      # SYMLINK to it. rsync -L on the top-level symlinked dir nests files under checkpoints/ and the
+      # include/exclude filter then drops them → sync the REAL dir flat instead.
+      HOST="root@$TGT"; RLOG="/home/"; RCKPT="/home/checkpoints/" ;;
     gcp)
       RSYNC_SSH="ssh -o ConnectTimeout=10"
       HOST="$TGT"; RLOG="~/orbit_wars_rl/"; RCKPT="~/orbit_wars_rl/checkpoints/" ;;

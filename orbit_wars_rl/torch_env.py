@@ -39,6 +39,18 @@ MAX_PLANETS = 48
 MAX_FLEETS = 256
 MAX_OWNED = 16
 
+# Comets (extra-solar objects) — spawn mid-game, are collidable + capturable + moving.
+# Match kaggle_environments.envs.orbit_wars: 4-comet symmetric groups spawn at these steps,
+# carry ships + production 1, radius 1, move along precomputed elliptical paths at 4 units/turn.
+# One group is active at a time (spawns 100 steps apart, paths <=40 steps), so 4 reserved
+# planet slots suffice. They live in the LAST N_COMET_SLOTS slots so the policy observes them.
+COMET_RADIUS = 1.0
+COMET_PRODUCTION = 1.0
+COMET_SPEED = 4.0
+COMET_SPAWN_STEPS = (50, 150, 250, 350, 450)
+N_COMET_SLOTS = 4
+COMET_SLOT_START = MAX_PLANETS - N_COMET_SLOTS  # 44
+
 # Discrete action bins (match action_mask.py / model.py)
 NUM_ANGLE_BINS = 144
 ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
@@ -46,6 +58,113 @@ NUM_SHIP_BINS = 32
 SHIP_COUNTS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 19, 22, 26, 30, 35, 42, 50, 60, 72, 86, 102, 122, 145, 173, 206, 245, 290, 350, 420]
 # Fraction-mode decode (10 bins): bin i → (i+1)/10 * src_ships
 FRACTION_BIN_VALUES = [(i + 1) / 10 for i in range(10)]
+
+
+_COMET_T_ARR = None  # cached dense-sample parameter grid (t), built on first use
+
+
+def _comet_paths_fast(initial_planets, angular_velocity, spawn_step,
+                      comet_planet_ids=None, comet_speed=4.0, rng=None):
+    """Vectorized drop-in for kaggle's generate_comet_paths — byte-identical output, ~30x faster.
+    Only the two 5000-iteration loops (dense ellipse sampling + arc-length resample) are
+    vectorized with numpy; the RNG draw order (e, a, phi per attempt) and the validity check are
+    preserved exactly, so `comet_ships` (drawn after) and accept/reject decisions are unchanged.
+    np.cos/np.sin match math.cos/math.sin bit-for-bit here (verified); cross-checked against
+    kaggle on 250 seeds in tests/test_comet_fidelity.py. Segments (arc/5000 ≈ 0.05) << comet_speed
+    so the resample never skips a target → searchsorted matches kaggle's sequential append."""
+    global _COMET_T_ARR
+    import math as _m
+    if rng is None:
+        rng = random
+    comet_planet_ids = set() if comet_planet_ids is None else set(comet_planet_ids)
+    num = 5000
+    if _COMET_T_ARR is None:
+        _COMET_T_ARR = 0.3 * _m.pi + 1.4 * _m.pi * np.arange(num) / (num - 1)
+    t = _COMET_T_ARR
+
+    def _dist(p1, p2):
+        return _m.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+
+    for _ in range(300):
+        e = rng.uniform(0.75, 0.93)
+        a = rng.uniform(60, 150)
+        perihelion = a * (1 - e)
+        if perihelion < SUN_RADIUS + COMET_RADIUS:
+            continue
+        b = a * _m.sqrt(1 - e ** 2)
+        c_val = a * e
+        phi = rng.uniform(_m.pi / 6, _m.pi / 3)
+        cphi, sphi = _m.cos(phi), _m.sin(phi)
+        ex = c_val + a * np.cos(t)
+        ey = b * np.sin(t)
+        x = CENTER + ex * cphi - ey * sphi
+        y = CENTER + ex * sphi + ey * cphi
+        # Resample at constant comet_speed arc-length intervals (searchsorted == kaggle's
+        # sequential cum>=target since per-segment length << comet_speed).
+        seg = np.sqrt(np.diff(x) ** 2 + np.diff(y) ** 2)
+        cum = np.cumsum(seg)                                  # cum[j] = arc length to dense[j+1]
+        K = int(cum[-1] // comet_speed)
+        if K >= 1:
+            sel = np.searchsorted(cum, comet_speed * np.arange(1, K + 1), side="left") + 1
+            px = np.concatenate(([x[0]], x[sel]))
+            py = np.concatenate(([y[0]], y[sel]))
+        else:
+            px, py = x[:1], y[:1]
+        onboard = (px >= 0) & (px <= BOARD_SIZE) & (py >= 0) & (py <= BOARD_SIZE)
+        if not onboard.any():
+            continue
+        bi = np.where(onboard)[0]
+        visible = [(float(px[i]), float(py[i])) for i in range(bi[0], bi[-1] + 1)]
+        if not (5 <= len(visible) <= 40):
+            continue
+        paths = [
+            [[yv, xv] for xv, yv in visible],
+            [[BOARD_SIZE - xv, yv] for xv, yv in visible],
+            [[xv, BOARD_SIZE - yv] for xv, yv in visible],
+            [[BOARD_SIZE - yv, BOARD_SIZE - xv] for xv, yv in visible],
+        ]
+        static_planets, orbiting_planets = [], []
+        for planet in initial_planets:
+            if planet[0] in comet_planet_ids:
+                continue
+            pr = _dist((planet[2], planet[3]), (CENTER, CENTER))
+            (orbiting_planets if pr + planet[4] < ROTATION_RADIUS_LIMIT else static_planets).append(planet)
+        valid = True
+        buf = COMET_RADIUS + 0.5
+        for k, (cx, cy) in enumerate(visible):
+            if _dist((cx, cy), (CENTER, CENTER)) < SUN_RADIUS + COMET_RADIUS:
+                valid = False
+                break
+            sym_pts = [(cy, cx), (BOARD_SIZE - cx, cy), (cx, BOARD_SIZE - cy), (BOARD_SIZE - cy, BOARD_SIZE - cx)]
+            for planet in static_planets:
+                for sp in sym_pts:
+                    if _dist(sp, (planet[2], planet[3])) < planet[4] + buf:
+                        valid = False
+                        break
+                if not valid:
+                    break
+            if not valid:
+                break
+            game_step = spawn_step - 1 + k
+            for planet in orbiting_planets:
+                dx = planet[2] - CENTER
+                dy = planet[3] - CENTER
+                orb_r = _m.sqrt(dx ** 2 + dy ** 2)
+                init_angle = _m.atan2(dy, dx)
+                cur_angle = init_angle + angular_velocity * game_step
+                pxp = CENTER + orb_r * _m.cos(cur_angle)
+                pyp = CENTER + orb_r * _m.sin(cur_angle)
+                for sp in sym_pts:
+                    if _dist(sp, (pxp, pyp)) < planet[4] + COMET_RADIUS:
+                        valid = False
+                        break
+                if not valid:
+                    break
+            if not valid:
+                break
+        if valid:
+            return paths
+    return None
 
 
 def _ship_speed(ships: torch.Tensor) -> torch.Tensor:
@@ -89,6 +208,7 @@ class VecTorchEnv:
         reinforce_cost: float = 0.0,
         reinforce_gate_min_planets: int = 0,
         reinforce_forward_only: bool = False,
+        sufficient_commit_factor: float = 0.0,
     ):
         self.num_envs = num_envs
         # Reinforcement: when True, own planets (except the launch source) are LEGAL
@@ -127,6 +247,16 @@ class VecTorchEnv:
         #      training-only, internalised at inference. 0/False = off. Enemy/neutral
         #      targets are never constrained.
         self.reinforce_forward_only = bool(reinforce_forward_only)
+        #   SUFFICIENT-COMMIT MASK: veto an ATTACK launch (enemy/neutral target) whose
+        #   ship_count <= target's current defense × this factor → fragments fired under a
+        #   target's garrison become impossible by construction, forcing concentration
+        #   (attack only a target you can actually take, else accumulate first). Fixes the
+        #   opening under-commitment that caps conversion (open<50 cap/atk ~0.38 vs winner
+        #   0.51). 1.0 = strict (need strictly more than current defense); 0.6 = relaxed
+        #   fallback if it over-constrains; 0.0 = off. Exact for neutrals (they don't regrow),
+        #   approximate for enemy planets (reinforce in transit). Pure training-time mask
+        #   (no reward tax → no fire=0 Nash); the policy internalises it, parity at eval/export.
+        self.sufficient_commit_factor = float(sufficient_commit_factor)
         # reinforce_rate metric accumulators (N, num_players), allocated/zeroed per
         # rollout via reset_reinforce_stats(). None = not collecting (no overhead).
         self._reinforce_launch_count = None
@@ -207,6 +337,8 @@ class VecTorchEnv:
         self.step_count: torch.Tensor = None    # (N,) long
         self.angular_velocity: torch.Tensor = None  # (N,) float
         self.next_fleet_id: torch.Tensor = None     # (N,) long
+        self._has_comets = False                    # set in _precompute_comets
+        self._comet_xy = None                       # (N, T+1, 4, 2) precomputed comet positions
         self.done: torch.Tensor = None              # (N,) bool
         self.rewards: torch.Tensor = None           # (N, num_players) float
         self.prev_material: torch.Tensor = None     # (N, num_players) float
@@ -320,6 +452,7 @@ class VecTorchEnv:
         self.seeds = list(seeds)
 
         self._precompute_orbital_params()
+        self._init_comets()
         self.prev_material = self._compute_material()
         self.prev_production = self._compute_production()
         owner_p = self.planets[:, :, 1].long()
@@ -362,6 +495,108 @@ class VecTorchEnv:
         self._planet_is_orbiting = (
             (self._planet_orbital_r + r) < ROTATION_RADIUS_LIMIT
         ) & self.planet_alive
+
+    def _init_comets(self, env_indices=None):
+        """Allocate / clear the per-step comet schedule buffers. Comets are computed LAZILY
+        (`_lazy_comets`) the first time an env reaches a spawn step, because generate_comet_paths
+        is expensive (5000-pt sampling) and most games end before the later spawns — so an upfront
+        precompute of all 5 spawns × N envs would dominate reset/auto-reset cost. `_has_comets`
+        stays True (the integration is always wired); an un-computed schedule is simply all-dead."""
+        N, T1 = self.num_envs, self.episode_steps + 1
+        if getattr(self, "_comet_xy", None) is None:
+            self._comet_xy = torch.zeros(N, T1, N_COMET_SLOTS, 2, device=self.device)
+            self._comet_alive = torch.zeros(N, T1, N_COMET_SLOTS, dtype=torch.bool, device=self.device)
+            self._comet_check = torch.zeros(N, T1, N_COMET_SLOTS, dtype=torch.bool, device=self.device)
+            self._comet_ships0 = torch.zeros(N, T1, N_COMET_SLOTS, device=self.device)
+            self._comet_spawn_done = torch.zeros(N, len(COMET_SPAWN_STEPS), dtype=torch.bool, device=self.device)
+            self._comet_ids = torch.zeros(N, N_COMET_SLOTS, device=self.device)
+        self._has_comets = True
+        idx = torch.arange(N, device=self.device) if env_indices is None else \
+            torch.tensor(env_indices, device=self.device)
+        # Clear schedule for these envs (auto-reset gives them new seeds/comets).
+        self._comet_alive[idx] = False
+        self._comet_ships0[idx] = 0.0
+        self._comet_check[idx] = False
+        self._comet_spawn_done[idx] = False
+        # Comet ids match kaggle (max regular id + 1 + c = n_regular + c; ids are contiguous
+        # 0..n-1 and prior comets are removed before each spawn, so ids repeat).
+        nreg = self.planet_alive[idx][:, :COMET_SLOT_START].sum(dim=1).float()
+        self._comet_ids[idx] = nreg.unsqueeze(1) + torch.arange(N_COMET_SLOTS, device=self.device).float()
+
+    def _lazy_comets(self):
+        """Compute any comet spawn an env reaches THIS step (step_count == spawn-1). Cheap check
+        (5 scalar compares); the heavy generate_comet_paths runs only for the few envs crossing a
+        spawn boundary, and only for spawns games actually reach."""
+        if self.episode_steps <= COMET_SPAWN_STEPS[0]:
+            return
+        sc = self.step_count
+        for si, S in enumerate(COMET_SPAWN_STEPS):
+            if S >= self.episode_steps:
+                continue
+            need = (sc == (S - 1)) & ~self._comet_spawn_done[:, si]
+            if need.any():
+                self._compute_spawn(torch.where(need)[0].cpu().tolist(), si)
+
+    def _compute_spawn(self, env_indices, si):
+        """Fill the comet schedule for spawn COMET_SPAWN_STEPS[si] for the given envs. Reuses
+        kaggle's generate_comet_paths so the ellipse math + comet RNG order (paths THEN ships)
+        are byte-identical; folds spawn+advance into the per-step lookup (position, alive,
+        check=collision-tested, ships0 at activation)."""
+        S, T1 = COMET_SPAWN_STEPS[si], self.episode_steps + 1
+        for e in env_indices:
+            self._comet_spawn_done[e, si] = True
+            ang_vel = float(self.angular_velocity[e].item())
+            init_planets = []
+            for i in range(COMET_SLOT_START):
+                if bool(self.planet_alive[e, i]):
+                    p = self.init_planets[e, i].tolist()
+                    init_planets.append([int(p[0]), int(p[1]), p[2], p[3], p[4], p[5], p[6]])
+            rng = random.Random(f"orbit_wars-comet-{self.seeds[e]}-{S}")
+            paths = _comet_paths_fast(init_planets, ang_vel, S, comet_planet_ids=set(),
+                                      comet_speed=COMET_SPEED, rng=rng)
+            if not paths:
+                continue
+            comet_ships = min(rng.randint(1, 99), rng.randint(1, 99),
+                              rng.randint(1, 99), rng.randint(1, 99))
+            for c in range(N_COMET_SLOTS):
+                path = paths[c]
+                L = len(path)
+                # path_index k = step_count-(S-1). k in [0,L-1]=on-path; k==L = kaggle's
+                # stay-put expiry tick (still collidable), then gone.
+                for k in range(L + 1):
+                    t = (S - 1) + k
+                    if t >= T1:
+                        break
+                    kk = min(k, L - 1)
+                    self._comet_xy[e, t, c, 0] = path[kk][0]
+                    self._comet_xy[e, t, c, 1] = path[kk][1]
+                    self._comet_alive[e, t, c] = True
+                    self._comet_check[e, t, c] = (k >= 1)
+                    if k == 0:
+                        self._comet_ships0[e, t, c] = comet_ships
+
+    def _apply_comet_state(self):
+        """Set comet slots for the current step_count: activate new comets (owner=-1,
+        ships, production) and set alive. Position is applied in step() phase 2/8.
+        Returns the per-(N,P) collision-check mask for comet slots this tick."""
+        t = self.step_count.clamp(max=self.episode_steps).long()          # (N,)
+        bidx = torch.arange(self.num_envs, device=self.device)
+        c0 = COMET_SLOT_START
+        alive_t = self._comet_alive[bidx, t]                              # (N, 4)
+        ships0_t = self._comet_ships0[bidx, t]                            # (N, 4)
+        activating = ships0_t > 0                                         # (N, 4)
+        sl = slice(c0, c0 + N_COMET_SLOTS)
+        # Activate: seed id, owner=-1, ships, production at the comet's first tick.
+        self.planets[:, sl, 0] = torch.where(activating, self._comet_ids, self.planets[:, sl, 0])
+        self.planets[:, sl, 1] = torch.where(activating, torch.full_like(ships0_t, -1.0),
+                                             self.planets[:, sl, 1])
+        self.planets[:, sl, 5] = torch.where(activating, ships0_t, self.planets[:, sl, 5])
+        self.planets[:, sl, 6] = torch.where(activating, torch.full_like(ships0_t, COMET_PRODUCTION),
+                                             self.planets[:, sl, 6])
+        self.planets[:, sl, 4] = torch.where(activating, torch.full_like(ships0_t, COMET_RADIUS),
+                                             self.planets[:, sl, 4])
+        self.planet_alive[:, sl] = alive_t
+        return t, bidx
 
     def _state_dict(self) -> dict:
         return {
@@ -953,6 +1188,7 @@ class VecTorchEnv:
             target_gather = target_idx.unsqueeze(-1).expand(-1, -1, 7)
             tgt = self.planets.gather(1, target_gather)
             target_owner = tgt[:, :, 1].long()
+            target_ships = tgt[:, :, 5]                            # current defense at the target
             target_alive = self.planet_alive.gather(1, target_idx)
             if self.allow_reinforce:
                 # Own planets are valid targets (friendly arrival reinforces the
@@ -1017,6 +1253,16 @@ class VecTorchEnv:
                 self._reinf_step[:, owner_id, 2] += reinf_per * w2
                 is_neutral = use_target_decode & (target_owner < 0)  # neutral planet owner = -1
                 self._neutral_launch_count[:, owner_id] += (can_fire & is_neutral).sum(dim=1).float()
+
+        # SUFFICIENT-COMMIT MASK: veto an attack launch (enemy/neutral target) whose ship
+        # count can't beat the target's current defense × factor → fragments impossible by
+        # construction, forcing concentration. Reinforces (own targets) are untouched —
+        # they have their own garrison-floor discipline. Pure veto, no reward tax.
+        if (self.sufficient_commit_factor > 0.0 and self.action_decode == "target"
+                and actions.shape[-1] >= 4):
+            is_attack = use_target_decode & (target_owner != owner_id)
+            insufficient = is_attack & (ship_count <= target_ships * self.sufficient_commit_factor)
+            can_fire = can_fire & ~insufficient
 
         # Compute launch positions (just outside planet radius along angle)
         start_x = src_x + torch.cos(angle) * (src_r + 0.1)
@@ -1102,6 +1348,13 @@ class VecTorchEnv:
                 ovr = angle_overrides.get(pid) if angle_overrides else None
                 self._apply_actions(act, pid, angle_override=ovr)
 
+        # 0b. Comets: lazily compute any spawn reached this step, then activate this tick's
+        # comet group (owner=-1, ships, prod) + set alive, BEFORE production (a neutral comet
+        # doesn't produce; a captured one does).
+        if self._has_comets:
+            self._lazy_comets()
+            comet_t, comet_bidx = self._apply_comet_state()
+
         # 1. Production: planet[5] += planet[6] for owned planets (owner != -1)
         owner = self.planets[:, :, 1]
         prod  = self.planets[:, :, 6]
@@ -1120,6 +1373,14 @@ class VecTorchEnv:
         is_orb = self._planet_is_orbiting
         planet_new_x = torch.where(is_orb, planet_new_x, planet_old_x)
         planet_new_y = torch.where(is_orb, planet_new_y, planet_old_y)
+
+        # 2b. Comets follow their precomputed path (not orbital motion): new pos = path[t].
+        # old pos stays the current position so the swept-pair check uses the real chord.
+        if self._has_comets:
+            c0 = COMET_SLOT_START
+            cxy = self._comet_xy[comet_bidx, comet_t]                  # (N, 4, 2)
+            planet_new_x[:, c0:c0 + N_COMET_SLOTS] = cxy[:, :, 0]
+            planet_new_y[:, c0:c0 + N_COMET_SLOTS] = cxy[:, :, 1]
 
         # 3. Fleet movement
         fleet_angle = self.fleets[:, :, 4]
@@ -1170,6 +1431,12 @@ class VecTorchEnv:
         hit_moving = disc_ok & (t2 >= 0.0) & (t1 <= 1.0)
         hit_degenerate = (a < 1e-12) & (c <= 0.0)
         hit = (hit_moving & (a >= 1e-12)) | hit_degenerate  # (N, F, P)
+
+        # Comets are not collision-tested on their first (off-board) placement tick.
+        if self._has_comets:
+            c0 = COMET_SLOT_START
+            chk = self._comet_check[comet_bidx, comet_t]              # (N, 4) bool
+            hit[:, :, c0:c0 + N_COMET_SLOTS] &= chk.unsqueeze(1)
 
         # Mask out dead fleets / dead planets
         valid = self.fleet_alive.unsqueeze(2) & self.planet_alive.unsqueeze(1)
@@ -1553,6 +1820,9 @@ class VecTorchEnv:
             self.rewards[env_i] = 0.0
         # Re-precompute orbital params for changed envs
         self._precompute_orbital_params()
+        # Reset the comet schedule for the reset envs (new seeds → recomputed lazily).
+        if done_idx:
+            self._init_comets(done_idx)
         self.prev_material[done_mask] = self._compute_material()[done_mask]
 
 

@@ -210,6 +210,7 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
                                reinforce_gate_min_planets: int = 0,
                                reinforce_forward_only: bool = False,
                                reinforce_garrison_floor: float = 0.0,
+                               sufficient_commit_factor: float = 0.0,
                                veto_stats: dict = None):
     """Convert policy outputs to actions using target planet logits for aiming.
 
@@ -325,6 +326,12 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         # below the floor. Attacks (enemy/neutral) are never garrison-limited.
         if (is_own_target and allow_reinforce and reinforce_garrison_floor > 0.0
                 and (planets[pidx][5] - ships) < reinforce_garrison_floor):
+            continue
+        # Sufficient-commit parity (torch_env): veto an ATTACK launch that can't beat
+        # the target's current defense × factor → forces concentration. Reinforces
+        # (own targets) untouched (they have the garrison floor instead).
+        if (not is_own_target and sufficient_commit_factor > 0.0
+                and ships <= planets[tidx][5] * sufficient_commit_factor):
             continue
 
         angle = _target_intercept_angle(planets[pidx], planets[tidx], ships, obs)
