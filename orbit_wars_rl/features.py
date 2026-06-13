@@ -39,6 +39,33 @@ import torch
 # in its NATIVE feature regime (deflation off). Default off → deflation active (production path).
 _NO_FRIENDLY_DEFLATION = os.environ.get("ORBIT_NO_FRIENDLY_DEFLATION") == "1"
 
+# Game-phase observation features (Stage B). When on, append 4 global channels (global dim 11->15).
+# Set per-checkpoint by eval/export from cfg.model.game_phase_features (or the env var for probes).
+# MUST stay byte-identical to the vectorized version in torch_env.get_features — see
+# feature_parity_gamephase_probe.py. Pure function of `step` → parity-safe.
+_GAME_PHASE_FEATURES = os.environ.get("ORBIT_GAME_PHASE_FEATURES") == "1"
+_COMET_SPAWN_STEPS = (50, 150, 250, 350, 450)  # MUST match torch_env.COMET_SPAWN_STEPS
+
+
+def set_game_phase_features(on: bool) -> None:
+    """Toggle the game-phase global channels (called by eval/export after load_checkpoint)."""
+    global _GAME_PHASE_FEATURES
+    _GAME_PHASE_FEATURES = bool(on)
+
+
+def game_phase_channels(step):
+    """The 4 game-phase global channels from the integer game step:
+    [phase_early (step<50), phase_mid (50<=step<100), phase_late (step>=100),
+     norm_steps_to_next_comet_spawn]. Comet spawns at _COMET_SPAWN_STEPS; the last channel is
+     (next_spawn - step)/100 in (0,1], or 1.0 once no spawn remains. Single source of truth for
+     the scalar path; torch_env mirrors it vectorized (parity-tested)."""
+    early = 1.0 if step < 50 else 0.0
+    mid = 1.0 if (50 <= step < 100) else 0.0
+    late = 1.0 if step >= 100 else 0.0
+    nxt = next((S for S in _COMET_SPAWN_STEPS if S > step), None)
+    comet_cycle = (nxt - step) / 100.0 if nxt is not None else 1.0
+    return [early, mid, late, comet_cycle]
+
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet, Fleet, CENTER, ROTATION_RADIUS_LIMIT
 
 BOARD_SIZE = 100.0
@@ -288,7 +315,7 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
     mode_2p = 1.0 if num_players == 2 else 0.0
     mode_4p = 1.0 if num_players == 4 else 0.0
 
-    global_feats = np.array([
+    global_list = [
         player / max(num_players - 1, 1),    # 0: player index
         np.clip(step / 500.0, 0.0, 1.0),      # 1: game progress
         np.clip(angular_velocity / 0.05, -1.0, 1.0), # 2: orbital speed
@@ -300,7 +327,10 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         np.clip(fleet_commitment, 0.0, 1.0),  # 8: fraction of own ships in transit
         mode_2p,                             # 9: 2-player mode flag
         mode_4p,                             # 10: 4-player mode flag
-    ], dtype=np.float32)
+    ]
+    if _GAME_PHASE_FEATURES:
+        global_list.extend(game_phase_channels(step))  # 11-13 phase one-hot, 14 comet-cycle
+    global_feats = np.array(global_list, dtype=np.float32)
 
     # Precompute enemy fleet ships racing toward each target planet (pairwise feat 14).
     # Result shape: (n_p_pair,) — independent of source slot, broadcast in compute_pairwise_features.

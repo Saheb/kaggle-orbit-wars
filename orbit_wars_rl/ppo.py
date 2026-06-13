@@ -417,6 +417,7 @@ class PPOLearner:
                 "ship_bin_mode": str(getattr(model_cfg, "ship_bin_mode", "absolute")),
                 "action_decode": str(getattr(model_cfg, "action_decode", "angle")),
                 "allow_reinforce": bool(getattr(model_cfg, "allow_reinforce", False)),
+                "game_phase_features": bool(getattr(model_cfg, "game_phase_features", False)),
             }
         return {
             "model": self.model.state_dict(),

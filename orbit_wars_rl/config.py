@@ -25,6 +25,12 @@ class ModelConfig:
     planet_feature_dim: int = 20
     fleet_feature_dim: int = 13
     global_feature_dim: int = 11
+    # Game-phase observation features (Stage B / Isaiah Lux-2021 borrow): when on,
+    # append 4 global channels — a 3-way phase one-hot (early<50 / mid50-100 / late>=100)
+    # + normalized steps-to-next-comet-spawn — taking global_feature_dim 11 -> 15. OFF by
+    # default so every existing 11-global checkpoint loads unchanged; the from-scratch run
+    # sets it (load_checkpoint round-trips it via ckpt_cfg). Parity-safe (pure fn of step).
+    game_phase_features: bool = False
     entity_dim: int = 96
     num_heads: int = 4
     num_layers: int = 3

@@ -249,6 +249,9 @@ def _get_model():
 
 {features_code}
 
+# Game-phase global channels: match the checkpoint (11 vs 15 globals).
+set_game_phase_features({game_phase_features})
+
 
 # --- Action masks (inlined from action_mask.py) ---
 
@@ -410,6 +413,12 @@ def _apply_checkpoint_model_config(checkpoint, cfg: Config) -> dict:
         cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
     if "ship_bin_mode" in ckpt_cfg:
         cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
+    # Global feature dim + game-phase flag (Stage B: 11 vs 15 globals). Patch the dim from the
+    # weights so the rebuilt model matches; game_phase_features drives the inlined extractor.
+    if isinstance(state_dict, dict) and "global_proj.weight" in state_dict:
+        cfg.model.global_feature_dim = int(state_dict["global_proj.weight"].shape[1])
+    if bool(ckpt_cfg.get("game_phase_features", False)):
+        cfg.model.game_phase_features = True
 
     return state_dict
 
@@ -448,6 +457,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     # the policy was trained (baked into the checkpoint config by ppo.state_dict).
     _ckpt = _load_checkpoint(checkpoint_path)
     allow_reinforce = bool(_ckpt.get("config", {}).get("allow_reinforce", False)) if isinstance(_ckpt, dict) else False
+    game_phase_features = bool(_ckpt.get("config", {}).get("game_phase_features", False)) if isinstance(_ckpt, dict) else False
     if allow_reinforce:
         print("  Reinforcement: ON (own planets are legal targets)")
         print(f"  Reinforce DISCIPLINE (must match training): gate_min_planets="
@@ -471,6 +481,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         ship_bin_mode=repr(m.ship_bin_mode),
         target_decode=target_decode,
         allow_reinforce=allow_reinforce,
+        game_phase_features=game_phase_features,
         reinforce_gate_min_planets=reinforce_gate_min_planets,
         reinforce_forward_only=reinforce_forward_only,
         reinforce_garrison_floor=reinforce_garrison_floor,

@@ -387,6 +387,8 @@ def train(args):
             print(f"Checkpoint declares ship_bin_mode={cfg.model.ship_bin_mode}")
         if "min_ship_bin" in ckpt_cfg:
             cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
+        if bool(ckpt_cfg.get("game_phase_features", False)):
+            cfg.model.game_phase_features = True  # resumed weights are 15-global
         del _ckpt_peek
 
     # CLI overrides checkpoint metadata. This lets a run deliberately mask bin
@@ -395,12 +397,17 @@ def train(args):
         cfg.model.min_ship_bin = args.min_ship_bin
     cfg.model.action_decode = args.action_decode
     cfg.model.allow_reinforce = args.allow_reinforce
+    # Game-phase features: on if the CLI asks OR a resumed ckpt had them (15-global weights).
+    cfg.model.game_phase_features = cfg.model.game_phase_features or args.game_phase_features
+    if cfg.model.game_phase_features:
+        cfg.model.global_feature_dim = 15
 
     env = VecTorchEnv(num_envs=args.num_envs, num_players=2,
                       device=device, episode_steps=500,
                       ship_bin_mode=cfg.model.ship_bin_mode,
                       action_decode=args.action_decode,
                       allow_reinforce=args.allow_reinforce,
+                      game_phase_features=cfg.model.game_phase_features,
                       reinforce_garrison_floor=args.reinforce_garrison_floor,
                       reinforce_cost=args.reinforce_cost,
                       reinforce_gate_min_planets=args.reinforce_gate_min_planets,
@@ -659,6 +666,7 @@ def train(args):
                     "action_decode": args.action_decode,
                     "resume": args.resume or "",
                     "ship_bin_mode": cfg.model.ship_bin_mode,
+                    "game_phase_features": cfg.model.game_phase_features,
                 },
                 resume="allow",
             )
@@ -1490,6 +1498,10 @@ if __name__ == "__main__":
                              "forward-staging in top-player replays; removes the costless safe-fire "
                              "outlet that floods symmetric self-play. Enemy/neutral targets "
                              "unconstrained. Only active with --allow-reinforce.")
+    parser.add_argument("--game-phase-features", action="store_true",
+                        help="Append 4 game-phase global channels (phase one-hot early<50/mid/late + "
+                             "normalized steps-to-next-comet-spawn); global feature dim 11->15. "
+                             "Breaks 11-global checkpoint loading → from-scratch runs only (Stage B).")
     parser.add_argument("--sufficient-commit-factor", type=float, default=0.0,
                         help="SUFFICIENT-COMMIT MASK: veto an ATTACK launch (enemy/neutral target) "
                              "whose ship count <= target's current defense × this factor → fragments "

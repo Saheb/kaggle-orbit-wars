@@ -112,6 +112,19 @@ Isolate the teacher-KL on the *exact* drift we've documented, with NO from-scrat
 - **Decision:** drift damped on a *fixed* self-anchor ⇒ mechanism works ⇒ proceed to Stage B. Flat-no-effect over many
   ckpts ⇒ β too weak or wrong heads; frozen ⇒ β too strong. (Our standard "judge by the target metric's trend over
   many ckpts" rule.)
+- **⭐ EXPECT A PLATEAU AT THE ANCHOR'S LEVEL — do NOT wait for Stage A to CLIMB.** Stage A success = held-out WR
+  *holds* at ≈ the 4M self's level (drift damped); it is NOT supposed to rise above the anchor. A fixed teacher is
+  soft-capped (β does double duty: anti-drift strength AND ceiling, see §3). The climb requires Stage B's ratchet +
+  outcome pressure. So once held-out WR is clearly holding (no peak-then-fall out to ~8–9M cumulative), the mechanism
+  is proven — **stop and move to Stage B; don't burn GPU hoping the fixed anchor breaks its own ceiling (it won't).**
+  **Two independent practitioner corroborations:** (1) the Isaiah/Toad Brigade Lux-2021 writeup
+  ([[reference_toad_brigade_rl_recipe]]); (2) a current Orbit Wars leaderboard leader (**kaggle: vkhydras**, paraphrased):
+  "for a while I kept the teacher as a fixed anchor — a KL penalty toward it, or self-play vs a frozen copy — and just
+  kept stalling around its level. What worked was making the thing I trained against keep improving *with* me instead
+  of staying frozen." Also independently confirms: pure cloning caps *below* the teacher (BC compounding error) and you
+  need an *outcome* signal, not "copy this move," to break the ceiling. Note vkhydras most directly describes refreshing
+  the **opponent** (pool channel); our ratchet refreshes the **teacher** (loss channel) — same principle, both run in
+  Stage B, but credit the *outcome pressure (pool)* for the climb, not the teacher-KL alone.
 
 ### Stage B — the RATCHET + from-scratch + new features (the real Phase-3 run)
 - **From-scratch** (BC warmstart) so the feature set (below) is learned natively + the policy acquires comets/phase
@@ -178,16 +191,35 @@ checkpoints** — flat/peak-then-fall over many ckpts = it isn't working → dia
   known/modest; measure SPS at launch.
 - **Interaction with the pool:** both are "frozen-ckpt-flavored" but act on different channels; they should compose.
   Guard against double-constraining (if both pin hard, the policy may stall) — read held-out WR.
+- **⭐ Stage-B WARMSTART PRE-FLIGHT (from a leaderboard leader, kaggle: Billy Bradley, 12th).** Two failure modes that
+  hit a from-scratch BC warmstart specifically — **Stage A is IMMUNE to both** (it resumes a full PPO ckpt: critic
+  trained EV~0.8, entropy live H_fire 0.1–0.26). For Stage B:
+  1. **Entropy collapsed during the IL/BC phase → can't explore in RL.** BC on the narrow Isaiah+Hober opening set can
+     peak the policy. *Check:* clip_frac ≠ 0 and entropy not floored in the first ckpts (our lesson #9: BC-warmstart →
+     `clip_frac=0`/frozen). *Lever:* bump `--entropy-coef-fire/target/ships` early.
+  2. **Trained policy + UNTRAINED critic → "unlearning" of good behavior before the critic catches up.** CONFIRMED
+     exposure: `bc.py` trains policy heads ONLY (no value head), so a BC warmstart = trained policy + fresh critic;
+     early PPO advantages are noise and can push the policy off the good BC point. We have NO dedicated critic-warmup
+     (only an LR ramp, auto-skipped on resume). **Structural cushion we already have: the teacher-KL anchor itself
+     partially mitigates this** — anchored to the BC self, it resists the noisy-advantage unlearning while the critic
+     fits (the anchor does double duty: anti-drift + warmstart protection; the doc's "BC = style insurance while weak").
+     *Cheap extra levers if needed:* `--with-warmup` (low early LR buys the critic update-room), or a short critic-only
+     warmup (freeze policy / tiny policy-LR first N updates — not built yet). *Canaries:* low early EV = critic still
+     catching up; watch clip_frac.
 
 ---
 
 ## 9. Sequencing / gate
 
-1. **GATE — closed-loop fidelity (in flight):** the frozen-vs-pins kaggle full-panel anchors (running) decide whether
-   torch_env held-out WR is a TRUSTWORTHY selection signal. The ratchet *is* a selection-signal amplifier — if a
-   residual closed-loop gap exists (torch_env disagrees with kaggle, e.g. the rev53b 10% vs 37.5% discrepancy), the
-   ratchet would amplify a *biased* signal. **Resolve/understand the closed-loop verdict before relying on the
-   ratchet.** (Stage A, which uses held-out *trend* not absolute level, is more robust to this and can proceed first.)
+1. **GATE — closed-loop fidelity ✅ LARGELY PASSED 2026-06-13.** The frozen p2rev5 4M decode-vs-pin/deb harnesses
+   (`frozen_vs_pins_torch.py` + `frozen_vs_deb_torch.py`, torch_env+comets, threshold-decode) vs the kaggle panel:
+   **rev38 torch 44.2% ≈ kaggle 44.5% ✅**, **deb torch 7.0% ≈ kaggle 5.1% (256-panel; ~1.4×, CIs overlap) ✅** (within noise), **rev53b torch 10.4%
+   vs kaggle 32.8% ❌ 3× off.** Verdict: torch_env IS a trustworthy selection signal for the opponents we use; the
+   in-training "deb/pins look easy" (~27-60% we-win) was purely the sampled+evolving confound. rev53b is the lone
+   outlier and — since deb uses the SAME `to_legacy_obs`+converter adapters and is faithful — its gap is
+   **rev53b-specific, NOT a torch_env bug.** **Action: Stage-B pool = rev38 + deb (both faithful); DROP rev53b.**
+   The ratchet (a selection-signal amplifier) can therefore rely on torch_env / held-out Ajay (real kaggle env).
+   Residual: deb ~1.4× easier in torch (within noise), not worth chasing. See [[project_train_eval_sim_gap]].
 2. **Build game-phase features** (`docs/next-steps.md`) — needed for Stage B's from-scratch run.
 3. **Stage A** (cheap resume + self-anchor) → read held-out drift → tune β.
 4. **Stage B** (ratchet + from-scratch + features) → read held-out HOLD-past-2M.

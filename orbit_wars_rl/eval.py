@@ -12,7 +12,7 @@ import numpy as np
 
 from config import Config
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH
-from features import extract_features, _ETA_PROBE_SPEED
+from features import extract_features, _ETA_PROBE_SPEED, set_game_phase_features
 from action_mask import compute_action_masks, actions_from_policy, actions_from_target_policy
 
 
@@ -68,6 +68,10 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     action_decode = str(ckpt_cfg.get("action_decode", "angle"))
     # Reinforcement: eval must mask targets the SAME way the checkpoint was trained.
     cfg.model.allow_reinforce = bool(ckpt_cfg.get("allow_reinforce", False))
+    # Game-phase features: eval's extract_features must emit the SAME globals the ckpt was
+    # trained on (11 vs 15). Set the module flag to match (off for all pre-Stage-B ckpts).
+    cfg.model.game_phase_features = bool(ckpt_cfg.get("game_phase_features", False))
+    set_game_phase_features(cfg.model.game_phase_features)
     return sd, action_decode
 
 

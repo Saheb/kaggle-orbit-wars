@@ -2,43 +2,99 @@
 
 Living doc — efforts and ideas, roughly prioritized. Discipline: **one delta per cloud run.**
 Status tags: 🔵 in-flight · 🟢 ready-to-build · 🟡 idea · ✅ done · ⏸ parked.
-Current focus: **⭐ COMET FIX (2026-06-13) — the train/eval sim gap was MISSING COMETS in torch_env, now FIXED**
-(byte-faithful to kaggle, `docs/train-eval.md` + `docs/training.md`). This was the root blocker. p2rev9 was relaunched
-on the faithful engine and **validated the fix works live** (pin WR recalibrated down), then killed. **Comet FEATURES
-✅ DONE 2026-06-13** (is_comet + path-aware position/expiry, train/eval/export parity — see the FROM-SCRATCH FEATURE
-SET section below). Boards ruled out (self-play = LB = panel, WR A/B confirmed). **Next: frozen-vs-pins closed-loop
-check (in flight), then a from-scratch run with the new feature set.** Prior framing below (pool pivot) still valid.
-Current focus: **Phase 2 — the POOL/CURRICULUM pivot** (p2rev9 LIVE, 2026-06-13). 4 reward/mask levers all left
-`planets@50=6` → the ceiling is STRUCTURAL because of **win-starvation** (can't learn from a peeler we never beat;
-deb ~5%). Fix the SIGNAL: pin winnable RL selves (rev38/rev53b — cross-eval 27%/37.5%, NOT deb-like) instead of
-shaping. See `docs/training.md` Current State + [[feedback_win_starvation]]. VDN/per-slot concluded (back to standard arch).
+Current focus: **⭐ PHASE 3 STAGE B (from-scratch ratchet) — building the pre-flight (2026-06-13).** Foundations all
+GREEN: comet PHYSICS+FEATURES ✅, game-phase features ✅ (both parity-clean), **Stage A ✅ PASSED** (fixed teacher-KL
+β=0.05 held the held-out band — see CONCLUDED block below), **closed-loop fidelity ✅ PASSED** (rev38 + deb FAITHFUL,
+rev53b dropped → torch_env is a trustworthy selection signal; Stage-B pool = rev38 + deb; `docs/phase3.md` §9,
+[[project_train_eval_sim_gap]]). **Next = the Stage B pre-flight + launch** — see the "STAGE B PRE-FLIGHT" section
+immediately below. Lineage context: comet fix was the root blocker (train/eval sim gap = missing comets, now
+byte-faithful); win-starvation finding ([[feedback_win_starvation]]) → the pool/selection-signal pivot; VDN/per-slot
+concluded (standard arch).
 
 ---
 
-## 🔵 LIVE — p3stageA (Phase 3 Stage A: teacher-KL anti-cycling anchor) — GCP L4, 2026-06-13
+## ✅ CONCLUDED — p3stageA (Phase 3 Stage A: teacher-KL anti-cycling anchor) — PASSED, box destroyed 2026-06-13
 
-- **GCP L4 `g2-standard-8`, zone `us-east1-d`, instance name `cap-probe-93160`** (⚠️ MISNAMED — it was a
-  capacity-probe instance repurposed because L4 was STOCKOUT in asia-south1-b/us-west1-a/europe-west4/us-east4;
-  us-east1-d had the only capacity. It is the real p3stageA training box). SSH alias
-  `cap-probe-93160.us-east1-d.orbit-wars-rl`. RUNNING + BILLING (~$1.13/hr, on-demand).
-- **⚠️ DELETE when done (manual, no auto):** `gcloud compute instances delete cap-probe-93160 --zone=us-east1-d --project=orbit-wars-rl --quiet`
-  (DELETE not stop — [[feedback_gcp_instance_cleanup]]). GCP is otherwise CLEAN (probe instances deleted).
+- **✅ VERDICT: PASS — the fixed teacher-KL anchor (β=0.05) held the held-out band.** 14-pt held-out Ajay trend
+  over ~4.5M→10.3M cumulative oscillated **3.5–5.9% (mean ~5.1), FLAT — no peak-then-fall** (the un-anchored p2rev5
+  control's signature was peak 5.9@4M → lower band; it did NOT appear). The one 3.5 dip @8.2M was noise (recovered
+  to 5.1/5.9/5.1/5.5). Canaries stayed green: il_kl plateaued ~0.05–0.06 (bounded drift), clip ~0.19→0.24 (never→0,
+  KL low/estop 0 = benign), entropy stable. **Carried forward = the validated KNOB (β=0.05 damps drift), NOT a
+  checkpoint** (Stage B is from-scratch for the 15-global feature dim). Two leaderboard leaders (vkhydras, Billy
+  Bradley) independently confirm a fixed anchor plateaus at its level — so this hold IS the success, not a stall.
+  Box `426301` DESTROYED (billing stopped), watcher stopped, all ckpts+log harvested to `gpu_run_artifacts/p3stageA/`.
+  **Next: Stage B** (ratchet v1 + BC-warmstart pre-flight + from-scratch run with comets ✅ + game-phase ✅ features,
+  pool = rev38 + deb). Original live block kept below for config reference.
+
+- **MIGRATED off GCP L4 (2026-06-13):** the L4 (`cap-probe-93160`) ran the SAME config at only **~191 SPS** (deb
+  @0.25 is CPU-bound on 8 vCPU / 4 workers). Moved to a **Jarvis A100 80GB SPOT** for the 28-core CPU throughput.
+  GCP box DELETED at 360k steps (below its first 500k ckpt — nothing harvested, no result lost).
+- **Jarvis A100-80GB SPOT, machine id `426301`, IP `217.18.55.161`, region IN2 (Noida), 28 cores, ~₹84/hr.
+  ⚠️ SPOT — DESTROY, never pause (preemption may lose data; the sync watcher below is mandatory).**
+- **DESTROY:** `jl destroy 426301 --yes` (from the launch box; needs venv + `JL_API_KEY` + key — JARVIS_RUNBOOK §Auth).
 - **Run = Phase 3 Stage A** (`docs/phase3.md` §5): resume **p2rev5 4M** + ONE delta = a CONSTANT self-anchored
   teacher-KL (`--il-lambda 0.05 --il-ref seed_checkpoints/p2rev5_4M.pt --il-decay-frac 100`). Else identical to
-  p2rev5 (deb pool @0.25, gate3/floor0, early_capture off, LR 5e-5, gae 0.99, 256 envs/128 rollout/**32 mb**/ppo-2).
-  **`--num-minibatches 16→32`** (the only other change): the teacher's extra frozen forward OOM'd the L4 at mb=16
-  (~21GB); mb=32 halves per-forward activation → 13.4GB, comfortable. Script:
-  `gpu_run_artifacts/p3stageA/start_p3stageA_gcp.sh`. Comet-faithful engine.
-- **iter 1 healthy (2026-06-13):** SPS 486, EV 0.677, KL 0.015, clip 0.130, estop 0, **il_kl 0.005 / il_coef 0.050**
-  (anchor active + constant; il_kl≈0 at iter1 since policy==teacher, grows as it drifts). GPU 13.4/23GB.
+  p2rev5 AND the GCP p3stageA run (deb pool @0.25, gate3/floor0, early_capture off, LR 5e-5, gae 0.99,
+  **256 envs**/128 rollout/**32 mb**/ppo-2). **CLEAN MIGRATION — num-envs stays 256 (NOT 512)** to preserve the
+  single-delta comparison vs the 256-env p2rev5 control (a 2x batch would confound the anti-drift read); speedup
+  is purely the A100's cores → **`--heuristic-workers 4→8`**. mb=32 (teacher's extra frozen forward fits 80GB
+  trivially — uses only 13.4GB). Script: `gpu_run_artifacts/p3stageA/run_remote_p3stageA_jarvis.sh`. Comet-faithful engine.
+- **iter 1-4 healthy (2026-06-13):** SPS ramping 465→644 (~600 steady, **3x the L4**), EV 0.69→0.90, KL ~0.015,
+  clip ~0.22 (NOT→0), estop 0, **il_kl 0.004→0.006 / il_coef 0.050** (anchor active + constant; il_kl≈0 at iter1
+  since policy==teacher, growing as it drifts). GPU 13.4/80GB, util 22% (CPU/deb-bound, as expected).
 - **WATCH (THE hypothesis):** held-out **Ajay** WR HOLDS past the ~4-5M band instead of peak-then-fall (un-anchored
   p2rev5 control: peak 5.9%@4M → ~4.5% band). CANARIES: `clip_frac` must NOT→0 (anchor too strong/frozen → lower
   il-lambda); `il_kl` should grow then plateau (anchor working); entropy stable. KILL/RETUNE read: held-out still
   peaks-then-falls = il-lambda too weak (raise next run); clip→0 = too strong.
-- **Watcher (controller):** `bash gpu_run_artifacts/run_watchers.sh start p3stageA gcp cap-probe-93160.us-east1-d.orbit-wars-rl`
+- **Watcher (controller):** `bash gpu_run_artifacts/run_watchers.sh start p3stageA jarvis 217.18.55.161`
   → sync + held-out Ajay full panel per ckpt (masks gate3/floor0/no-forward, match training) →
   `gpu_run_artifacts/p3stageA/`. First eval = step ~4.5M (500k after the 4M resume).
-- Monitor: `ssh cap-probe-93160.us-east1-d.orbit-wars-rl "grep '^iter' ~/orbit_wars_rl/train_gpu_phase1_p3stageA_*.log | tail"`.
+- Monitor: `ssh -i ~/.ssh/jarvis-labs-key root@217.18.55.161 "grep '^iter' /home/train_gpu_phase1_p3stageA_*.log | tail"`.
+
+---
+
+## 🟢 STAGE B PRE-FLIGHT & LAUNCH PLAN (the from-scratch ratcheted-teacher run, set 2026-06-13)
+
+The from-scratch run (`docs/phase3.md` §5 Stage B). Foundations done: Stage A proved the anchor (β=0.05), fidelity
+gate passed (pool = rev38 + deb), feature set ready (comets ✅ + game-phase ✅). Remaining = three coupled pre-flight
+items, then the launch. **One open arch decision (#2) is answered by a free probe during the BC rebuild.**
+
+1. 🟢 **NEW 15-global BC — REBUILD (decided 2026-06-13, the "clean" path over an 11→15 zero-pad promote).** The latest
+   BC `seed_checkpoints/bc_snowball_pairwise15.pt` is pairwise-15 (current arch ✓) but **11-global** (`global_proj
+   (96,11)`, no `game_phase_features` in config, dated Jun 11 → pre-comet-fix) → can't init the 15-global Stage B
+   model. **To rebuild:** add `--game-phase-features` to `bc.py` + the snowball dataset builder (set
+   `cfg.model.game_phase_features` + `global_feature_dim=15` + `features.set_game_phase_features(True)`; **`bc.py`
+   `_save_bc_checkpoint` MUST save `game_phase_features` in the ckpt config — it currently omits it**), re-fetch the
+   snowball replays, **REBUILD the dataset** (BC `--samples` pickles store PRE-EXTRACTED tensors → re-running bc.py on
+   the old pickle won't upgrade the dim; must rebuild via the builder, which re-extracts), retrain → `bc_snowball_15global.pt`.
+   Comets corrected automatically by re-extraction. Runs LOCALLY (bc.py = supervised on static tensors, no VecTorchEnv
+   rollout → no Mac-CPU segfault; builder uses kaggle_env).
+2. 🟡 **CAPACITY — do we need a bigger net? Answer with the BC rebuild (free probe), don't scale on spec.** Current net
+   = `entity_dim 96 / 4 heads / 3 layers / mlp_exp 3` ≈ **391K params**, constant all project. **No capacity signal**
+   (EV ~0.85–0.90, BC fits teachers) — failures are DYNAMICS (drift/signal), not fitting; bigger = more drift surface +
+   a Stage-B confound. BUT from-scratch = the free moment to change arch, and GPU is IDLE (Stage A 22% util, CPU/deb-
+   bound) so bigger is ~free on SPS. **Plan: train the new BC at 96-dim AND ~128-dim (or layers 3→4), compare val loss +
+   imitation fidelity.** Meaningfully better fit → scale Stage B; ~same → keep 96 (default). Evidence-gated, clean A/B.
+3. 🟢 **BC-warmstart pre-flight (Billy Bradley, `docs/phase3.md` §8).** (a) entropy collapsed in IL → can't explore:
+   check `clip_frac≠0` / entropy not floored early; lever `--entropy-coef-*`. (b) trained policy + UNTRAINED critic →
+   "unlearning" before critic catches up — CONFIRMED `bc.py` is policy-only (no value head). Cushion: the teacher-KL
+   anchor (to the BC self) resists noisy-advantage unlearning; extra lever `--with-warmup` (low early LR); canary = low
+   early EV.
+4. 🟢 **RATCHET v1 (the one real new build).** Watcher computes held-out WR per ckpt → if a NEW BEST **by a margin**,
+   refresh `--il-ref` to it + relaunch from a clean ckpt boundary (β CONSTANT ~0.05, NOT decay-to-0). Guard ratchet-DOWN
+   (don't re-anchor on noise). v2 (in-process reload) only if v1 works.
+5. 🟢 **THE LAUNCH (after 1–4).** From-scratch resume `bc_snowball_15global.pt` + `--game-phase-features` + `--il-lambda
+   0.05` (Stage-A-validated) ratcheted + pool **rev38 + deb** + `--il-decay-frac 100` (no decay), comet-faithful engine,
+   on Jarvis A100 spot (clean migration recipe in the CONCLUDED block above). ⭐ Falsifiable sub-exp: does phase-as-
+   OBSERVATION let us RETIRE the time-scheduled shaping (first_strike t<50 / early_capture)? WATCH: held-out WR CLIMBS
+   and HOLDS past 2M (ratchet rising), il_kl bounded, **all-env** planets@50 moves off 6 (NOT the WON-subset, which is
+   survivorship — see Stage A analysis).
+
+**Code landed this session (game-phase features, all gated/off-by-default):** `config.game_phase_features`,
+`features.game_phase_channels`/`set_game_phase_features`, `torch_env` vectorized mirror + `VecTorchEnv(game_phase_features=)`,
+`train_torch --game-phase-features` (sets dim 15 + saves flag via `ppo.state_dict`), `eval.load_checkpoint` restore +
+flag, `export_agent` bake. Parity probe `feature_parity_gamephase_probe.py` CLEAN. **Fixed latent export bug:**
+`export_agent` never patched `global_feature_dim` from weights (any dim change would've crashed export).
 
 ---
 
@@ -56,7 +112,18 @@ non-orbiting. Identical branch in `torch_env.get_features` + `features.extract_f
 a pre-existing id-0 `initial_planets` collision). Regression test: `orbit_wars_rl/feature_parity_comet_probe.py`
 (CLEAN). Physics fidelity tests still pass. Full write-up: `docs/training.md` Current State.
 
-### 🟢 GAME-PHASE features (NEW 2026-06-13, from the Toad Brigade/Isaiah Lux-2021 winner writeup)
+### ✅ GAME-PHASE features — BUILT + VALIDATED 2026-06-13 (Stage B feature set; off by default, opt-in)
+**DONE:** `--game-phase-features` appends 4 global channels (11→15): a 3-way phase one-hot (early<50 / mid50-100 /
+late>=100, the `<50` boundary deliberately = the first_strike/early_capture shaping window for the retire-shaping
+test) + normalized steps-to-next-comet-spawn. Single source of truth `features.game_phase_channels`; vectorized
+mirror in `torch_env.get_features`; **parity probe `feature_parity_gamephase_probe.py` CLEAN (0.00e+00 across phase
++ comet-spawn boundaries)**. Gated by `cfg.model.game_phase_features` (default OFF → every 11-global ckpt loads
+unchanged); round-trips train→ckpt(`ppo.state_dict`)→`load_checkpoint`→eval→`export_agent` (exported 15-global agent
+runs in real kaggle env). **Fixed a latent export bug found en route:** `export_agent` never patched
+`global_feature_dim` from the ckpt weights (any dim change would've crashed export — now patches it). ⭐ Falsifiable
+sub-experiment for Stage B: does phase-as-OBSERVATION let us retire the time-scheduled shaping (first_strike t<50 /
+early_capture exp-decay)? Original rationale below.
+
 **The gap:** the agent's ENTIRE temporal sense is ONE scalar — global feat 1 = `clip(step/500,0,1)`. No global
 game-phase signal at all. Everything else temporal is entity-local (fleet ETAs, comet expiry, 5-turn orbit pred).
 Isaiah added a discrete game-phase embedding (turn//40) + day-night cycle embedding and "the network quickly
@@ -247,6 +314,18 @@ sufficient-commit/commitment lever FAILED, #2) → revisit the quantity gradient
    opening AND good holding, solved as separate clean deltas; opening arguably first since it *gates* regime B.
 4. ⏸ **Capture-efficiency reward — graveyard.** Penalizing wasted/inefficient fires = a conditional
    fire-tax → passivity / fire=0 Nash. Do not. The mask (#2) is the non-tax way to encode the same intent.
+
+### Discipline masks (training-only, NO input-dim change → addable to ANY run, no from-scratch restart)
+
+1. 🟢 **Sun-blocking angle mask (NEW 2026-06-13, from the feature-completeness audit).** The real game **destroys
+   any fleet whose path crosses the sun** (`orbit_wars.py:607`, `point_to_segment_distance(sun, old, new) < SUN_RADIUS=10`)
+   — so firing through the sun = annihilated ships. The agent has **NO signal for it**: torch_env's angle_mask is
+   "all angles legal (no sun-blocking)", and there's no feature/mask, so it must learn sun-avoidance from reward alone.
+   torch_env PHYSICS is faithful (it destroys sun-crossers too — sim-gap probe is byte-clean), so this is purely an
+   *awareness* gap. **Fix = an angle/target mask** that vetoes a launch whose src→tgt segment passes within SUN_RADIUS
+   of CENTER (same family as forward-only/sufficient-commit; `torch_env._apply_actions` + parity in
+   `action_mask.py`/`eval.py`/`export_agent.py`). **No input-dim change → does NOT force a from-scratch restart**, can
+   land in Stage B or any later resume. Low-risk efficiency lever; quantify wasted sun-crossing launches first to size it.
 
 ### Reinforce-targeting levers
 

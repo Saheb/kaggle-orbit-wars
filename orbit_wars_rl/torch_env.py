@@ -217,8 +217,12 @@ class VecTorchEnv:
         reinforce_gate_min_planets: int = 0,
         reinforce_forward_only: bool = False,
         sufficient_commit_factor: float = 0.0,
+        game_phase_features: bool = False,
     ):
         self.num_envs = num_envs
+        # Game-phase observation channels (Stage B): append 4 globals (dim 11->15). Must match
+        # features.game_phase_channels (parity test feature_parity_gamephase_probe.py).
+        self.game_phase_features = bool(game_phase_features)
         # Reinforcement: when True, own planets (except the launch source) are LEGAL
         # targets — ships arriving at a friendly planet add to its garrison (physics
         # already implemented in step()). EDA of top players: ~57% of fleets reinforce;
@@ -859,7 +863,7 @@ class VecTorchEnv:
         mode_4p = float(self.num_players == 4)
         player_norm = player / max(self.num_players - 1, 1)
 
-        gf = torch.stack([
+        gf_list = [
             torch.full_like(total_owned_ships, player_norm),  # 0
             torch.clamp(self.step_count.float() / 500.0, 0.0, 1.0),  # 1
             torch.clamp(self.angular_velocity / 0.05, -1.0, 1.0),    # 2
@@ -871,7 +875,20 @@ class VecTorchEnv:
             torch.clamp(fleet_commit, 0.0, 1.0),                     # 8  (was 7)
             torch.full_like(total_owned_ships, mode_2p),      # 9  (was 8)
             torch.full_like(total_owned_ships, mode_4p),      # 10 (was 9)
-        ], dim=1)  # (N, 11)
+        ]
+        if self.game_phase_features:
+            # 11-13: phase one-hot (early<50 / mid50-100 / late>=100); 14: norm steps-to-next
+            # comet spawn = (next_spawn - step)/100 in (0,1], or 1.0 if none remain. Mirrors
+            # features.game_phase_channels exactly (parity-tested).
+            sc = self.step_count.float()
+            early = (sc < 50).float()
+            mid = ((sc >= 50) & (sc < 100)).float()
+            late = (sc >= 100).float()
+            comet_cycle = torch.ones_like(sc)
+            for S in reversed(COMET_SPAWN_STEPS):       # descending → smallest S>step wins
+                comet_cycle = torch.where(sc < S, (S - sc) / 100.0, comet_cycle)
+            gf_list += [early, mid, late, comet_cycle]
+        gf = torch.stack(gf_list, dim=1)  # (N, 11) or (N, 15) with game-phase
 
         # Action masks
         owned_idx, slot_valid = self.owned_indices_for(player)
