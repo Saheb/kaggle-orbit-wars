@@ -103,6 +103,25 @@
 
 ## Current State (2026-06-13)
 
+### ⭐ PHASE 3 STARTED — Stage A (teacher-KL anti-cycling anchor); closed-loop fidelity is SPLIT
+**Comet FEATURES done** (path-aware, parity probe CLEAN — see the comet section below). **Closed-loop fidelity check
+(frozen p2rev5 4M vs the pins, threshold-decode):** the new `frozen_vs_pins_torch.py` duel (torch_env+comets) vs the
+full kaggle 256-panel — **rev38 torch 44.2% ≈ kaggle 44.5% ✅ (faithful)** but **rev53b torch 10.4% vs kaggle 32.8%
+❌ (3× gap)**. So the comet PHYSICS fix is solid (rev38 confirms) but a **real opponent-specific obs/closed-loop gap
+remains for rev53b-style play** (beyond the min_owned_dist cap bug). The old 48g seat-0 anchors (27/37.5%) were noise.
+**Implication for Phase 3 pools: pin rev38 (faithful, beatable); treat rev53b with suspicion as a pin** (torch makes
+it look ~unbeatable at 10% when it's really 32.8% → win-starvation trap). Localize the rev53b gap later via
+`frozen_vs_pins_torch.py` + `sim_gap_probe.py`.
+**Phase 3 = ratcheted teacher-KL + league (`docs/phase3.md`)** — the structural anti-cycling fix (PPO clip is a
+*relative* trust region blind to slow drift; teacher-KL is the missing *absolute* anchor; ratchet = re-anchor to
+rising held-out-best → climb without ceiling). Machinery exists (`ppo.py` `frozen_il_model`/`_il_kl_penalty`,
+`--il-ref`/`--il-lambda`); only the ratchet is a new build. **Stage A LAUNCHED 2026-06-13 (GCP L4, `p3stageA`):**
+resume p2rev5 4M + ONE delta = a CONSTANT self-anchored teacher-KL (`--il-lambda 0.05 --il-ref <4M> --il-decay-frac
+100`), else identical to p2rev5 (deb pool, gate3/floor0, early_capture off). Held-out = kaggle Ajay (kaggle-native →
+faithful selection signal, unaffected by the rev53b torch gap). **WATCH:** held-out WR HOLDS past the ~4-5M band
+instead of peak-then-fall (un-anchored p2rev5: peak 5.9%@4M → ~4.5% band). Canaries: clip_frac must NOT→0 (frozen),
+il_kl moderate, entropy stable; tune il-lambda by these. Origin: [[reference_toad_brigade_rl_recipe]].
+
 ### ⭐⭐ THE BIG ONE — the train/eval sim gap = MISSING COMETS in torch_env (FOUND + FIXED 2026-06-13)
 
 This is the root blocker behind the whole "panel not LB-predictive / pool wr is fiction / planets@50=6 / hoarding"
@@ -120,10 +139,12 @@ we hoard-to-win and where planets@50→100 collapses for real. We were overfitti
   byte-faithful for whole games incl comets. Tests: `tests/test_comet_fidelity.py`. Full write-up: `docs/train-eval.md`.
 - **Board distribution ruled out (2026-06-13):** self-play boards = real LB boards (same generate_planets,
   symmetric — no SSDR/handicap in p2rev9); the eval PANEL's board features (count/production/orbiting/big-planet)
-  also match the natural distribution. **WR A/B confirmed it** (`board_dist_ab.py`, p2rev5 4M vs Ajay, both seats):
-  PANEL 5.9% (256g) vs RANDOM ~8% — roughly comparable (random marginally higher, within noise), NOT the 10×+ that
-  would explain the gap. So boards are NOT the gap — physics (comets) was. The low WR vs strong opponents is genuine
-  skill, not a board/seat artifact.
+  also match the natural distribution. **WR A/B confirmed it** (`board_dist_ab.py`, p2rev5 4M vs Ajay, both seats,
+  128 seeds each → 256 games each, run in the REAL kaggle env): PANEL **5.9%** (15/256) vs RANDOM **5.9%** (15/256)
+  — IDENTICAL at convergence (the seat split just mirror-flips: panel s0 4.7/s1 7.0, random s0 7.0/s1 4.7). Random
+  peaked ~9.8% mid-run (@112g) then regressed to the same mean — the earlier "RANDOM ~8%" note read it before it
+  converged. NOT the 10×+ a board artifact would produce. So boards are NOT the gap — physics (comets) was. The low
+  WR vs strong opponents is genuine skill, not a board/seat artifact. (Log: `/tmp/board_ab.log`.)
 
 **Active run:** NONE. **p2rev9 (comet-faithful relaunch) KILLED @1.28M 2026-06-13** after confirming the fix works
 live — GCP box `orbit-wars-p2rev9` DELETED (no billing). It was a validation run (resume p2rev5 4M + the POOL pivot
@@ -134,9 +155,22 @@ mid-adapt + sampled-vs-decode). Harvested 524k+1M ckpts → `gpu_run_artifacts/p
 `p2rev9_cometfree_old/`. (p2rev7+p2rev8 also KILLED 2026-06-13.) **The fix itself is committed (branch
 `comet-sim-fidelity-fix`), tested, and documented — the next run is the FEATURE phase below, ideally from-scratch.**
 
-**NEXT (deliberate phase):** comet FEATURES — populate `is_comet` (channel exists, was 0) + add comet-expiry
-awareness (top players read path_index to avoid investing in a departing comet), with train/eval/export PARITY;
-then a from-scratch run that learns comets from step 0. The pool-pivot logic is now well-founded on a faithful sim.
+**NEXT (deliberate phase):** comet FEATURES — ✅ **DONE 2026-06-13** (path-aware, train/eval/export parity).
+Step 1 (static parity probe, `orbit_wars_rl/feature_parity_comet_probe.py`) found the obs gap was BIGGER than
+`is_comet`: comet slots also broke the orbital-prediction features (planet feat 9/10/11 + pairwise
+sin/cos/dist/eta/roi) because comets carry stale `init_planets=(0,0)` but `is_orbiting=True` → `get_features`
+predicted a circular orbit from (0,0) while `extract_features` fell back to the comet's CURRENT position (true on the
+REAL kaggle obs too — not a reconstruction artifact). Step 2 (the fix): for comet slots OVERLOAD the orbital
+channels (NO model-dim change → existing ckpts still load, frozen-vs-pins stays runnable) — feat 7 `is_comet`=1,
+feat 10/11 = comet PATH position +5 steps (`paths[path_index+5]`), feat 9 = normalized steps-to-departure
+(`(len(path)-path_index)/40`); pairwise treats comet targets as non-orbiting; `to_legacy_obs` now surfaces
+`comets`/`comet_planet_ids` (+ fixed a pre-existing id-0 collision: comet slots polluted `initial_planets` with id 0,
+corrupting real planet 0's orbit feats). Identical comet branch in `torch_env.get_features` +
+`features.extract_features`/`compute_pairwise_features` (kaggle obs exposes `observation.comets` = paths+path_index,
+so eval/export parity is automatic via features.py). Parity probe now CLEAN on all comet feats; comet fidelity
+(physics) tests still pass. Pre-existing comet-independent `min_owned_dist` BOARD_SIZE-cap parity bug flagged
+separately (task_ab4d5b3a). **THEN:** step 3 = frozen-vs-pins WR duel (now runnable), then a from-scratch run that
+learns comets from step 0. The pool-pivot logic is now well-founded on a faithful sim.
 
 **Why the pivot (the win-starvation finding):** 4 reward/mask levers all left `planets@50` pinned at 6 — the
 opening ceiling is STRUCTURAL because we can't learn to beat a peeler we never beat (deb ~5%, all-loss = no

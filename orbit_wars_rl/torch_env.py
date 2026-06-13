@@ -50,6 +50,14 @@ COMET_SPEED = 4.0
 COMET_SPAWN_STEPS = (50, 150, 250, 350, 450)
 N_COMET_SLOTS = 4
 COMET_SLOT_START = MAX_PLANETS - N_COMET_SLOTS  # 44
+# Comet observation features (overload the orbital channels of comet slots, gated by is_comet).
+# Comets don't orbit circularly, so the generic orb_r/pred_x/pred_y channels are meaningless for
+# them; for comet slots we instead expose the comet's path position COMET_FEAT_LOOKAHEAD steps
+# ahead (pred_x/pred_y) and normalized steps-to-departure (orb_r channel). MUST stay in sync with
+# the comet branch in features.extract_features / compute_pairwise_features (parity-tested in
+# tests/feature_parity_comet_probe.py).
+COMET_FEAT_LOOKAHEAD = 5    # path-position lookahead (matches the planet 5-turn orbit lookahead)
+COMET_LIFE_NORM = 40.0      # normalize steps-to-departure (comet paths are <= ~40 steps)
 
 # Discrete action bins (match action_mask.py / model.py)
 NUM_ANGLE_BINS = 144
@@ -702,7 +710,10 @@ class VecTorchEnv:
         dyp = y.unsqueeze(2) - y.unsqueeze(1)
         dpp = torch.sqrt(dxp * dxp + dyp * dyp)
         mine_col = is_mine.unsqueeze(1)            # (N, 1, P)
-        big = torch.full_like(dpp, BOARD_SIZE)
+        # Sentinel must exceed the max possible board distance (diagonal ~141 on
+        # a 100x100 board) so it never wins the min over a real owned distance;
+        # BOARD_SIZE alone capped feat15 on sparse boards (train/eval mismatch).
+        big = torch.full_like(dpp, BOARD_SIZE * 4.0)
         dpp_masked = torch.where(mine_col, dpp, big)
         min_owned_dist = dpp_masked.min(dim=2).values  # (N, P)
         any_mine = is_mine.any(dim=1, keepdim=True)
@@ -712,8 +723,11 @@ class VecTorchEnv:
         # is_home heuristic
         is_home = is_mine & (ships <= 10 + prod * 5) & (ships >= 10 - prod)
 
-        # is_comet — skip for now (comets not implemented in Phase 3a)
+        # is_comet — alive planets occupying the reserved comet slots (44-47).
         is_comet = torch.zeros_like(is_orbiting)
+        if self._has_comets:
+            c0 = COMET_SLOT_START
+            is_comet[:, c0:c0 + N_COMET_SLOTS] = planet_alive[:, c0:c0 + N_COMET_SLOTS]
 
         # Connectivity features: owned planets within r=15 / r=30 of each planet.
         # dpp[n,i,j] = dist from planet i to j; mine_row[n,i,1] = is i mine?
@@ -745,6 +759,32 @@ class VecTorchEnv:
             (owned_within_30 / 12.0).clamp(max=1.0), # 18 — connectivity r=30
             planet_alive.float(),            # 19 — active mask (was 17)
         ], dim=2)  # (N, P, 20)
+
+        # Comet overlay: for alive comet slots, replace the meaningless orbital channels
+        # (9 orb_r, 10 pred_x, 11 pred_y — comets don't orbit circularly) with path-aware
+        # values that MATCH features.extract_features' comet branch:
+        #   ch 9  -> normalized steps-to-departure  (clamp((last_alive_step - now)/NORM, 0, 1))
+        #   ch 10 -> comet path position LOOKAHEAD steps ahead, x  (normalized)
+        #   ch 11 -> same, y
+        if self._has_comets:
+            c0 = COMET_SLOT_START
+            ns = N_COMET_SLOTS
+            T1 = self.episode_steps + 1
+            bidx = torch.arange(N, device=self.device)
+            t_now = self.step_count.clamp(max=self.episode_steps).long()          # (N,)
+            step_ids = torch.arange(T1, device=self.device).view(1, T1, 1)        # (1,T1,1)
+            # last step index at which each comet slot is alive (0 if never)
+            last_alive = (self._comet_alive.float() * step_ids).amax(dim=1)       # (N, ns)
+            remaining = (last_alive - t_now.unsqueeze(1)).clamp(min=0.0)          # (N, ns)
+            ahead_t = torch.minimum(t_now.unsqueeze(1) + COMET_FEAT_LOOKAHEAD,
+                                    last_alive.long()).clamp(0, self.episode_steps)
+            cslot = torch.arange(ns, device=self.device).view(1, ns)
+            ahead_xy = self._comet_xy[bidx.view(N, 1), ahead_t, cslot]            # (N, ns, 2)
+            sl = slice(c0, c0 + ns)
+            pf[:, sl, 9] = (remaining / COMET_LIFE_NORM).clamp(0.0, 1.0)
+            pf[:, sl, 10] = (ahead_xy[..., 0] - CENTER) / CENTER
+            pf[:, sl, 11] = (ahead_xy[..., 1] - CENTER) / CENTER
+
         # Zero out dead slots so output matches legacy (which leaves them zero).
         pf = pf * planet_alive.unsqueeze(-1).float()
 
@@ -1854,12 +1894,45 @@ def to_legacy_obs(env: VecTorchEnv, env_idx: int = 0, player: int = 0) -> dict:
                 int(f[i, 5]), float(f[i, 6]),
             ])
     ip = env.init_planets[env_idx].cpu().numpy()
+    # Exclude comet slots (>= COMET_SLOT_START): their init_planets entry is unpopulated
+    # (id 0, pos 0,0) and would collide with real planet id 0 in init_by_id, corrupting that
+    # planet's orbit features. Comets carry no meaningful initial-board entry (they spawn
+    # mid-game and get path-aware features instead).
     initial_planets = [
         [int(ip[i, 0]), int(ip[i, 1]),
          float(ip[i, 2]), float(ip[i, 3]), float(ip[i, 4]),
          float(ip[i, 5]), float(ip[i, 6])]
-        for i in range(MAX_PLANETS) if a[i]
+        for i in range(COMET_SLOT_START) if a[i]
     ]
+    # Comets: surface the live comet group (ids + full per-comet paths + path_index) so the
+    # kaggle-side feature path (features.extract_features) sees them exactly as the real env's
+    # obs does. Reconstructed from the byte-faithful comet schedule buffers.
+    comet_planet_ids: list[int] = []
+    comets: list[dict] = []
+    if getattr(env, "_has_comets", False):
+        c0 = COMET_SLOT_START
+        ca = env._comet_alive[env_idx].cpu().numpy()        # (T1, ns)
+        cxy = env._comet_xy[env_idx].cpu().numpy()           # (T1, ns, 2)
+        cids = env._comet_ids[env_idx].cpu().numpy()         # (ns,)
+        cur = int(env.step_count[env_idx].item())
+        planet_ids: list[int] = []
+        paths: list[list] = []
+        path_index = -1
+        for c in range(N_COMET_SLOTS):
+            if not bool(a[c0 + c]):
+                continue  # comet slot not currently alive (no live comet there)
+            alive_steps = [t for t in range(ca.shape[0]) if ca[t, c]]
+            if not alive_steps:
+                continue
+            first = alive_steps[0]
+            full_path = [[float(cxy[t, c, 0]), float(cxy[t, c, 1])]
+                         for t in range(first, alive_steps[-1] + 1)]
+            planet_ids.append(int(cids[c]))
+            paths.append(full_path)
+            path_index = cur - first
+        if planet_ids:
+            comets.append({"planet_ids": planet_ids, "paths": paths, "path_index": path_index})
+            comet_planet_ids = list(planet_ids)
     return {
         "step": int(env.step_count[env_idx].item()),
         "player": player,
@@ -1867,5 +1940,6 @@ def to_legacy_obs(env: VecTorchEnv, env_idx: int = 0, player: int = 0) -> dict:
         "fleets": fleets,
         "angular_velocity": float(env.angular_velocity[env_idx].item()),
         "initial_planets": initial_planets,
-        "comet_planet_ids": [],
+        "comet_planet_ids": comet_planet_ids,
+        "comets": comets,
     }

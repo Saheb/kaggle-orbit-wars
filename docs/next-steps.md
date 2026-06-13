@@ -4,13 +4,107 @@ Living doc — efforts and ideas, roughly prioritized. Discipline: **one delta p
 Status tags: 🔵 in-flight · 🟢 ready-to-build · 🟡 idea · ✅ done · ⏸ parked.
 Current focus: **⭐ COMET FIX (2026-06-13) — the train/eval sim gap was MISSING COMETS in torch_env, now FIXED**
 (byte-faithful to kaggle, `docs/train-eval.md` + `docs/training.md`). This was the root blocker. p2rev9 was relaunched
-on the faithful engine and **validated the fix works live** (pin WR recalibrated down), then killed. **Next: comet
-FEATURES (is_comet + expiry, train/eval/export parity) then a from-scratch run.** Boards ruled out (self-play = LB =
-panel, WR A/B confirmed). Prior framing below (pool pivot) still valid but now sits on a faithful sim.
+on the faithful engine and **validated the fix works live** (pin WR recalibrated down), then killed. **Comet FEATURES
+✅ DONE 2026-06-13** (is_comet + path-aware position/expiry, train/eval/export parity — see the FROM-SCRATCH FEATURE
+SET section below). Boards ruled out (self-play = LB = panel, WR A/B confirmed). **Next: frozen-vs-pins closed-loop
+check (in flight), then a from-scratch run with the new feature set.** Prior framing below (pool pivot) still valid.
 Current focus: **Phase 2 — the POOL/CURRICULUM pivot** (p2rev9 LIVE, 2026-06-13). 4 reward/mask levers all left
 `planets@50=6` → the ceiling is STRUCTURAL because of **win-starvation** (can't learn from a peeler we never beat;
 deb ~5%). Fix the SIGNAL: pin winnable RL selves (rev38/rev53b — cross-eval 27%/37.5%, NOT deb-like) instead of
 shaping. See `docs/training.md` Current State + [[feedback_win_starvation]]. VDN/per-slot concluded (back to standard arch).
+
+---
+
+## 🔵 LIVE — p3stageA (Phase 3 Stage A: teacher-KL anti-cycling anchor) — GCP L4, 2026-06-13
+
+- **GCP L4 `g2-standard-8`, zone `us-east1-d`, instance name `cap-probe-93160`** (⚠️ MISNAMED — it was a
+  capacity-probe instance repurposed because L4 was STOCKOUT in asia-south1-b/us-west1-a/europe-west4/us-east4;
+  us-east1-d had the only capacity. It is the real p3stageA training box). SSH alias
+  `cap-probe-93160.us-east1-d.orbit-wars-rl`. RUNNING + BILLING (~$1.13/hr, on-demand).
+- **⚠️ DELETE when done (manual, no auto):** `gcloud compute instances delete cap-probe-93160 --zone=us-east1-d --project=orbit-wars-rl --quiet`
+  (DELETE not stop — [[feedback_gcp_instance_cleanup]]). GCP is otherwise CLEAN (probe instances deleted).
+- **Run = Phase 3 Stage A** (`docs/phase3.md` §5): resume **p2rev5 4M** + ONE delta = a CONSTANT self-anchored
+  teacher-KL (`--il-lambda 0.05 --il-ref seed_checkpoints/p2rev5_4M.pt --il-decay-frac 100`). Else identical to
+  p2rev5 (deb pool @0.25, gate3/floor0, early_capture off, LR 5e-5, gae 0.99, 256 envs/128 rollout/**32 mb**/ppo-2).
+  **`--num-minibatches 16→32`** (the only other change): the teacher's extra frozen forward OOM'd the L4 at mb=16
+  (~21GB); mb=32 halves per-forward activation → 13.4GB, comfortable. Script:
+  `gpu_run_artifacts/p3stageA/start_p3stageA_gcp.sh`. Comet-faithful engine.
+- **iter 1 healthy (2026-06-13):** SPS 486, EV 0.677, KL 0.015, clip 0.130, estop 0, **il_kl 0.005 / il_coef 0.050**
+  (anchor active + constant; il_kl≈0 at iter1 since policy==teacher, grows as it drifts). GPU 13.4/23GB.
+- **WATCH (THE hypothesis):** held-out **Ajay** WR HOLDS past the ~4-5M band instead of peak-then-fall (un-anchored
+  p2rev5 control: peak 5.9%@4M → ~4.5% band). CANARIES: `clip_frac` must NOT→0 (anchor too strong/frozen → lower
+  il-lambda); `il_kl` should grow then plateau (anchor working); entropy stable. KILL/RETUNE read: held-out still
+  peaks-then-falls = il-lambda too weak (raise next run); clip→0 = too strong.
+- **Watcher (controller):** `bash gpu_run_artifacts/run_watchers.sh start p3stageA gcp cap-probe-93160.us-east1-d.orbit-wars-rl`
+  → sync + held-out Ajay full panel per ckpt (masks gate3/floor0/no-forward, match training) →
+  `gpu_run_artifacts/p3stageA/`. First eval = step ~4.5M (500k after the 4M resume).
+- Monitor: `ssh cap-probe-93160.us-east1-d.orbit-wars-rl "grep '^iter' ~/orbit_wars_rl/train_gpu_phase1_p3stageA_*.log | tail"`.
+
+---
+
+## 🟢 FROM-SCRATCH FEATURE SET + RL recipe (for the next from-scratch run, 2026-06-13)
+
+The next from-scratch run rides on the faithful (comet) sim. Bundle ALL feature/observation changes here —
+they change the model input dim, so they MUST land together in one from-scratch run (existing ckpts won't load),
+and the cost of adding them is free *now* (we're going from-scratch anyway) and expensive later (retrofit = restart).
+
+### ✅ DONE — comet features (path-aware, train/eval/export parity)
+`is_comet` populated + comet slots OVERLOAD the orbital channels (no model-dim change on their own): feat 7=1,
+feat 10/11 = comet PATH position +5 steps, feat 9 = normalized steps-to-departure. Pairwise treats comets
+non-orbiting. Identical branch in `torch_env.get_features` + `features.extract_features` (kaggle obs exposes
+`observation.comets`=paths+path_index → eval/export parity automatic). `to_legacy_obs` now surfaces comets (+ fixed
+a pre-existing id-0 `initial_planets` collision). Regression test: `orbit_wars_rl/feature_parity_comet_probe.py`
+(CLEAN). Physics fidelity tests still pass. Full write-up: `docs/training.md` Current State.
+
+### 🟢 GAME-PHASE features (NEW 2026-06-13, from the Toad Brigade/Isaiah Lux-2021 winner writeup)
+**The gap:** the agent's ENTIRE temporal sense is ONE scalar — global feat 1 = `clip(step/500,0,1)`. No global
+game-phase signal at all. Everything else temporal is entity-local (fleet ETAs, comet expiry, 5-turn orbit pred).
+Isaiah added a discrete game-phase embedding (turn//40) + day-night cycle embedding and "the network quickly
+developed dramatically different behaviors during beginning/middle/end game ... a crucial part of its success."
+A scalar forces the net to manufacture sharp nonlinear thresholds; a bucketed/one-hot phase gives near-orthogonal
+per-phase codes cheaply. Our architecture projects continuous globals via Linear → **one-hot phase channels are the
+natural fit** (no new embedding layer). All parity-safe (computable from `step`, `angular_velocity`, constant spawn
+steps). Ranked, add the top two:
+1. 🟢 **Game-phase one-hot** (early/mid/late, or finer buckets aligned to our `planets@16/32/50/100` analysis
+   windows). The direct Isaiah analog. We MEASURE behavior per phase but never tell the agent which phase it's in.
+2. 🟢 **Comet-cycle phase** = normalized steps-to-next-comet-spawn (+ steps-since-last). The periodic day-night
+   analog; complements the per-comet expiry feature (rhythm vs entity). Spawns at constant 50/150/250/350/450.
+3. ⏸ **Endgame / time-to-hard-cap** — fold into the phase one-hot's last bucket (weak: games usually end by
+   elimination well before the 500 cap, so a dedicated channel is low-value).
+4. ⏸ **Orbital phase** (`sin/cos(angular_velocity·step)`) — PARK; per-planet positions + pairwise arrival already
+   expose the geometry locally; a global orbital phase is mostly redundant.
+**⭐ Hypothesis to test (phase-as-observation vs phase-as-reward-schedule):** we currently encode "phase matters"
+through hand-tuned time-DEPENDENT REWARD shaping (`early_capture` exp-decay, `first_strike` t<50) — fragile and
+Nash-eaten. Isaiah gives phase as an OBSERVATION and lets the policy self-condition. So the clean falsifiable bundle:
+add the phase one-hot and test whether it lets the agent learn the opening aggression we've been BRIBING it into,
+allowing us to RETIRE the time-scheduled shaping. Restraint: top-two only — more temporal channels risk the policy
+leaning on the clock instead of the board.
+
+### 🟡 RL-recipe borrows from the same writeup (bigger bets, after the feature run)
+> **⭐ Now a concrete staged plan: `docs/phase3.md`** (ratcheted teacher-KL + league, on the faithful sim). The
+> machinery already exists (`ppo.py` `frozen_il_model`/`_il_kl_penalty`, `--il-ref`/`--il-lambda`); the new build is
+> the RATCHET (re-anchor to rising held-out-best; current schedule wrongly decays to 0). Summary bullets kept below.
+- **⭐ Frozen-teacher KL as an ANTI-CYCLING STABILIZER (not imitation).** Isaiah: a KL loss to a frozen teacher
+  "helped to stabilize behavior and prevent strategic cycles — both of which plague a pure self-play setup." That is
+  our #1 documented failure (improve-then-degrade / Nash reforms ~2M, [[feedback_selfplay_collapse_metrics]]). We
+  only ever used IL/BC as a *small imitation aux* (bc-coef 0.05 = "too weak"). The teacher-KL is a CORE stabilizer
+  whose job is to keep self-play from wandering off the strong attractor — NOT to copy a style. Pair it with the
+  from-scratch run: keep a frozen strong checkpoint as the KL anchor. Highest-leverage / lowest-risk borrow (machinery
+  we already have). **Frame explicitly as stabilizer to avoid conflation with the dead bc-coef-0.05 aux.**
+- **Shape-then-sparse with teacher distillation.** Isaiah: ~20M steps of dense shaping to bootstrap, then DROP shaping
+  and train on pure ±1 terminal, with the previous (shaped) net as KL teacher. Maybe the missing bridge — every
+  shaping term we anneal gets eaten by the Nash; the teacher is what carries behavior through the un-shaping.
+- **Diverse opponent LEAGUE for resilience when behind** — Isaiah hit our EXACT "agent gives up when losing" failure
+  and prescribed "a league of more diverse opponents." Independent corroboration of the pool-seed-RL pivot +
+  win-starvation finding. (Already queued; see Pool levers below.)
+- **Test-time 180° board-symmetry augmentation** (average action probs over the rotation-symmetric board) — near-free
+  eval regularizer/boost we don't use. Greedy decode at eval = our threshold-decode (already do). Validated: joint
+  action over all units + masking-to-−inf-with-no-op-escape = our arch + [[feedback_veto_mask_removes_not_teaches]].
+- ⏸ **IMPALA/UPGO algorithm switch** — PARK (big bet); UPGO is a sparse-reward self-imitation helper but switching
+  off PPO is not a quick lever. Network-size distillation curriculum also parked.
+Full source: `writeups/Toad Brigade's Approach - Deep Reinforcement Learning  Kaggle.md` (Isaiah Pressman, Lux AI
+2021 winner — very likely the SAME "Isaiah" we profile as #1 Orbit Wars → our top-player "style" replays are likely
+another self-play RL agent's emergent behavior, not human heuristics; [[project_isaiah_style_profile]]).
 
 ---
 

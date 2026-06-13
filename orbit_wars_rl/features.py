@@ -45,6 +45,13 @@ BOARD_SIZE = 100.0
 SUN_RADIUS = 10.0
 MAX_SPEED = 6.0
 
+# Comet observation features — must stay in sync with torch_env (COMET_FEAT_LOOKAHEAD /
+# COMET_LIFE_NORM). For comet planets the orbital channels (9 orb_r, 10 pred_x, 11 pred_y)
+# are overloaded with path-aware values: position COMET_FEAT_LOOKAHEAD steps ahead along the
+# comet path (pred_x/pred_y) and normalized steps-to-departure (orb_r channel).
+COMET_FEAT_LOOKAHEAD = 5
+COMET_LIFE_NORM = 40.0
+
 
 def fleet_speed(ships):
     ships = max(1, int(ships))
@@ -67,6 +74,14 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
     angular_velocity = obs.get("angular_velocity", 0.0)
     initial_planets = obs.get("initial_planets", planets)
     comet_planet_ids = set(obs.get("comet_planet_ids", []))
+    # Map comet planet id -> (path, path_index) so comet slots get path-aware position/expiry
+    # features instead of the (meaningless) circular-orbit prediction. Same data the real kaggle
+    # obs exposes via observation.comets; mirrored in torch_env.get_features for train/eval parity.
+    comet_info = {}
+    for _grp in (obs.get("comets") or []):
+        _pidx = _grp.get("path_index", -1)
+        for _ci, _pid in enumerate(_grp.get("planet_ids", [])):
+            comet_info[int(_pid)] = (_grp["paths"][_ci], _pidx)
 
     n_planets = len(planets)
     n_fleets = min(len(fleets), max_fleets)
@@ -117,6 +132,18 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         pred_x = CENTER + orbital_r * math.cos(future_angle) if is_orbiting else x
         pred_y = CENTER + orbital_r * math.sin(future_angle) if is_orbiting else y
 
+        # Comet overlay: comets don't orbit circularly, so override the orbital channels with
+        # path-aware values (pred = path position LOOKAHEAD steps ahead; orb_r channel =
+        # normalized steps-to-departure). Mirrors torch_env.get_features' comet overlay.
+        orb_r_feat = orbital_r / CENTER
+        if is_comet and int(pid) in comet_info:
+            _cpath, _cpidx = comet_info[int(pid)]
+            _L = len(_cpath)
+            if _L > 0:
+                _ahead = _cpath[min(_cpidx + COMET_FEAT_LOOKAHEAD, _L - 1)]
+                pred_x, pred_y = float(_ahead[0]), float(_ahead[1])
+                orb_r_feat = min(max(_L - _cpidx, 0) / COMET_LIFE_NORM, 1.0)
+
         # Incoming fleet pressure
         friendly_pressure = 0.0
         enemy_pressure = 0.0
@@ -161,7 +188,7 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
             float(is_orbiting),                # 6: is_orbiting
             float(is_comet),                   # 7: is_comet
             dist_to_sun / CENTER,              # 8: normalized dist to sun
-            orbital_r / CENTER,                # 9: normalized orbital radius
+            orb_r_feat,                        # 9: orbital radius (or comet steps-to-departure)
             (pred_x - CENTER) / CENTER,        # 10: predicted x (5-turn lookahead)
             (pred_y - CENTER) / CENTER,        # 11: predicted y (5-turn lookahead)
             friendly_pressure / 100.0,         # 12: incoming friendly pressure
@@ -328,6 +355,7 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         max_owned=max_owned, angular_velocity=angular_velocity, step=step,
         init_by_id=init_by_id, enemy_contest=enemy_contest,
         friendly_contest=None if _NO_FRIENDLY_DEFLATION else friendly_contest,
+        comet_ids=comet_planet_ids,
     )
 
     return {
@@ -371,7 +399,8 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
                               angular_velocity: float = 0.0, step: int = 0,
                               init_by_id: dict | None = None,
                               enemy_contest: np.ndarray | None = None,
-                              friendly_contest: np.ndarray | None = None):
+                              friendly_contest: np.ndarray | None = None,
+                              comet_ids=None):
     """For each (owned-slot, target-planet) pair return geometric + ownership features.
 
     These are exactly the quantities the model cannot easily compute from raw (x, y)
@@ -408,9 +437,14 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
     tgt_is_orbiting = np.zeros(n_p, dtype=np.bool_)
     tgt_init_angle = np.zeros(n_p, dtype=np.float64)
     tgt_orbital_r = np.zeros(n_p, dtype=np.float64)
+    comet_id_set = set(int(c) for c in (comet_ids or []))
     if init_by_id is not None:
         for j in range(n_p):
             pid = int(planets[j][0])
+            # Comets are not circular orbiters → no arrival correction (use current position).
+            # Matches torch_env, where comet slots have _planet_is_orbiting=False.
+            if pid in comet_id_set:
+                continue
             init_p = init_by_id.get(pid, planets[j])
             rx = float(init_p[2]) - CENTER
             ry = float(init_p[3]) - CENTER
