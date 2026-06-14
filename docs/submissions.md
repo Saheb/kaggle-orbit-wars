@@ -34,6 +34,6 @@ Ordered by submission date. Checkpoint paths relative to repo root.
 - Sanity check: always run 10/10 vs random before submitting
 - Ajay panel added 2026-06-04 as harder eval metric (orbit_lite intercept aiming gives Ajay structural fleet-speed advantage)
 - Zach panel saturating ~88-89%; Ajay panel is now the signal that matters
-- Top 10 LB target: ~1153 (gap from current record **993.9** = ~159 points)
+- Top 10 LB target: **above 1500** (~1153 is only top-100; #1 Isaiah ≈ 1751). Gap from current record **993.9** = **~500+ points** (goal 900→1500+).
 - **LB record = rev38 5M + fixed aimer = 993.9** (sub 53451535). Best *lineage* to build on is rev38, not rev53b.
 - **Ajay/1166 panel demoted (2026-06-09):** rev53b proved the heuristic-ladder panel is not LB-predictive (10.9% Ajay → 933 LB, below rev38's 2.7% → 993.9). Treat panels as guardrails, not the objective; the only honest LB signal is submitting.

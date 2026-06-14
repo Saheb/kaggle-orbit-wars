@@ -115,7 +115,7 @@ class PPOLearner:
 
         return fire_kl + ship_kl + target_kl
 
-    def compute_loss(self, batch, return_metrics=False):
+    def compute_loss(self, batch, return_metrics=False, value_only=False):
         """Compute PPO clipped loss on a batch (target-decode only).
 
         batch keys:
@@ -220,14 +220,20 @@ class PPOLearner:
         target_entropy = target_dist.entropy().mean()
 
         # IL regularization: KL(π_current || π_frozen_BC) on rollout states.
-        il_kl = self._il_kl_penalty(batch, outputs)
+        # Skipped in value_only (critic warmup) — the policy is frozen, so the IL
+        # anchor and entropy/policy terms are irrelevant (and the frozen-IL forward
+        # would be wasted compute).
+        il_kl = self._il_kl_penalty(batch, outputs) if not value_only else outputs["fire_logits"].new_zeros(())
 
-        loss = (policy_loss
-                + cfg.value_coef * value_loss
-                - cfg.entropy_coef_fire  * fire_entropy
-                - cfg.entropy_coef_target * target_entropy
-                - cfg.entropy_coef_ships * ship_entropy
-                + self.il_coef * il_kl)
+        if value_only:
+            loss = cfg.value_coef * value_loss
+        else:
+            loss = (policy_loss
+                    + cfg.value_coef * value_loss
+                    - cfg.entropy_coef_fire  * fire_entropy
+                    - cfg.entropy_coef_target * target_entropy
+                    - cfg.entropy_coef_ships * ship_entropy
+                    + self.il_coef * il_kl)
 
         if return_metrics:
             clip_frac = ((ratio - 1.0).abs() > cfg.clip_eps).float().mean()
@@ -401,6 +407,38 @@ class PPOLearner:
         avg_metrics["kl_early_stop"] = float(early_stopped)
         self.update_count += n_updates
         return avg_metrics
+
+    # Value-head parameter prefixes — the ONLY params trained during critic warmup.
+    # The shared trunk + policy heads stay frozen so the BC policy is byte-for-byte
+    # untouched while the value head fits the frozen features.
+    _VALUE_HEAD_PREFIXES = ("value_fc1", "value_fc2", "value_out")
+
+    def _set_value_only(self, on: bool) -> None:
+        for name, p in self.model.named_parameters():
+            p.requires_grad = (name.split(".")[0] in self._VALUE_HEAD_PREFIXES) if on else True
+
+    def value_warmup_update(self, batches):
+        """Critic-only warmup (BC warmstart: trained policy + UNtrained critic).
+        Freeze the trunk + policy heads; fit ONLY the value head on the frozen BC
+        features for one pass over the minibatches. No scheduler step (keep LR
+        steady) and no IL/entropy/policy terms. Returns minimal logging metrics."""
+        self._set_value_only(True)
+        sum_vl, n = 0.0, 0
+        for batch in batches:
+            loss, metrics = self.compute_loss(batch, return_metrics=True, value_only=True)
+            self.optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in self.model.parameters() if p.requires_grad],
+                self.cfg.ppo.max_grad_norm)
+            self.optimizer.step()
+            sum_vl += metrics["value_loss"]
+            n += 1
+        self._set_value_only(False)
+        self.update_count += n
+        return {"value_loss": sum_vl / max(n, 1),
+                "learning_rate": self.optimizer.param_groups[0]["lr"],
+                "kl_early_stop": 0.0, "critic_warmup": 1.0}
 
     def get_lr(self):
         return self.optimizer.param_groups[0]["lr"]

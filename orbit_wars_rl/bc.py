@@ -373,6 +373,9 @@ def _save_bc_checkpoint(model: EntityTransformer, cfg, save_path: str):
             "ship_bin_mode":  cfg.model.ship_bin_mode,
             "num_ship_bins":  cfg.model.num_ship_bins,
             "min_ship_bin":   cfg.model.min_ship_bin,
+            # 15-global feature flag — load_checkpoint/train_torch restore the global dim from
+            # this so a 15-global BC warmstart loads correctly (omitting it silently breaks resume).
+            "game_phase_features": cfg.model.game_phase_features,
         },
     }, save_path)
     print(f"BC model saved → {save_path}")
@@ -646,6 +649,16 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=0.0,
                         help="Learning rate override (default: use BCConfig.learning_rate=3e-4). "
                              "For fine-tuning from a strong checkpoint, use 1e-4.")
+    parser.add_argument("--game-phase-features", action="store_true",
+                        help="Train a 15-global model (11->15: phase one-hot + comet-cycle). The "
+                             "--samples pkl MUST be built with the same flag (build_snowball_bc.py "
+                             "--game-phase-features) so the stored global tensors are 15-dim.")
+    parser.add_argument("--entity-dim", type=int, default=0,
+                        help="Override model entity_dim (default 96). Use 128 for the capacity-probe arm.")
+    parser.add_argument("--device", type=str, default="",
+                        help="Override device (e.g. 'mps' for Apple GPU, 'cuda', 'cpu'). Default: cfg.device.")
+    parser.add_argument("--batch-size", type=int, default=0,
+                        help="Override BC batch size (default 128). Larger (512) = fewer steps + better CPU/MPS amortization.")
     args = parser.parse_args()
 
     cfg = Config()
@@ -654,6 +667,17 @@ if __name__ == "__main__":
     cfg.bc.num_steps = args.steps
     if args.lr > 0:
         cfg.bc.learning_rate = args.lr
+    if args.device:
+        cfg.device = args.device
+    if args.batch_size > 0:
+        cfg.bc.batch_size = args.batch_size
+    if args.game_phase_features:
+        from features import set_game_phase_features
+        cfg.model.game_phase_features = True
+        cfg.model.global_feature_dim = 15
+        set_game_phase_features(True)   # so any on-the-fly extraction emits 15-global too
+    if args.entity_dim > 0:
+        cfg.model.entity_dim = args.entity_dim
 
     if args.samples:
         validate_bc_from_samples(cfg, args.samples, save_path=args.save,

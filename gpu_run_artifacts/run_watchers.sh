@@ -15,6 +15,15 @@
 #   run_watchers.sh stop                  # kill all watchers
 #   run_watchers.sh status                # active run + live procs
 #
+#   <run> is BOTH the local artifact folder (gpu_run_artifacts/<run>/) and, by default, the
+#   substring matched in remote log/checkpoint filenames. For a multi-arm A/B whose arms use
+#   DIFFERENT run-names (e.g. gate2 + gate3) under one umbrella folder, set env MATCH to the common
+#   prefix so ONE watcher syncs/evals both arms:
+#       MATCH=gate run_watchers.sh start gate_ab jarvis <ip>   # folder=gate_ab, matches gate2/gate3
+#   For a gate A/B, also set EVAL_GATE_FROM_RUNNAME=1 so each ckpt is evaled with its OWN
+#   --reinforce-gate-min-planets (parsed from the <MATCH><N> token in the filename) — eval must match
+#   training, so gate2 ckpts get the gate=2 mask and gate3 ckpts the gate=3 mask automatically.
+#
 # held_out_opp default = candidate_ajay_1200 (deb is usually IN training, so not held-out).
 # Eval masks default to the current locked design (gate3/floor0/NO forward-only) — override via env
 # REINFORCE_MASKS if a run trains different masks (eval MUST match training).
@@ -56,6 +65,7 @@ write_env() {  # write_env <run> <platform> <target> <opp>
   esac
   cat > "$ENVF" <<EOF
 RUN='$RUN'
+MATCH='${MATCH:-$RUN}'
 PLATFORM='$PLAT'
 TARGET='$TGT'
 RSYNC_SSH='$RSYNC_SSH'
@@ -64,6 +74,7 @@ REMOTE_LOG_DIR='$RLOG'
 REMOTE_CKPT_DIR='$RCKPT'
 OPP='$OPP'
 REINFORCE_MASKS='${REINFORCE_MASKS:---reinforce-gate-min-planets 3 --reinforce-garrison-floor 0}'
+EVAL_GATE_FROM_RUNNAME='${EVAL_GATE_FROM_RUNNAME:-}'
 EOF
 }
 
@@ -72,11 +83,11 @@ _sync() {  # _sync <run>
   local RUN="$1"; . "$ROOT/gpu_run_artifacts/$1/.watch_env"
   local DST="$ROOT/gpu_run_artifacts/$1"; mkdir -p "$DST/logs" "$DST/checkpoints"
   while _still_active "$RUN"; do
-    rsync -az -e "$RSYNC_SSH" --include="train_gpu_phase1_${RUN}_*.log" --exclude='*' \
+    rsync -az -e "$RSYNC_SSH" --include="train_gpu_phase1_${MATCH}*.log" --exclude='*' \
       "$HOST:$REMOTE_LOG_DIR" "$DST/logs/" 2>/dev/null
     rsync -azL -e "$RSYNC_SSH" \
-      --include="torch_step_*${RUN}*.pt" --include="pool_step_*${RUN}*.pt" \
-      --include="torch_best_${RUN}*.pt" --exclude='*' \
+      --include="torch_step_*${MATCH}*.pt" --include="pool_step_*${MATCH}*.pt" \
+      --include="torch_best_${MATCH}*.pt" --exclude='*' \
       "$HOST:$REMOTE_CKPT_DIR" "$DST/checkpoints/" 2>/dev/null
     sleep "$POLL"
   done
@@ -88,7 +99,7 @@ _eval() {  # _eval <run>   (platform-independent — local files only)
   local DIR="$ROOT/gpu_run_artifacts/$1/checkpoints" LOGDIR="$ROOT/gpu_run_artifacts/$1/eval_logs"
   local OUT="$ROOT/gpu_run_artifacts/$1/eval_$(basename "${OPP%.py}" | sed 's/candidate_//').csv"
   mkdir -p "$LOGDIR"; cd "$ROOT"
-  [ -f "$OUT" ] || echo "utc_time,step,win_rate,seat0_wr,seat1_wr,open_capatk_WON,mid_capatk_WON,peelrate_WON,planets100_WON,reinf_step_mid,reinf_dir_fwd,games,checkpoint" > "$OUT"
+  [ -f "$OUT" ] || echo "utc_time,step,win_rate,seat0_wr,seat1_wr,open_capatk_WON,mid_capatk_WON,peelrate_WON,planets100_WON,reinf_step_early,reinf_step_mid,reinf_dir_fwd,games,checkpoint" > "$OUT"
   while _still_active "$RUN"; do
     while IFS= read -r ckpt; do
       [ -n "$ckpt" ] || continue
@@ -97,8 +108,14 @@ _eval() {  # _eval <run>   (platform-independent — local files only)
       grep -q ",$base$" "$OUT" 2>/dev/null && continue
       step=$(echo "$base" | sed -E 's/torch_step_([0-9]+)_.*/\1/')
       elog="$LOGDIR/eval_${base%.pt}.log"
+      # Per-arm eval mask: for a gate A/B whose arms are named <MATCH><N> (gate2/gate3), eval each
+      # ckpt with its OWN gate-min-planets (eval must match training). Opt-in via EVAL_GATE_FROM_RUNNAME.
+      masks="$REINFORCE_MASKS"
+      if [ -n "$EVAL_GATE_FROM_RUNNAME" ] && [[ "$base" =~ ${MATCH}([0-9]+) ]]; then
+        masks=$(echo "$REINFORCE_MASKS" | sed -E "s/--reinforce-gate-min-planets [0-9]+/--reinforce-gate-min-planets ${BASH_REMATCH[1]}/")
+      fi
       $PY orbit_wars_rl/eval.py --checkpoint "$ckpt" --opponent "$OPP" \
-          --panel --target-decode $REINFORCE_MASKS > "$elog" 2>&1 || true
+          --panel --target-decode $masks > "$elog" 2>&1 || true
       wr=$(grep -E "^Overall:"  "$elog" | tail -1 | sed -E 's/.*\(([0-9.]+)%\).*/\1/')
       s0=$(grep -E "^  seat 0:" "$elog" | tail -1 | sed -E 's/.*\(([0-9.]+)%\).*/\1/')
       s1=$(grep -E "^  seat 1:" "$elog" | tail -1 | sed -E 's/.*\(([0-9.]+)%\).*/\1/')
@@ -106,10 +123,11 @@ _eval() {  # _eval <run>   (platform-independent — local files only)
       mc=$(grep -E "WON\(.*cap/atk open" "$elog" | tail -1 | sed -E 's#.*mid50-100 ([0-9.]+).*#\1#')
       p100=$(grep -E "WON\(.*cap/atk open" "$elog" | tail -1 | sed -E 's#.*WON\([0-9]+g\) [0-9]+/[0-9]+/[0-9]+/([0-9]+).*#\1#')
       pr=$(grep -E "WON\(.*peel-rate" "$elog" | tail -1 | sed -E 's#.*WON\([0-9]+g\) peel-rate ([0-9.]+).*#\1#')
+      rse=$(grep -E "reinf by step" "$elog" | tail -1 | sed -E 's#.*reinf by step +<50:([0-9.]+).*#\1#')
       rsm=$(grep -E "reinf by step" "$elog" | tail -1 | sed -E 's#.*reinf by step +<50:[0-9.]+ +50-100:([0-9.]+).*#\1#')
       rdf=$(grep -E "reinf direction" "$elog" | tail -1 | sed -E 's#.*fwd ([0-9]+)%.*#\1#')
-      echo "$(date -u +%FT%TZ),${step},${wr:-ERR},${s0:-ERR},${s1:-ERR},${oc:-NA},${mc:-NA},${pr:-NA},${p100:-NA},${rsm:-NA},${rdf:-NA},256,${base}" >> "$OUT"
-    done < <(find "$DIR" -maxdepth 1 -name "torch_step_*${RUN}*.pt" -mmin +2 2>/dev/null | sort -rV)
+      echo "$(date -u +%FT%TZ),${step},${wr:-ERR},${s0:-ERR},${s1:-ERR},${oc:-NA},${mc:-NA},${pr:-NA},${p100:-NA},${rse:-NA},${rsm:-NA},${rdf:-NA},256,${base}" >> "$OUT"
+    done < <(find "$DIR" -maxdepth 1 -name "torch_step_*${MATCH}*.pt" -mmin +2 2>/dev/null | sort -rV)
     sleep "$POLL"
   done
   echo "[eval] $RUN no longer active — exiting" >> "$ROOT/gpu_run_artifacts/$RUN/watchers.log"

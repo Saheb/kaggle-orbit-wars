@@ -142,27 +142,51 @@ class OpponentPool:
 
     # ---- sampling ----------------------------------------------------------
 
-    def sample(self, rng: Optional[random.Random] = None) -> Optional[PoolMember]:
+    def sample(self, rng: Optional[random.Random] = None,
+               external_fraction: Optional[float] = None,
+               pinned_fraction: Optional[float] = None) -> Optional[PoolMember]:
         """Sample a member by PFSP weight. Returns None if the pool is empty.
 
-        If external_fraction > 0, external heuristics are guaranteed that
-        fraction of samples regardless of their PFSP win-rate. This keeps
-        targeted opponents (e.g. Hellburner) in the training mix even when
-        the rollout win-rate climbs high. PFSP governs only the self-members
-        within the remaining (1 - external_fraction) budget.
+        ``external_fraction`` overrides the instance default (lets a caller ramp it
+        per-rollout). If > 0, external heuristics are guaranteed that fraction of
+        samples regardless of their PFSP win-rate, keeping targeted opponents (e.g.
+        the peeler) in the mix even as the rollout win-rate climbs.
+
+        ``pinned_fraction`` engages **ramp mode** (3-way split):
+        external slice / **pinned-RL slice** / PFSP over ORGANIC (non-pinned) selves.
+        This pulls pinned RL champions (e.g. rev38) OUT of PFSP into their own fixed
+        ramped fraction — necessary because PFSP weight ``(1-wr)^α`` *up-samples* an
+        opponent you lose to, so a weak from-scratch policy would otherwise see MORE
+        rev38 early (backwards). When ``pinned_fraction is None`` the legacy 2-way
+        behaviour is preserved (pinned members compete inside PFSP with the selves).
+        Returns None when the chosen budget falls to PFSP but no organic snapshot
+        exists yet (early from-scratch) — the caller then falls back to self-play.
         """
         if not self.members:
             return None
         r = rng or random
+        ext_frac = self.external_fraction if external_fraction is None else external_fraction
 
         externals = [m for m in self.members if m.kind == "external_heuristic"]
-        self_members = [m for m in self.members if m.kind == "self"]
 
-        if externals and self.external_fraction > 0.0:
-            if r.random() < self.external_fraction:
-                # Fixed external slice: uniform among all external heuristics.
+        if pinned_fraction is not None:
+            # --- Ramp mode: external / pinned-RL / PFSP-over-organic (non-pinned selves) ---
+            pinned = [m for m in self.members if m.pinned]
+            organic = [m for m in self.members if m.kind == "self" and not m.pinned]
+            roll = r.random()
+            if externals and roll < ext_frac:
                 return r.choice(externals)
-            # Remaining budget: PFSP over self-members only (fall through below).
+            if pinned and roll < ext_frac + pinned_fraction:
+                return r.choice(pinned)
+            if not organic:
+                # No organic snapshots yet (early from-scratch) → caller does self-play.
+                return None
+            candidates = organic
+        elif externals and ext_frac > 0.0:
+            # Legacy 2-way: fixed external slice vs PFSP over all self-members (incl. pinned).
+            if r.random() < ext_frac:
+                return r.choice(externals)
+            self_members = [m for m in self.members if m.kind == "self"]
             candidates = self_members if self_members else self.members
         else:
             # Legacy path: PFSP over all members together.
@@ -326,7 +350,9 @@ class OpponentPool:
         self_members = [m for m in self.members if m.kind != "external_heuristic"]
         top_self = sorted(self_members, key=lambda m: -self._pfsp_weight(m))[:max_rows]
         rows = top_self + externals
-        ext_note = (f"  external_fraction={self.external_fraction:.2f}"
+        # NOTE: this is the CONFIGURED target/cap; under a ramp (train_torch) the LIVE
+        # per-rollout fraction is lower — see the "pool hard-ramp" line for the live value.
+        ext_note = (f"  external_target_frac={self.external_fraction:.2f}"
                     if self.external_fraction > 0 else "")
         lines = [f"  pool size={len(self.members)}  alpha={self.pfsp_alpha}{ext_note}"]
         for m in rows:

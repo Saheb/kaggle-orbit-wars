@@ -174,7 +174,7 @@ Opponent paths relative to repo root. Always `--target-decode` for Phase 1.
 | Rev32b 6M | **88.7%** | 0.8% | pending | Best Zach ever |
 | Rev35c 1M | — | **3.1%** | — | Best Ajay ever |
 
-Target: Top 10 LB ≈ 1153 (gap ~234 points from 918.8).
+Target: Top 10 LB is **above 1500** (1153 is only ~top-100; #1 Isaiah ≈ 1751). Our LB record is 918.8 → the gap to top-10 is **~600+ points** (a large gap; goal is 900→1500+).
 
 ---
 

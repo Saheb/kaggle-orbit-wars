@@ -318,6 +318,10 @@ def train(args):
         cfg.ppo.il_lambda = args.il_lambda
     if args.il_decay_frac is not None:
         cfg.ppo.il_decay_frac = args.il_decay_frac
+    if args.critic_warmup_ev is not None:
+        cfg.ppo.critic_warmup_ev = args.critic_warmup_ev
+    if args.critic_warmup_max_updates is not None:
+        cfg.ppo.critic_warmup_max_updates = args.critic_warmup_max_updates
     if args.bc_coef is not None:
         cfg.ppo.bc_coef = args.bc_coef
     print(f"PPO config: lr={cfg.ppo.learning_rate}, ppo_epochs={cfg.ppo.ppo_epochs}, "
@@ -623,8 +627,13 @@ def train(args):
         # Pre-allocate a frozen model for 'self' opponents (loaded with state_dict per rollout)
         pool_opp_model = copy.deepcopy(model).to(device)
         pool_opp_model.eval()
-        print(f"Pool initialised: mode={args.pool_mode}, members={len(pool)}, "
-              f"fraction={args.pool_fraction}, snapshot_every={args.pool_checkpoint_interval:,} steps\n")
+        print(f"Pool initialised: mode={args.pool_mode}, members={len(pool)} (at init), "
+              f"pool-fraction={args.pool_fraction}, snapshot_every={args.pool_checkpoint_interval:,} steps")
+        if args.pool_pinned_fraction > 0.0:
+            print(f"  Opponent-difficulty RAMP active: pinned-RL + external ease in 0 -> "
+                  f"{args.pool_pinned_fraction:.3f}/{args.pool_external_fraction:.3f} of the pool slice "
+                  f"over {args.pool_hard_ramp_steps:,} steps (true-zero start = self-play early).")
+        print()
     last_pool_snapshot_step = 0
 
     total_env_steps = 0
@@ -810,6 +819,14 @@ def train(args):
         return feats, outs
 
     print(f"\nStarting self-play training (target {args.total_steps:,} env steps)")
+    # Critic-only warmup (BC warmstart): fit the value head with the policy frozen
+    # until EV reaches the threshold, before PPO trusts any advantage. Self-skips on
+    # a warm-critic resume (first rollout's EV already >= threshold).
+    critic_warmup_active = cfg.ppo.critic_warmup_ev > 0.0
+    critic_warmup_count = 0
+    if critic_warmup_active:
+        print(f"Critic warmup ENABLED: value-head-only until EV>={cfg.ppo.critic_warmup_ev} "
+              f"(max {cfg.ppo.critic_warmup_max_updates} rollouts), policy frozen.")
     print("=" * 70)
 
     while total_env_steps < args.total_steps:
@@ -822,10 +839,24 @@ def train(args):
         N_self, N_pool = N, 0
         current_seat = 0
         if pool is not None and len(pool) > 0 and args.pool_fraction > 0:
-            pool_opp = pool.sample(rng)
-            N_pool = int(N * args.pool_fraction)
-            N_self = N - N_pool
-            current_seat = rng.randint(0, 1)  # alternate so current sees both seats
+            if args.pool_pinned_fraction > 0.0:
+                # Ramp mode: ease the hard opponents (pinned RL + external peeler) in
+                # 0→target so a weak from-scratch BC isn't win-starved. true-zero start
+                # = pure self-play early (pins pulled out of PFSP; no organic snapshots
+                # yet → sample() returns None → self-play fallback below).
+                ramp = (min(total_env_steps / args.pool_hard_ramp_steps, 1.0)
+                        if args.pool_hard_ramp_steps > 0 else 1.0)
+                pool_opp = pool.sample(
+                    rng,
+                    external_fraction=args.pool_external_fraction * ramp,
+                    pinned_fraction=args.pool_pinned_fraction * ramp,
+                )
+            else:
+                pool_opp = pool.sample(rng)
+            if pool_opp is not None:
+                N_pool = int(N * args.pool_fraction)
+                N_self = N - N_pool
+                current_seat = rng.randint(0, 1)  # alternate so current sees both seats
         opp_seat = 1 - current_seat
         pool_slice = slice(N_self, N) if N_pool > 0 else slice(0, 0)
         # Inform env which envs are self-play (SSDR active) vs pool (symmetric).
@@ -1113,11 +1144,17 @@ def train(args):
             bc_subset = [bc_samples_for_aux[i] for i in bc_idx]
             bc_batch = _bc_collate(bc_subset, device)
 
-        # PPO update
+        # PPO update — OR a critic-only warmup step while the BC-warmstart critic is
+        # still cold (policy frozen, value head only). The EV-based exit is checked
+        # below, after this rollout's EV is computed.
         model.train()
-        metrics = learner.update(minibatches, scheduler=scheduler,
-                                 kl_target=cfg.ppo.kl_target,
-                                 bc_batch=bc_batch)
+        if critic_warmup_active:
+            metrics = learner.value_warmup_update(minibatches)
+            critic_warmup_count += 1
+        else:
+            metrics = learner.update(minibatches, scheduler=scheduler,
+                                     kl_target=cfg.ppo.kl_target,
+                                     bc_batch=bc_batch)
         metrics.update(ms_metrics)
         # reinforce_rate: of the current policy's realized launches (train_mask-filtered,
         # across both seats), the fraction sent to our own planets (Vadasz ~0.57; target
@@ -1185,6 +1222,15 @@ def train(args):
         total_env_steps += rollout_T * N
         iter_count += 1
         clipfrac_history.append(metrics.get("clip_frac", 0.0))
+
+        # Critic-warmup exit: once the (policy-frozen) value head explains enough
+        # return variance — or we hit the cap — stop warming and switch to PPO.
+        if critic_warmup_active:
+            _ev = metrics.get("explained_variance", 0.0)
+            if _ev >= cfg.ppo.critic_warmup_ev or critic_warmup_count >= cfg.ppo.critic_warmup_max_updates:
+                critic_warmup_active = False
+                print(f"  ★ critic warmup DONE: EV={_ev:.3f} after {critic_warmup_count} "
+                      f"rollouts ({total_env_steps:,} steps) — starting PPO.", flush=True)
 
         # --- Logging --------------------------------------------------------
         now = time.perf_counter()
@@ -1356,6 +1402,13 @@ def train(args):
             if evicted:
                 print(f"  pool: mastered & evicted external opponents: {evicted}")
             print(f"  pool snapshot @ step {total_env_steps:,}")
+            if args.pool_pinned_fraction > 0.0:
+                ramp = (min(total_env_steps / args.pool_hard_ramp_steps, 1.0)
+                        if args.pool_hard_ramp_steps > 0 else 1.0)
+                print(f"  pool hard-ramp {ramp:.2f} ({total_env_steps:,}/{args.pool_hard_ramp_steps:,}): "
+                      f"LIVE pinned_frac={args.pool_pinned_fraction * ramp:.3f} "
+                      f"external_frac={args.pool_external_fraction * ramp:.3f} of pool slice "
+                      f"(target {args.pool_pinned_fraction:.3f}/{args.pool_external_fraction:.3f})")
             print(pool.summary())
 
     elapsed = time.perf_counter() - start
@@ -1433,6 +1486,14 @@ if __name__ == "__main__":
     parser.add_argument("--il-decay-frac", type=float, default=None,
                         help="Fraction of total training over which il_lambda "
                              "decays to 0 (default cfg: 0.8).")
+    parser.add_argument("--critic-warmup-ev", type=float, default=None,
+                        help="Critic-only warmup: before PPO, freeze the trunk + policy "
+                             "heads and train ONLY the value head until explained-variance "
+                             "reaches this (e.g. 0.8), so PPO never trusts a random critic and "
+                             "unlearns a BC warmstart. 0/unset = disabled. Self-skips on a "
+                             "warm-critic resume (EV already high → 0 warmup steps).")
+    parser.add_argument("--critic-warmup-max-updates", type=int, default=None,
+                        help="Safety cap on critic-warmup rollouts if EV never reaches the threshold.")
     parser.add_argument("--il-ref", type=str, default="",
                         help="Path to a separate frozen reference .pt for IL. "
                              "Default behaviour: when il_lambda>0 and --resume is "
@@ -1630,6 +1691,21 @@ if __name__ == "__main__":
                              "remaining 60%% is governed by PFSP over self-checkpoints. "
                              "Use for targeted runs where you need sustained pressure from "
                              "a specific opponent regardless of rollout win-rate.")
+    parser.add_argument("--pool-pinned-fraction", type=float, default=0.0,
+                        help="TARGET fraction of pool samples reserved for PINNED RL champions "
+                             "(--pool-seed-rl, e.g. rev38), pulling them OUT of PFSP into a fixed "
+                             "slice. >0 engages 3-way ramp mode: external / pinned-RL / PFSP-over-"
+                             "organic-selves. Necessary because PFSP up-samples opponents you lose "
+                             "to, so a weak from-scratch policy would see MORE rev38 early "
+                             "(backwards). 0 = legacy (pins compete inside PFSP). With "
+                             "--pool-fraction 0.75 a target of 0.267 ≈ 0.20 of TOTAL games.")
+    parser.add_argument("--pool-hard-ramp-steps", type=int, default=0,
+                        help="Steps over which the hard opponents (pinned RL + external peeler) "
+                             "ramp in 0→target, linearly. Both --pool-pinned-fraction and "
+                             "--pool-external-fraction are scaled by min(step/ramp,1). Eases the "
+                             "unbeatable opponents in so a weak from-scratch BC isn't win-starved "
+                             "(true-zero start = pure self-play early). 0 = no ramp (jump to "
+                             "target). Only active when --pool-pinned-fraction > 0.")
     parser.add_argument("--preseed-pool", type=str, default="",
                         help="Directory of .pt checkpoints to preseed the pool "
                              "with as 'self' members. Step is parsed from filename "

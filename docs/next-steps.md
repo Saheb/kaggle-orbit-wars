@@ -2,7 +2,166 @@
 
 Living doc — efforts and ideas, roughly prioritized. Discipline: **one delta per cloud run.**
 Status tags: 🔵 in-flight · 🟢 ready-to-build · 🟡 idea · ✅ done · ⏸ parked.
-Current focus: **⭐ PHASE 3 STAGE B (from-scratch ratchet) — building the pre-flight (2026-06-13).** Foundations all
+Current focus: **⭐ PHASE 3 STAGE B — 🔵 LIVE ON GCP L4 (LAUNCHED 2026-06-14).** Ramp built+unit-tested, BC step-0 WRs
+validated (0% vs both), from-scratch run live with critic-warmup + ramped pool. **Manual re-anchors (no auto-ratchet).**
+> **⭐ TWO CONCURRENT SPOT RUNS (2026-06-14) — both ⚠️ DESTROY when done (`jl destroy <id> --yes`):**
+> - **stageb2 = PRIMARY** (machine `426650` @ `217.18.55.108`): re-anchor from 6.29M, has the controller watcher (zach
+>   evals + sync). Details below. ⚠️ ship0 was creeping (0.14) — watch.
+> - **stageb3 = "let it be"** (machine `426674` @ `217.18.55.92`, A100-40GB spot): **FROM-SCRATCH** BC warmstart +
+>   **early-capture-coef 0.3** (always-on) + **gate2** + **deb-external 0.10** (rev38 pinned 0.267) + LR 0.0001 +
+>   critic-warmup 0.7 + ramp ON 6M + no min-ship-bin. Tests: does early_capture give the from-scratch run the
+>   expansion+commitment gradient (planets@50→9, self-punishes 1-ship probes) that phase-obs-alone didn't. Launch:
+>   `RUN=stageb3 RESUME=IL_REF=orbit_wars_rl/seed_checkpoints/bc_snowball_15global.pt LR=0.0001 CRITIC_WARMUP_EV=0.7
+>   GATE=2 POOL_EXTERNAL_FRAC=0.10 EARLY_CAPTURE_COEF=0.3 HEURISTIC_WORKERS=4 bash gpu_run_artifacts/run_stageb_jarvis.sh`.
+>   iter-1 healthy (critic warmup, EV→, policy frozen). **Monitoring = SYNC-ONLY** (controller is single-run, on stageb2):
+>   nohup loop PID in `gpu_run_artifacts/stageb3/.sync_pid` syncs /home/checkpoints+log every 300s → `gpu_run_artifacts/stageb3/`
+>   (⚠️ kill that PID when stageb3 ends). NO auto-eval — for stageb3 zach reads, run manually with **gate2** masks
+>   (`--reinforce-gate-min-planets 2 --reinforce-garrison-floor 0`) into `gpu_run_artifacts/stageb3/eval_logs/`.
+>
+> **⭐⭐ ACTIVE RUN — stageb2r (RE-ANCHOR from stageb2's 1M peak + deb→h12 swap, LAUNCHED 09:07 UTC 2026-06-14):**
+> - **Why:** stageb2 (re-anchor from 6.29M, LR 2×, deb pool) showed a clean **peak-then-fall** on zach held-out
+>   (524k→1M→1.5M→2M→2.62M = 46.9/**64.5**/49.6/41.4/31.2 — monotonic decline past the 1M peak) + diag ship0/meanshipbin
+>   undercommit creep. Root-cause read: **β=0.05 anchor too loose under 2× LR** — il_kl plateaued ~0.26 (vs Stage A's
+>   ~0.06 that HELD). So: re-anchor from the **1M peak**, **drop LR 0.0001→0.00005**, and swap the win-starving deb (0%)
+>   for the **beatable planner h12** (28% vs 6.29M — real win-gradient). Old stageb2 KILLED; ckpts/CSV kept as history
+>   under `gpu_run_artifacts/stageb2/`.
+> - **Box:** same Jarvis spot @ `217.18.55.108`, IN2, **A100-PCIE-40GB**, 16 cores → 4 workers. is_spot=TRUE ⚠️ **DESTROY
+>   when done:** `jl destroy <id> --yes` (`jl list` for id); spot data may not persist → watcher sync mandatory.
+> - **Config:** resume+il-ref = **1M** (copied to `/home/seed_b2r_resume_1M.pt` — a path with NO sibling `pool_*.pt` so
+>   the pool starts FRESH = rev38-pinned + h12-external only, NOT the resumed deb pool), **LR 0.00005**, critic-warmup OFF
+>   (`CRITIC_WARMUP_EV=0`, trained critic), pool ramp OFF (`POOL_RAMP_STEPS=0`), `EXT_OPP=candidate_producer_h12.py`
+>   (launch script now param'd, line 71), il-lambda 0.05 constant, gate3/floor0, game-phase, no early_capture, min-ship-bin
+>   OFF (⚠️ ship0 unguarded — watch). iter-1 healthy: EV 0.794, clip 0.090 (≠0, not frozen), KL 0.008, **il_kl 0.009**
+>   (≈0 at start, policy==teacher; THE thing to watch — should plateau LOW ~0.05-0.06, not 0.26), LR 5e-5, estop 0.
+>   Pool log confirmed: members=3, "external loaded: candidate_producer_h12", NO deb, no "Pool resumed". Launch:
+>   `RUN=stageb2r RESUME=$SEED IL_REF=$SEED LR=0.00005 GATE=3 CRITIC_WARMUP_EV=0 POOL_RAMP_STEPS=0 HEURISTIC_WORKERS=4
+>   EXT_OPP=opponents/candidate_producer_h12.py nohup bash gpu_run_artifacts/run_stageb_jarvis.sh …`
+> - **Watcher LIVE:** `run_watchers.sh start stageb2r jarvis 217.18.55.108 opponents/candidate_zach_public.py` → zach panel
+>   per ckpt → `gpu_run_artifacts/stageb2r/eval_zach_public.csv`. Ratchet calc init'd (anchor=1M seed, WR bootstraps).
+>   **READ:** does the LR-drop + tighter-anchor + h12 hold the held-out line (no peak-then-fall) AND does the h12
+>   win-gradient teach anti-peel that transfers? Local trend plot: `plot_train_log.py <log> --eval <csv>`.
+> - **(prior stageb2 block, superseded:)** resume 6.29M, LR 0.0001, deb pool, watcher → `gpu_run_artifacts/stageb2/`.
+> - **RE-ANCHOR = MANUAL (no auto-ratchet).** Decision CALCULATOR (dry-run, executes nothing):
+>   `orbit_wars_rl/.venv/bin/python gpu_run_artifacts/ratchet.py --run stageb2 --jarvis-ip 217.18.55.108 --opp zach_public check`
+>   → prints rolling-3 / anchor_wr / threshold(+2pp) / step-gap / best-ckpt / HOLD-or-REANCHOR. Rule: rolling-3 ≥ anchor+2pp
+>   AND ≥1M-step gap, never down (anchor_wr bootstraps from the first 3 evals ≈ the ~48% start).
+> - **⚠️ MANUAL re-anchor relaunch — `check`'s printed command OMITS this run's env (would revert to script defaults:
+>   LR 5e-5 / warmup-on / ramp-6M / RUN=stageb → WRONG + dir collision).** Use this instead (CK = best ckpt from `check`,
+>   path under `/home/checkpoints/`): `ssh -i ~/.ssh/jarvis-labs-key root@217.18.55.108 "cd /home && pgrep -f
+>   '[t]rain_torch.*--run-name stageb2'|xargs -r kill; sleep 5; RUN=stageb2 RESUME=<CK> IL_REF=<CK> LR=0.0001
+>   CRITIC_WARMUP_EV=0 POOL_RAMP_STEPS=0 HEURISTIC_WORKERS=4 nohup bash gpu_run_artifacts/run_stageb_jarvis.sh
+>   >/home/stageb2_reanchor.out 2>&1 </dev/null &"` then re-run `ratchet.py … init --anchor <CK>` to reset the calculator.
+> - **GCP stageb run — ✅ KILLED + instance DELETED by user 2026-06-14 (no longer billing).** It was degrading (peak
+>   6.29M, then ship0↑ / zach 48→32). Verdict it gave us: zach 6→48% but **0% vs Ajay** (transfer failed; same
+>   strong-peeler wall). Next lever after stageb2/stageb3 = steepen peeler gradient (the beatable-planner ladder below).
+>
+> **⭐⭐ STRATEGY STATE + BEATABLE-PLANNER LADDER (2026-06-14 — the NEXT lever after stageb2/stageb3):**
+> - **THE WALL (verdict from the GCP stageb run):** zach climbed 6%→48% but **0% vs Ajay** (6.29M 0/256, 9.44M 0/256,
+>   8.91M 1/256 = one lucky econ board). Transfer to the hard opponent FAILED — same place as all of Phase 2. Opponent
+>   ladder by our 6.29M panel WR: **zach ~48% (weak) · rev38 ~20% (beatable RL champion) · deb/Ajay ~0% (orbit_lite
+>   PLANNERS = the wall).** So the gap is specifically **planner-style forward-sim PEELING**, not RL strength in general —
+>   self-play + rev38 won't teach the counter. **Top-10 LB is >1500** (1153 = top-100; our record ~918) — long road.
+> - **NEXT LEVER = a BEATABLE planner-peeler in the pool** — an opponent we win **30–60%** against (vs deb/Ajay's ~0%),
+>   so there's a real win-gradient to LEARN the anti-peel/hold skill (win-starvation: you can't learn from a 0%-opponent).
+> - **Kaggle access WORKS** (CLI + `~/.kaggle/kaggle.json`; `kaggle kernels list/pull --competition orbit-wars`). Pulled
+>   ProducerLite kernels (pilkwang/sohaib = logistics-limited Producers) but **base64-packed self-contained kernels are
+>   FRAGILE to extract** — the wrapper played random-level (43.8% vs random = broken integration). DROPPED. The bug was
+>   **importlib-indirection loading** (also broke a first detune attempt); flat files loaded DIRECTLY by env.run are fine.
+> - **✅ WORKING APPROACH = DETUNE the known-working `candidate_producer_1200.py`** (flat `cp` + `sed` the dataclass
+>   `horizon: int = 18` default down; uses the shared `opponents/orbit_lite/`, loaded directly = no indirection).
+>   **`opponents/candidate_producer_h14.py` + `candidate_producer_h10.py` (horizon 14/10) both CRUSH random 100%** =
+>   genuine weaker planners. `horizon` = clean strength dial (max_offensive_targets/max_regroup_time are backup knobs).
+> - **✅ FOUND IT + LADDER COMPLETE — `candidate_producer_h10.py` is the beatable planner.** Full horizon ladder
+>   (32g vs 6.29M, gate3/floor0; random control alongside):
+>
+>   | horizon | vs random | vs 6.29M | verdict |
+>   |---|---|---|---|
+>   | h18 (full) | 100% | **0%** | too strong |
+>   | h14 | 100% | **0%** | too strong (win-starvation) |
+>   | **h12** | (val skipped — same detune path) | **28.12%** (9/32) | **🎯 THE PICK — harder, still safe** |
+>   | h10 | 100% | **43.75%** (14/32) | beatable but near-matched (6.29M already ~masters it) |
+>   | h4 | 94% (15/16) | **100%** (32/32) | too weak (trivial — teaches nothing) |
+>
+>   The cliff is **h12→h14** (28%→0%); usable beatable band = **h10–h12** (h13 ≈ the edge, untested). h10/h12 still
+>   crush random 100% = REAL planners. **DECISION (2026-06-14, evidence-backed): pick h12, not h10.** 6.29M already beats
+>   h10 at 44% (near-mastery) → a fixed h10 gets solved early and decays to weak-external self-play; h12's 28% gives real
+>   anti-peel headroom that *stays* challenging (training only makes it easier → 28% is a rising floor, never starves).
+>   Resulting pool spread is clean: rev38 ~20% + h12 ~28% + self ~50%. Other data: 6.29M vs rev38_5M = **19.9%**.
+>   **→ NEXT: swap deb→`candidate_producer_h12.py` in the pool** (one delta, anchor stays 6.29M, no early_capture).
+>   CURRICULUM ramp target = **h13** at the next re-anchor (skip h10 — agent's past it). Eval/export must keep it external.
+> - **VALIDATE-FIRST rule (user, 2026-06-14, [[feedback_validate_kernel_before_screen]]):** any pulled/wrapped opponent
+>   must ~crush random (≈100%) BEFORE screening vs our ckpt — control: producer_1200 + deb both 100% vs random; a broken
+>   integration plays random-level and gives a FALSE screen.
+> - **Once the beatable planner is picked:** add it to the next run's pool (alongside/replacing some deb), one delta.
+>   **✅ Cleanup DONE:** broken `opponents/candidate_plite_sohaib.py` + `opponents/producerlite_sohaib/` removed.
+>
+> **🟢 8-HR MONITORING (⚠️ ALL STALE — GCP box `orbit-wars-training` is DELETED; goal elapsed 2026-06-14; superseded by stageb2/stageb3 above. Do NOT run any command in this block — kept for config reference only):**
+> - **Box:** GCP L4 `orbit-wars-training` @ `34.14.144.22` zone `asia-south1-b`. Anchor (il-ref) = `bc_snowball_15global.pt`.
+> - **CHECK each tick** (`gcloud compute ssh orbit-wars-training --zone=asia-south1-b -- "grep '^iter' \$(ls -t ~/orbit_wars_rl/train_gpu_phase1_stageb_*.log|head -1)|tail -5"` + `cat gpu_run_artifacts/stageb/eval_zach_public.csv`): clip, KL, EV, H_fire, il_kl, estop, SPS, ship0, reward, + zach-WR trend.
+> - **ACT:** (a) **clip>0.25 sustained WITH KL↑/EV↓/estop>0** → halve LR (benign if KL low+EV stable+estop0 → DON'T halve, [[feedback_clipfrac_lowkl_benign]]). (b) **zach-WR sustained new best** (rolling-3 ≥ anchor+2pp, ≥1M-step gap) → re-anchor. (c) EV collapse / entropy floored / ship0 spike / box dead → investigate.
+> - **RELAUNCH one-liners (box-side; LR now env-param):** latest ckpt = `CK=$(ls -t ~/orbit_wars_rl/checkpoints/torch_step_*stageb*.pt|head -1)`. **Halve LR:** `cd ~/orbit_wars_rl && pgrep -f '[t]rain_torch.*--run-name stageb'|xargs -r kill; sleep 3; RESUME=$CK IL_REF=<anchor> LR=0.000025 nohup bash gpu_run_artifacts/stageb_gcp/run_remote_stageb_gcp.sh >~/orbit_wars_rl/stageb_nohup.out 2>&1 </dev/null &`. **Re-anchor:** same but `RESUME=$CK IL_REF=$CK` (keep LR). After ANY relaunch the ramp resets (total_env_steps→0, expected) — re-verify iter-1 health + that the watcher still syncs (run-name unchanged so no new watcher needed). **⚠️ DELETE box when 8hr done if user not continuing.**
+> - **Baseline @ iter50 (~1.64M):** clip 0.093, KL 0.012, EV 0.84, H_fire 0.17, il_kl 0.276 (plateauing), estop 0, SPS 556 (deb ramping in), reward +. HEALTHY — no action.
+> **⭐⭐ STAGE B STATE (read first if resuming):**
+> - **🔵 Box: GCP L4 `orbit-wars-training` @ `34.14.144.22`, zone `asia-south1-b`, SSH alias
+>   `orbit-wars-training.asia-south1-b.orbit-wars-rl`, ~$1.13/hr.** ⚠️ **DELETE (not stop) when done:**
+>   `gcloud compute instances delete orbit-wars-training --zone=asia-south1-b` ([[feedback_gcp_instance_cleanup]]).
+>   (Jarvis `426481` DESTROYED 2026-06-14 — budget out.) **iter 1-3 HEALTHY: SPS ~880** (the ramp keeps deb≈0 early →
+>   pure GPU-fast self-play, so the feared L4 CPU-bound ~191 SPS only bites in the back half), EV climbing 0.001→0.185
+>   (critic warmup, policy frozen = KL/clip/H_fire 0 BY DESIGN until EV≥0.7, NOT the frozen-BC bug). Pool=3 (rev38 pin +
+>   deb ext + self), ramp flags confirmed in argv. **✅ BC-warmstart PRE-FLIGHT PASSED** (iter 28 @917k: critic warmup
+>   exited EV 0.762, `clip 0.054≠0` + `H_fire 0.178` not floored → policy exploring, not frozen; il_kl growing 0.08→0.17
+>   = anchor engaged; KL ~0.016, estop 0). **Watcher LIVE** (controller, gcp) — **held-out = ZACH** (`eval_zach_public.csv`)
+>   for EARLY progress signal (BC starts 6% vs zach; **Ajay is too hard early — 0.0 at 500k/1M — so it can't gauge early
+>   progress; switch the held-out back to Ajay ~8M as the guardrail**: re-run `run_watchers.sh start stageb gcp <alias>
+>   opponents/candidate_ajay_1200.py`). Monitor: `gcloud compute ssh orbit-wars-training --zone=asia-south1-b -- "grep
+>   '^iter' ~/orbit_wars_rl/train_gpu_phase1_stageb_*.log | tail"`. **LR = 5e-5 (HELD, not 1e-4):** the low post-warmup
+>   `clip ~0.046` was a TRANSIENT — clip rose 0.041→0.063 over iters 25-30 as PPO accelerated out of the frozen warmup
+>   (entropy 0.16→0.20 too). Lesson #8's 1e-4-for-fresh-BC predates the critic-warmup+teacher-KL (which deliberately
+>   suppress early clip) → not a direct precedent. **Fallback: if clip PLATEAUS <0.05 over 1-2M with no zach-WR progress,
+>   restart from the current ckpt with LR 1e-4** (cheap, critic already warmed). Stop-all: `run_watchers.sh stop` + delete.
+>   Decision: **manual re-anchors** (ratchet is Jarvis-hardcoded; not adapting it — re-anchor by hand on a sustained
+>   held-out new-best per `gpu_run_artifacts/ratchet.py` semantics: rolling-mean-of-3 ≥ anchor+2pp, ≥1M steps gap).
+> - **✅ DONE prior session:** (1) gate A/B inconclusive → **GATE=3** (locked design). (2) **rev38 pin 11→15-global
+>   crash FIXED** → `seed_checkpoints/rev38_5M_15g.pt` (pre-flight MUST load every pin into the run's model). (3)
+>   **CRITIC WARMUP built + validated** — `--critic-warmup-ev` freezes trunk+policy, trains ONLY the value head until
+>   EV≥thresh; frozen trunk plateaus ~0.75 → default **0.7**; cap-exits to PPO at 30 rollouts. Off by default.
+> - **✅ DONE this session (2026-06-14):**
+>   1. **OPPONENT-DIFFICULTY RAMP — BUILT + UNIT-TESTED.** `OpponentPool.sample(external_fraction=, pinned_fraction=)`
+>      now does the 3-way split (peeler / pinned-RL / PFSP-over-ORGANIC-non-pinned-selves), pulling rev38 OUT of PFSP
+>      into its own ramped slice (PFSP would up-sample what we lose to = backwards). `pinned_fraction=None` preserves
+>      legacy exactly. `train_torch` ramps both 0→target over `--pool-hard-ramp-steps` (keys off local total_env_steps),
+>      with `pool_opp=None`→self-play fallback for the true-zero start. New flags `--pool-pinned-fraction` /
+>      `--pool-hard-ramp-steps`. 5 tests in `orbit_wars_rl/tests/test_pool_ramp.py` (run via `.venv/bin/python` — no
+>      pytest; has a `__main__` runner). At full ramp 0.267 of the 0.75 pool slice ⇒ **0.20 of TOTAL games each** for
+>      rev38+deb (self-play 0.60 = 0.25 current-mirror + 0.35 organic snapshots). **⚠️ RAMP RESETS on each ratchet
+>      re-anchor** (total_env_steps restarts at 0 on resume, like every schedule here) — consistent with "lengthen the
+>      ramp at the next re-anchor"; raise `POOL_RAMP_STEPS` on a relaunch to extend. **OPEN (user decision):** if ramp
+>      continuity across re-anchors is wanted instead, add a `--pool-ramp-start-step` offset the ratchet passes.
+>   2. **BC step-0 matchup VALIDATED (local, 32 games, gate3/floor0): `bc_snowball_15global.pt` is 0.00% vs BOTH
+>      rev38 AND deb** (both lose by elimination; planets@50=3 vs winner 9). Confirms the ramp is essential — zero
+>      win-gradient at full strength = pure win-starvation. (The old `/home/bc_vs_*.log` on the destroyed box never
+>      finished; superseded by this local run.)
+>   3. **GCP L4 LAUNCH ARTIFACTS PREPARED:** `gpu_run_artifacts/stageb_gcp/run_remote_stageb_gcp.sh` (GCP twin of the
+>      Jarvis script — same config; `cd ~/orbit_wars_rl`, seed_checkpoints repo-root-relative, `--heuristic-workers 4`,
+>      ramp wired). Watcher controller already supports `gcp`; eval restores `game_phase_features` from the ckpt
+>      (15-global panels load cleanly, no extra flag). `run_stageb_jarvis.sh` also ramp-wired (kept for A100 reuse).
+> - **🟢 THE LAUNCH (ready — sequence):**
+>   1. `bash gpu_run_artifacts/launch_gpu_gcp.sh --run stageb` (creates L4, syncs code, installs env; default zone
+>      asia-south1-b — try asia-south1-c / europe-west4-a if stockout). Note the instance name + zone + SSH alias.
+>   2. scp the two ckpts (launch script EXCLUDES seed_checkpoints/):
+>      `gcloud compute scp seed_checkpoints/{bc_snowball_15global.pt,rev38_5M_15g.pt} <inst>:~/orbit_wars_rl/seed_checkpoints/ --zone=<z>`
+>   3. start training: `gcloud compute ssh <inst> --zone=<z> -- 'cd ~/orbit_wars_rl && nohup bash gpu_run_artifacts/stageb_gcp/run_remote_stageb_gcp.sh >/dev/null 2>&1 &'`
+>   4. watcher: `bash gpu_run_artifacts/run_watchers.sh start stageb gcp <inst>.<zone>.orbit-wars-rl`
+>   5. PRE-FLIGHT (docs/phase3.md §8): watch clip_frac≠0 + entropy not floored in first ckpts; iter-1 EV/KL healthy.
+> - **🔴 DEFERRED GAP — ratchet is Jarvis-hardcoded** (`~/.ssh/jarvis-labs-key`, `root@ip`, `/home/checkpoints`,
+>   `run_stageb_jarvis.sh`). NOT blocking launch (first launch + watcher are manual; re-anchors only fire hours in on a
+>   sustained +2pp best). **Before the first re-anchor is due, parameterize `ratchet.py` for GCP** (SSH cmd/user/host/
+>   ckpt-dir/launch-script) OR do the first re-anchor manually. Stop-all: `run_watchers.sh stop` +
+>   `gcloud compute instances delete <inst> --zone=<z>`.
+>
+> (Prior gate-A/B + ratchet-build LIVE STATE retained in the STAGE B PRE-FLIGHT section below for reference.)
+
+Foundations all
 GREEN: comet PHYSICS+FEATURES ✅, game-phase features ✅ (both parity-clean), **Stage A ✅ PASSED** (fixed teacher-KL
 β=0.05 held the held-out band — see CONCLUDED block below), **closed-loop fidelity ✅ PASSED** (rev38 + deb FAITHFUL,
 rev53b dropped → torch_env is a trustworthy selection signal; Stage-B pool = rev38 + deb; `docs/phase3.md` §9,
@@ -59,7 +218,49 @@ The from-scratch run (`docs/phase3.md` §5 Stage B). Foundations done: Stage A p
 gate passed (pool = rev38 + deb), feature set ready (comets ✅ + game-phase ✅). Remaining = three coupled pre-flight
 items, then the launch. **One open arch decision (#2) is answered by a free probe during the BC rebuild.**
 
-1. 🟢 **NEW 15-global BC — REBUILD (decided 2026-06-13, the "clean" path over an 11→15 zero-pad promote).** The latest
+> **⭐ LIVE STATE (2026-06-13 cont. — read first if resuming):**
+> - **✅ BC REBUILD DONE (#1) + CAPACITY DECIDED (#2): keep entity_dim 96.** Rebuilt the 15-global dataset
+>   (`orbit_wars_rl/snowball_bc_15g.pkl`, 15410 samples, reinforce_share 0.53) and trained both arms on the A100.
+>   **96 vs 128 ≈ tied** (val_loss 3.90 vs 3.86 within noise; 96 EDGES target fidelity top1 0.28 vs 0.26) → no
+>   capacity benefit, **keep 96**. **Stage-B warmstart = `seed_checkpoints/bc_snowball_15global.pt`** (96-dim,
+>   `global_proj (96,15)`, `game_phase_features:True`, synced LOCAL + on box; d128 also synced, unused). Gate-fail
+>   (top1 0.28 < 0.30) is the expected diverse-snowball ceiling → behavioral prior, PPO refines; **watch clip_frac at
+>   launch** (#3). Feature audit fully CLOSED (comets + enemy_mass rejected, 15-global FINAL).
+> - **🔵 GPU box LIVE:** Jarvis **A100-80GB SPOT, machine `426442`, IP `217.18.55.104`, region IN2, ₹84/hr.**
+>   ⚠️ SPOT — `jl destroy 426442 --yes` when done (auth: JARVIS_RUNBOOK §Auth). Env installed (kaggle orbit_wars),
+>   code synced, dataset + both BC ckpts on box at `/home/checkpoints/`.
+> - **🔵 GATE=2-vs-3 A/B — LAUNCHED 2026-06-13 on box 426442 (both arms parallel, healthy).** Matched pair from
+>   p2rev5 4M, single delta = `--reinforce-gate-min-planets 2` (run-name `gate2`) vs `3` (`gate3`), comet-fixed engine,
+>   deb pool @0.25, clean p2rev5 config (NO sufficient-commit), 4 heuristic-workers each (parallel on 28 cores, ~386
+>   SPS/arm, GPU 45/80GB). Script `gpu_run_artifacts/gate_ab/run_gate_ab_jarvis.sh <2|3>` (on box `/home/`). iter-1
+>   healthy both (EV 0.69, KL<0.013, clip<0.13 NOT→0, estop 0, deb loaded, early_capture 0). **Watcher LIVE +
+>   FIXED 2026-06-13** — re-launch as
+>   **`MATCH=gate EVAL_GATE_FROM_RUNNAME=1 run_watchers.sh start gate_ab jarvis 217.18.55.104`** (NOT the bare
+>   `start gate_ab …`: the umbrella name `gate_ab` matches NEITHER arm's filenames `gate2`/`gate3`, so the original
+>   watcher synced 0 files). The controller now takes two new envs: `MATCH` = the filename-substring token (separate
+>   from the folder/run label; `MATCH=gate` prefix-matches both arms into `gpu_run_artifacts/gate_ab/`), and
+>   `EVAL_GATE_FROM_RUNNAME=1` = **per-arm eval mask** (each ckpt is auto-evaled with its OWN
+>   `--reinforce-gate-min-planets`, parsed from the `gate2`/`gate3` token → eval matches training **automatically**;
+>   the old manual-gate2-re-eval caveat is GONE). Verified end-to-end: both arms' logs + ckpts syncing, and the live
+>   gate2 524288 panel ran with `--reinforce-gate-min-planets 2`. **READ:** two-sided canary — gate2 peel-rate /
+>   planets@50→100 hold ↑ WITHOUT planets@50 regressing (the passivity-crutch failure); plus reinf@2 (split in eval)
+>   should show gate2 actually reinforces at 2 planets. First ckpts landed ~500k (gate2 first). Monitor:
+>   `ssh … "grep '^iter' /home/train_gpu_phase1_gate{2,3}_*.log | tail"`.
+> - **✅ RATCHET v1 controller (#4) — BUILT 2026-06-13** (`gpu_run_artifacts/ratchet.py` + parameterized launch
+>   `gpu_run_artifacts/run_stageb_jarvis.sh`). Reads the watcher's held-out Ajay CSV; on a GENUINE sustained new-best
+>   it kills + relaunches the Stage B arm resuming from the new-best ckpt with `--il-ref` swapped to it (FULL AUTO,
+>   user-chosen). Noise guards (the heart of it — held-out is a 256-game panel, SE ~1.4pp@5%): re-anchor only when the
+>   **rolling mean of the trailing 3 evals** beats the anchor by a **2.0pp margin** AND ≥1M steps since the last anchor;
+>   NEVER ratchets down. Validated: HOLDS on the p3stageA flat-noise fixture (3.5–5.9), RE-ANCHORS on a sustained climb,
+>   rejects single +4pp peaks. Kill uses the bracket-trick pgrep scoped to `--run-name stageb` (SSH self-kill safe);
+>   relaunch is nohup-detached (survives disconnect). The FIRST launch (#5) + watcher start stay manual; the ratchet
+>   manages re-anchors only. Usage in `run_stageb_jarvis.sh` header. **Remaining before launch:** #3 BC-warmstart
+>   pre-flight (entropy/critic canaries at first ckpts) + set GATE to the gate2-vs-gate3 winner.
+
+1. ✅ **DONE — NEW 15-global BC REBUILD (2026-06-13).** Rebuilt + trained, keep 96-dim (see LIVE STATE above). Code:
+   `bc.py --game-phase-features/--entity-dim/--device/--batch-size` + `_save_bc_checkpoint` saves `game_phase_features`;
+   `build_snowball_bc.py --game-phase-features` (+ fixed a dual-`features`-module bug). Original spec retained below.
+   The latest
    BC `seed_checkpoints/bc_snowball_pairwise15.pt` is pairwise-15 (current arch ✓) but **11-global** (`global_proj
    (96,11)`, no `game_phase_features` in config, dated Jun 11 → pre-comet-fix) → can't init the 15-global Stage B
    model. **To rebuild:** add `--game-phase-features` to `bc.py` + the snowball dataset builder (set
@@ -69,7 +270,8 @@ items, then the launch. **One open arch decision (#2) is answered by a free prob
    the old pickle won't upgrade the dim; must rebuild via the builder, which re-extracts), retrain → `bc_snowball_15global.pt`.
    Comets corrected automatically by re-extraction. Runs LOCALLY (bc.py = supervised on static tensors, no VecTorchEnv
    rollout → no Mac-CPU segfault; builder uses kaggle_env).
-2. 🟡 **CAPACITY — do we need a bigger net? Answer with the BC rebuild (free probe), don't scale on spec.** Current net
+2. ✅ **DONE — CAPACITY PROBE: keep 96-dim** (96 vs 128 tied on the A100, 96 edges target fidelity — see LIVE STATE).
+   Original rationale below. 🟡 Current net
    = `entity_dim 96 / 4 heads / 3 layers / mlp_exp 3` ≈ **391K params**, constant all project. **No capacity signal**
    (EV ~0.85–0.90, BC fits teachers) — failures are DYNAMICS (drift/signal), not fitting; bigger = more drift surface +
    a Stage-B confound. BUT from-scratch = the free moment to change arch, and GPU is IDLE (Stage A 22% util, CPU/deb-
@@ -80,9 +282,11 @@ items, then the launch. **One open arch decision (#2) is answered by a free prob
    "unlearning" before critic catches up — CONFIRMED `bc.py` is policy-only (no value head). Cushion: the teacher-KL
    anchor (to the BC self) resists noisy-advantage unlearning; extra lever `--with-warmup` (low early LR); canary = low
    early EV.
-4. 🟢 **RATCHET v1 (the one real new build).** Watcher computes held-out WR per ckpt → if a NEW BEST **by a margin**,
-   refresh `--il-ref` to it + relaunch from a clean ckpt boundary (β CONSTANT ~0.05, NOT decay-to-0). Guard ratchet-DOWN
-   (don't re-anchor on noise). v2 (in-process reload) only if v1 works.
+4. ✅ **RATCHET v1 — BUILT 2026-06-13** (`gpu_run_artifacts/ratchet.py`, full-auto per user). Watcher computes held-out
+   WR per ckpt → on a GENUINE sustained new-best (rolling-mean-of-3 ≥ anchor + 2.0pp margin, ≥1M steps since last
+   anchor, never ratchet-down) it kills + relaunches `run_stageb_jarvis.sh` resuming from the new-best with `--il-ref`
+   swapped to it (β CONSTANT 0.05 via `--il-decay-frac 100`). Validated (HOLDS on p3stageA noise, RE-ANCHORS on a
+   climb, rejects single peaks). v2 (in-process reload) only if v1 works. See the LIVE STATE block above for usage.
 5. 🟢 **THE LAUNCH (after 1–4).** From-scratch resume `bc_snowball_15global.pt` + `--game-phase-features` + `--il-lambda
    0.05` (Stage-A-validated) ratcheted + pool **rev38 + deb** + `--il-decay-frac 100` (no decay), comet-faithful engine,
    on Jarvis A100 spot (clean migration recipe in the CONCLUDED block above). ⭐ Falsifiable sub-exp: does phase-as-
@@ -111,6 +315,46 @@ non-orbiting. Identical branch in `torch_env.get_features` + `features.extract_f
 `observation.comets`=paths+path_index → eval/export parity automatic). `to_legacy_obs` now surfaces comets (+ fixed
 a pre-existing id-0 `initial_planets` collision). Regression test: `orbit_wars_rl/feature_parity_comet_probe.py`
 (CLEAN). Physics fidelity tests still pass. Full write-up: `docs/training.md` Current State.
+
+**✅ COMET-ENGAGEMENT AUDIT — CONCLUDED 2026-06-13 (no feature, no mask, no lever; input set complete).** Asked: is a
+comet-collision-risk INPUT CHANNEL needed (the last restart-forcing candidate)? Measured exposure with p2rev5 4M
+self-play (256 games, torch_env+comets, exact swept-collision labels via a throwaway diagnostic, since reverted) +
+89 snowball winner replays. (1) **Motion is faithfully passed** — comets aren't approximated circular; we index the
+engine's own sampled elliptical path (`observation.comets`), feeding current pos + a +5 path point. (2) **Collision is
+conditional combat, not the sun's instant-kill** — a fleet whose swept path hits a comet's swept path enters combat
+(capture if it out-ships, annihilated if not); faithful in BOTH engines. (3) **Captures are economically ~useless**
+(user insight, confirmed): at expiry the comet is dropped from `planets` WITH its ships (`orbit_wars.py:415`) — parked
+ships evaporate unless evacuated. Top players DO evacuate: own a comet 7.55% of steps, fire FROM comets 2.14% of
+launches (capture→relay before expiry, 41/89 games); **our agent under-relays (0.55%)** and over-targets (fires AT
+comets 3.18% vs winners 1.78%). (4) **Exposure is tiny & DELIBERATE** — total comet collisions 1.15% of launches
+(78% capture/22% annihilate); deliberate targeting 3.18% >> any accidental crossing → policy/value, not a missing
+input (the agent already sees `is_comet` + steps-to-departure + comet is a legal fire source). (5) **A comet-target
+veto A/B** (p2rev5 vs p2rev5, one seat forbidden comet targets, 256 games): veto-seat **53.3%** — within ±6% noise
+(seat asym 62/44.5 dwarfs it) → **a wash.** **Verdict:** no channel (no restart), no mask, no lever; the BC clone
+seeds reasonable comet behavior (capture→relay is in the replays). The aimer-not-leading-comets refinement
+(features.py:476) is a no-restart, low-value option, NOT pursued. **The Stage B input set (15-global + comets +
+game-phase) is COMPLETE — nothing in the comet/feature audit forces a wider input or a different restart.**
+
+**✅ PRODUCER-v2 `enemy_mass` FEATURE — INVESTIGATED & REJECTED 2026-06-13 (kept 15-global; do NOT rebuild to 16).**
+Producer's author released v2 (`kaggle: slawekbiel/the-producer-v2`) citing one improvement: a `β·ρ(eta)·enemy_mass`
+term, where `enemy_mass` = distance-decayed enemy GARRISON reachable to a target (`cheap_enemy_pressure`:
+`Σ_{enemy s} ships[s]·(1−d(s,t)/(speed[s]·H))₊`), ρ = a flight-time ramp. The v1↔v2 code diff is LITERALLY just the
+three `reinforce_*` knobs → this term is the whole delta. **We genuinely lack it** — our pairwise models only the
+target's OWN growth (`ships_at_arrival`/`roi`) + in-flight enemy FLEETS (`enemy_contest` feat 14), i.e. exactly
+Producer-v1's "opponents do-nothing" model; no reachable-garrison term. A full sweep of BOTH producers (offense
+selection/sizing + defensive regroup + flow scorer) found `enemy_mass` is the ONLY observable we lack — everything
+else maps to our features or is the value-head's job. **BUT three replay validations (89 snowball winners, target
+resolved via `_find_target_planet_index`, enemy_mass ported w/ self-exclusion) ALL contradicted the feature's use:**
+(1) **offense selection** — winners do NOT avoid high-mass targets (chosen/avail median 0.85 ≈ losers); (2) **offense
+sizing** — winners' oversize is FLAT vs enemy_mass (1.74→1.78→1.66 across mass terciles); it's LOSERS who over-feed
+high-mass targets (1.64→1.71→1.86) and lose; (3) **defense** — winners reinforce their LOW-mass REAR planets
+(reinforced-planet mass 29 vs un-reinforced 47, ratio 0.61), the INVERSE of Producer's "reinforce the threatened
+front" regroup (fits our bucket-brigade/rear-staging picture). **Unifying conclusion:** `enemy_mass` is load-bearing
+for Producer's HEURISTIC PLANNER (patches its static-opponent flow scorer) but is NOT how the top RL agents we emulate
+play — and an RL value head learns reactive reinforcement IMPLICITLY from self-play vs reactive opponents (it has the
+raw enemy positions/ships). Adding it risks biasing toward the LOSER pattern (over-feeding contested targets). **The
+path to beating Producer is a strong RL policy (Stage B), not importing its heuristic feature. Decision: 15-global is
+FINAL.** Harness: `/tmp/enemy_mass_validate.py`; kernels at `/tmp/producer_v{1,2}/code.py`.
 
 ### ✅ GAME-PHASE features — BUILT + VALIDATED 2026-06-13 (Stage B feature set; off by default, opt-in)
 **DONE:** `--game-phase-features` appends 4 global channels (11→15): a 3-way phase one-hot (early<50 / mid50-100 /
@@ -317,17 +561,37 @@ sufficient-commit/commitment lever FAILED, #2) → revisit the quantity gradient
 
 ### Discipline masks (training-only, NO input-dim change → addable to ANY run, no from-scratch restart)
 
-1. 🟢 **Sun-blocking angle mask (NEW 2026-06-13, from the feature-completeness audit).** The real game **destroys
-   any fleet whose path crosses the sun** (`orbit_wars.py:607`, `point_to_segment_distance(sun, old, new) < SUN_RADIUS=10`)
-   — so firing through the sun = annihilated ships. The agent has **NO signal for it**: torch_env's angle_mask is
-   "all angles legal (no sun-blocking)", and there's no feature/mask, so it must learn sun-avoidance from reward alone.
-   torch_env PHYSICS is faithful (it destroys sun-crossers too — sim-gap probe is byte-clean), so this is purely an
-   *awareness* gap. **Fix = an angle/target mask** that vetoes a launch whose src→tgt segment passes within SUN_RADIUS
-   of CENTER (same family as forward-only/sufficient-commit; `torch_env._apply_actions` + parity in
-   `action_mask.py`/`eval.py`/`export_agent.py`). **No input-dim change → does NOT force a from-scratch restart**, can
-   land in Stage B or any later resume. Low-risk efficiency lever; quantify wasted sun-crossing launches first to size it.
+1. 🟡 **Sun-blocking angle mask — DOWNGRADED 2026-06-13 (the prior audit's "NO signal" claim was WRONG).** The real game
+   **destroys any fleet whose path crosses the sun** (`orbit_wars.py:607`, `point_to_segment_distance < SUN_RADIUS=10`).
+   The earlier audit logged "the agent has no feature/mask for it" — **but it does: pairwise channel 4 = `sun_safe`**
+   (`features.py:533`/`567` ↔ `torch_env.py:1052`, parity-clean), a per-(source,target) flag = "does the straight-line
+   path clear the sun." So the agent **is aware** of sun-blocking; it just isn't hard-*masked* from it. That reframes
+   this from a fill-the-void fix to a **discipline lever** (harden an existing signal, like forward-only) — much lower
+   value than the audit implied. Still a no-restart mask if ever wanted; **not a priority.** (`sun_safe` uses the
+   *current* target position, not the orbital-intercept arrival segment — a cheap no-restart refinement, also low value.)
 
 ### Reinforce-targeting levers
+
+**⭐ FRAMING — the reinforce credit-assignment problem & how we "simplify" it (2026-06-13, read before any holding/reinforce lever).**
+Reinforce earns **no immediate reward** (an attack captures → instant credit; a reinforce just moves ships, value =
+"avoided a future loss / enabled a future push"). So its credit is **weak + counterfactual + diluted**, NOT merely
+long-horizon (the horizon is ~10-30 steps; at γ=0.995 that's only ~0.86-0.95 discount — the killer is counterfactual
+noise + GAE credit-dilution, not the discount). **The obvious simplification — reward holding directly — is a known
+graveyard here:** `defense_coef` (p2rev7) FLOODED; in a symmetric self-play mirror a dense per-step holding reward IS
+the flood pump, same family as fire-tax→fire=0 / target-value→carpet-bomb ([[feedback_selfplay_collapse_metrics]],
+[[feedback_win_starvation]]). PBRS isn't a free pass either — `expansion_coef` is potential-based/telescoping and STILL
+gets Nash-eaten; a "holding potential" is hard to design AND washes in a symmetric mirror. **So we do NOT solve the
+credit assignment — Phase 3 ROUTES AROUND it three ways (this IS the simplification):** (1) **imitate** it — snowball
+BC seeds the winner reinforce ramp so the agent starts doing it, not discovering it from a weak gradient; (2) **anchor
+it terminally** — the peeler-in-pool makes bad holding actually LOSE games → converts the diffuse counterfactual into a
+real terminal win/loss gradient GAE can propagate (the validated "fix the SIGNAL" lever); (3) **preserve** it —
+teacher-KL stops self-play Nash from eroding the seeded behavior. **Recommendation: don't invent a new credit-assignment
+mechanism — run Stage B and MEASURE whether reinforce-holding emerges (read the planets@50→100 hold + peel-rate
+trend); the K-nearest mask (#1 below) is the structural CONTINGENCY** (it doesn't teach value, it SHRINKS the problem:
+short rear→front hops → short transits, ships stay defensible, tiny per-hop horizon). **Guardrail from the enemy_mass
+validation: PRESERVE rear-staging, do NOT force threatened-front reinforce** — winners reinforce their LOW-threat rear
+(staging depth); pouring ships into high-threat contested planets was the LOSER pattern
+([[feedback_heuristic_feature_not_rl_feature]]). A naive holding reward would push toward that loser pattern.
 
 1. 🟡 **K-nearest own-target mask (NEW idea 2026-06-12) — structural "bucket-brigade" staging.** An own
    (reinforce) target is legal only if it is among the **K nearest** owned planets to the source (K=2–3);
@@ -348,19 +612,29 @@ sufficient-commit/commitment lever FAILED, #2) → revisit the quantity gradient
    [[feedback_veto_mask_removes_not_teaches]]: banning far-reinforce may just make it reinforce *less*, not
    cascade — pair with a reason the cascade pays off. Sequencing: a single delta AFTER p2rev6 concludes.
 
-2. 🟡 **Empire-gate threshold (`reinforce_gate_min_planets`) — UNTUNED knob + a misleading metric (user, 2026-06-12).**
-   The gate is **3** ("expand first, never reinforce a tiny empire" — replay ramp reinforce@1=0.00, @2=0.10,
-   @9-12=0.30); a "felt logical" pick, never swept. **Metric caveat to fix FIRST:** with gate=3, reinforce is
-   MASKED at 1–2 planets, so the eval's **"reinf@2-3" bin is diluted by the gated 2s — the true reinf@3 is ~2× the
-   reported number** (0.07 bin ≈ 0.13–0.14 @3). Stop comparing our *gated* "2-3" against the winner's *ungated*
-   @2 → **split the @2/@3 bins in `eval.py game_conversion`** so reinf@3 reads cleanly. **On lowering 3→2:** it
-   would match the replay's @2=0.10 (winners reinforce a little at 2 planets; we ban it), BUT it **fights our
-   under-expansion problem** — at 2 planets the right move is to grab the 3rd, and gate=3 *forces* that; lowering
-   gives a reason to reinforce-not-expand exactly when smallest. AND the gate isn't the early-reinforce lever
-   anyway (the `<50` deficit is downstream of slow expansion; per-empire rates are already ~winner when legal).
-   **Verdict: PARK the threshold sweep** — gate=3 is defensible / maybe-right-for-us; revisit only if we become a
-   fast expander (planets@50→9) and early reinforce is STILL gated-short. Winner's @2=0.10 is affordable once
-   you're already expanding fast — we're not there. (Do the cheap metric-split regardless.)
+2. 🟢 **Empire-gate threshold (`reinforce_gate_min_planets`) — UN-PARKED 2026-06-13: replay evidence weakens "gate=3
+   is right"; now an evidence-backed single-delta A/B candidate.** The gate is **3** ("expand first"); a "felt logical"
+   pick, never swept. **NEW replay analysis** (89 snowball winners, launches binned by empire size, target resolved via
+   `bc._find_target_planet_index`; threat = any enemy fleet present):
+   | owned | reinf% | expand% | attack% | reinf threat/none |
+   |--:|--:|--:|--:|--:|
+   | 1 | **0.7%** | 97.3 | 2.1 | 1/0 |
+   | 2 | **10.1%** | 85.5 | 4.3 | **15/6** |
+   | 3 | 18.7 | 75.3 | 6.0 | 28/0 |
+   | 4–8 | 24→40 | 66→30 | 10→30 | ~all threat |
+   **Two findings:** (a) at **1 planet winners essentially never reinforce (0.7%)** → banning reinforce@1 is right (both
+   gate=2/3 do). (b) at **2 planets winners reinforce 10.1%, and ~71% of it is DEFENSIVE** (15 under-threat / 6 not) —
+   **gate=3 bans this entirely.** So gate=3 contradicts a real, mostly-defensive winner behavior, and it's exactly the
+   behavior tied to our **dominant P-HOLD/peel gap**: gate=3 forces us to expand off planet #2 when we should reinforce
+   to *hold* it under threat. **Counter still stands** (don't just switch to 2): 85% of winner k=2 launches are still
+   expansion, we under-expand (planets@50=6 vs 9), so gate=2 risks a **passivity crutch** (reinforce-not-expand when
+   smallest) — the winner's 10% is affordable *because* they expand fast; we don't. **Can't be settled at inference**
+   (the gate shapes LEARNED behavior — a gate=3-trained policy has no reinforce-at-2 to express; lowering the eval gate =
+   untrained noise) → needs a **single-delta training A/B (gate=2 vs gate=3)**, no-restart/one-knob, off a stable resume
+   (p2rev5 4M + gate=2), NOT confounded into Stage B's big changes. **Two-sided canary:** peel-rate / planets@50→100 hold
+   must IMPROVE (the hoped gain) while planets@50 must NOT regress (the passivity-crutch failure). **DO FIRST regardless:**
+   the metric-split — with gate=3, eval's "reinf@2-3" bin is diluted by gated 2s (true reinf@3 ≈ 2× reported); split the
+   @2/@3 bins in `eval.py game_conversion` so reinf@3 reads cleanly (needed to read the A/B).
 
 ### Pool / anti-drift levers (training pressure, NOT reward)
 

@@ -133,8 +133,11 @@ Isolate the teacher-KL on the *exact* drift we've documented, with NO from-scrat
   climbs to strong RL selves. β roughly constant (no decay-to-0).
 - **Ratchet controller (the one real build):** every ~1–2M steps / N checkpoints, the watcher computes held-out WR;
   if a new best, **refresh `--il-ref` to that checkpoint** and continue.
-  - **v1 (manual/cheap):** the held-out eval watcher already ranks checkpoints; pick the new best and relaunch
-    resume with the new `--il-ref` (a clean checkpoint boundary). Low build cost, proves the ratchet.
+  - **v1 ✅ BUILT 2026-06-13** (`gpu_run_artifacts/ratchet.py`, full-auto). Polls the watcher's held-out CSV; on a
+    genuine sustained new-best (rolling-mean-of-3 ≥ anchor + 2.0pp margin, ≥1M steps since last anchor, never
+    ratchet-down) it kills + relaunches `run_stageb_jarvis.sh` resuming from the new-best ckpt with `--il-ref` swapped
+    to it. The relaunch (RESUME=IL_REF=new-best) IS the "clean checkpoint boundary". Noise guards validated against the
+    p3stageA flat-noise fixture (correctly HOLDS). First launch + watcher stay manual; ratchet manages re-anchors only.
   - **v2 (in-process):** reload `frozen_il_model` mid-run from the new best (no relaunch). Build only if v1 works.
 - **Pool:** the pool-seed-RL + deb league (the existing queued lever) — pinned strong-but-beatable RL selves +
   the peeler. Both levers together (pressure + anchor).

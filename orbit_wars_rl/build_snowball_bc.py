@@ -129,7 +129,17 @@ def main():
                     help="cap cloned steps per game (0 = full game; keep 0 to capture the late reinforce ramp)")
     ap.add_argument("--samples-out", required=True)
     ap.add_argument("--summary-out", default=None)
+    ap.add_argument("--game-phase-features", action="store_true",
+                    help="Extract 15-global features (11->15: phase one-hot + comet-cycle) so the "
+                         "pkl can init a 15-global Stage-B model. Comets are re-extracted either way.")
     args = ap.parse_args()
+
+    if args.game_phase_features:
+        # Set the flag on the EXACT features module that bc.extract_features reads (the script-dir
+        # `features` import), not a second `orbit_wars_rl.features` copy — they have separate globals.
+        import sys
+        from orbit_wars_rl.bc import extract_features
+        sys.modules[extract_features.__module__].set_game_phase_features(True)
 
     samples, summary = build(args.replay_dir, args.player, args.exclude, args.steps_max)
     os.makedirs(os.path.dirname(os.path.abspath(args.samples_out)), exist_ok=True)

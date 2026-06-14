@@ -97,7 +97,7 @@
 - Export requires `--target-decode` for Phase 1.
 
 **LB scores:** Rev38 5M + fixed aimer = **967.6** ← record (drifted from 978.3) | Rev38 5M = 950.5 | Rev53b 13.6M (Ajay 10.9%) = **953.2** | Rev38 6M = submitted (Ajay 3.1%) | Rev32b 6M = 872.4 | Rev31 10M = 918.8 | Rev30 11M = 866.3 | Rev28 27M = 843.9 | Rev54 1M (Ajay 5.5%) = **848.6** (53527873) — 119pts UNDER rev38 record despite 2× Ajay panel; 4th confirmation Ajay panel ≠ LB-predictive
-**LB record stays rev38 5M + fixed aimer = 967.6.** Target: Top 10 needs ~1153. Gap = ~186 points.
+**LB record stays rev38 5M + fixed aimer = 967.6.** Target: Top 10 is **above 1500** (~1153 is only top-100; #1 Isaiah ≈ 1751) → gap **~550+ points**, goal 900→1500+.
 
 ---
 

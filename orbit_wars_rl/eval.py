@@ -172,9 +172,12 @@ _ISAIAH_HOARD_REF = "garr_frac 0.50/0.51/0.54/0.87  ships/planet 11/15/22/60"
 # is opponent/success-confounded (it co-moves with empire size — phase2 §6); bucketing by
 # empire size makes it directly comparable to the top-player ramp (phase2 §2 / metrics.md):
 # @1 ≈0.00, @2 ≈0.10, @9-12 ≈0.30, @13+ 0.34-0.61.
-_REINF_BINS = [(1, 1, "1"), (2, 3, "2-3"), (4, 6, "4-6"),
+# @2 and @3 split (2026-06-13): with reinforce_gate_min_planets=3, reinforce is MASKED at
+# 1-2 planets, so a combined "2-3" bin is diluted by gated 2s and under-reads true @3. The
+# winner ramp (89 snowball replays) is @1:0.007 @2:0.10 @3:0.19 — so @3 ≈ 2× a combined 2-3.
+_REINF_BINS = [(1, 1, "1"), (2, 2, "2"), (3, 3, "3"), (4, 6, "4-6"),
                (7, 9, "7-9"), (10, 12, "10-12"), (13, 10**9, "13+")]
-_REINF_RAMP_REF = "@1:0.00 @2:0.10 @9-12:0.30 @13+:0.34-0.61"
+_REINF_RAMP_REF = "@1:0.01 @2:0.10 @3:0.19 @9-12:0.30 @13+:0.34-0.61"
 _REINF_STEP_REF = "<50:0.29 · 50-100:0.41 · >100:0.31"   # snowball winners; peaks mid-game
 
 
@@ -269,6 +272,13 @@ def game_conversion(steps, seat):
     # owned-planet-steps; fire_frac = on firing steps, mean fraction of owned planets that fired.
     launch_states = launch_count = fire_steps = 0
     fire_frac_sum = 0.0
+    # ship0 by phase × outcome (the panic hypothesis): is the 1-ship probe an END-GAME /
+    # LOSING artifact rather than a genuine habit? Split legal launches into early<50 /
+    # mid50-100 / late>=100, count sent==1 (the eval analog of training ship_bin0); the
+    # panel routes won/lost. mean ships/launch per phase complements it (undercommit read).
+    launches_ph = [0, 0, 0]
+    ship1_ph = [0, 0, 0]
+    ship_ph_sum = [0, 0, 0]
     planets_at = {ms: None for ms in _CONV_MILESTONES}
     garrison_at = {ms: None for ms in _CONV_MILESTONES}   # ships parked on owned planets
     inflight_at = {ms: None for ms in _CONV_MILESTONES}   # ships in owned fleets (deployed)
@@ -338,6 +348,11 @@ def game_conversion(steps, seat):
             if not (ssh > 0 and sent <= ssh):       # legal launches only
                 continue
             fired_this_step += 1                    # counted before target resolution
+            _ph = 0 if t < _LAUNCH_WINDOW else (1 if t < _MID_WINDOW else 2)
+            launches_ph[_ph] += 1
+            ship_ph_sum[_ph] += sent
+            if sent == 1:
+                ship1_ph[_ph] += 1
             tgt = _resolve_launch_target(p0, src, float(mv[1]))
             if tgt is None:
                 continue                            # unclassifiable → skip (== analyzer)
@@ -402,7 +417,8 @@ def game_conversion(steps, seat):
            "lost_caps": lost_caps, "hold_durations": hold_durations,
            "glen": len(steps), "reinf_bin": reinf_bin, "atk_bin": atk_bin,
            "launch_states": launch_states, "launch_count": launch_count,
-           "fire_steps": fire_steps, "fire_frac_sum": fire_frac_sum}
+           "fire_steps": fire_steps, "fire_frac_sum": fire_frac_sum,
+           "launches_ph": launches_ph, "ship1_ph": ship1_ph, "ship_ph_sum": ship_ph_sum}
     for ms in _CONV_MILESTONES:
         out[f"p{ms}"] = planets_at[ms]
         out[f"g{ms}"] = garrison_at[ms]
@@ -420,6 +436,10 @@ def new_conversion_acc():
            # planets → firing from "many of few"), so the won-game value is the honest spray read.
            "launch_states_won": 0, "launch_count_won": 0, "fire_steps_won": 0, "fire_frac_sum_won": 0.0,
            "launch_states_lost": 0, "launch_count_lost": 0, "fire_steps_lost": 0, "fire_frac_sum_lost": 0.0,
+           # ship0 (1-ship probe) by phase × outcome — the panic hypothesis
+           "launches_ph": [0, 0, 0], "ship1_ph": [0, 0, 0], "ship_ph_sum": [0, 0, 0],
+           "launches_ph_won": [0, 0, 0], "ship1_ph_won": [0, 0, 0], "ship_ph_sum_won": [0, 0, 0],
+           "launches_ph_lost": [0, 0, 0], "ship1_ph_lost": [0, 0, 0], "ship_ph_sum_lost": [0, 0, 0],
            # retention split by outcome — lost-cap → 1 on elimination (lose every planet because you
            # LOST the game), so the won-game value is the honest "can we hold mid-game?" read.
            "captures_won": 0, "captures_lost": 0, "lost_caps_won": 0, "lost_caps_lost": 0,
@@ -465,6 +485,15 @@ def add_conversion(acc, conv, won=None):
     for i in range(len(_REINF_BINS)):
         acc["reinf_bin"][i] += conv["reinf_bin"][i]
         acc["atk_bin"][i] += conv["atk_bin"][i]
+    for i in range(3):
+        acc["launches_ph"][i] += conv["launches_ph"][i]
+        acc["ship1_ph"][i] += conv["ship1_ph"][i]
+        acc["ship_ph_sum"][i] += conv["ship_ph_sum"][i]
+        if won is not None:
+            suf = "won" if won else "lost"
+            acc[f"launches_ph_{suf}"][i] += conv["launches_ph"][i]
+            acc[f"ship1_ph_{suf}"][i] += conv["ship1_ph"][i]
+            acc[f"ship_ph_sum_{suf}"][i] += conv["ship_ph_sum"][i]
     acc["games"] += 1
     for ms in _CONV_MILESTONES:
         v = conv[f"p{ms}"]
@@ -568,6 +597,15 @@ def _fmt_conversion(acc):
     pwl = (f"     WON({gw}g) {plw(16)}/{plw(32)}/{plw(50)}/{plw(100)}  cap/atk open<50 {cap_open_w:.2f} mid50-100 {cap_mid_w:.2f} (whole {capw:.2f})"
            f"\n     LOST({gl}g) {pll(16)}/{pll(32)}/{pll(50)}/{pll(100)}  cap/atk open<50 {cap_open_l:.2f} mid50-100 {cap_mid_l:.2f} (whole {capl:.2f})\n"
            if (gw + gl) > 0 else "")
+    # ship0 (1-ship probe) by phase × outcome — tests the panic hypothesis: a 1-ship launch
+    # concentrated in late/lost games is an end-game/losing artifact, not a policy habit.
+    # mean = mean ships per launch in that phase (the undercommit complement).
+    def _s0(suf):
+        lp, s1, ss = acc[f"launches_ph{suf}"], acc[f"ship1_ph{suf}"], acc[f"ship_ph_sum{suf}"]
+        return "  ".join(
+            (f"{nm} {100*s1[i]/lp[i]:.0f}%(mean{ss[i]/lp[i]:.0f},n{lp[i]})" if lp[i] else f"{nm} —(n0)")
+            for i, nm in enumerate(("early<50", "mid50-100", "late>=100")))
+    s0wl = (f"\n     WON  {_s0('_won')}\n     LOST {_s0('_lost')}" if (gw + gl) > 0 else "")
     return (f"Conversion: caps/game {c/n:.1f}  atk-launch/game {al/n:.1f}  "
             f"cap/atk-launch {c/max(al,1):.3f} (open<50 {cap_open:.3f}  mid50-100 {cap_mid:.3f})  ships/cap {acc['attack_ships']/max(c,1):.0f}  "
             f"reinf_share {rl/max(al+rl,1):.2f}\n"
@@ -586,7 +624,8 @@ def _fmt_conversion(acc):
             f"   [ref:Isaiah {_ISAIAH_HOARD_REF}]\n"
             f"  reinf by empire size  {ramp}   [ref:ramp {_REINF_RAMP_REF}]\n"
             f"  reinf by step  <50:{rsh_e:.2f}  50-100:{rsh_m:.2f}  >100:{rsh_l:.2f}   [ref:winner {_REINF_STEP_REF}]\n"
-            f"  reinf direction  fwd {rdf:.0f}%  rear {rdr:.0f}%  (n={acc['reinf_dirn']})   [ref:winner fwd ~57% · rear ~26%]")
+            f"  reinf direction  fwd {rdf:.0f}%  rear {rdr:.0f}%  (n={acc['reinf_dirn']})   [ref:winner fwd ~57% · rear ~26%]\n"
+            f"  ship0 1-ship-probe by phase  {_s0('')}{s0wl}")
 
 
 def evaluate_against_baseline(
@@ -691,6 +730,10 @@ def evaluate_panel(
     conv_tot = new_conversion_acc()
     game_idx = 0
     total_games = sum(len(seeds) for seeds in BY_ARCHETYPE.values()) * 2
+
+    print(f"Panel eval START — opponent: {opponent} | {total_games} games "
+          f"(128 seeds × 2 seats) | decode={'target' if target_decode else 'argmax'} "
+          f"fire_thr={fire_threshold}", flush=True)
 
     for archetype, seeds in BY_ARCHETYPE.items():
         for seed in seeds:

@@ -82,6 +82,13 @@ class PPOConfig:
     il_decay_frac: float = 0.8
     kl_target: float = 0.05   # KL early-stop threshold per epoch; inf = disabled
     value_coef: float = 0.5
+    # Critic-only warmup (for BC warmstarts: trained policy + UNtrained critic).
+    # Before normal PPO, freeze the trunk + policy heads and train ONLY the value
+    # head until explained-variance reaches critic_warmup_ev (so PPO never trusts a
+    # random critic's advantages and unlearns the BC policy). 0 = disabled. Adaptive
+    # threshold self-skips on a warm-critic resume (EV already high → 0 warmup steps).
+    critic_warmup_ev: float = 0.0
+    critic_warmup_max_updates: int = 30   # safety cap if EV never reaches the threshold
     # Note: shaping_coef is intentionally NOT here — it is passed as --shaping-coef
     # CLI arg directly to TorchEnv (see train_torch.py). PPOConfig is not the
     # right owner for an environment reward shaping parameter.
