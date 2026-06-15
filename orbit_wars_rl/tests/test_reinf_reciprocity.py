@@ -14,29 +14,33 @@ from eval import _reinf_reciprocity
 
 
 def test_pingpong_slice():
-    # Saheb's observed loop: 10->22 @90/94/98, 22->10 @92/96/100 (period 2).
+    # Saheb's observed loop: 10->22 @90/94/98, 22->10 @92/96/100 (period 2) — all late (>=100? no,
+    # 90-98 are mid 50-100, 100 is late). recip3_ph splits the within-3 count by forward-edge phase.
     edges = [(90, 10, 22), (92, 22, 10), (94, 10, 22),
              (96, 22, 10), (98, 10, 22), (100, 22, 10)]
-    r = _reinf_reciprocity(edges)
+    r, ph = _reinf_reciprocity(edges)
     # every edge except the last (100, no reverse after) has its reverse exactly 2 steps later
     assert r == [0, 5, 5], f"expected [0,5,5], got {r}"
-    print(f"ok: ping-pong slice -> within1/2/3 = {r}")
+    # forward edges at 90/92/94/96/98 are all mid (50-100) -> recip3_ph = [0,5,0]
+    assert ph == [0, 5, 0], f"expected phase split [0,5,0], got {ph}"
+    print(f"ok: ping-pong slice -> within1/2/3 = {r}, recip3 by phase = {ph}")
 
 
 def test_distances_and_empty():
-    assert _reinf_reciprocity([]) == [0, 0, 0]
+    assert _reinf_reciprocity([]) == ([0, 0, 0], [0, 0, 0])
     # reverse at +1, +3, and a never-reversed edge
     edges = [(10, 1, 2), (11, 2, 1),         # d=1
              (20, 3, 4), (23, 4, 3),         # d=3
              (30, 5, 6)]                      # no reverse
-    r = _reinf_reciprocity(edges)
+    r, ph = _reinf_reciprocity(edges)
     # (10):d1 -> all three; (11):reverse 1->2? none after 11 -> skip; (20):d3 -> recip3 only;
-    # (23):reverse 3->4 after 23? none -> skip; (30): none
+    # (23):reverse 3->4 after 23? none -> skip; (30): none. both reciprocated edges are early (<50).
     assert r == [1, 1, 2], f"expected [1,1,2], got {r}"
+    assert ph == [2, 0, 0], f"expected phase split [2,0,0], got {ph}"
     # nearest-reverse only (not double-counted): A->B at t with two reverses picks the closest
     edges2 = [(0, 1, 2), (1, 2, 1), (2, 2, 1)]
-    assert _reinf_reciprocity(edges2) == [1, 1, 1], "should use nearest reverse (d=1), count once"
-    print("ok: distance buckets + empty + nearest-reverse")
+    assert _reinf_reciprocity(edges2)[0] == [1, 1, 1], "should use nearest reverse (d=1), count once"
+    print("ok: distance buckets + empty + nearest-reverse + phase split")
 
 
 if __name__ == "__main__":

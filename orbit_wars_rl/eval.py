@@ -252,14 +252,18 @@ def _friendly_inbound(fleets, tgt, seat):
 
 def _reinf_reciprocity(reinf_edges):
     """Reinforce PING-PONG detector. `reinf_edges` = [(step, src_pid, tgt_pid), ...] of own-target
-    reinforce launches. Returns [r1, r2, r3] = count of reinforces whose NEAREST reverse edge
-    (tgt->src) lands within 1 / 2 / 3 steps after it (cumulative). An A->B reinforce then a B->A
-    reinforce a few turns later = ships oscillating between two own planets (pure waste). This is
-    a TEMPORAL loop (arrival, then reverse) — a same-turn role mutex does NOT catch it."""
+    reinforce launches. Returns (recip, recip3_ph):
+      recip      = [r1, r2, r3] count of reinforces whose NEAREST reverse edge (tgt->src) lands
+                   within 1 / 2 / 3 steps after it (cumulative).
+      recip3_ph  = the within-3 count split by the FORWARD edge's phase (<50 / 50-100 / >=100).
+    An A->B reinforce then a B->A reinforce a few turns later = ships oscillating between two own
+    planets (pure waste). TEMPORAL loop (arrival, then reverse) — a same-turn role mutex misses it.
+    Rank1 winners: reciprocal-within-3 is <1%; an observed ~43% is a real pathology."""
     from bisect import bisect_right
     recip = [0, 0, 0]
+    recip3_ph = [0, 0, 0]
     if not reinf_edges:
-        return recip
+        return recip, recip3_ph
     by_edge: dict = {}
     for (tt, a, b) in reinf_edges:
         by_edge.setdefault((a, b), []).append(tt)
@@ -272,10 +276,13 @@ def _reinf_reciprocity(reinf_edges):
         j = bisect_right(rev, tt)                   # nearest reverse strictly after this launch
         if j < len(rev):
             d = rev[j] - tt
-            if d <= 3: recip[2] += 1
+            if d <= 3:
+                recip[2] += 1
+                ph = 0 if tt < _LAUNCH_WINDOW else (1 if tt < _MID_WINDOW else 2)
+                recip3_ph[ph] += 1
             if d <= 2: recip[1] += 1
             if d <= 1: recip[0] += 1
-    return recip
+    return recip, recip3_ph
 
 
 def game_conversion(steps, seat):
@@ -297,6 +304,14 @@ def game_conversion(steps, seat):
     reinf_early = reinf_mid = 0                                      # reinforce launches by step-window
     reinf_fwd = reinf_rear = reinf_dirn = 0                          # reinforce direction (vs enemy centroid)
     reinf_edges: list = []   # (step, src_pid, tgt_pid) per reinforce launch → reciprocal ping-pong below
+    # Phase-structured reinforce diagnostics (denom = reinf_n_ph per phase). Top-player mining shows
+    # early reinforces are forward/outward but mid/late logistics are freer → LOG, don't hard-mask:
+    #   fwde  = target closer to the NEAREST ENEMY planet than source (forward-to-enemy)
+    #   cout  = target FURTHER from our OWN-empire centroid than source (mass pushed outward)
+    #   ftop3 = target is one of our 3 frontline (closest-to-enemy) owned planets
+    reinf_n_ph = [0, 0, 0]; reinf_fwde_ph = [0, 0, 0]; reinf_cout_ph = [0, 0, 0]; reinf_ftop3_ph = [0, 0, 0]
+    # forward-to-enemy by reinforce SIZE (rank1: <=20 ships fwd 42% vs 51-100 fwd 71% — big sends move outward)
+    reinf_n_sz = [0, 0, 0]; reinf_fwde_sz = [0, 0, 0]   # ship-size buckets: <=20 / 21-50 / 51+
     # Retention: of the planets we CAPTURE, how many do we then lose, and how long did we hold
     # them? cap_step[pid] = step we (most recently) took pid; on a later loss we close the episode.
     # lost_caps/captures is the recapture/turnover rate — immune to the end->0 churn degeneracy.
@@ -405,6 +420,14 @@ def game_conversion(steps, seat):
         _enemy = [p for p in p0 if int(p[1]) != seat and int(p[1]) >= 0]
         _ecx = sum(p[2] for p in _enemy) / len(_enemy) if _enemy else None
         _ecy = sum(p[3] for p in _enemy) / len(_enemy) if _enemy else None
+        # own-empire centroid (centroid-outward ref) + frontline top-3 (closest-to-enemy owned)
+        _own = [p for p in p0 if int(p[1]) == seat]
+        _ocx = sum(p[2] for p in _own) / len(_own) if _own else None
+        _ocy = sum(p[3] for p in _own) / len(_own) if _own else None
+        _front3: set = set()
+        if _own and _enemy:
+            _de = lambda q: min(math.hypot(q[2] - e[2], q[3] - e[3]) for e in _enemy)
+            _front3 = {p[0] for p in sorted(_own, key=_de)[:3]}
         for mv in acts:
             if not mv or len(mv) < 3:
                 continue
@@ -433,6 +456,20 @@ def game_conversion(steps, seat):
                     reinf_dirn += 1
                     if dT < dS - 3: reinf_fwd += 1      # toward enemy (forward-staging)
                     elif dT > dS + 3: reinf_rear += 1   # away from enemy (rear-defense)
+                # phase-structured: forward-to-nearest-enemy, centroid-outward, frontline-top3
+                reinf_n_ph[_ph] += 1
+                if _enemy:
+                    deS = min(math.hypot(src[2] - e[2], src[3] - e[3]) for e in _enemy)
+                    deT = min(math.hypot(tgt[2] - e[2], tgt[3] - e[3]) for e in _enemy)
+                    sz = 0 if sent <= 20 else (1 if sent <= 50 else 2)
+                    reinf_n_sz[sz] += 1
+                    if deT < deS:
+                        reinf_fwde_ph[_ph] += 1
+                        reinf_fwde_sz[sz] += 1
+                if _ocx is not None and math.hypot(tgt[2] - _ocx, tgt[3] - _ocy) > math.hypot(src[2] - _ocx, src[3] - _ocy):
+                    reinf_cout_ph[_ph] += 1            # mass pushed outward from own centroid
+                if int(tgt[0]) in _front3:
+                    reinf_ftop3_ph[_ph] += 1
                 if t < _LAUNCH_WINDOW:
                     reinf_early += 1                # reinforce by step-window (when does it matter?)
                 elif t < _MID_WINDOW:
@@ -475,9 +512,12 @@ def game_conversion(steps, seat):
             fire_frac_sum += fired_this_step / owned_dec
         launch_count += fired_this_step
     end_planets = sum(1 for p in (last or []) if int(p[1]) == seat)
-    reinf_recip = _reinf_reciprocity(reinf_edges)
+    reinf_recip, reinf_recip3_ph = _reinf_reciprocity(reinf_edges)
     out = {"captures": caps, "attack_launches": atk, "reinforce_launches": reinf,
-           "reinf_recip": reinf_recip,
+           "reinf_recip": reinf_recip, "reinf_recip3_ph": reinf_recip3_ph,
+           "reinf_n_ph": reinf_n_ph, "reinf_fwde_ph": reinf_fwde_ph,
+           "reinf_cout_ph": reinf_cout_ph, "reinf_ftop3_ph": reinf_ftop3_ph,
+           "reinf_n_sz": reinf_n_sz, "reinf_fwde_sz": reinf_fwde_sz,
            "attack_ships": atk_ships, "end_planets": end_planets,
            "redundant": redundant, "underkill": underkill, "atk_early": atk_early,
            "caps_early": caps_early, "atk_mid": atk_mid, "caps_mid": caps_mid,
@@ -523,6 +563,9 @@ def new_conversion_acc():
            "atk_early_won": 0, "atk_early_lost": 0, "caps_early_won": 0, "caps_early_lost": 0,
            "atk_mid": 0, "caps_mid": 0, "reinf_early": 0, "reinf_mid": 0,
            "reinf_fwd": 0, "reinf_rear": 0, "reinf_dirn": 0, "reinf_recip": [0, 0, 0],
+           "reinf_recip3_ph": [0, 0, 0], "reinf_n_ph": [0, 0, 0], "reinf_fwde_ph": [0, 0, 0],
+           "reinf_cout_ph": [0, 0, 0], "reinf_ftop3_ph": [0, 0, 0],
+           "reinf_n_sz": [0, 0, 0], "reinf_fwde_sz": [0, 0, 0],
            "atk_mid_won": 0, "atk_mid_lost": 0, "caps_mid_won": 0, "caps_mid_lost": 0,
            "games_won": 0, "games_lost": 0,
            "reinf_bin": [0] * len(_REINF_BINS), "atk_bin": [0] * len(_REINF_BINS)}
@@ -543,8 +586,10 @@ def add_conversion(acc, conv, won=None):
               "fire_steps", "fire_frac_sum", "atk_mid", "caps_mid", "reinf_early", "reinf_mid",
               "reinf_fwd", "reinf_rear", "reinf_dirn"):
         acc[k] += conv[k]
-    for _k in range(3):                              # reinf_recip is a 1/2/3-step list
-        acc["reinf_recip"][_k] += conv["reinf_recip"][_k]
+    for _lk in ("reinf_recip", "reinf_recip3_ph", "reinf_n_ph", "reinf_fwde_ph",
+                "reinf_cout_ph", "reinf_ftop3_ph", "reinf_n_sz", "reinf_fwde_sz"):
+        for _k in range(3):                          # 3-element phase / size / step lists
+            acc[_lk][_k] += conv[_lk][_k]
     # route the fire-rate fields into won/lost buckets so spray can be read free of the
     # losing-position confound (won=None from non-eval callers → overall only, no split)
     if won is not None:
@@ -605,6 +650,12 @@ def _fmt_conversion(acc):
     rdr = 100 * acc["reinf_rear"] / max(acc["reinf_dirn"], 1)  # rear-defense % (forward-only blocks these)
     _rl = max(acc["reinforce_launches"], 1)                    # reinforce-ping-pong rate (of reinforces)
     rr1, rr2, rr3 = (acc["reinf_recip"][0] / _rl, acc["reinf_recip"][1] / _rl, acc["reinf_recip"][2] / _rl)
+    _f3 = lambda num, den: tuple(num[i] / max(den[i], 1) for i in range(3))   # phase/size-safe fraction
+    fwde = _f3(acc["reinf_fwde_ph"], acc["reinf_n_ph"])    # forward-to-nearest-enemy by phase
+    cout = _f3(acc["reinf_cout_ph"], acc["reinf_n_ph"])    # centroid-outward by phase
+    ftop3 = _f3(acc["reinf_ftop3_ph"], acc["reinf_n_ph"])  # target-frontline-top3 by phase
+    fwsz = _f3(acc["reinf_fwde_sz"], acc["reinf_n_sz"])    # forward-to-enemy by ship size
+    rc3p = acc["reinf_recip3_ph"]; rnp = acc["reinf_n_ph"]
     pl = lambda ms: (f"{acc[f'p{ms}_sum']/acc[f'p{ms}_n']:.0f}" if acc[f"p{ms}_n"] else "—")
     plw = lambda ms: (f"{acc[f'p{ms}_sum_won']/acc[f'p{ms}_n_won']:.0f}" if acc[f"p{ms}_n_won"] else "—")
     pll = lambda ms: (f"{acc[f'p{ms}_sum_lost']/acc[f'p{ms}_n_lost']:.0f}" if acc[f"p{ms}_n_lost"] else "—")
@@ -715,7 +766,10 @@ def _fmt_conversion(acc):
             f"  reinf by step  <50:{rsh_e:.2f}  50-100:{rsh_m:.2f}  >100:{rsh_l:.2f}   [ref:winner {_REINF_STEP_REF}]\n"
             f"  reinf direction  fwd {rdf:.0f}%  rear {rdr:.0f}%  (n={acc['reinf_dirn']})   [ref:winner fwd ~57% · rear ~26%]\n"
             f"  reinf ping-pong  recip<=1/2/3st {rr1:.2f}/{rr2:.2f}/{rr3:.2f} of {acc['reinforce_launches']} reinf "
-            f"({acc['reinf_recip'][2]} within 3st)   [A->B then B->A = waste loop; 0=none, NOT caught by same-turn mutex]\n"
+            f"({acc['reinf_recip'][2]} within 3st; by phase {rc3p[0]}/{rc3p[1]}/{rc3p[2]})   [A->B then B->A = waste loop; rank1 <0.01, NOT caught by same-turn mutex]\n"
+            f"  reinf by phase  n {rnp[0]}/{rnp[1]}/{rnp[2]} (<50/50-100/>100)  fwd-enemy {fwde[0]:.2f}/{fwde[1]:.2f}/{fwde[2]:.2f} [rank1 0.77/0.50/0.48]\n"
+            f"     centroid-out {cout[0]:.2f}/{cout[1]:.2f}/{cout[2]:.2f} [rank1 0.83/0.69/0.70]  target-front-top3 {ftop3[0]:.2f}/{ftop3[1]:.2f}/{ftop3[2]:.2f} [rank1 0.81/0.34/0.27]\n"
+            f"  reinf fwd-enemy by size  <=20/21-50/51+ {fwsz[0]:.2f}/{fwsz[1]:.2f}/{fwsz[2]:.2f}  (n {acc['reinf_n_sz'][0]}/{acc['reinf_n_sz'][1]}/{acc['reinf_n_sz'][2]})   [rank1 <=20:0.42 51-100:0.71]\n"
             f"  ship0 1-ship-probe by phase  {_s0('')}{s0wl}")
 
 
