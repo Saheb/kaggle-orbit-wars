@@ -312,6 +312,14 @@ def game_conversion(steps, seat):
     reinf_n_ph = [0, 0, 0]; reinf_fwde_ph = [0, 0, 0]; reinf_cout_ph = [0, 0, 0]; reinf_ftop3_ph = [0, 0, 0]
     # forward-to-enemy by reinforce SIZE (rank1: <=20 ships fwd 42% vs 51-100 fwd 71% — big sends move outward)
     reinf_n_sz = [0, 0, 0]; reinf_fwde_sz = [0, 0, 0]   # ship-size buckets: <=20 / 21-50 / 51+
+    # Attack target aggregation: split-source same-target attacks, with a floor-aware breakdown.
+    # Raw same-target fan-out is noisy; the useful signal is whether multiple sources were needed
+    # to clear the target's projected capture floor.
+    atk_turns = atk_agg_turns = atk_agg_moves = atk_agg_groups = 0
+    atk_agg_essential = atk_agg_solo = atk_agg_under = 0
+    atk_agg_cov_sum = 0.0
+    atk_turns_ph = [0, 0, 0]; atk_agg_turns_ph = [0, 0, 0]; atk_agg_groups_ph = [0, 0, 0]
+    atk_agg_essential_ph = [0, 0, 0]; atk_agg_under_ph = [0, 0, 0]
     # Retention: of the planets we CAPTURE, how many do we then lose, and how long did we hold
     # them? cap_step[pid] = step we (most recently) took pid; on a later loss we close the episode.
     # lost_caps/captures is the recapture/turnover rate — immune to the end->0 churn degeneracy.
@@ -428,6 +436,8 @@ def game_conversion(steps, seat):
         if _own and _enemy:
             _de = lambda q: min(math.hypot(q[2] - e[2], q[3] - e[3]) for e in _enemy)
             _front3 = {p[0] for p in sorted(_own, key=_de)[:3]}
+        step_ph = 0 if t < _LAUNCH_WINDOW else (1 if t < _MID_WINDOW else 2)
+        attack_groups = {}
         for mv in acts:
             if not mv or len(mv) < 3:
                 continue
@@ -438,7 +448,7 @@ def game_conversion(steps, seat):
             if not (ssh > 0 and sent <= ssh):       # legal launches only
                 continue
             fired_this_step += 1                    # counted before target resolution
-            _ph = 0 if t < _LAUNCH_WINDOW else (1 if t < _MID_WINDOW else 2)
+            _ph = step_ph
             launches_ph[_ph] += 1
             ship_ph_sum[_ph] += sent
             if sent == 1:
@@ -507,6 +517,33 @@ def game_conversion(steps, seat):
                         underkill += 1
                         if early:
                             underkill_early += 1
+                attack_groups.setdefault(int(tgt[0]), []).append((src, tgt, sent))
+        if attack_groups:
+            atk_turns += 1
+            atk_turns_ph[step_ph] += 1
+            had_agg = False
+            for group in attack_groups.values():
+                if len({int(src[0]) for src, _, _ in group}) < 2:
+                    continue
+                had_agg = True
+                atk_agg_groups += 1
+                atk_agg_groups_ph[step_ph] += 1
+                atk_agg_moves += len(group)
+                total_sent = sum(sent for _, _, sent in group)
+                max_single = max(sent for _, _, sent in group)
+                floor = max(_cap_cost_at_arrival(src, tgt, seat) for src, tgt, _ in group)
+                atk_agg_cov_sum += total_sent / max(floor, 1.0)
+                if total_sent >= floor and max_single < floor:
+                    atk_agg_essential += 1
+                    atk_agg_essential_ph[step_ph] += 1
+                elif max_single >= floor:
+                    atk_agg_solo += 1
+                else:
+                    atk_agg_under += 1
+                    atk_agg_under_ph[step_ph] += 1
+            if had_agg:
+                atk_agg_turns += 1
+                atk_agg_turns_ph[step_ph] += 1
         if fired_this_step > 0 and owned_dec > 0:
             fire_steps += 1
             fire_frac_sum += fired_this_step / owned_dec
@@ -518,6 +555,14 @@ def game_conversion(steps, seat):
            "reinf_n_ph": reinf_n_ph, "reinf_fwde_ph": reinf_fwde_ph,
            "reinf_cout_ph": reinf_cout_ph, "reinf_ftop3_ph": reinf_ftop3_ph,
            "reinf_n_sz": reinf_n_sz, "reinf_fwde_sz": reinf_fwde_sz,
+           "atk_turns": atk_turns, "atk_agg_turns": atk_agg_turns,
+           "atk_agg_moves": atk_agg_moves, "atk_agg_groups": atk_agg_groups,
+           "atk_agg_essential": atk_agg_essential, "atk_agg_solo": atk_agg_solo,
+           "atk_agg_under": atk_agg_under, "atk_agg_cov_sum": atk_agg_cov_sum,
+           "atk_turns_ph": atk_turns_ph, "atk_agg_turns_ph": atk_agg_turns_ph,
+           "atk_agg_groups_ph": atk_agg_groups_ph,
+           "atk_agg_essential_ph": atk_agg_essential_ph,
+           "atk_agg_under_ph": atk_agg_under_ph,
            "attack_ships": atk_ships, "end_planets": end_planets,
            "redundant": redundant, "underkill": underkill, "atk_early": atk_early,
            "caps_early": caps_early, "atk_mid": atk_mid, "caps_mid": caps_mid,
@@ -553,6 +598,11 @@ def new_conversion_acc():
            "launches_ph": [0, 0, 0], "ship1_ph": [0, 0, 0], "ship_ph_sum": [0, 0, 0],
            "launches_ph_won": [0, 0, 0], "ship1_ph_won": [0, 0, 0], "ship_ph_sum_won": [0, 0, 0],
            "launches_ph_lost": [0, 0, 0], "ship1_ph_lost": [0, 0, 0], "ship_ph_sum_lost": [0, 0, 0],
+           # split-source same-target attack aggregation, floor-aware (essential vs solo-capable vs under-floor)
+           "atk_turns": 0, "atk_agg_turns": 0, "atk_agg_moves": 0, "atk_agg_groups": 0,
+           "atk_agg_essential": 0, "atk_agg_solo": 0, "atk_agg_under": 0, "atk_agg_cov_sum": 0.0,
+           "atk_turns_ph": [0, 0, 0], "atk_agg_turns_ph": [0, 0, 0], "atk_agg_groups_ph": [0, 0, 0],
+           "atk_agg_essential_ph": [0, 0, 0], "atk_agg_under_ph": [0, 0, 0],
            # retention split by outcome — lost-cap → 1 on elimination (lose every planet because you
            # LOST the game), so the won-game value is the honest "can we hold mid-game?" read.
            "captures_won": 0, "captures_lost": 0, "lost_caps_won": 0, "lost_caps_lost": 0,
@@ -584,10 +634,14 @@ def add_conversion(acc, conv, won=None):
               "end_planets", "redundant", "underkill", "atk_early", "caps_early", "redundant_early",
               "underkill_early", "lost_caps", "launch_states", "launch_count",
               "fire_steps", "fire_frac_sum", "atk_mid", "caps_mid", "reinf_early", "reinf_mid",
-              "reinf_fwd", "reinf_rear", "reinf_dirn"):
+              "reinf_fwd", "reinf_rear", "reinf_dirn", "atk_turns", "atk_agg_turns",
+              "atk_agg_moves", "atk_agg_groups", "atk_agg_essential", "atk_agg_solo",
+              "atk_agg_under", "atk_agg_cov_sum"):
         acc[k] += conv[k]
     for _lk in ("reinf_recip", "reinf_recip3_ph", "reinf_n_ph", "reinf_fwde_ph",
-                "reinf_cout_ph", "reinf_ftop3_ph", "reinf_n_sz", "reinf_fwde_sz"):
+                "reinf_cout_ph", "reinf_ftop3_ph", "reinf_n_sz", "reinf_fwde_sz",
+                "atk_turns_ph", "atk_agg_turns_ph", "atk_agg_groups_ph",
+                "atk_agg_essential_ph", "atk_agg_under_ph"):
         for _k in range(3):                          # 3-element phase / size / step lists
             acc[_lk][_k] += conv[_lk][_k]
     # route the fire-rate fields into won/lost buckets so spray can be read free of the
@@ -726,6 +780,17 @@ def _fmt_conversion(acc):
     ff_w = acc["fire_frac_sum_won"] / max(acc["fire_steps_won"], 1)
     lr_l = acc["launch_count_lost"] / max(acc["launch_states_lost"], 1)
     ff_l = acc["fire_frac_sum_lost"] / max(acc["fire_steps_lost"], 1)
+    # Split-source attack aggregation: same target attacked by 2+ distinct sources on one step.
+    # Floor classes use projected capture floor at the slowest contributor's arrival (max floor).
+    agg_turn = acc["atk_agg_turns"] / max(acc["atk_turns"], 1)
+    agg_moves = acc["atk_agg_moves"] / max(al, 1)
+    agg_ess = acc["atk_agg_essential"] / max(acc["atk_agg_groups"], 1)
+    agg_solo = acc["atk_agg_solo"] / max(acc["atk_agg_groups"], 1)
+    agg_under = acc["atk_agg_under"] / max(acc["atk_agg_groups"], 1)
+    agg_cov = acc["atk_agg_cov_sum"] / max(acc["atk_agg_groups"], 1)
+    aggp = _f3(acc["atk_agg_turns_ph"], acc["atk_turns_ph"])
+    agge = _f3(acc["atk_agg_essential_ph"], acc["atk_agg_groups_ph"])
+    aggu = _f3(acc["atk_agg_under_ph"], acc["atk_agg_groups_ph"])
     gw, gl = acc["games_won"], acc["games_lost"]
     wl = (f"     WON({gw}g) lr {lr_w:.3f} ff {ff_w:.2f}  |  LOST({gl}g) lr {lr_l:.3f} ff {ff_l:.2f}"
           f"   (read WON; ff inflates on losses)\n") if (gw + gl) > 0 else ""
@@ -759,6 +824,11 @@ def _fmt_conversion(acc):
             f"   [ref:winner  cap/atk whole 0.53 · open<50 0.51 · mid50-100 0.47 · planets 2/6/9/10 · reinf 0.30]\n"
             f"  fire-rate  launch_rate {lr:.3f}  fire_frac {ff:.2f}   [ref:Isaiah 0.036 / 0.17]\n"
             f"{wl}"
+            f"  attack aggregation  turn {agg_turn:.3f}  moves {agg_moves:.3f}  groups {acc['atk_agg_groups']}  "
+            f"essential {agg_ess:.2f}  solo-cap {agg_solo:.2f}  under-floor {agg_under:.2f}  cov {agg_cov:.2f}"
+            f"   [ref:rank1 turn 0.061 moves 0.092 essential 0.158 under 0.545]\n"
+            f"     by phase agg-turn <50/50-100/>100 {aggp[0]:.2f}/{aggp[1]:.2f}/{aggp[2]:.2f}  "
+            f"essential {agge[0]:.2f}/{agge[1]:.2f}/{agge[2]:.2f}  under {aggu[0]:.2f}/{aggu[1]:.2f}/{aggu[2]:.2f}\n"
             f"  hoard  garr_frac@ {gf(16)}/{gf(32)}/{gf(50)}/{gf(100)}  "
             f"ships/planet@ {spp(16)}/{spp(32)}/{spp(50)}/{spp(100)}"
             f"   [ref:Isaiah {_ISAIAH_HOARD_REF}]\n"
