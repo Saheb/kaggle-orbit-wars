@@ -2147,3 +2147,87 @@ def to_legacy_obs(env: VecTorchEnv, env_idx: int = 0, player: int = 0) -> dict:
         "comet_planet_ids": comet_planet_ids,
         "comets": comets,
     }
+
+
+def to_legacy_obs_batch(env: VecTorchEnv, env_ids, player: int = 0) -> list[dict]:
+    """Batched `to_legacy_obs` for a group of envs (1-D LongTensor or list of ids).
+
+    Produces the SAME per-env obs dicts as ``[to_legacy_obs(env, e, player) for e in ids]``
+    but with ONE GPU->CPU copy per field (over all ids) instead of ~8 tiny syncs per env.
+    At ~96 external-opponent envs/step that collapses hundreds of per-step syncs into a
+    handful — the dominant per-step transport tax. Pure transport: identical bytes out
+    (verified by tests/test_to_legacy_obs_batch.py)."""
+    # Keep the ids ON-DEVICE for indexing — a .tolist() here (then re-tensoring) would force
+    # an extra GPU->CPU->GPU round-trip per external group; the only sync we want is the
+    # batched .cpu() copies below.
+    if torch.is_tensor(env_ids):
+        idx = env_ids.to(device=env.device, dtype=torch.long)
+    else:
+        idx = torch.as_tensor(list(env_ids), dtype=torch.long, device=env.device)
+    n = int(idx.shape[0])
+    # One batched copy per field (vs per-env in to_legacy_obs).
+    P = env.planets[idx].cpu().numpy()              # (n, MAX_PLANETS, 7)
+    A = env.planet_alive[idx].cpu().numpy()         # (n, MAX_PLANETS)
+    F = env.fleets[idx].cpu().numpy()               # (n, MAX_FLEETS, 7)
+    FA = env.fleet_alive[idx].cpu().numpy()         # (n, MAX_FLEETS)
+    IP = env.init_planets[idx].cpu().numpy()        # (n, MAX_PLANETS, 7)
+    STEP = env.step_count[idx].cpu().numpy()        # (n,)
+    ANG = env.angular_velocity[idx].cpu().numpy()   # (n,)
+    has_comets = getattr(env, "_has_comets", False)
+    if has_comets:
+        CA = env._comet_alive[idx].cpu().numpy()    # (n, T1, ns)
+        CXY = env._comet_xy[idx].cpu().numpy()      # (n, T1, ns, 2)
+        CIDS = env._comet_ids[idx].cpu().numpy()    # (n, ns)
+
+    out = []
+    for j in range(n):
+        p, a, f, fa, ip = P[j], A[j], F[j], FA[j], IP[j]
+        planets = [
+            [int(p[i, 0]), int(p[i, 1]), float(p[i, 2]), float(p[i, 3]),
+             float(p[i, 4]), float(p[i, 5]), float(p[i, 6])]
+            for i in range(MAX_PLANETS) if a[i]
+        ]
+        fleets = [
+            [int(f[i, 0]), int(f[i, 1]), float(f[i, 2]), float(f[i, 3]),
+             float(f[i, 4]), int(f[i, 5]), float(f[i, 6])]
+            for i in range(MAX_FLEETS) if fa[i]
+        ]
+        initial_planets = [
+            [int(ip[i, 0]), int(ip[i, 1]), float(ip[i, 2]), float(ip[i, 3]),
+             float(ip[i, 4]), float(ip[i, 5]), float(ip[i, 6])]
+            for i in range(COMET_SLOT_START) if a[i]
+        ]
+        comet_planet_ids: list[int] = []
+        comets: list[dict] = []
+        if has_comets:
+            ca, cxy, cids = CA[j], CXY[j], CIDS[j]
+            cur = int(STEP[j])
+            planet_ids: list[int] = []
+            paths: list[list] = []
+            path_index = -1
+            for c in range(N_COMET_SLOTS):
+                if not bool(a[COMET_SLOT_START + c]):
+                    continue
+                alive_steps = [t for t in range(ca.shape[0]) if ca[t, c]]
+                if not alive_steps:
+                    continue
+                first = alive_steps[0]
+                full_path = [[float(cxy[t, c, 0]), float(cxy[t, c, 1])]
+                             for t in range(first, alive_steps[-1] + 1)]
+                planet_ids.append(int(cids[c]))
+                paths.append(full_path)
+                path_index = cur - first
+            if planet_ids:
+                comets.append({"planet_ids": planet_ids, "paths": paths, "path_index": path_index})
+                comet_planet_ids = list(planet_ids)
+        out.append({
+            "step": int(STEP[j]),
+            "player": player,
+            "planets": planets,
+            "fleets": fleets,
+            "angular_velocity": float(ANG[j]),
+            "initial_planets": initial_planets,
+            "comet_planet_ids": comet_planet_ids,
+            "comets": comets,
+        })
+    return out

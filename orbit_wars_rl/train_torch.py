@@ -246,26 +246,35 @@ class HeuristicWorkerPool:
         self.pool.join()
 
 
-def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device):
+def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device, *,
+                                      owned_idx=None, slot_valid=None, src_pids=None):
     """Convert list-of-lists [[from_pid, angle_rad, ships], ...] per env into
     a (num_envs, MAX_OWNED, 3) action tensor plus a (num_envs, MAX_OWNED) float
     tensor of the raw continuous angles (NaN where no launch). The continuous
     angles let the env bypass 144-bin quantization for these aiming-heavy
-    opponents (see torch_env._apply_actions angle_override)."""
+    opponents (see torch_env._apply_actions angle_override).
+
+    Fast path (SPS patch C): the rollout already holds this seat's `owned_idx`/`slot_valid`
+    in its feature dict (get_features calls owned_indices_for, so they are IDENTICAL), and the
+    source planet ids per owned slot can be gathered once. Pass them as `owned_idx`/`slot_valid`/
+    `src_pids` to skip the redundant `env.owned_indices_for()` recompute AND the full
+    `env.planets.cpu()` 7-column copy. When omitted, they are derived from `env` exactly as
+    before (the path frozen_vs_deb_torch.py relies on)."""
     from torch_env import MAX_OWNED, NUM_ANGLE_BINS, ANGLE_BIN_WIDTH, SHIP_COUNTS
     import math as _math
 
-    N = env.num_envs
-    owned_idx, slot_valid = env.owned_indices_for(player)   # (N, MAX_OWNED)
+    if owned_idx is None:
+        owned_idx, slot_valid = env.owned_indices_for(player)   # (N, MAX_OWNED)
+        gather_idx = owned_idx.unsqueeze(-1).expand(-1, -1, 7).cpu()
+        # planet id per owned slot (column 0) — same value the precomputed fast path supplies.
+        src_pids = env.planets.cpu().gather(1, gather_idx)[:, :, 0]
+    N = owned_idx.shape[0]
+    sv_cpu = slot_valid.cpu() if torch.is_tensor(slot_valid) else slot_valid
+    src_pids_cpu = src_pids.cpu() if torch.is_tensor(src_pids) else src_pids
     fire = torch.zeros(N, MAX_OWNED, dtype=torch.long)
     angle_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
     ship_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
     cont_angle = torch.full((N, MAX_OWNED), float("nan"), dtype=torch.float32)
-
-    gather_idx = owned_idx.unsqueeze(-1).expand(-1, -1, 7).cpu()
-    planets_cpu = env.planets.cpu()
-    src = planets_cpu.gather(1, gather_idx)
-    sv_cpu = slot_valid.cpu()
 
     for e in range(N):
         moves = moves_per_env[e]
@@ -273,8 +282,8 @@ def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device):
             continue
         pid_to_slot = {}
         for k in range(MAX_OWNED):
-            if sv_cpu[e, k].item():
-                pid_to_slot[int(src[e, k, 0].item())] = k
+            if bool(sv_cpu[e, k]):
+                pid_to_slot[int(src_pids_cpu[e, k])] = k
         for mv in moves:
             if not isinstance(mv, (list, tuple)) or len(mv) < 3:
                 continue
@@ -569,6 +578,15 @@ def train(args):
         if resumed_pool_path:
             pool = OpponentPool.load(resumed_pool_path)
             print(f"Pool resumed from {resumed_pool_path}: {len(pool)} members")
+            # OpponentPool.load() restores the SAVED external_fraction — a CONFIG knob, not
+            # state (unlike the member list / PFSP stats, which we DO keep). Without this the
+            # current run's --pool-external-fraction is silently ignored on resume: a pool
+            # saved at 0.6 kept training at 0.6 despite --pool-external-fraction 0.5. The
+            # current run's flag must govern; override it (members/stats untouched).
+            if pool.external_fraction != args.pool_external_fraction:
+                print(f"  override external_fraction {pool.external_fraction:.2f} -> "
+                      f"{args.pool_external_fraction:.2f} (CLI --pool-external-fraction wins on resume)")
+                pool.external_fraction = args.pool_external_fraction
         else:
             pool = OpponentPool(
                 max_self_members=args.pool_max_size,
@@ -815,19 +833,26 @@ def train(args):
             return torch.stack([fire_a, angle_a, ship_a, target_a], dim=-1), None
 
         if opp.kind == "external_heuristic":
-            from torch_env import to_legacy_obs
-            ids = env_ids.tolist()
+            from torch_env import to_legacy_obs_batch
             pa = planner_adapters.get(opp.name)
             if pa is not None:
                 # In-process GPU planner: compute over all envs, then select our ids
-                # (env_ids may be non-contiguous under per-episode assignment).
+                # (env_ids may be non-contiguous under per-episode assignment). Only this
+                # branch needs the python id list — build it here, not unconditionally
+                # (an eager env_ids.tolist() would force a GPU->CPU sync every group).
                 moves_full = pa.moves(env, player, env_slice=None)
-                moves_per_env = [moves_full[e] for e in ids]
+                moves_per_env = [moves_full[e] for e in env_ids.tolist()]
             else:
-                obs_list = [to_legacy_obs(env, env_idx=e, player=player) for e in ids]
+                # Patch B: ONE batched GPU->CPU copy per field over the group, instead of
+                # ~8 tiny per-env syncs × |ids| (the dominant per-step transport tax).
+                _t0 = time.perf_counter()
+                obs_list = to_legacy_obs_batch(env, env_ids, player)
+                _t_acc["ext_obs"] += time.perf_counter() - _t0
                 wp = heur_worker_pools.get(opp.name)
                 if wp is not None:
+                    _t0 = time.perf_counter()
                     moves_per_env = wp.map(obs_list)
+                    _t_acc["ext_wait"] += time.perf_counter() - _t0
                 else:
                     # Fallback: serial path (no worker pool registered)
                     moves_per_env = []
@@ -836,21 +861,21 @@ def train(args):
                             moves_per_env.append(opp.agent_fn(obs) or [])
                         except Exception:
                             moves_per_env.append([])
-            # Build action tensor with the same converter the cloud eval uses, but only
-            # over our env_ids. _heuristic_moves_to_action_tensor expects an env-like with
-            # num_envs rows so we gather just those rows.
-            class _IndexView:
-                """Minimal view-like adapter so _heuristic_moves_to_action_tensor sees
-                only the (possibly non-contiguous) env_ids it should write into."""
-                def __init__(self, env, ids_t):
-                    self.num_envs = int(ids_t.numel())
-                    self.planets = env.planets[ids_t]
-                    self._env = env; self._ids = ids_t
-                def owned_indices_for(self, player):
-                    oi, sv = env.owned_indices_for(player)
-                    return oi[self._ids], sv[self._ids]
-            view = _IndexView(env, env_ids)
-            act, cont_angle = _heuristic_moves_to_action_tensor(moves_per_env, view, player, device)
+            # Patch C: reuse this seat's already-computed owned_idx/slot_valid (get_features
+            # calls owned_indices_for, so cached_feats holds the IDENTICAL tensors) + one
+            # subset gather for source planet ids, replacing the per-group owned_indices_for
+            # recompute and the full env.planets.cpu() 7-column copy the old _IndexView did.
+            _t0 = time.perf_counter()
+            if cached_feats is not None:
+                oi_full, sv_full = cached_feats["owned_indices"], cached_feats["slot_valid"]
+            else:
+                oi_full, sv_full = env.owned_indices_for(player)
+            oi_sub, sv_sub = oi_full[env_ids], sv_full[env_ids]
+            src_pids = env.planets[env_ids, :, 0].gather(1, oi_sub)   # (n, MAX_OWNED) planet ids
+            act, cont_angle = _heuristic_moves_to_action_tensor(
+                moves_per_env, env, player, device,
+                owned_idx=oi_sub, slot_valid=sv_sub, src_pids=src_pids)
+            _t_acc["ext_conv"] += time.perf_counter() - _t0
             if args.action_decode == "target":
                 # Target_idx = -1 sentinel so VecTorchEnv keeps angle decoding for these
                 # rows (not target decoding). The continuous angle (cont_angle) is applied
@@ -993,10 +1018,18 @@ def train(args):
         ms_n    = {m: torch.zeros((), device=env.device) for m in _MS}
 
         # --- Rollout collection (no grad) -----------------------------------
+        # Per-rollout wall-time breakdown (SPS patch A): attributes main-thread time to
+        # policy_forward / external obs-build / worker-wait / move-convert / env_step /
+        # ppo_update so the diag line shows where the per-step tax actually is. CPU
+        # perf_counter (no cuda.synchronize) → GPU-async work lands at the next sync; that
+        # is exactly the main-thread wall-time we are trying to reduce.
+        _t_acc = {"pf": 0.0, "ext_obs": 0.0, "ext_wait": 0.0, "ext_conv": 0.0,
+                  "estep": 0.0, "upd": 0.0}
         model.eval()
         for t in range(rollout_T):
             actions_per_player = {}
             feats_by_player = {}   # reused for self-pool opponents (avoid recomputing get_features)
+            _t_pf = time.perf_counter()
             for p in range(P):
                 feats_p, outs_p = forward_player(p)
                 feats_by_player[p] = feats_p
@@ -1025,6 +1058,7 @@ def train(args):
                 storage["values"][t, :, p].copy_(outs_p["value"].squeeze(-1), non_blocking=True)
                 # angle_p is zeros (unused in target-decode); env needs 4-col action tensor.
                 actions_per_player[p] = torch.stack([fire_p, angle_p, ship_p, target_p], dim=-1)
+            _t_acc["pf"] += time.perf_counter() - _t_pf
 
             # Pool opponent override: for each pool env, replace its opp-seat action
             # (opp_seat = 1 - the env's assigned seat) with that env's assigned member's
@@ -1062,7 +1096,9 @@ def train(args):
                             angle_overrides[os_] = ovr
                         ovr[ids_t] = opp_cont.to(ovr.dtype)
 
+            _t_es = time.perf_counter()
             state, rewards, done = env.step(actions_per_player, angle_overrides=angle_overrides)
+            _t_acc["estep"] += time.perf_counter() - _t_es
             # Hoard milestones: when an env is at episode-step 16/32/50/100, accumulate
             # player-0 garrison (parked), in-flight, and owned-planet counts for that env.
             ownp = env.planets[:, :, 1].long()                            # (N, P) owner
@@ -1269,6 +1305,7 @@ def train(args):
         # still cold (policy frozen, value head only). The EV-based exit is checked
         # below, after this rollout's EV is computed.
         model.train()
+        _t_upd = time.perf_counter()
         if critic_warmup_active:
             metrics = learner.value_warmup_update(minibatches)
             critic_warmup_count += 1
@@ -1276,6 +1313,7 @@ def train(args):
             metrics = learner.update(minibatches, scheduler=scheduler,
                                      kl_target=cfg.ppo.kl_target,
                                      bc_batch=bc_batch)
+        _t_acc["upd"] += time.perf_counter() - _t_upd
         metrics.update(ms_metrics)
         # train_mask time-fraction per (env,player): under per-episode assignment a slot's
         # learning-ness can flip mid-rollout (env resets pool<->self / seat), so the env's
@@ -1462,6 +1500,15 @@ def train(args):
                     f"{metrics.get('wnorm_enemy_contest', 0):.3f} "
                     f"(orig~{metrics.get('wnorm_pw_orig', 0):.2f})"
                     + actcoef + pencoef
+                )
+                # SPS patch A: per-rollout wall-time breakdown (where the per-step tax is).
+                _tt = sum(_t_acc.values()) or 1.0
+                _ext = _t_acc['ext_obs'] + _t_acc['ext_wait'] + _t_acc['ext_conv']
+                print(
+                    f"   timing | pf {_t_acc['pf']:.1f} ext_obs {_t_acc['ext_obs']:.1f} "
+                    f"ext_wait {_t_acc['ext_wait']:.1f} ext_conv {_t_acc['ext_conv']:.1f} "
+                    f"estep {_t_acc['estep']:.1f} upd {_t_acc['upd']:.1f} "
+                    f"(sum {_tt:.1f}s, ext {_ext/_tt*100:.0f}%)"
                 )
             # W&B logging
             if wb is not None:
