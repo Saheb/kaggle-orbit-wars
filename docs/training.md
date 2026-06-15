@@ -101,7 +101,41 @@
 
 ---
 
-## Current State (2026-06-15 PM) — CORRPACK2 live (correctness-pack fidelity track, NOT a new lever)
+## Current State (2026-06-16) — CORRPACK3E live (LR 1e-4); self-anchor re-anchor → BEST-EVER Ajay 14.8%
+
+**⭐ THE RESULT — the self-anchor re-anchor WORKED (first clear best-ever Ajay this project).** corrpack2 collapsed @4M,
+so corrpack3 re-anchored from corrpack2's pre-collapse **2.5M peak** (resume = IL-ref = that self). The lineage continued
+corrpack3 → 3b → **3c (LR 2.5e-5)** → **3d (LR 5e-5)** → **3e (LR 1e-4, LIVE)** on **Jarvis H200 SPOT 217.18.55.72**
+(⚠️ SPOT → watcher-sync mandatory, `jl destroy` when done). Anchor UNCHANGED throughout = corrpack2 2.5M self; config
+512 envs/mb32/workers12, ext 0.6, gate2/floor0/clamp, il-λ0.05 constant. Full 256-game panels (gate2, target-decode):
+
+| ckpt | LR | Ajay | Zach |
+|---|---|---|---|
+| corrpack2 2.5M (prior peak) | — | 11.7% | 94.5% |
+| **corrpack3d 524k** | 5e-5 | **14.8%** | **95.7%** |
+| corrpack3d 1M (3e resume base) | 5e-5 | 10.2% | — |
+| **corrpack3e 524k** (1e-4, ~1.57M cum) | 1e-4 | **14.5%** | — |
+
+**14.8% Ajay beats corrpack2's 11.7% peak and the old all-time 3.1% record (Rev35c/Rev38), with Zach 95.7% simultaneously**
+(Ajay usually trades vs Zach via turtling — getting both is new). The re-anchor HELD instead of the transient-then-Nash-reform
+pattern.
+
+**The LR scaling (user call):** clip plateaued ~0.066 at 5e-5 on the 512-env/4096-minibatch batch = under-stepping (batch
+supports ~4× corrpack2's LR). Switched to **1e-4 at the 1M ckpt boundary** (corrpack3e resumes `torch_step_1048576_corrpack3d`).
+⚠️ 1e-4 ≈ corrpack2's per-update aggressiveness = the regime it collapsed in (with the rev38 anchor) — bet = the SELF-anchor
+holds it where rev38's didn't. **First held-out HOLDS: 3e 524k = 14.5%** (the 1M's 10.2% was a noise dip, bounced back), clip
+settled to the target band **0.09**, KL **~0.005**, il_kl **0.05** (anchor fully engaged), EV 0.81, estop 0 = healthy. Decision
+rule: if a later 3e point falls <~10% = 1e-4 reintroduced drift → revert to the **corrpack3d 524k ckpt (14.8%, banked LOCALLY
+under `gpu_run_artifacts/corrpack3d/checkpoints/` — torch+pool 524k + 1M)** and drop LR to 5e-5. Need 3e 1M/1.5M points to
+confirm hold past 2M.
+
+**⚠️ HONEST CAVEAT — numeric record, NOT structural.** The force-concentration wall is INTACT at every ckpt: out-massed **97%**,
+garr@loss ~33 vs enemy-inbound ~74, **planets@50=6**, peel WON ~0.60. Our WON Ajay games still win on easy boards (hold 11st).
+So 14.8% is competence/board-luck stabilized by the self-anchor, NOT cracking force concentration (still the root wall; bar is
+still BEAT rev38 *structurally*). reinf ping-pong low (recip3st 0.08) = not the pathology here. **Process note:** partial-panel WR
+overstates — 3d 524k read ~21% at 144/256 (favorable early seeds) but finished 14.8%; always read the full 256-game Overall.
+
+## Current State (2026-06-15 PM) — CORRPACK2 live — ⚠️ SUPERSEDED (collapsed @4M; see corrpack3 above)
 
 **LIVE: corrpack2** — resumed **corrpack @ 2.5M** (torch_step_2539520) on Jarvis A100-80GB spot (box **427274** @ 217.18.55.138)
 with **correctness pack #2** baked in: per-EPISODE pool attribution (sticky member/seat per episode, raw pre-shaping winner

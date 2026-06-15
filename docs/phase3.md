@@ -125,6 +125,17 @@ Isolate the teacher-KL on the *exact* drift we've documented, with NO from-scrat
   need an *outcome* signal, not "copy this move," to break the ceiling. Note vkhydras most directly describes refreshing
   the **opponent** (pool channel); our ratchet refreshes the **teacher** (loss channel) — same principle, both run in
   Stage B, but credit the *outcome pressure (pool)* for the climb, not the teacher-KL alone.
+- **✅ LIVE CONFIRMATION (2026-06-16, corrpack lineage) — the self-anchor MECHANISM WORKS, and it can even nudge UP a
+  little.** corrpack2 drifted/collapsed @4M *with a rev38 (foreign-self) KL anchor*; re-anchoring to corrpack2's own
+  pre-collapse **2.5M peak** (resume = IL-ref = that self, il-λ0.05 constant, decay disabled) HELD past the prior collapse
+  point and reached **best-ever Ajay 14.8% + Zach 95.7%** (corrpack3d 524k) — above corrpack2's 11.7% peak. So a SELF-anchor
+  damps the slow drift the rev38 anchor missed (matches §3's "anchor to your OWN strong self" + the safety note). ⚠️ Two
+  caveats consistent with this section: (1) it's still essentially *holding/small-gain near the anchor*, NOT a structural
+  climb — the force-concentration wall is intact (out-massed 97%, planets@50=6), so the gain is competence-stabilization,
+  not the ceiling breaking (the ceiling break still needs Stage B's ratchet + outcome pressure, exactly as predicted);
+  (2) LR matters for *whether the anchor holds* — at 5e-5 held-out was a noisy ~10–15% (read the trend, not one point), and
+  we are testing LR 1e-4 (corrpack3e) to see if the self-anchor still holds at corrpack2's per-update aggressiveness (the
+  regime it collapsed in *with the rev38 anchor*). See `docs/training.md` Current State (2026-06-16) + [[project_corrpack3_reanchor]].
 
 ### Stage B — the RATCHET + from-scratch + new features (the real Phase-3 run)
 - **From-scratch** (BC warmstart) so the feature set (below) is learned natively + the policy acquires comets/phase
