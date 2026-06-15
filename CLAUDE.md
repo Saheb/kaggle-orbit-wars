@@ -173,7 +173,7 @@ Opponent paths relative to repo root. Always `--target-decode` for Phase 1.
 | Rev31 10M | 84.8% | — | **918.8** | LB record |
 | Rev32b 6M | **88.7%** | 0.8% | pending | Best Zach (pre-corrpack) |
 | Rev35c 1M | — | 3.1% | — | Old best Ajay (pre-corrpack) |
-| **corrpack3d 524k** | **95.7%** | **14.8%** | — | ⭐ Best Ajay AND best Zach ever (self-anchor re-anchor; wall still intact — numeric not structural). 3e (LR 1e-4) continues it |
+| **corrpack3e 4.7M** | **98.8%** | **18.0%** | — | ⭐ Best Ajay AND Zach ever (self-anchor re-anchor + LR 1e-4 climbed to 6M). Wall still intact (out-massed ~96%) — numeric not structural. Base for Lever A (decmass1) |
 
 Target: Top 10 LB is **above 1500** (1153 is only ~top-100; #1 Isaiah ≈ 1751). Our LB record is 918.8 → the gap to top-10 is **~600+ points** (a large gap; goal is 900→1500+).
 

@@ -101,7 +101,40 @@
 
 ---
 
-## Current State (2026-06-16) — CORRPACK3E live (LR 1e-4); self-anchor re-anchor → BEST-EVER Ajay 14.8%
+## Current State (2026-06-16) — DECMASS1 live (Lever A: decisive-mass reward) on corrpack3e's 18%-best base
+
+**⭐ FIRST STRUCTURAL ATTACK ON THE FORCE-CONCENTRATION WALL.** Every prior lever was a scalar reward/pool
+knob and all failed (HANDICAP/CONSOL negative; out-massed pinned ~96-98%). **Lever A** rewards our INFLIGHT force
+converging on an ENEMY planet the step it first reaches **producer_v2's capture_floor** — board-grounded (NOT
+outcome-tied) so it injects the concentration gradient symmetric self-play structurally can't price, and it's
+reward-side only (not obs/eval) so there's NO train/eval parity surface.
+
+```
+floor_t = garrison + prod·eta + enemy_inbound + beta·ρ(eta)·reachable_enemy_mass + 1
+```
+Constants = producer_v2 ProducerLiteConfig (beta=2.2, eta_free=3, eta_scale=12, horizon=18, overhead=1). The
+`beta·ρ·enemy_mass` margin is v2's **reactive-reinforcement** term — the not-yet-launched defense that out-masses
+us. (**User find:** the first floor `ships+prod·3+1` was a static proxy ~HALF the real value — it omitted the
+reaction margin + eta projection.) Commit `8ff1eb7`; flags `--decisive-mass-coef` (0=off) + `--decisive-mass-beta`
+(2.2; lower to ~1.0 if the `decis` diag stays ~0); `tests/test_decisive_mass.py`; `decis` = avg floor-crossings
+per (env,seat)/rollout. Calibration: from-scratch smoke decis 0.03→5.91 (v2 floor ~4-5× sparser than bare), but
+DENSE on the trained policy.
+
+**LIVE: decmass1** — Jarvis H200 SPOT 217.18.55.72 (⚠️ `jl destroy` when done; →6M ~2.2hr). Resume = IL-ref =
+**corrpack3e 4.7M** (Ajay 18.0% / Zach 98.8% — new best-ever) = self-re-anchor at our best (il_kl 0.005 at start =
+low-shock) + LR 1e-4. ONE real delta = the lever (coef 0.2, beta 2.2). **iter1: decis 11.98** (fires strong on the
+trained policy → beta 2.2 not too sparse), clip 0.108 / KL 0.013 / EV 0.69 / estop 0 healthy. Script
+`gpu_run_artifacts/decmass1/run_remote_decmass1_jarvis.sh`; watchers ajay+zach. **READ:** eval `out-massed%` DOWN
+from ~96% + `garr@loss→enemy-inbound` (31 vs 71) CLOSING; Ajay holds/climbs from 18%. **KILL: flat out-massed% by
+~1.5M ⇒ blocker is ARCHITECTURAL → lever C (multi-move-per-source).** So decmass1 is diagnostic either way.
+
+**Base run — corrpack3e CONCLUDED @6M (the self-anchor re-anchor WORKED + LR 1e-4 climbed):** full 256-game panels
+(gate2, target-decode): corrpack3d 524k 14.8%/95.7% → corrpack3e 524k 14.5 → 1.57M 16.0 → 3.1M 16.0 → **4.7M 18.0%
+/ Zach 98.8%** (no peak-then-fall; 1e-4 held where rev38's anchor didn't in corrpack2). > old all-time 3.1% record.
+⚠️ wall INTACT throughout (out-massed ~96%, planets@50=6) → 18% is competence/board-luck, NOT structural → exactly
+what Lever A targets. Banked locally: 3d 524k+1M, 3e 4.7M.
+
+## Current State (2026-06-16) — CORRPACK3E live (LR 1e-4) — ⚠️ SUPERSEDED (concluded @6M; see decmass1 above)
 
 **⭐ THE RESULT — the self-anchor re-anchor WORKED (first clear best-ever Ajay this project).** corrpack2 collapsed @4M,
 so corrpack3 re-anchored from corrpack2's pre-collapse **2.5M peak** (resume = IL-ref = that self). The lineage continued
