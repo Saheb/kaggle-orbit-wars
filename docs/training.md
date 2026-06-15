@@ -101,7 +101,25 @@
 
 ---
 
-## Current State (2026-06-15) — HANDICAP run live (Stage-B lineage, the "make under-expansion LOSE" lever)
+## Current State (2026-06-15 PM) — CORRPACK2 live (correctness-pack fidelity track, NOT a new lever)
+
+**LIVE: corrpack2** — resumed **corrpack @ 2.5M** (torch_step_2539520) on Jarvis A100-80GB spot (box **427274** @ 217.18.55.138)
+with **correctness pack #2** baked in: per-EPISODE pool attribution (sticky member/seat per episode, raw pre-shaping winner
+for PFSP, group-by-member override) + time-fraction-weighted rollout diagnostics + obstrunc `enemyship` metric (SSDR+pool /
+self-boost guarded). NEW run-name (`--resume` resets steps→0). Config else identical to corrpack (clamp/gate2/floor0/
+rev38-KL λ0.05/deb-ext0.6/128 envs/6M). Script `gpu_run_artifacts/corrpack2/run_remote_corrpack2_jarvis.sh`; teardown @5.9M
++ watchers zach+ajay(from-latest). **VALIDATED @iter7-10:** clean resume (EV 0.70-0.81, KL ~0.006, clip 0.22, estop 0, il_kl
+~0.56); `obstrunc 0.286 (fleet 0.325 ship 0.236 enemyship 0.236)` — **enemyship==ship ⇒ ~all hidden fleet mass is the
+OPPONENT's (~24% of enemy ship-mass invisible = MATERIAL for obs256)**; per-episode crediting runs error-free. ⚠️ SPS 350→285
+(per-episode multi-member override cost; opt = hoist get_features(seat)). **This is a FIDELITY track (stop-lying-to-ourselves),
+NOT a new lever** — the bar is still BEAT rev38_5M. Full detail: `docs/next-steps.md` Current focus + SESSION 2026-06-15 LATE.
+
+**Prior runs this day (all CONCLUDED, boxes destroyed):** HANDICAP + CONSOL both NEGATIVE (reward/pool knobs don't crack the
+force-concentration wall — out-massed pinned ~98%); corrpack (pack #1: clamp/no-8cap/fleet-debit/metadata/diag) killed @2.83M
+to become corrpack2, but validated the clamp fix live (emit/req 0.96-0.99, satur low → storage384 NOT needed; zach 80-83%).
+See the superseded HANDICAP section below + `docs/next-steps.md` EVE2/EVE3 for those.
+
+## Current State (2026-06-15) — HANDICAP run live (SUPERSEDED — concluded NEGATIVE; see above)
 
 **LIVE: handicap** — resume stageb4 1.5M + inverse-SSDR self-boost (+3 planets to our seat in pool, tapering to 0 over
 4M) + deb dominant in pool + rev38 teacher-KL anchor, on a Jarvis A100-80GB spot (box 427065 @ 217.18.55.39, SPS~370).

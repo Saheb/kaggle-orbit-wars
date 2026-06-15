@@ -94,8 +94,11 @@ _sync() {  # _sync <run>
   echo "[sync] $RUN no longer active — exiting" >> "$DST/watchers.log"
 }
 
-_eval() {  # _eval <run>   (platform-independent — local files only)
+_eval() {  # _eval <run> [opp_override]   (platform-independent — local files only)
   local RUN="$1"; . "$ROOT/gpu_run_artifacts/$1/.watch_env"
+  # An explicit opp arg overrides .watch_env's OPP, so a SECOND eval loop (e.g. Ajay) can run
+  # alongside the primary (zach) under the same run/marker, each writing its own eval_<opp>.csv.
+  local OPP="${2:-$OPP}"
   local DIR="$ROOT/gpu_run_artifacts/$1/checkpoints" LOGDIR="$ROOT/gpu_run_artifacts/$1/eval_logs"
   local OUT="$ROOT/gpu_run_artifacts/$1/eval_$(basename "${OPP%.py}" | sed 's/candidate_//').csv"
   mkdir -p "$LOGDIR"; cd "$ROOT"
@@ -107,7 +110,9 @@ _eval() {  # _eval <run>   (platform-independent — local files only)
       base=$(basename "$ckpt")
       grep -q ",$base$" "$OUT" 2>/dev/null && continue
       step=$(echo "$base" | sed -E 's/torch_step_([0-9]+)_.*/\1/')
-      elog="$LOGDIR/eval_${base%.pt}.log"
+      # elog is OPPONENT-specific: with two eval loops (zach + ajay) sharing this LOGDIR, an
+      # opponent-agnostic name would collide/race on every checkpoint both loops eval.
+      elog="$LOGDIR/eval_${base%.pt}__$(basename "${OPP%.py}" | sed 's/candidate_//').log"
       # Per-arm eval mask: for a gate A/B whose arms are named <MATCH><N> (gate2/gate3), eval each
       # ckpt with its OWN gate-min-planets (eval must match training). Opt-in via EVAL_GATE_FROM_RUNNAME.
       masks="$REINFORCE_MASKS"
@@ -144,12 +149,40 @@ case "${1:-}" in
     nohup bash "$0" _eval "$RUN" >/dev/null 2>&1 &
     echo "started watchers: run=$RUN platform=$PLAT target=$TGT held-out-eval=$OPP"
     ;;
+  add-eval)
+    # Add a SECOND held-out eval loop for another opponent to the CURRENTLY ACTIVE run,
+    # WITHOUT tearing down the existing watchers (start does stop_all — that would kill the
+    # in-flight panel). Self-terminates via the same .active_run marker, so no stale-watcher
+    # risk. Usage: add-eval <run> <opp.py> [from-latest]
+    #   from-latest: (re)create the opp CSV and seed every existing ckpt EXCEPT the newest as
+    #   already-done, so only the latest + future checkpoints get evaled (slow panels like Ajay
+    #   should not backfill the whole history).
+    RUN="${2:?usage: add-eval <run> <opp> [from-latest]}"; OPP_ARG="${3:?need opponent path}"; MODE="${4:-}"
+    _still_active "$RUN" || { echo "run '$RUN' is not the active run (marker='$(cat "$MARKER" 2>/dev/null)') — start it first"; exit 1; }
+    . "$ROOT/gpu_run_artifacts/$RUN/.watch_env"   # for MATCH; NB this also sets OPP=primary —
+    OPP="$OPP_ARG"                                  # so override with our arg AFTER sourcing.
+    OUT="$ROOT/gpu_run_artifacts/$RUN/eval_$(basename "${OPP%.py}" | sed 's/candidate_//').csv"
+    DIR="$ROOT/gpu_run_artifacts/$RUN/checkpoints"
+    if [ "$MODE" = "from-latest" ]; then
+      echo "utc_time,step,win_rate,seat0_wr,seat1_wr,open_capatk_WON,mid_capatk_WON,peelrate_WON,planets100_WON,reinf_step_early,reinf_step_mid,reinf_dir_fwd,games,checkpoint" > "$OUT"
+      newest=$(find "$DIR" -maxdepth 1 -name "torch_step_*${MATCH}*.pt" 2>/dev/null | sort -V | tail -1)
+      while IFS= read -r ck; do
+        [ -n "$ck" ] || continue
+        [ "$ck" = "$newest" ] && continue
+        b=$(basename "$ck"); s=$(echo "$b" | sed -E 's/torch_step_([0-9]+)_.*/\1/')
+        echo "SEED,${s},skip,,,,,,,,,,0,${b}" >> "$OUT"
+      done < <(find "$DIR" -maxdepth 1 -name "torch_step_*${MATCH}*.pt" 2>/dev/null)
+      echo "seeded $(basename "$OUT") to start from latest: $(basename "${newest:-<none>}")"
+    fi
+    nohup bash "$0" _eval "$RUN" "$OPP" >/dev/null 2>&1 &
+    echo "added eval loop: run=$RUN opp=$OPP -> $(basename "$OUT")"
+    ;;
   stop)    : > "$MARKER"; stop_all ;;
   status)
     echo "active run: $(cat "$MARKER" 2>/dev/null || echo none)"
     echo "live watcher procs:"; pgrep -af "run_watchers.sh _" || echo "  (none)"
     ;;
   _sync)  _sync "$2" ;;
-  _eval)  _eval "$2" ;;
-  *) echo "usage: $0 {start <run> <platform> <target> [opp] | stop | status}"; exit 1 ;;
+  _eval)  _eval "$2" "${3:-}" ;;
+  *) echo "usage: $0 {start <run> <platform> <target> [opp] | add-eval <run> <opp> [from-latest] | stop | status}"; exit 1 ;;
 esac

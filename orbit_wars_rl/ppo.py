@@ -456,6 +456,15 @@ class PPOLearner:
                 "action_decode": str(getattr(model_cfg, "action_decode", "angle")),
                 "allow_reinforce": bool(getattr(model_cfg, "allow_reinforce", False)),
                 "game_phase_features": bool(getattr(model_cfg, "game_phase_features", False)),
+                # Reinforce / sufficient-commit DISCIPLINE — eval & export must mask the SAME way
+                # the ckpt was trained or the policy self-sabotages. Persist so they auto-load
+                # instead of relying on CLI flags being remembered (a panel/submission footgun).
+                "reinforce_gate_min_planets": int(getattr(model_cfg, "reinforce_gate_min_planets", 0)),
+                "reinforce_forward_only": bool(getattr(model_cfg, "reinforce_forward_only", False)),
+                "reinforce_garrison_floor": float(getattr(model_cfg, "reinforce_garrison_floor", 0.0)),
+                "sufficient_commit_factor": float(getattr(model_cfg, "sufficient_commit_factor", 0.0)),
+                # provenance: how the ckpt was trained (eval always clamps, so not an eval-contract field)
+                "ship_overflow_mode": str(getattr(model_cfg, "ship_overflow_mode", "drop")),
             }
         return {
             "model": self.model.state_dict(),

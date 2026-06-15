@@ -115,6 +115,26 @@ def decode_ship_bins(ship_bins: torch.Tensor, max_ships: torch.Tensor, ship_bin_
     return counts_t[idx]
 
 
+def index_features(feats: dict, ids: torch.Tensor) -> dict:
+    """Index an env-batched `get_features()` dict down to the envs in `ids` (1-D Long).
+
+    Lets a frozen pool-self opponent forward ONLY its assigned envs — reusing the features
+    already computed for the learning model this step — instead of forwarding all N envs and
+    discarding all but a few rows. The model has no cross-env coupling (LayerNorm, not
+    BatchNorm) so per-row outputs are identical to forwarding the full batch then indexing.
+    All feature tensors are env-batched on dim 0; `owned_count` is a length-N python list."""
+    ids_list = ids.tolist()
+    out = {}
+    for k, v in feats.items():
+        if torch.is_tensor(v):
+            out[k] = v[ids]
+        elif isinstance(v, list):
+            out[k] = [v[i] for i in ids_list]
+        else:
+            out[k] = v
+    return out
+
+
 def compute_gae(rewards: torch.Tensor, values: torch.Tensor,
                 dones: torch.Tensor, next_value: torch.Tensor,
                 gamma: float, lam: float):
@@ -403,6 +423,16 @@ def train(args):
         cfg.model.min_ship_bin = args.min_ship_bin
     cfg.model.action_decode = args.action_decode
     cfg.model.allow_reinforce = args.allow_reinforce
+    # Persist the reinforce/sufficient-commit DISCIPLINE on cfg.model so the checkpoint records
+    # them (ppo.state_dict) and eval/export auto-load them — they must match training or the
+    # policy self-sabotages. Previously eval relied on CLI flags being remembered.
+    cfg.model.reinforce_gate_min_planets = args.reinforce_gate_min_planets
+    cfg.model.reinforce_forward_only = args.reinforce_forward_only
+    cfg.model.reinforce_garrison_floor = args.reinforce_garrison_floor
+    cfg.model.sufficient_commit_factor = args.sufficient_commit_factor
+    # PROVENANCE only (eval always clamps via _ship_bin_to_count, so this doesn't change the eval
+    # contract) — but record how the ckpt was trained (drop vs clamp) so it's never ambiguous.
+    cfg.model.ship_overflow_mode = args.ship_overflow_mode
     # Game-phase features: on if the CLI asks OR a resumed ckpt had them (15-global weights).
     cfg.model.game_phase_features = cfg.model.game_phase_features or args.game_phase_features
     if cfg.model.game_phase_features:
@@ -411,6 +441,7 @@ def train(args):
     env = VecTorchEnv(num_envs=args.num_envs, num_players=2,
                       device=device, episode_steps=500,
                       ship_bin_mode=cfg.model.ship_bin_mode,
+                      ship_overflow_mode=args.ship_overflow_mode,
                       action_decode=args.action_decode,
                       allow_reinforce=args.allow_reinforce,
                       game_phase_features=cfg.model.game_phase_features,
@@ -733,39 +764,67 @@ def train(args):
         # Planet ship counts snapshot per step — used for avgfleet/p90fleet metrics.
     }
 
-    def compute_pool_actions(opp: PoolMember, player: int, env_slice: slice) -> torch.Tensor:
-        """Return action tensor (N_pool, MAX_OWNED, 3) for the opponent playing
-        `player` in envs `env_slice`. Supports 'self' (frozen RL model on GPU)
-        and 'external_heuristic' (.py agent via legacy Python obs)."""
+    def _get_pool_self_model(member: PoolMember):
+        """Frozen, eval-mode model holding `member`'s weights, cached ON the member so we
+        load_state_dict ONCE per member instead of once per (member, seat) group per step.
+        The model is a tiny deepcopy that lives and dies with the member — evicted members
+        are GC'd together with their cached model, so there is no id()-reuse hazard a plain
+        dict cache keyed on id(member) would have. `pool.save()` serializes only named
+        dataclass fields, so the extra attribute is never persisted."""
+        m = getattr(member, "_pool_model", None)
+        if m is None:
+            m = copy.deepcopy(pool_opp_model)
+            m.load_state_dict(member.state_dict)
+            m.to(device)
+            m.eval()
+            member._pool_model = m
+        return m
+
+    def compute_pool_actions(opp: PoolMember, player: int, env_ids: torch.Tensor,
+                             cached_feats: dict | None = None) -> torch.Tensor:
+        """Return (action tensor, cont_angle|None) for the opponent playing `player`
+        in the envs listed in `env_ids` (1-D LongTensor). Supports 'self' (frozen RL
+        model on GPU) and 'external_heuristic' (.py agent / in-process planner).
+
+        Keyed by an arbitrary index set, NOT a contiguous slice: per-episode pool
+        assignment lets different envs hold different members at the same step, so the
+        step loop groups envs by (member, seat) and calls this once per group.
+
+        `cached_feats` (if given) is the env-batched `get_features(player)` already computed
+        for the learning model this step — reused for 'self' members instead of recomputing,
+        and indexed to `env_ids` so the frozen model forwards only its assigned envs."""
         if opp.kind == "self":
-            # Load opp weights into the reusable frozen model
-            pool_opp_model.load_state_dict(opp.state_dict)
-            feats = env.get_features(player, max_planets=cfg.env.max_planets, max_fleets=128)
+            opp_model = _get_pool_self_model(opp)   # cached weights (no per-group load_state_dict)
+            feats = cached_feats if cached_feats is not None else \
+                env.get_features(player, max_planets=cfg.env.max_planets, max_fleets=128)
+            sub = index_features(feats, env_ids)    # select our envs BEFORE the forward
             with torch.no_grad():
-                outs = pool_opp_model(
-                    feats["planet_features"], feats["fleet_features"],
-                    feats["global_features"], feats["planet_mask"],
-                    feats["fleet_mask"],
-                    fire_mask=feats["fire_mask"], angle_mask=feats["angle_mask"],
-                    slot_valid=feats["slot_valid"], owned_indices=feats["owned_indices"],
-                    owned_count=feats["owned_count"],
-                    pairwise_features=feats.get("pairwise_features"),
+                outs = opp_model(
+                    sub["planet_features"], sub["fleet_features"],
+                    sub["global_features"], sub["planet_mask"],
+                    sub["fleet_mask"],
+                    fire_mask=sub["fire_mask"], angle_mask=sub["angle_mask"],
+                    slot_valid=sub["slot_valid"], owned_indices=sub["owned_indices"],
+                    owned_count=sub["owned_count"],
+                    pairwise_features=sub.get("pairwise_features"),
                 )
             fire_a, angle_a, ship_a, target_a, *_ = sample_action_batched(
-                outs, feats["fire_mask"], feats.get("target_mask")
+                outs, sub["fire_mask"], sub.get("target_mask")
             )
-            return torch.stack([fire_a, angle_a, ship_a, target_a], dim=-1)[env_slice], None
+            # Rows already correspond 1:1 to env_ids (we indexed before the forward).
+            return torch.stack([fire_a, angle_a, ship_a, target_a], dim=-1), None
 
         if opp.kind == "external_heuristic":
             from torch_env import to_legacy_obs
-            start, stop = env_slice.start or 0, env_slice.stop or N
+            ids = env_ids.tolist()
             pa = planner_adapters.get(opp.name)
             if pa is not None:
-                # In-process GPU planner: no obs pickling / no CPU worker pool.
-                moves_per_env = pa.moves(env, player, env_slice=slice(start, stop))
+                # In-process GPU planner: compute over all envs, then select our ids
+                # (env_ids may be non-contiguous under per-episode assignment).
+                moves_full = pa.moves(env, player, env_slice=None)
+                moves_per_env = [moves_full[e] for e in ids]
             else:
-                obs_list = [to_legacy_obs(env, env_idx=e, player=player)
-                            for e in range(start, stop)]
+                obs_list = [to_legacy_obs(env, env_idx=e, player=player) for e in ids]
                 wp = heur_worker_pools.get(opp.name)
                 if wp is not None:
                     moves_per_env = wp.map(obs_list)
@@ -777,20 +836,20 @@ def train(args):
                             moves_per_env.append(opp.agent_fn(obs) or [])
                         except Exception:
                             moves_per_env.append([])
-            # Build action tensor with the same converter the cloud eval uses,
-            # but only over the env slice. _heuristic_moves_to_action_tensor
-            # expects N rows so we build over the slice and return.
-            class _SliceView:
-                """Minimal view-like adapter so _heuristic_moves_to_action_tensor
-                sees just the slice it should write into."""
-                def __init__(self, env, slc):
-                    self.num_envs = stop - start
-                    self.planets = env.planets[slc]
-                    self._env = env; self._slc = slc
+            # Build action tensor with the same converter the cloud eval uses, but only
+            # over our env_ids. _heuristic_moves_to_action_tensor expects an env-like with
+            # num_envs rows so we gather just those rows.
+            class _IndexView:
+                """Minimal view-like adapter so _heuristic_moves_to_action_tensor sees
+                only the (possibly non-contiguous) env_ids it should write into."""
+                def __init__(self, env, ids_t):
+                    self.num_envs = int(ids_t.numel())
+                    self.planets = env.planets[ids_t]
+                    self._env = env; self._ids = ids_t
                 def owned_indices_for(self, player):
                     oi, sv = env.owned_indices_for(player)
-                    return oi[self._slc], sv[self._slc]
-            view = _SliceView(env, env_slice)
+                    return oi[self._ids], sv[self._ids]
+            view = _IndexView(env, env_ids)
             act, cont_angle = _heuristic_moves_to_action_tensor(moves_per_env, view, player, device)
             if args.action_decode == "target":
                 # Target_idx = -1 sentinel so VecTorchEnv keeps angle decoding for these
@@ -833,54 +892,74 @@ def train(args):
               f"(max {cfg.ppo.critic_warmup_max_updates} rollouts), policy frozen.")
     print("=" * 70)
 
+    # --- Per-EPISODE pool assignment (correctness fix) ----------------------------
+    # The opponent identity + our seat are drawn ONCE PER EPISODE — when an env RESETS
+    # — and held until that episode ends, instead of being re-rolled every rollout.
+    # Previously `pool_opp`/`current_seat` were sampled per-rollout while episodes (~300-
+    # 500 steps) span ~3-4 rollouts, so a game could be played by different controllers
+    # across rollout boundaries and credited to whichever assignment was active at its
+    # done step — contaminating PFSP attribution and injecting mid-game controller swaps.
+    # Now each env's assignment is sticky for the life of its episode; result is credited
+    # to THAT assignment with the raw (pre-shaping) winner.
+    # NOTE: SSDR is supported per-env (self-play mask); self-boost (handicap, parked) is
+    # NOT yet ported to per-episode seats and is guarded out below.
+    pool_active = pool is not None and len(pool) > 0 and args.pool_fraction > 0
+
+    def _draw_assignment(steps_now: int):
+        """Draw a fresh (is_pool, member, our_seat) for one resetting env. Each env is a
+        pool env with prob `pool_fraction` (preserves the old aggregate pool exposure);
+        the member is sampled per-env (more in-rollout opponent diversity than the old
+        single-member-per-rollout), with the same ramp logic as before."""
+        if not pool_active or rng.random() >= args.pool_fraction:
+            return False, None, 0
+        if args.pool_pinned_fraction > 0.0:
+            ramp = (min(steps_now / args.pool_hard_ramp_steps, 1.0)
+                    if args.pool_hard_ramp_steps > 0 else 1.0)
+            member = pool.sample(rng,
+                                 external_fraction=args.pool_external_fraction * ramp,
+                                 pinned_fraction=args.pool_pinned_fraction * ramp)
+        else:
+            member = pool.sample(rng)
+        if member is None:
+            return False, None, 0
+        return True, member, rng.randint(0, 1)
+
+    if args.self_boost_planets > 0 and pool_active:
+        raise NotImplementedError(
+            "self-boost (handicap) is not ported to per-episode pool assignment "
+            "(needs per-env boosted seat); it is parked-negative — relaunch without it.")
+    if env.ssdr_frac > 0.0 and pool_active:
+        # SSDR asymmetry is applied at env.step()'s auto-reset using the SSDR mask set at
+        # rollout start (= ~env_is_pool), but a per-episode reassignment is drawn AFTER that
+        # reset — so a reassigned POOL env can inherit an SSDR-asymmetric board, violating the
+        # "pool envs get clean symmetric starts" contract. Proper fix = pre-draw each env's
+        # NEXT-episode pool-ness and set the SSDR mask from it BEFORE stepping (so the board
+        # matches the new episode). Inert for the current lineage (ssdr_frac=0); error loudly
+        # rather than silently feed asymmetric boards to frozen pool opponents.
+        raise NotImplementedError(
+            "SSDR (ssdr_frac>0) + per-episode pool assignment is not yet aligned: a reassigned "
+            "pool env can inherit an SSDR-asymmetric board (the mask lags the reassignment). "
+            "Use ssdr_frac=0, or implement pre-drawn next-episode pool-ness for the SSDR mask.")
+
+    # Persistent per-env assignment (Python lists; N is small). Drawn at startup; an
+    # env's slot is refreshed only when that env resets (handled in the step loop).
+    env_is_pool = [False] * N
+    env_member: list[PoolMember | None] = [None] * N
+    env_seat = [0] * N
+    for _e in range(N):
+        env_is_pool[_e], env_member[_e], env_seat[_e] = _draw_assignment(total_env_steps)
+
     while total_env_steps < args.total_steps:
-        # --- Per-rollout opponent assignment --------------------------------
-        # If a pool is configured, dedicate `pool_fraction` of envs to play
-        # current-vs-(sampled pool opponent). The remaining envs do P=2
-        # symmetric self-play. The pool opponent is sampled ONCE per rollout
-        # (not per env) — keeps pool-opponent forward cheap.
-        pool_opp: PoolMember | None = None
-        N_self, N_pool = N, 0
-        current_seat = 0
-        if pool is not None and len(pool) > 0 and args.pool_fraction > 0:
-            if args.pool_pinned_fraction > 0.0:
-                # Ramp mode: ease the hard opponents (pinned RL + external peeler) in
-                # 0→target so a weak from-scratch BC isn't win-starved. true-zero start
-                # = pure self-play early (pins pulled out of PFSP; no organic snapshots
-                # yet → sample() returns None → self-play fallback below).
-                ramp = (min(total_env_steps / args.pool_hard_ramp_steps, 1.0)
-                        if args.pool_hard_ramp_steps > 0 else 1.0)
-                pool_opp = pool.sample(
-                    rng,
-                    external_fraction=args.pool_external_fraction * ramp,
-                    pinned_fraction=args.pool_pinned_fraction * ramp,
-                )
-            else:
-                pool_opp = pool.sample(rng)
-            if pool_opp is not None:
-                N_pool = int(N * args.pool_fraction)
-                N_self = N - N_pool
-                current_seat = rng.randint(0, 1)  # alternate so current sees both seats
-        opp_seat = 1 - current_seat
-        pool_slice = slice(N_self, N) if N_pool > 0 else slice(0, 0)
+        # --- Per-EPISODE opponent assignment --------------------------------
+        # env_is_pool / env_member / env_seat are sticky per episode (drawn on reset,
+        # see the step loop). Here we just publish the per-env self-play mask for SSDR
+        # (pool envs get clean symmetric starts; self-play envs get SSDR) from the
+        # CURRENT assignment. N_pool is now just a diagnostic count, not a slice.
+        N_pool = sum(env_is_pool)
         # Inform env which envs are self-play (SSDR active) vs pool (symmetric).
-        # Pool envs get clean symmetric starts so old checkpoints aren't poisoned
-        # by asymmetric boards they were never trained on.
         if env.ssdr_frac > 0.0:
-            self_mask = torch.zeros(N, dtype=torch.bool)
-            self_mask[:N_self] = True
+            self_mask = torch.tensor([not ip for ip in env_is_pool], dtype=torch.bool)
             env.set_ssdr_mask(self_mask)
-        # Handicapped-real-planner curriculum: grant OUR seat (current_seat) extra starting
-        # planets in the POOL envs (where a planner opponent lives), tapering k -> 0 over
-        # --self-boost-ramp-steps. Win-gradient for holding vs a strong planner, then weaned off.
-        if args.self_boost_planets > 0:
-            bramp = (min(total_env_steps / args.self_boost_ramp_steps, 1.0)
-                     if args.self_boost_ramp_steps > 0 else 1.0)
-            boost_k = int(round(args.self_boost_planets * (1.0 - bramp)))
-            boost_mask = torch.zeros(N, dtype=torch.bool)
-            if N_pool > 0:
-                boost_mask[N_self:N] = True
-            env.set_self_boost(boost_k, current_seat, boost_mask)
         # Training-wide anneal of early_capture_coef → 0 (dense→sparse shaping).
         # Cosine from the base coef at step 0 to 0 at frac*total_steps, then stays 0.
         # env.step() reads self.early_capture_coef fresh each step, so mutating the
@@ -899,10 +978,10 @@ def train(args):
             model.reinforce_logit_bias = args.reinforce_bias_init * (1.0 - rb_frac)
         # Reset train_mask: all True by default, mark opp's slots False below
         storage["train_mask"].fill_(True)
-        # Zero the reinforce_rate accumulators for this rollout (env counts realized
-        # reinforce/fire launches per (env,player); combined with train_mask below).
-        if args.allow_reinforce:
-            env.reset_reinforce_stats()
+        # Zero the reinforce_rate + overask accumulators for this rollout (env counts realized
+        # reinforce/fire launches per (env,player); combined with train_mask below). Unconditional
+        # so overask_rate logs for non-reinforce runs too; reinforce-specific counts stay gated.
+        env.reset_reinforce_stats()
 
         # Hoard milestones (player 0): snapshot garrison/in-flight/planets when an env
         # is AT episode-step 16/32/50/100. Controlled-time + scale-free → replaces the
@@ -917,8 +996,10 @@ def train(args):
         model.eval()
         for t in range(rollout_T):
             actions_per_player = {}
+            feats_by_player = {}   # reused for self-pool opponents (avoid recomputing get_features)
             for p in range(P):
                 feats_p, outs_p = forward_player(p)
+                feats_by_player[p] = feats_p
                 fire_p, angle_p, ship_p, target_p, lpf_p, lps_p, lpt_p = sample_action_batched(
                     outs_p, feats_p["fire_mask"], feats_p.get("target_mask")
                 )
@@ -945,21 +1026,41 @@ def train(args):
                 # angle_p is zeros (unused in target-decode); env needs 4-col action tensor.
                 actions_per_player[p] = torch.stack([fire_p, angle_p, ship_p, target_p], dim=-1)
 
-            # Pool opponent override: in pool envs, replace `opp_seat`'s action
-            # with the pool member's action, and mark its storage slot as
-            # not-trainable so PPO ignores it.
+            # Pool opponent override: for each pool env, replace its opp-seat action
+            # (opp_seat = 1 - the env's assigned seat) with that env's assigned member's
+            # action, and mark the slot not-trainable so PPO ignores it. Per-episode
+            # assignment means different envs may hold different members/seats this step,
+            # so we group by (member, opp_seat) and call compute_pool_actions per group.
             angle_overrides = None
-            if pool_opp is not None and N_pool > 0:
-                opp_action, opp_cont = compute_pool_actions(pool_opp, opp_seat, pool_slice)
-                actions_per_player[opp_seat][pool_slice] = opp_action
-                storage["train_mask"][t, pool_slice, opp_seat] = False
-                if opp_cont is not None:
-                    # Continuous-angle override for the external opponent's slice (NaN
-                    # elsewhere) → bypasses 144-bin quantization for its aiming.
-                    full_ovr = torch.full(actions_per_player[opp_seat].shape[:2],
-                                          float("nan"), device=env.device)
-                    full_ovr[pool_slice] = opp_cont
-                    angle_overrides = {opp_seat: full_ovr}
+            if N_pool > 0:
+                groups: dict = {}  # (id(member), opp_seat) -> [member, opp_seat, [env ids]]
+                for e in range(N):
+                    if not env_is_pool[e]:
+                        continue
+                    os_ = 1 - env_seat[e]
+                    groups.setdefault((id(env_member[e]), os_),
+                                      [env_member[e], os_, []])[2].append(e)
+                for member, os_, ids in groups.values():
+                    ids_t = torch.tensor(ids, device=env.device, dtype=torch.long)
+                    opp_action, opp_cont = compute_pool_actions(
+                        member, os_, ids_t, cached_feats=feats_by_player.get(os_))
+                    # Advanced-index assignment (index_put_) requires matching dtypes — it
+                    # does NOT auto-cast the way the old contiguous-slice copy_ did; cast to
+                    # the destination so behaviour matches the prior slice path exactly.
+                    dst = actions_per_player[os_]
+                    dst[ids_t] = opp_action.to(dst.dtype)
+                    storage["train_mask"][t, ids_t, os_] = False
+                    if opp_cont is not None:
+                        # Continuous-angle override for an external member's envs (NaN
+                        # elsewhere) → bypasses 144-bin quantization for its aiming.
+                        if angle_overrides is None:
+                            angle_overrides = {}
+                        ovr = angle_overrides.get(os_)
+                        if ovr is None:
+                            ovr = torch.full(actions_per_player[os_].shape[:2],
+                                             float("nan"), device=env.device)
+                            angle_overrides[os_] = ovr
+                        ovr[ids_t] = opp_cont.to(ovr.dtype)
 
             state, rewards, done = env.step(actions_per_player, angle_overrides=angle_overrides)
             # Hoard milestones: when an env is at episode-step 16/32/50/100, accumulate
@@ -1014,18 +1115,23 @@ def train(args):
             for r in rewards[:, 1][done].tolist():
                 reward_history_p1.append(r)
 
-            # Track pool opponent win/loss for PFSP weighting — only count
-            # finished pool envs (current is in `current_seat`).
-            if pool_opp is not None and N_pool > 0:
-                done_pool = done[pool_slice]
-                if done_pool.any():
-                    r_cur = rewards[pool_slice, current_seat]
-                    r_opp = rewards[pool_slice, opp_seat]
-                    for cur_r, opp_r, d in zip(r_cur.tolist(), r_opp.tolist(), done_pool.tolist()):
-                        if not d: continue
-                        if cur_r > opp_r:   pool.record_result(pool_opp, "win")
-                        elif opp_r > cur_r: pool.record_result(pool_opp, "loss")
-                        else:               pool.record_result(pool_opp, "draw")
+            # PFSP attribution + per-episode reassignment. Credit each finished POOL
+            # env to ITS OWN assigned member using the RAW (pre-shaping) winner — NOT
+            # the shaped `rewards` tensor, which by now carries material/expansion/
+            # early-capture shaping — then draw a fresh assignment for the new episode
+            # that env.step() already auto-reset. Crediting BEFORE reassign so the slot
+            # still holds the just-finished episode's controller.
+            done_list = torch.nonzero(done, as_tuple=False).flatten().tolist()
+            if done_list:
+                last_wins = env._last_wins  # (N, P) bool, raw winner at the done step
+                for e in done_list:
+                    if env_is_pool[e] and env_member[e] is not None:
+                        cur_seat = env_seat[e]; o_seat = 1 - cur_seat
+                        cur_w = bool(last_wins[e, cur_seat]); opp_w = bool(last_wins[e, o_seat])
+                        if cur_w and not opp_w:   pool.record_result(env_member[e], "win")
+                        elif opp_w and not cur_w: pool.record_result(env_member[e], "loss")
+                        else:                     pool.record_result(env_member[e], "draw")
+                    env_is_pool[e], env_member[e], env_seat[e] = _draw_assignment(total_env_steps)
 
         # Bootstrap value at end of rollout — for both players
         next_value_p = torch.zeros(N, P, device=storage_dev)
@@ -1171,11 +1277,17 @@ def train(args):
                                      kl_target=cfg.ppo.kl_target,
                                      bc_batch=bc_batch)
         metrics.update(ms_metrics)
-        # reinforce_rate: of the current policy's realized launches (train_mask-filtered,
-        # across both seats), the fraction sent to our own planets (Vadasz ~0.57; target
-        # 0.4-0.6). train_mask[0] is (N,P) and constant over the rollout's t.
+        # train_mask time-fraction per (env,player): under per-episode assignment a slot's
+        # learning-ness can flip mid-rollout (env resets pool<->self / seat), so the env's
+        # rollout-SUMMED diagnostic accumulators below are weighted by the FRACTION of steps
+        # each slot was the learning policy — ≈ correct vs the old t=0 snapshot (which counted
+        # a flipped slot's whole-rollout total). Still approximate: assumes a slot's counts are
+        # roughly uniform over the rollout (the env totals aren't split by when they happened).
+        train_frac = storage["train_mask"].float().mean(0).to(env.device)   # (N, P) in [0,1]
+        # reinforce_rate: of the current policy's realized launches (train_frac-weighted,
+        # across both seats), the fraction sent to our own planets (Vadasz ~0.57; target 0.4-0.6).
         if args.allow_reinforce and env._fire_launch_count is not None:
-            tm = storage["train_mask"][0].to(env.device).float()   # (N, P)
+            tm = train_frac                                        # (N, P)
             fires = (env._fire_launch_count * tm).sum()
             reinf = (env._reinforce_launch_count * tm).sum()
             neut = (env._neutral_launch_count * tm).sum()
@@ -1195,6 +1307,31 @@ def train(args):
                 metrics["reinf_step_e"] = float((rs[0] / fs[0]).item())
                 metrics["reinf_step_m"] = float((rs[1] / fs[1]).item())
                 metrics["reinf_step_l"] = float((rs[2] / fs[2]).item())
+        # overask_rate: fraction of the current policy's INTENDED launches whose ship_count >
+        # source garrison (→ DROPPED in "drop" mode, clamped-to-full in "clamp"/eval). Always
+        # logged (not gated on allow_reinforce); split by episode window [<50/50-100/>100].
+        if getattr(env, "_attempt_step", None) is not None:
+            tmu = train_frac.unsqueeze(-1)                                        # (N, players, 1)
+            oa = (env._overask_step * tmu).sum(dim=(0, 1))                        # (3,)
+            at = (env._attempt_step * tmu).sum(dim=(0, 1))                        # (3,)
+            metrics["overask_rate"] = float((oa.sum() / at.sum().clamp(min=1.0)).item())
+            metrics["overask_e"] = float((oa[0] / at[0].clamp(min=1.0)).item())
+            metrics["overask_m"] = float((oa[1] / at[1].clamp(min=1.0)).item())
+            metrics["overask_l"] = float((oa[2] / at[2].clamp(min=1.0)).item())
+            # requested→emitted gap + fleet saturation + obs truncation (current policy via train_mask)
+            req = float((env._attempt_step * tmu).sum().item())
+            emi = float((env._emitted_step * tmu).sum().item())
+            ssv = float((env._slotstarve_step * tmu).sum().item())
+            metrics["moves_emit_req"] = emi / max(req, 1.0)            # emitted / requested
+            metrics["fleet_saturation"] = ssv / max(emi + ssv, 1.0)   # dropped-for-no-slot / can_fire
+            if getattr(env, "_obs_calls", None) is not None:
+                metrics["obs_trunc_rate"] = float(env._obs_trunc.sum().item()) / max(float(env._obs_calls.sum().item()), 1.0)
+                # severity: how much of the live fleet count / ship mass is hidden past the obs cap
+                metrics["obs_trunc_fleet_frac"] = float(env._obs_trunc_fleets.sum().item()) / max(float(env._obs_total_fleets.sum().item()), 1.0)
+                metrics["obs_trunc_ship_frac"] = float(env._obs_trunc_ships.sum().item()) / max(float(env._obs_total_ships.sum().item()), 1.0)
+                # ENEMY omitted ship mass ÷ all enemy ship mass — the obs256 decider (is the
+                # hidden mass the OPPONENT's, e.g. an inbound strike we can't see?).
+                metrics["obs_trunc_enemy_ship_frac"] = float(env._obs_trunc_enemy_ships.sum().item()) / max(float(env._obs_total_enemy_ships.sum().item()), 1.0)
         with torch.no_grad():
             metrics["old_value_mean"] = float(flat["values"].mean().item())
             metrics["old_value_std"] = float(flat["values"].std(unbiased=False).item())
@@ -1303,6 +1440,13 @@ def train(args):
                     f"{metrics.get('planets@50',0):.0f}/{metrics.get('planets@100',0):.0f} "
                     f"garrfrac@50 {metrics.get('garr_frac@50',0):.2f} "
                     f"shipspp@50 {metrics.get('ships_per_planet@50',0):.0f} | "
+                    f"overask {metrics.get('overask_rate',0):.2f} "
+                    f"(<50/50-100/>100 {metrics.get('overask_e',0):.2f}/"
+                    f"{metrics.get('overask_m',0):.2f}/{metrics.get('overask_l',0):.2f}) "
+                    f"emit/req {metrics.get('moves_emit_req',0):.2f} satur {metrics.get('fleet_saturation',0):.3f} "
+                    f"obstrunc {metrics.get('obs_trunc_rate',0):.3f} "
+                    f"(fleet {metrics.get('obs_trunc_fleet_frac',0):.3f} ship {metrics.get('obs_trunc_ship_frac',0):.3f} "
+                    f"enemyship {metrics.get('obs_trunc_enemy_ship_frac',0):.3f}) | "
                     f"{reinfstr}"
                     f"H_ship {metrics.get('ship_entropy', 0):.2f} "
                     f"H_tgt {metrics.get('target_entropy', 0):.2f} | "
@@ -1570,7 +1714,7 @@ if __name__ == "__main__":
                         help="Reinforcement discipline #4 (forward-staging gate): an own reinforce "
                              "target is legal only if it is closer to the nearest enemy planet than "
                              "the launch source, so reinforcement flows rear→front (staging) and a "
-                             "safe rear hoard is impossible by construction. Matches the 66-70% "
+                             "safe rear hoard is impossible by construction. Matches the 66-70%% "
                              "forward-staging in top-player replays; removes the costless safe-fire "
                              "outlet that floods symmetric self-play. Enemy/neutral targets "
                              "unconstrained. Only active with --allow-reinforce.")
@@ -1578,6 +1722,13 @@ if __name__ == "__main__":
                         help="Append 4 game-phase global channels (phase one-hot early<50/mid/late + "
                              "normalized steps-to-next-comet-spawn); global feature dim 11->15. "
                              "Breaks 11-global checkpoint loading → from-scratch runs only (Stage B).")
+    parser.add_argument("--ship-overflow-mode", choices=["drop", "clamp"], default="clamp",
+                        help="What torch_env does when a launch asks for more ships than the source "
+                             "garrison: 'clamp' (DEFAULT — send min(ask,src), the whole garrison, "
+                             "MATCHING EVAL's _ship_bin_to_count) or 'drop' (legacy — void the whole "
+                             "launch, the train/eval-mismatch behavior). ~35%% of attacks overask; "
+                             "default flipped to clamp 2026-06-15 (clamp is correct; pass 'drop' only "
+                             "to reproduce the legacy bug or as an A/B control).")
     parser.add_argument("--sufficient-commit-factor", type=float, default=0.0,
                         help="SUFFICIENT-COMMIT MASK: veto an ATTACK launch (enemy/neutral target) "
                              "whose ship count <= target's current defense × this factor → fragments "

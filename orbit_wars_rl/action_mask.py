@@ -13,6 +13,23 @@ import math
 import numpy as np
 import torch
 
+# --- ship-commitment audit (probe-only; enable via action_mask._SHIP_AUDIT["on"]=True) ---
+_SHIP_AUDIT = {"on": False}
+_SHIP_AUDIT_DATA = {
+    "attack":    {"n": 0, "overflow": 0, "full": 0, "ratio_sum": 0.0, "hist": [0] * 11},
+    "reinforce": {"n": 0, "overflow": 0, "full": 0, "ratio_sum": 0.0, "hist": [0] * 11},
+}
+def _reset_ship_audit():
+    for c in _SHIP_AUDIT_DATA.values():
+        c.update(n=0, overflow=0, full=0, ratio_sum=0.0, hist=[0] * 11)
+def _ship_audit_record(nominal, garrison, is_reinforce):
+    d = _SHIP_AUDIT_DATA["reinforce" if is_reinforce else "attack"]
+    g = max(1, int(garrison)); d["n"] += 1
+    if nominal > garrison: d["overflow"] += 1
+    if nominal >= garrison: d["full"] += 1
+    r = nominal / g; d["ratio_sum"] += r
+    d["hist"][10 if r >= 1.0 else min(int(r * 10), 9)] += 1
+
 NUM_ANGLE_BINS = 144
 ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
 CENTER = 50.0
@@ -131,7 +148,8 @@ def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, playe
         ship_bins = torch.argmax(ship_logits, dim=-1).cpu().numpy().squeeze(0)
 
     moves = []
-    max_moves = 8
+    max_moves = MAX_OWNED_PLANETS  # = model's owned-slot width (16); kaggle env has NO move cap,
+    # the old 8 was a self-nerf + train/eval mismatch (torch_env fires all 16). Bounded by owned_count.
     for slot in range(min(masks["owned_count"], fire_decisions.shape[0])):
         if len(moves) >= max_moves:
             break
@@ -294,7 +312,8 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         ship_bins = torch.argmax(ship_logits, dim=-1).cpu().numpy().squeeze(0)
 
     moves = []
-    max_moves = 8
+    max_moves = MAX_OWNED_PLANETS  # = model's owned-slot width (16); kaggle env has NO move cap,
+    # the old 8 was a self-nerf + train/eval mismatch (torch_env fires all 16). Bounded by owned_count.
     for slot in range(min(masks["owned_count"], fire_decisions.shape[0])):
         if len(moves) >= max_moves:
             break
@@ -315,6 +334,9 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
             continue
 
         ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
+        if _SHIP_AUDIT["on"]:
+            _nom = SHIP_COUNTS[int(ship_bins[slot])] if ship_bin_mode == "absolute" else ships
+            _ship_audit_record(_nom, int(planets[pidx][5]), is_own_target)
         # Reserve cap (probe): keep at least reserve_frac of the source planet's
         # current ships at home — forces a defensive garrison instead of
         # committing the whole army forward. reserve_frac=0.0 = no change.
@@ -437,7 +459,8 @@ def actions_from_sampled_policy(fire_action, angle_action, ship_action, masks, o
     ship_bins = ship_action.cpu().numpy().squeeze(0)
 
     moves = []
-    max_moves = 8
+    max_moves = MAX_OWNED_PLANETS  # = model's owned-slot width (16); kaggle env has NO move cap,
+    # the old 8 was a self-nerf + train/eval mismatch (torch_env fires all 16). Bounded by owned_count.
     for slot in range(min(masks["owned_count"], fire_decisions.shape[0])):
         if len(moves) >= max_moves:
             break

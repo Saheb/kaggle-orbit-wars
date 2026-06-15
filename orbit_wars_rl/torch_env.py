@@ -197,6 +197,7 @@ class VecTorchEnv:
         device: str | torch.device = "cpu",
         episode_steps: int = 500,
         ship_bin_mode: str = "absolute",
+        ship_overflow_mode: str = "clamp",   # matches eval (_ship_bin_to_count clamps); "drop"=legacy bug
         action_decode: str = "angle",
         win_margin_coeff: float = 0.0,
         shaping_coef: float = 0.0,
@@ -283,12 +284,36 @@ class VecTorchEnv:
         # (own = _reinforce_launch_count; enemy = fire − own − neutral). Phase-2
         # target-head health (is the "where" head selective or uniform?).
         self._neutral_launch_count = None
+        self._overask_step = None      # (N, num_players, 3) attacks+reinf where bin>garrison
+        self._attempt_step = None      # (N, num_players, 3) all intended launches (= requested moves)
+        self._emitted_step = None      # (N, num_players, 3) launches that created a fleet (emitted)
+        self._slotstarve_step = None   # (N, num_players, 3) can_fire dropped: fleet storage full
+        self._last_wins = None         # (N, num_players) bool: raw winner mask from the last _check_done
+        self._obs_trunc = None         # (num_players,) get_features calls with live fleets > obs cap
+        self._obs_calls = None         # (num_players,) get_features calls total (denom)
+        # richer truncation severity (how much mass is hidden, not just whether any is):
+        self._obs_trunc_fleets = None  # (num_players,) live fleets in slots >= obs cap (omitted)
+        self._obs_total_fleets = None  # (num_players,) all live fleets (denom)
+        self._obs_trunc_ships = None   # (num_players,) ship mass in omitted fleets
+        self._obs_total_ships = None   # (num_players,) ship mass in all live fleets (denom)
+        # ENEMY-only severity (the high-signal cut for the obs256 decision: is the hidden mass
+        # enemy fleets we're blind to, not our own?). Enemy = fleet owner != the obs player.
+        self._obs_trunc_enemy_ships = None  # (num_players,) enemy ship mass in omitted fleets
+        self._obs_total_enemy_ships = None  # (num_players,) enemy ship mass in all live fleets
         self.num_players = num_players
         self.episode_steps = episode_steps
         self.device = torch.device(device)
         # See ModelConfig.ship_bin_mode. "absolute" uses SHIP_COUNTS lookup;
         # "fraction" uses round(FRAC_VALUES[bin] * src_ships).
         self.ship_bin_mode = ship_bin_mode
+        # What to do when a launch's ship_count exceeds the source garrison:
+        #   "drop"  — legacy: void the whole launch (valid_ships = src_ships >= ship_count)
+        #   "clamp" — send min(ship_count, src_ships), i.e. the whole garrison — MATCHES EVAL
+        #             (action_mask `_ship_bin_to_count` = min(count, max_ships)). Fixes the
+        #             train/eval gap where ~35% of attacks were silently dropped in training.
+        if ship_overflow_mode not in {"drop", "clamp"}:
+            raise ValueError(f"unknown ship_overflow_mode={ship_overflow_mode!r}")
+        self.ship_overflow_mode = ship_overflow_mode
         if action_decode not in {"angle", "target"}:
             raise ValueError(f"unknown action_decode={action_decode!r}")
         self.action_decode = action_decode
@@ -724,6 +749,26 @@ class VecTorchEnv:
         init_planets = self.init_planets[:, :P, :]
         fleets = self.fleets[:, :F, :]
         fleet_alive = self.fleet_alive[:, :F]
+        # obs_fleet_truncation diagnostic: an env whose LIVE fleets spill past the obs cap F (slots
+        # >= F) is partly unseen by the model. Rate = such (env,call) / all (env,call). The rate only
+        # says SOME mass is hidden; the *_frac severity metrics below say HOW MUCH (fleet count + ship
+        # mass omitted vs total) — the real signal for whether raising max_fleets is worth it.
+        if self._obs_calls is not None and 0 <= player < self.num_players:
+            self._obs_calls[player] += N
+            if F < self.fleet_alive.shape[1]:
+                self._obs_trunc[player] += self.fleet_alive[:, F:].any(dim=1).sum().float()
+                alive_f = self.fleet_alive.float()
+                ships_all = self.fleets[:, :, 6] * alive_f
+                self._obs_trunc_fleets[player] += alive_f[:, F:].sum()
+                self._obs_total_fleets[player] += alive_f.sum()
+                self._obs_trunc_ships[player] += ships_all[:, F:].sum()
+                self._obs_total_ships[player] += ships_all.sum()
+                # ENEMY-only (owner != this obs player): the obs256-relevant cut — how much of
+                # the fleet mass the model is blind to belongs to the OPPONENT (e.g. an inbound
+                # strike), not our own in-flight reinforcements.
+                enemy_ships = ships_all * (self.fleets[:, :, 1].long() != player).float()
+                self._obs_trunc_enemy_ships[player] += enemy_ships[:, F:].sum()
+                self._obs_total_enemy_ships[player] += enemy_ships.sum()
 
         owner = planets[:, :, 1].long()
         x  = planets[:, :, 2];  y  = planets[:, :, 3]
@@ -1343,8 +1388,25 @@ class VecTorchEnv:
 
         # Validate: planet still owned by this player AND has enough ships
         valid_owner = (src_owner == owner_id) & slot_valid
+        # overask audit (nominal = pre-clamp ship_count): an intended launch whose ask exceeds
+        # the source garrison. In "drop" mode it's voided; in "clamp" mode it sends the whole
+        # garrison (matching eval). Measured regardless of mode so the A/B sees the same intent.
+        _attempted = fire & valid_owner & target_valid & (ship_count > 0)
+        _overask = _attempted & (ship_count > src_ships)
+        if self.ship_overflow_mode == "clamp":
+            ship_count = torch.minimum(ship_count, src_ships)
         valid_ships = src_ships >= ship_count
         can_fire = fire & valid_owner & valid_ships & target_valid & (ship_count > 0)  # (N, MAX_OWNED)
+        if self._attempt_step is not None:
+            _sc = self.step_count
+            _w0 = (_sc < 50).float(); _w1 = ((_sc >= 50) & (_sc < 100)).float(); _w2 = (_sc >= 100).float()
+            _oa = _overask.sum(dim=1).float(); _at = _attempted.sum(dim=1).float()    # (N,)
+            self._overask_step[:, owner_id, 0] += _oa * _w0
+            self._overask_step[:, owner_id, 1] += _oa * _w1
+            self._overask_step[:, owner_id, 2] += _oa * _w2
+            self._attempt_step[:, owner_id, 0] += _at * _w0
+            self._attempt_step[:, owner_id, 1] += _at * _w1
+            self._attempt_step[:, owner_id, 2] += _at * _w2
 
         # Reinforcement discipline (#1 garrison floor + #2 transit cost) + reinforce_rate
         # metric. is_reinforce: a launch whose target is one of OUR OWN planets — only
@@ -1397,15 +1459,8 @@ class VecTorchEnv:
         start_x = src_x + torch.cos(angle) * (src_r + 0.1)
         start_y = src_y + torch.sin(angle) * (src_r + 0.1)
 
-        # Debit ships from source planets. Use scatter_add with negative values.
-        # Multiple fires from same planet aren't possible (one slot per planet),
-        # so scatter is well-defined.
-        debit = ship_count * can_fire.float()                     # (N, MAX_OWNED)
-        ships_col = self.planets[:, :, 5]
-        new_ships = ships_col.scatter_add(1, owned_idx, -debit)
-        self.planets[:, :, 5] = new_ships
-
-        # Find first MAX_OWNED dead fleet slots per env via topk-smallest trick.
+        # Find first MAX_OWNED dead fleet slots per env via topk-smallest trick. Done BEFORE the
+        # ship debit so a slot-starved launch doesn't burn ships (see target_valid below).
         dead = ~self.fleet_alive                                  # (N, F) bool
         F = dead.shape[1]
         SENTINEL_F = F + 1
@@ -1418,7 +1473,33 @@ class VecTorchEnv:
         # fire_rank: among `can_fire` slots in an env, what's the rank of this slot?
         fire_rank = (can_fire.long().cumsum(dim=1) - 1).clamp(min=0)   # (N, MAX_OWNED)
         target_slot = rank_to_slot.gather(1, fire_rank)                # (N, MAX_OWNED)
+        # target_valid = a launch that BOTH wants to fire AND got a free fleet slot. If fleet
+        # storage is saturated (no free slot) the launch is DROPPED — not fired with ships burned.
         target_valid = rank_has.gather(1, fire_rank) & can_fire        # (N, MAX_OWNED)
+
+        # Debit ships from source planets — ONLY for launches that actually created a fleet
+        # (target_valid), so a slot-starved launch keeps its ships instead of burning them.
+        # scatter_add with negative values; one slot per planet so the scatter is well-defined.
+        debit = ship_count * target_valid.float()                 # (N, MAX_OWNED)
+        ships_col = self.planets[:, :, 5]
+        new_ships = ships_col.scatter_add(1, owned_idx, -debit)
+        self.planets[:, :, 5] = new_ships
+
+        # Launch diagnostics: emitted = fleets actually created (target_valid); slot-starved =
+        # can_fire dropped because fleet storage was full. fleet_slot_saturation = slotstarve/can_fire
+        # (can_fire = emitted ⊔ slotstarve). Together with _attempt_step (requested) this exposes the
+        # requested→emitted gap. Split by episode window [<50/50-100/>100].
+        if self._emitted_step is not None:
+            _sc2 = self.step_count
+            _v0 = (_sc2 < 50).float(); _v1 = ((_sc2 >= 50) & (_sc2 < 100)).float(); _v2 = (_sc2 >= 100).float()
+            _em = target_valid.sum(dim=1).float()                          # (N,)
+            _ss = (can_fire & ~target_valid).sum(dim=1).float()            # (N,)
+            self._emitted_step[:, owner_id, 0] += _em * _v0
+            self._emitted_step[:, owner_id, 1] += _em * _v1
+            self._emitted_step[:, owner_id, 2] += _em * _v2
+            self._slotstarve_step[:, owner_id, 0] += _ss * _v0
+            self._slotstarve_step[:, owner_id, 1] += _ss * _v1
+            self._slotstarve_step[:, owner_id, 2] += _ss * _v2
 
         # Per-env IDs for new fleets: next_fleet_id + 0, 1, 2, ... within env.
         new_id_within_env = (target_valid.long().cumsum(dim=1) - 1).clamp(min=0)
@@ -1452,6 +1533,22 @@ class VecTorchEnv:
             self.num_envs, self.num_players, 3, dtype=torch.float32, device=self.device)
         self._fire_step = torch.zeros(
             self.num_envs, self.num_players, 3, dtype=torch.float32, device=self.device)
+        self._overask_step = torch.zeros(
+            self.num_envs, self.num_players, 3, dtype=torch.float32, device=self.device)
+        self._attempt_step = torch.zeros(
+            self.num_envs, self.num_players, 3, dtype=torch.float32, device=self.device)
+        self._emitted_step = torch.zeros(
+            self.num_envs, self.num_players, 3, dtype=torch.float32, device=self.device)
+        self._slotstarve_step = torch.zeros(
+            self.num_envs, self.num_players, 3, dtype=torch.float32, device=self.device)
+        self._obs_trunc = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
+        self._obs_calls = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
+        self._obs_trunc_fleets = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
+        self._obs_total_fleets = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
+        self._obs_trunc_ships = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
+        self._obs_total_ships = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
+        self._obs_trunc_enemy_ships = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
+        self._obs_total_enemy_ships = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
 
     # ---------------------------------------------------------------------
     # Step — pure tensor ops, runs all N envs in one pass.
@@ -1821,6 +1918,11 @@ class VecTorchEnv:
             scores[:, pl] = sp.sum(dim=1) + sf.sum(dim=1)
         max_score, _ = scores.max(dim=1, keepdim=True)  # (N, 1)
         wins = (scores == max_score) & (max_score > 0)
+        # Expose the RAW winner mask (pre-shaping/bonus) so callers (PFSP result
+        # attribution) don't have to infer win/loss from the shaped reward tensor —
+        # which already carries material/expansion/early-capture/etc. shaping by the
+        # time step() returns it. Valid for envs that are newly-done THIS step.
+        self._last_wins = wins
         rewards = torch.where(wins, torch.ones_like(scores), -torch.ones_like(scores))
         # Optional win-margin bonus: winner gets +α*(my_score/total_score).
         # Losers stay at -1; coefficient 0 = pure ±1 (default).

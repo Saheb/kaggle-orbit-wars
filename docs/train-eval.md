@@ -37,6 +37,132 @@ divergence**, not independent causes.
 
 ---
 
+## ✅ FIXED (2026-06-15) — GAP #2: ship-overflow was DROPPED in training but CLAMPED in eval
+
+A **second** train/eval sim gap, found while brainstorming why the force-concentration wall
+([[project_force_concentration_wall]]) survives every reward/pool lever. Same class as the comet gap.
+**FIXED 2026-06-15: `--ship-overflow-mode clamp` is now the training default (and the `VecTorchEnv`
+constructor default), matching eval.** Verified live on the corrpack run: diag `emit/req` jumped to
+**0.99** (nearly all requested launches now fire) vs the ~0.42 implied by the old drop, and training
+`overask` reads **0.58** under sampling (even higher than the eval-argmax 0.35).
+
+**The discrepancy.** When the policy picks a `ship_bin` whose nominal count `SHIP_COUNTS[bin]` **exceeds
+the source planet's current garrison**, the two engines do *opposite* things:
+
+| engine | what happens to an over-ask (`ship_count > src_ships`) | code |
+|---|---|---|
+| **torch_env (TRAINING)** | `valid_ships = src_ships >= ship_count` is False → `can_fire` False → **launch silently DROPPED** (no fleet, planet keeps its ships) | `torch_env.py:1346` |
+| **kaggle / agent (EVAL)** | `_ship_bin_to_count = min(SHIP_COUNTS[bin], max_ships)` → **CLAMPED to the full garrison** (fleet fires) | `action_mask.py:483` |
+
+Training **samples** ship bins from raw logits with **no garrison mask** (`train_torch.py:80-86`), so
+overflow picks aren't prevented — they just evaporate.
+
+**The measurement** (`orbit_wars_rl/ship_commit_probe.py`; gated audit hook `action_mask._SHIP_AUDIT`,
+default-off; argmax/eval-decode, 24 games vs deb):
+
+| checkpoint | attack launches | full-commit (bin ≥ garrison) | **overflow (bin > garrison → DROPPED in train)** | mean send/garrison |
+|---|---|---|---|---|
+| consol_6M_final | 646 | 40.4% | **35.4%** | 1.00 |
+| rev38_5M | 991 | 42.8% | **37.2%** | 0.98 |
+
+`reinforce` launches show the same ~35% overflow. So **~1 in 3 intended attacks is dropped in training**,
+**lineage-wide** (not a consol artifact). Under training's *sampling* (vs eval's argmax) it is likely
+**higher**. The send/garrison distribution has **nothing below 0.5** and piles at 0.6→1.0+.
+
+**Two consequences:**
+1. **Signal corruption.** ~1/3 of the policy's most aggressive (full-commit) attack intentions become
+   **no-ops** in training → the gradient that would teach "commit hard, it pays" is *missing* for a third
+   of attempts, and train/eval behaviour diverges (drop vs clamp on the identical action).
+2. **It refines the wall.** The ship head is **not** timid — mean send/garrison ≈ **1.00**, nothing below
+   0.5; it tries to send ~everything it has. So the chronic out-massing (garrison ~40 vs enemy-inbound ~90)
+   is a **multi-planet AGGREGATION** failure (deb `_plan_regroup`s several planets into one strike; we fire
+   from one), **not** small per-launch sends. This corrects the earlier "per-launch under-commit" framing.
+
+**Fix "E" (SHIPPED 2026-06-15, ~1 line, structural).** Make torch_env **clamp** overflow to the garrison
+(`ship_count = min(ship_count, src_ships)`, matching eval) instead of dropping the launch. This aligns
+train↔eval *and* lets full-commit attacks actually execute and earn reward in training.
+
+**Validate before/with it:** (i) confirm the in-training **sampling** drop rate inside a torch_env rollout
+(expect ≥35%); (ii) clamp-vs-drop A/B on a short run, watching attack-commit rate / `out-massed %` / WR.
+⚠️ **Caveat:** this fixes a real signal bug + train/eval gap but does **not** by itself teach multi-planet
+aggregation (the deeper wall) — plausibly necessary-not-sufficient; pair with a regroup-imitation or
+aggregation-arch lever if it under-delivers.
+
+**Related design knob.** `ship_bin_mode="fraction"` (10 bins = %-of-current-garrison, keep-one-behind,
+**never overflows**) would also remove this gap; we currently run `"absolute"`.
+
+---
+
+## ✅ FIXED (2026-06-15) — GAP #4: ships BURNED with no fleet when fleet storage saturated
+
+`torch_env._apply_actions` debited ships (`debit = ship_count * can_fire`) **before** checking whether a
+free fleet slot existed; the fleet was only created for `target_valid` (= `can_fire` AND a free slot via
+the topk-`MAX_OWNED`-dead-slots trick). So in **fleet-saturated states** (≈`MAX_FLEETS=256` alive) a
+`can_fire` launch with no free slot **debited ships from its planet but created no fleet → ships
+vanished.** Replay scan context: max live fleets 517, p99 194, states >256 fleets = 0.66%. **Fix
+(`torch_env.py:1431` region):** compute slot availability FIRST, then `debit = ship_count *
+target_valid` — a slot-starved launch is now dropped (keeps its ships), never burned. Verified by a
+saturation unit test (free slots 0/1/3/5/8 → debit always == fleets created). No perf cost (reorder only).
+
+**⏳ STILL OPEN — the fleet CAPS themselves (separate measure-first perf/fidelity experiment, user 2026-06-15):**
+storage `MAX_FLEETS=256` truncates vs kaggle's unbounded fleet list (0.66% of states; real but rare
+train-only divergence, costs env physics every step), and the obs cap `max_fleets=128` (in BOTH
+`torch_env.get_features` AND eval `features.extract_features` — a shared faithfulness ceiling, NOT a
+train/eval mismatch; potentially hurts tactical awareness in fleet-heavy states, costs transformer
+attention) blinds the model to fleets 128–256 (1.88% of states). `obs=256` is checkpoint-load compatible
+(model is entity-shared/mask-based) — **but export/eval `_MAX_FLEETS`/feature caps must be updated
+consistently or you benchmark one path and submit another.**
+> **Benchmark matrix (run on the box, NOT in the A/B run):**
+> | run | obs | storage | note |
+> |---|---|---|---|
+> | A | 128 | 256 | current (post burn-fix) |
+> | B | 256 | 256 | model sees all stored fleets |
+> | C | 128 | 384 | fewer sim truncations, same model cost |
+> | D | 256 | 384 | high-fidelity candidate |
+>
+> **Measure:** rollout SPS · update SPS · peak GPU mem · `fleet_slot_saturation_rate` · `obs_fleet_truncation_rate`.
+> **Decision rule:** `obs256` only if the SPS hit is modest (≲10–15%) OR it clearly improves fleet-heavy
+> diagnostics; `storage384` only if saturation still happens under OUR OWN rollouts after the burn fix;
+> do NOT touch `MAX_OWNED`/source-ranking/multi-source in the same run. Needs: training-side cap knobs +
+> the two diagnostics (`fleet_slot_saturation_rate` = launches dropped for no free slot / can_fire;
+> `obs_fleet_truncation_rate` = get_features calls with live_fleets > obs_cap) wired into the train log.
+
+## ✅ FIXED (2026-06-15) — GAP #3: eval/export capped launches at 8/step; training fires up to 16
+
+`action_mask.py` decode (`actions_from_policy`, `actions_from_target_policy`, and the legality
+variant) hard-coded `max_moves = 8`, so eval AND every exported submission emitted at most **8**
+launches per step — but the model has **16** owned-planet slots and `torch_env` training fires all of
+them (`MAX_OWNED = 16`). A self-nerf **and** a train/eval mismatch. The real kaggle env has **no move
+cap** (`orbit_wars.py:process_moves` iterates every move; one move = `[from_id, angle, ships]` per
+source planet). **Fix:** `max_moves = MAX_OWNED_PLANETS` (16) at all three sites — compatible with
+existing checkpoints (no retrain; we were only truncating the decode). Most impactful when the agent
+holds >8 planets and wants to launch from many at once (expansion / mid-game snowball); vs deb we're
+usually out-expanded so it rarely bound there (sampled max 3 moves/step), but it removes the ceiling.
+
+---
+
+## ✅ FIXED (2026-06-15) — action-contract metadata: checkpoints now self-describe their mask regime
+
+A checkpoint could be **trained** under one action-mask regime and **evaluated/exported** under another
+unless the CLI flags were manually reproduced — an experiment-validity footgun (a panel/submission that
+silently masks differently than training self-sabotages). Fixes:
+- **`ppo.state_dict` now persists** the full reinforce/sufficient-commit discipline
+  (`reinforce_gate_min_planets` / `reinforce_forward_only` / `reinforce_garrison_floor` /
+  `sufficient_commit_factor`) alongside the pre-existing `ship_bin_mode`/`action_decode`/`allow_reinforce`/
+  `min_ship_bin`/`game_phase_features`, plus `ship_overflow_mode` as provenance.
+- **eval + export auto-load** these (CLI overrides via `None`-sentinel defaults; eval's boolean flag uses
+  `BooleanOptionalAction` so `--no-reinforce-forward-only` can override a persisted True).
+- **Consistent error-on-ambiguity:** for an OLD reinforce ckpt (`allow_reinforce` true, no persisted gate)
+  with no CLI flag, BOTH eval and export now **raise** requiring an explicit `--reinforce-gate-min-planets`
+  (it can't be inferred; guessing self-sabotages). Previously eval silently used 0 while export baked
+  legacy 2 — so a ckpt evaluated one way and submitted another. Pre-2026-06-15 reinforce ckpts therefore
+  need the flag passed explicitly (the automated watchers already do); new ckpts auto-load.
+- **NOT loaded** (no training counterpart; safe defaults ARE the contract): `fire_threshold` (0.5),
+  `target_sanity_penalty` (0.0), `reserve_frac` (0.0, an eval probe); `reinforce_logit_bias` is an
+  intentional train-only anneal→0 that eval must not replay.
+
+---
+
 **TL;DR (2026-06-11):** the in-training opponent-pool win-rate is measured **inside `torch_env`**
 (our vectorised GPU reimplementation of the kaggle env), with **sampled** actions, as an **EMA/
 cumulative** stat. It is a **PFSP sampling signal, not a performance metric.** For aiming-heavy

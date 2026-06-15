@@ -72,6 +72,16 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     # trained on (11 vs 15). Set the module flag to match (off for all pre-Stage-B ckpts).
     cfg.model.game_phase_features = bool(ckpt_cfg.get("game_phase_features", False))
     set_game_phase_features(cfg.model.game_phase_features)
+    # Reinforce / sufficient-commit DISCIPLINE: persisted at train time so eval/export mask the
+    # SAME way (else the policy self-sabotages). Absent in old ckpts → defaults (0/False) → those
+    # still require CLI flags, as before. evaluate_checkpoint uses these unless CLI overrides.
+    cfg.model.reinforce_gate_min_planets = int(ckpt_cfg.get("reinforce_gate_min_planets", 0))
+    cfg.model.reinforce_forward_only = bool(ckpt_cfg.get("reinforce_forward_only", False))
+    cfg.model.reinforce_garrison_floor = float(ckpt_cfg.get("reinforce_garrison_floor", 0.0))
+    cfg.model.sufficient_commit_factor = float(ckpt_cfg.get("sufficient_commit_factor", 0.0))
+    cfg.model._discipline_persisted = ("reinforce_gate_min_planets" in ckpt_cfg)
+    # provenance (inspectable; eval always clamps regardless of how training handled overflow)
+    cfg.model.ship_overflow_mode = str(ckpt_cfg.get("ship_overflow_mode", "drop"))
     return sd, action_decode
 
 
@@ -858,14 +868,48 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         panel: bool = False, sample: bool = False,
                         target_decode: bool = False,
                         target_sanity_penalty: float = 0.0,
-                        reinforce_gate_min_planets: int = 0,
-                        reinforce_forward_only: bool = False,
-                        reinforce_garrison_floor: float = 0.0,
-                        sufficient_commit_factor: float = 0.0):
+                        reinforce_gate_min_planets: int = None,
+                        reinforce_forward_only: bool = None,
+                        reinforce_garrison_floor: float = None,
+                        sufficient_commit_factor: float = None):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
 
     state_dict, ckpt_action_decode = load_checkpoint(params_path, cfg)
+    # Discipline masks: an explicit CLI value overrides; otherwise auto-load what the checkpoint
+    # was trained with (load_checkpoint set these on cfg.model). Eliminates the "forgot the flag
+    # → wrong panel/submission" footgun for masked runs. For OLD reinforce ckpts that never
+    # persisted the discipline, the gate CAN'T be inferred (guessing self-sabotages) → require it.
+    if (bool(cfg.model.allow_reinforce) and not bool(getattr(cfg.model, "_discipline_persisted", False))
+            and reinforce_gate_min_planets is None):
+        raise SystemExit(
+            "Checkpoint has allow_reinforce=True but NO persisted reinforce discipline (pre-2026-06-15 "
+            "ckpt). The gate/floor/forward values can't be inferred and guessing self-sabotages — pass "
+            "--reinforce-gate-min-planets (and --reinforce-garrison-floor / --[no-]reinforce-forward-only) "
+            "explicitly to match how it was trained.")
+    # Each auto-loaded entry shows its value AND whether the mask is actually ACTIVE — so
+    # "forward_only=False [off]" reads as "no mask applied", not "a mask got enabled". off =
+    # the mask is a no-op at this value (gate≤0 / forward False / floor≤0 / suff≤0).
+    _on = lambda active: "on" if active else "off"
+    _from_ckpt = []
+    if reinforce_gate_min_planets is None:
+        reinforce_gate_min_planets = int(cfg.model.reinforce_gate_min_planets)
+        _from_ckpt.append(f"gate={reinforce_gate_min_planets} [{_on(reinforce_gate_min_planets > 0)}]")
+    if reinforce_forward_only is None:
+        reinforce_forward_only = bool(cfg.model.reinforce_forward_only)
+        _from_ckpt.append(f"forward_only={reinforce_forward_only} [{_on(reinforce_forward_only)}]")
+    if reinforce_garrison_floor is None:
+        reinforce_garrison_floor = float(cfg.model.reinforce_garrison_floor)
+        _from_ckpt.append(f"floor={reinforce_garrison_floor} [{_on(reinforce_garrison_floor > 0)}]")
+    if sufficient_commit_factor is None:
+        sufficient_commit_factor = float(cfg.model.sufficient_commit_factor)
+        _from_ckpt.append(f"sufficient_commit={sufficient_commit_factor} [{_on(sufficient_commit_factor > 0)}]")
+    if _from_ckpt:
+        print(f"Discipline auto-loaded from checkpoint: {', '.join(_from_ckpt)}")
+        # Full resolved set in effect (incl. any CLI-set values), so train/eval parity is visible.
+        print(f"  → discipline in effect: gate={reinforce_gate_min_planets} "
+              f"forward_only={reinforce_forward_only} floor={reinforce_garrison_floor} "
+              f"suff={sufficient_commit_factor}")
     if cfg.model.ship_bin_mode != "absolute":
         print(f"Checkpoint ship_bin_mode={cfg.model.ship_bin_mode}")
     # Auto-detect action_decode from checkpoint config; CLI --target-decode overrides.
@@ -962,18 +1006,20 @@ if __name__ == "__main__":
     parser.add_argument("--target-sanity-penalty", type=float, default=0.0,
                         help="Subtract this from dominated same-source target logits "
                              "before target decode.")
-    parser.add_argument("--reinforce-gate-min-planets", type=int, default=0,
+    parser.add_argument("--reinforce-gate-min-planets", type=int, default=None,
                         help="Reinforce-discipline parity: own targets legal only at "
-                             ">= this many owned planets. MUST match training (p2rev1=3).")
-    parser.add_argument("--reinforce-forward-only", action="store_true",
+                             ">= this many owned planets. Default=auto-load from checkpoint; "
+                             "pass to override. MUST match training (p2rev1=3).")
+    parser.add_argument("--reinforce-forward-only", action=argparse.BooleanOptionalAction, default=None,
                         help="Reinforce-discipline parity: own target legal only if closer "
-                             "to the nearest enemy than the source. MUST match training.")
-    parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0,
+                             "to the nearest enemy than the source. Default=auto-load from ckpt; "
+                             "pass --reinforce-forward-only / --no-reinforce-forward-only to override.")
+    parser.add_argument("--reinforce-garrison-floor", type=float, default=None,
                         help="Reinforce-discipline parity: veto a reinforce that drains the "
-                             "source below this. MUST match training (p2rev1=10).")
-    parser.add_argument("--sufficient-commit-factor", type=float, default=0.0,
+                             "source below this. Default=auto-load from ckpt (p2rev1=10).")
+    parser.add_argument("--sufficient-commit-factor", type=float, default=None,
                         help="Sufficient-commit parity: veto an attack whose ships <= target "
-                             "defense × this factor. MUST match training (1.0 = strict).")
+                             "defense × this factor. Default=auto-load from ckpt (1.0 = strict).")
     args = parser.parse_args()
 
     cfg = Config()

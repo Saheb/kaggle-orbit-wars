@@ -419,6 +419,14 @@ def _apply_checkpoint_model_config(checkpoint, cfg: Config) -> dict:
         cfg.model.global_feature_dim = int(state_dict["global_proj.weight"].shape[1])
     if bool(ckpt_cfg.get("game_phase_features", False)):
         cfg.model.game_phase_features = True
+    # Reinforce / sufficient-commit DISCIPLINE (persisted by ppo.state_dict) so the exported
+    # mask matches training without relying on remembered CLI flags. Absent in old ckpts → 0/False.
+    cfg.model._discipline_persisted = ("reinforce_gate_min_planets" in ckpt_cfg)
+    cfg.model.allow_reinforce = bool(ckpt_cfg.get("allow_reinforce", False))
+    cfg.model.reinforce_gate_min_planets = int(ckpt_cfg.get("reinforce_gate_min_planets", 0))
+    cfg.model.reinforce_forward_only = bool(ckpt_cfg.get("reinforce_forward_only", False))
+    cfg.model.reinforce_garrison_floor = float(ckpt_cfg.get("reinforce_garrison_floor", 0.0))
+    cfg.model.sufficient_commit_factor = float(ckpt_cfg.get("sufficient_commit_factor", 0.0))
 
     return state_dict
 
@@ -436,11 +444,31 @@ def load_model(checkpoint_path: str, cfg: Config) -> EntityTransformer:
 
 def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_threshold: float = 0.5,
                  target_decode: bool = False,
-                 reinforce_gate_min_planets: int = 2,
-                 reinforce_forward_only: bool = False,
-                 reinforce_garrison_floor: float = 0.0,
-                 sufficient_commit_factor: float = 0.0):
+                 reinforce_gate_min_planets: int = None,
+                 reinforce_forward_only: bool = None,
+                 reinforce_garrison_floor: float = None,
+                 sufficient_commit_factor: float = None):
     model = load_model(checkpoint_path, cfg)
+    # Discipline masks: explicit arg overrides; else use what the checkpoint was trained with
+    # (load_model populated cfg.model via _apply_checkpoint_model_config). For OLD reinforce ckpts
+    # that never persisted the discipline, the gate CAN'T be inferred → require it explicitly
+    # (CONSISTENT with eval; previously export silently baked legacy 2 while eval used 0 — itself a
+    # footgun where a ckpt evaluated one way and submitted another).
+    _persisted = bool(getattr(cfg.model, "_discipline_persisted", False))
+    if (bool(getattr(cfg.model, "allow_reinforce", False)) and not _persisted
+            and reinforce_gate_min_planets is None):
+        raise SystemExit(
+            "Checkpoint has allow_reinforce=True but NO persisted reinforce discipline (pre-2026-06-15 "
+            "ckpt). Pass --reinforce-gate-min-planets (and floor/forward) explicitly — it can't be "
+            "inferred and guessing self-sabotages the exported agent.")
+    if reinforce_gate_min_planets is None:
+        reinforce_gate_min_planets = int(cfg.model.reinforce_gate_min_planets)
+    if reinforce_forward_only is None:
+        reinforce_forward_only = bool(cfg.model.reinforce_forward_only)
+    if reinforce_garrison_floor is None:
+        reinforce_garrison_floor = float(cfg.model.reinforce_garrison_floor)
+    if sufficient_commit_factor is None:
+        sufficient_commit_factor = float(cfg.model.sufficient_commit_factor)
 
     # Encode state_dict as base64
     buf = io.BytesIO()
@@ -560,12 +588,14 @@ if __name__ == "__main__":
     # training or the policy self-sabotages (reinforces <gate planets, backward, drains source).
     # For OLD forward-only/floor=10 checkpoints (p2rev1-3) pass --reinforce-forward-only
     # --reinforce-garrison-floor 10 explicitly.
-    parser.add_argument("--reinforce-gate-min-planets", type=int, default=2)
+    # Defaults None → auto-load from the checkpoint config (persisted by ppo.state_dict); pass a
+    # flag to override. Old ckpts without persisted discipline fall back to legacy values.
+    parser.add_argument("--reinforce-gate-min-planets", type=int, default=None)
     parser.add_argument("--reinforce-forward-only", action=argparse.BooleanOptionalAction,
-                        default=False, help="Own reinforce target must be closer to enemy than source.")
-    parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0)
+                        default=None, help="Own reinforce target must be closer to enemy than source.")
+    parser.add_argument("--reinforce-garrison-floor", type=float, default=None)
     # Sufficient-commit mask (ATTACKS). MUST match training (p2rev6 = 1.0). 0 = off.
-    parser.add_argument("--sufficient-commit-factor", type=float, default=0.0)
+    parser.add_argument("--sufficient-commit-factor", type=float, default=None)
     args = parser.parse_args()
 
     cfg = Config()
