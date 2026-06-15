@@ -135,6 +135,18 @@ defined below; all compute identically from top-player replays via `conversion_f
   short hold = capture-and-lose ("can't hold the lead"); lost-cap low + hold≈game-length = sticky. Home/
   initial planets excluded by construction (only planets that entered `cap_step` count). Diagnostic of the
   Phase-2 retention gap; expect high lost-cap/short hold vs a strong planner (deb), low/long vs weak (Zach).
+- **hold-loss autopsy** (`hold-loss  out-massed X% · abandoned X% · too-late X% · other X%   garr@cap A→@loss B
+  vs enemy-inbound C`, added 2026-06-15) — WHY a captured planet falls, classified at the step of loss from the
+  t-1 state (reuses `_friendly_inbound` geometry): **ABANDONED** = garrison ≤2 (we left it undefended); **OUT-MASSED**
+  = garrison >2 but enemy inbound fleet > our garrison (under-massed vs the threat); **TOO-LATE** = we had reinforcement
+  inbound but not enough/in time; **OTHER**. `garr@cap`/`@loss` = median garrison just after capture / just before loss;
+  `enemy-inbound` = median enemy ships racing in at loss. **⭐ 2026-06-15 ROOT FINDING: losses are ~100% OUT-MASSED vs
+  planners** (deb ~96 inbound vs our ~59 garrison), UNIVERSAL across our lineage (rev38 98% too). NOT a defense-laziness
+  gap (we garrison + reinforce) — a **force-concentration** gap: planners forward-project defenders + regroup multiple
+  planets into one decisive strike; we fire per-planet sized to current defense. The incoming fleet IS in our features
+  (planet ch13 `enemy_pressure` / pairwise feat 14 `enemy_contest`) → the fix is a training SIGNAL, not a feature. Watch
+  `out-massed%` DROP as a concentration lever works. Standalone tool: `orbit_wars_rl/hold_autopsy.py`. Memory:
+  `project_force_concentration_wall`.
 - **launch-waste<50** (printed `launch-waste<50  redundant X (WG X)  underkill X (WG X)`) — the OPENING
   (step <50) launch-discipline pair, both keyed to `cap_cost_at_arrival` (the SAME quantity the roi-deflation
   uses, replicated in `eval.py _cap_cost_at_arrival`/`_eta` from `_ETA_PROBE_SPEED`). Windowed to the opening

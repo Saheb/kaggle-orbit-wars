@@ -207,6 +207,8 @@ class VecTorchEnv:
         first_strike_steps: int = 0,
         first_strike_mult: float = 2.0,
         speed_coef: float = 0.0,
+        consolidation_coef: float = 0.0,
+        consolidation_steps: int = 40,
         handicap_frac: float = 0.0,
         handicap_ships: int = 5,
         ssdr_frac: float = 0.0,
@@ -319,6 +321,15 @@ class VecTorchEnv:
         # speed_coef=0.5 means a step-0 win scores 1.5, a timeout win scores ~1.0.
         # Keep ≤ 0.5 so a slow win still beats a fast loss.
         self.speed_coef = float(speed_coef)
+        # Consolidation bonus (force-concentration lever, 2026-06-15): a ONE-TIME +coef when a
+        # NET-NEW captured planet SURVIVES consolidation_steps. Unlike defense_coef (per-step
+        # penalty for losing production → hoard-to-avoid → FLOOD), this is success-GATED (paid
+        # only when a capture sticks), EVENT-based + capped (one-time → can't farm by sitting),
+        # and NEW-captures-only (home/initial excluded) → rewards expand-AND-consolidate, not
+        # blanket hoarding. Prices "commit enough to hold" → concentration. See
+        # project_force_concentration_wall; KILL if reinforce-rate/garr floods like defense_coef.
+        self.consolidation_coef = float(consolidation_coef)
+        self.consolidation_steps = int(consolidation_steps)
         # Handicap curriculum: fraction of games where player 0 starts with fewer ships.
         # Forces the agent to practise fighting from behind — the bimodal collapse state
         # that pure symmetric self-play never generates enough gradient for.
@@ -339,6 +350,15 @@ class VecTorchEnv:
         # True = self-play env (SSDR active), False = pool env (symmetric start).
         # If None, SSDR applies to all envs.
         self._ssdr_self_mask: torch.Tensor | None = None  # set via set_ssdr_mask()
+
+        # Self-boost (handicapped-real-planner curriculum): the INVERSE of SSDR — grant
+        # OUR seat (_self_boost_seat) _self_boost_k extra neutral planets at reset, in the
+        # envs flagged by _self_boost_mask (the pool/planner envs). The training loop tapers
+        # k -> 0 so a strong pool planner (deb) is beatable early (win-gradient for holding)
+        # then weans off the head-start. Set via set_self_boost(); inert when k<=0.
+        self._self_boost_k = 0
+        self._self_boost_seat = 0
+        self._self_boost_mask: torch.Tensor | None = None
 
         # State tensors — allocated in reset()
         self.planets: torch.Tensor = None       # (N, P, 7)
@@ -373,6 +393,27 @@ class VecTorchEnv:
         If never called, SSDR applies to all envs (original behaviour).
         """
         self._ssdr_self_mask = self_play_mask.bool().cpu()
+
+    def set_self_boost(self, k: int, seat: int, env_mask: torch.Tensor | None) -> None:
+        """Grant OUR seat `seat` `k` extra neutral planets at reset in envs where env_mask
+        is True (handicapped-real-planner curriculum). Call once per rollout; k tapers to 0."""
+        self._self_boost_k = int(k)
+        self._self_boost_seat = int(seat)
+        self._self_boost_mask = env_mask.bool().cpu() if env_mask is not None else None
+
+    def _maybe_self_boost(self, pad, n: int, base: int, env_i: int) -> None:
+        """Inverse of SSDR: give OUR seat extra neutral planets in boosted (pool) envs."""
+        if self._self_boost_k <= 0 or self._self_boost_mask is None:
+            return
+        if not bool(self._self_boost_mask[env_i]):
+            return
+        seat = self._self_boost_seat
+        neutral_idx = [i for i in range(n)
+                       if pad[i, 1] == -1 and i != base and i != base + 3]
+        random.shuffle(neutral_idx)
+        for ni in neutral_idx[:self._self_boost_k]:
+            pad[ni, 1] = seat
+            pad[ni, 5] = max(10, int(pad[ni, 6] * 3))
 
     def _ssdr_active_for(self, env_i: int) -> bool:
         """Return True if SSDR should apply to env index env_i."""
@@ -438,6 +479,8 @@ class VecTorchEnv:
                             prod = pad[ni, 6]
                             pad[ni, 1] = 1  # give to opponent
                             pad[ni, 5] = max(10, int(prod * 3))  # realistic ships
+                    # Self-boost (handicapped-real-planner): grant OUR seat extra planets
+                    self._maybe_self_boost(pad, n, base, seed_idx)
                 elif self.num_players == 4:
                     for j in range(4):
                         pad[base + j, 1] = j; pad[base + j, 5] = 10
@@ -471,6 +514,14 @@ class VecTorchEnv:
         self.prev_owned = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         for pl in range(self.num_players):
             self.prev_owned[:, pl] = ((owner_p == pl) & self.planet_alive).float().sum(dim=1)
+        # Consolidation-bonus per-planet state (only used when consolidation_coef != 0): track,
+        # per planet, the owner being held + how long since this holding episode began, whether
+        # it began as a CAPTURE (initial owners are NOT captures), and whether already credited.
+        P = self.planets.shape[1]
+        self.cap_owner = owner_p.clone()                                              # (N, P)
+        self.cap_age = torch.zeros(self.num_envs, P, dtype=torch.long, device=self.device)
+        self.cap_credited = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
+        self.cap_is_capture = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
         return self._state_dict()
 
     def _compute_material(self) -> torch.Tensor:
@@ -485,6 +536,27 @@ class VecTorchEnv:
                 + ((owner_f == pl).float() * ships_f).sum(dim=1)
             )
         return material
+
+    def _consolidation_bonus(self, terminal_rewards: torch.Tensor) -> torch.Tensor:
+        """One-time +consolidation_coef per NET-NEW captured planet that survives
+        consolidation_steps. Drives the consolidation state machine (cap_owner/age/credited/
+        is_capture) from the CURRENT planet owners and credits the holder. See __init__ note."""
+        cur_owner = self.planets[:, :, 1].long()                       # (N, P)
+        changed = cur_owner != self.cap_owner
+        # reset the holding episode on any ownership change; else age it one step
+        self.cap_age = torch.where(changed, torch.zeros_like(self.cap_age), self.cap_age + 1)
+        self.cap_credited = self.cap_credited & ~changed
+        # a mid-episode change to a real player = a capture (initial owners never "change")
+        self.cap_is_capture = torch.where(changed, cur_owner >= 0, self.cap_is_capture)
+        self.cap_owner = cur_owner
+        ready = (self.cap_is_capture & (self.cap_age >= self.consolidation_steps)
+                 & ~self.cap_credited & (cur_owner >= 0) & self.planet_alive)
+        if ready.any():
+            for pl in range(self.num_players):
+                cnt = (ready & (cur_owner == pl)).float().sum(dim=1)    # (N,) planets consolidated
+                terminal_rewards[:, pl] = terminal_rewards[:, pl] + self.consolidation_coef * cnt
+            self.cap_credited = self.cap_credited | ready
+        return terminal_rewards
 
     def _compute_production(self) -> torch.Tensor:
         """Total production rate of planets owned by each player. (N, num_players)"""
@@ -1678,6 +1750,9 @@ class VecTorchEnv:
                 effective_coef = self.early_capture_coef * decay  # (N,)
             terminal_rewards = terminal_rewards + effective_coef.unsqueeze(1) * ec_rewards
             self.prev_owned = owned
+        # Consolidation bonus: ONE-TIME +coef when a net-new CAPTURED planet survives K steps.
+        if self.consolidation_coef != 0.0:
+            terminal_rewards = self._consolidation_bonus(terminal_rewards)
         # Reinforcement transit cost (#2): price the ships each player sent to its own
         # planets this step. Costless reinforcement floods (rev56, ~30× launch volume);
         # this prunes the wasteful tail. Calibrate reinforce_cost so reinforce_rate
@@ -1695,6 +1770,14 @@ class VecTorchEnv:
             ec_owner = self.planets[:, :, 1].long()
             for pl in range(self.num_players):
                 self.prev_owned[done, pl] = ((ec_owner[done] == pl) & self.planet_alive[done]).float().sum(dim=1)
+        # Reset consolidation state for done envs to their fresh post-reset ownership (initial
+        # owners are NOT captures), so the bonus telescopes cleanly across the episode boundary.
+        if self.consolidation_coef != 0.0 and done.any():
+            fresh_owner = self.planets[:, :, 1].long()
+            self.cap_owner[done] = fresh_owner[done]
+            self.cap_age[done] = 0
+            self.cap_credited[done] = False
+            self.cap_is_capture[done] = False
         return self._state_dict(), terminal_rewards, done
 
     # ---------------------------------------------------------------------
@@ -1860,6 +1943,8 @@ class VecTorchEnv:
                         for ni in neutral_idx[:k]:
                             pad[ni, 1] = 1
                             pad[ni, 5] = max(10, int(pad[ni, 6] * 3))
+                    # Self-boost (handicapped-real-planner): grant OUR seat extra planets
+                    self._maybe_self_boost(pad, n, base, env_i)
                 elif self.num_players == 4:
                     for j in range(4):
                         pad[base + j, 1] = j; pad[base + j, 5] = 10

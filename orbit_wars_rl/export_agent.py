@@ -436,7 +436,7 @@ def load_model(checkpoint_path: str, cfg: Config) -> EntityTransformer:
 
 def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_threshold: float = 0.5,
                  target_decode: bool = False,
-                 reinforce_gate_min_planets: int = 3,
+                 reinforce_gate_min_planets: int = 2,
                  reinforce_forward_only: bool = False,
                  reinforce_garrison_floor: float = 0.0,
                  sufficient_commit_factor: float = 0.0):
@@ -560,7 +560,7 @@ if __name__ == "__main__":
     # training or the policy self-sabotages (reinforces <gate planets, backward, drains source).
     # For OLD forward-only/floor=10 checkpoints (p2rev1-3) pass --reinforce-forward-only
     # --reinforce-garrison-floor 10 explicitly.
-    parser.add_argument("--reinforce-gate-min-planets", type=int, default=3)
+    parser.add_argument("--reinforce-gate-min-planets", type=int, default=2)
     parser.add_argument("--reinforce-forward-only", action=argparse.BooleanOptionalAction,
                         default=False, help="Own reinforce target must be closer to enemy than source.")
     parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0)

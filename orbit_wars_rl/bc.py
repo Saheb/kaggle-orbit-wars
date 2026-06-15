@@ -284,6 +284,10 @@ def _collate(samples: list[dict], device) -> dict:
     return batch
 
 
+_FIRE_POS_WEIGHT = 1.0  # set from --fire-pos-weight in main; >1 counters fire-head class
+                        # imbalance (winners fire ~9.5% of owned slots -> BCE collapses to no-fire)
+
+
 def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
     """Cross-entropy BC loss across all owned-planet slots (target-decode).
 
@@ -297,10 +301,13 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
     fire_target = batch["fire_target"]        # (B, max_owned)
     ship_target = batch["ship_target"]        # (B, max_owned)
 
-    # Fire loss (binary cross-entropy per slot, masked)
+    # Fire loss (binary cross-entropy per slot, masked).
+    # pos_weight (>1) up-weights the fire=1 class to counter the ~1:9.5 imbalance that
+    # otherwise collapses the head toward "never fire" (the passive-BC failure).
     # Clamp logits to ±30 to avoid MPS float16 overflow from -1e9 mask values
     fire_loss = F.binary_cross_entropy_with_logits(
-        fire_logits.clamp(-30, 30), fire_target.float(), reduction="none"
+        fire_logits.clamp(-30, 30), fire_target.float(), reduction="none",
+        pos_weight=torch.tensor(_FIRE_POS_WEIGHT, device=fire_logits.device),
     ) * slot_valid
     fire_loss = fire_loss.sum() / slot_valid.sum().clamp(min=1)
 
@@ -659,7 +666,12 @@ if __name__ == "__main__":
                         help="Override device (e.g. 'mps' for Apple GPU, 'cuda', 'cpu'). Default: cfg.device.")
     parser.add_argument("--batch-size", type=int, default=0,
                         help="Override BC batch size (default 128). Larger (512) = fewer steps + better CPU/MPS amortization.")
+    parser.add_argument("--fire-pos-weight", type=float, default=1.0,
+                        help="pos_weight on the fire-head BCE to counter class imbalance "
+                             "(winners fire ~9.5%% of slots). >1 = the BC fires more. Try ~5-9.")
     args = parser.parse_args()
+
+    _FIRE_POS_WEIGHT = args.fire_pos_weight  # module-level rebind; bc_loss reads this global
 
     cfg = Config()
     cfg.seed = args.seed

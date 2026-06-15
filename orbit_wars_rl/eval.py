@@ -265,6 +265,16 @@ def game_conversion(steps, seat):
     cap_step: dict = {}
     lost_caps = 0
     hold_durations: list = []   # steps held before losing (lost episodes only; held-to-end censored)
+    # lost-capture AUTOPSY (why do held planets fall?): measured at the step of loss from the t-1
+    # state, reusing _friendly_inbound geometry. mode = [abandoned, out-massed, too-late, other]:
+    #   abandoned  = we left <=2 ships (captured and moved the army on)
+    #   out-massed = garrison>2 but enemy inbound fleet > our garrison (under-massed vs the threat)
+    #   too-late   = we had reinforcement inbound but not enough/in time (reactive)
+    cap_garr: dict = {}          # ships on a planet right after we captured it (holding-surplus read)
+    loss_mode = [0, 0, 0, 0]
+    loss_garr_cap: list = []     # garrison at capture, per lost planet
+    loss_garr_at: list = []      # garrison just before loss
+    loss_enemy_in: list = []     # enemy ships inbound to it just before loss
     reinf_bin = [0] * len(_REINF_BINS)   # own-target launches by empire size at launch
     atk_bin = [0] * len(_REINF_BINS)     # attack launches by empire size at launch
     # launch_rate / fire_frac (vs Isaiah 0.036 / 0.17): ALL legal launches (attack+reinforce),
@@ -315,9 +325,27 @@ def game_conversion(steps, seat):
                     elif t < _MID_WINDOW:
                         caps_mid += 1                  # mid-game (50-100) captures
                     cap_step[pid] = t                  # open a hold episode
+                    cap_garr[pid] = p[5]               # garrison right after capture
                 elif was == seat and own != seat and pid in cap_step:
                     hold_durations.append(t - cap_step[pid])   # lost what we took
                     lost_caps += 1
+                    # AUTOPSY: why? use t-1 state (just before the flip).
+                    tgt0 = next((q for q in p0 if q[0] == pid), None) if p0 else None
+                    if tgt0 is not None:
+                        f0a = steps[t - 1][seat].observation.get("fleets") or []
+                        g_loss = tgt0[5]
+                        e_in = _friendly_inbound(f0a, tgt0, 1 - seat)
+                        loss_garr_cap.append(cap_garr.get(pid, 0))
+                        loss_garr_at.append(g_loss)
+                        loss_enemy_in.append(e_in)
+                        if g_loss <= 2:
+                            loss_mode[0] += 1                          # ABANDONED
+                        elif e_in > g_loss:
+                            loss_mode[1] += 1                          # OUT-MASSED
+                        elif _friendly_inbound(f0a, tgt0, seat) > 0:
+                            loss_mode[2] += 1                          # TOO-LATE
+                        else:
+                            loss_mode[3] += 1                          # OTHER
                     del cap_step[pid]
                 prev[pid] = own
             last = p1
@@ -415,6 +443,8 @@ def game_conversion(steps, seat):
            "reinf_fwd": reinf_fwd, "reinf_rear": reinf_rear, "reinf_dirn": reinf_dirn,
            "redundant_early": redundant_early, "underkill_early": underkill_early,
            "lost_caps": lost_caps, "hold_durations": hold_durations,
+           "loss_mode": loss_mode, "loss_garr_cap": loss_garr_cap,
+           "loss_garr_at": loss_garr_at, "loss_enemy_in": loss_enemy_in,
            "glen": len(steps), "reinf_bin": reinf_bin, "atk_bin": atk_bin,
            "launch_states": launch_states, "launch_count": launch_count,
            "fire_steps": fire_steps, "fire_frac_sum": fire_frac_sum,
@@ -431,6 +461,7 @@ def new_conversion_acc():
            "attack_ships": 0, "end_planets": 0, "redundant": 0, "underkill": 0,
            "glen_sum": 0, "games": 0, "atk_early": 0, "caps_early": 0, "redundant_early": 0, "underkill_early": 0,
            "lost_caps": 0, "hold_durations": [],
+           "loss_mode": [0, 0, 0, 0], "loss_garr_cap": [], "loss_garr_at": [], "loss_enemy_in": [],
            "launch_states": 0, "launch_count": 0, "fire_steps": 0, "fire_frac_sum": 0.0,
            # fire-rate split by game outcome — fire_frac inflates on losses (cornered to few
            # planets → firing from "many of few"), so the won-game value is the honest spray read.
@@ -481,6 +512,10 @@ def add_conversion(acc, conv, won=None):
         acc[f"hold_durations_{suf}"].extend(conv["hold_durations"])
         acc["games_won" if won else "games_lost"] += 1
     acc["hold_durations"].extend(conv["hold_durations"])
+    for i in range(4):
+        acc["loss_mode"][i] += conv["loss_mode"][i]
+    for k in ("loss_garr_cap", "loss_garr_at", "loss_enemy_in"):
+        acc[k].extend(conv[k])
     acc["glen_sum"] += conv["glen"]
     for i in range(len(_REINF_BINS)):
         acc["reinf_bin"][i] += conv["reinf_bin"][i]
@@ -563,6 +598,11 @@ def _fmt_conversion(acc):
     lostr_w = acc["lost_caps_won"] / max(acc["captures_won"], 1)
     lostr_l = acc["lost_caps_lost"] / max(acc["captures_lost"], 1)
     medh_w, medh_l = _med(acc["hold_durations_won"]), _med(acc["hold_durations_lost"])
+    # lost-capture autopsy: WHY held planets fall. out-massed = enemy fleet > our garrison (the
+    # force-concentration gap — planners mass a decisive strike; we hold a thin line everywhere).
+    lmt = sum(acc["loss_mode"]) or 1
+    lm = [x / lmt for x in acc["loss_mode"]]
+    gcap_med, gloss_med, einb_med = _med(acc["loss_garr_cap"]), _med(acc["loss_garr_at"]), _med(acc["loss_enemy_in"])
     redf = acc["redundant_early"] / max(acc["atk_early"], 1)
     redf_wg = acc["redundant"] / max(al, 1)
     undf = acc["underkill_early"] / max(acc["atk_early"], 1)
@@ -614,6 +654,9 @@ def _fmt_conversion(acc):
             f"{pwl}"
             f"\n  retention  peel-rate {lost_rate:.2f} ({acc['lost_caps']}/{c} caps lost)  median-hold {med_hold}st\n"
             f"{rwl}"
+            f"  hold-loss  out-massed {lm[1]:.0%} · abandoned {lm[0]:.0%} · too-late {lm[2]:.0%} · other {lm[3]:.0%}"
+            f"   garr@cap {gcap_med:.0f}→@loss {gloss_med:.0f} vs enemy-inbound {einb_med:.0f}"
+            f"   [out-massed = enemy fleet > our garrison = force-concentration gap]\n"
             f"  launch-waste<50  redundant {redf:.2f} (WG {redf_wg:.2f})  underkill {undf:.2f} (WG {undf_wg:.2f})"
             f"   [⚠ underkill NON-discriminating: winners also ~0.40. THE signal = open<50 cap/atk above]\n"
             f"   [ref:winner  cap/atk whole 0.53 · open<50 0.51 · mid50-100 0.47 · planets 2/6/9/10 · reinf 0.30]\n"

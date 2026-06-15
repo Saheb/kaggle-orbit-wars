@@ -2,8 +2,199 @@
 
 Living doc — efforts and ideas, roughly prioritized. Discipline: **one delta per cloud run.**
 Status tags: 🔵 in-flight · 🟢 ready-to-build · 🟡 idea · ✅ done · ⏸ parked.
-Current focus: **⭐ PHASE 3 STAGE B — 🔵 LIVE ON GCP L4 (LAUNCHED 2026-06-14).** Ramp built+unit-tested, BC step-0 WRs
-validated (0% vs both), from-scratch run live with critic-warmup + ramped pool. **Manual re-anchors (no auto-ratchet).**
+Current focus: **🟡 NO LIVE RUN — both 2026-06-15 levers (HANDICAP + CONSOL) CONCLUDED NEGATIVE on the force-concentration wall; all boxes destroyed.** Next lever must supply a STRUCTURAL concentration signal (not another reward/pool knob). See the SESSION 2026-06-15 EVE2 block immediately below.
+
+> **⭐⭐⭐⭐⭐ SESSION 2026-06-15 EVE2 — HANDICAP + CONSOL BOTH CONCLUDED NEGATIVE: reward/pool knobs do NOT crack the force-concentration wall (read FIRST).**
+> Two single-delta runs this session, both resumed from stageb4 1.5M, both attacking the holding-under-peel wall, both run to their decision point and torn down ($0, all Jarvis boxes destroyed). **Neither moved the wall.** The wall metric is `out-massed %` of losses (enemy fleet > our garrison at the lost capture) + the absolute `garrison@loss vs enemy-inbound` gap ([[project_force_concentration_wall]]).
+> - **HANDICAP (win-gradient lever) — crutch REFUTED, wall UNMOVED.** Inverse-SSDR: grant OUR seat +3 planets in pool envs vs deb-dominant pool, tapering to 0 over 4M (`--self-boost-planets 3 --self-boost-ramp-steps 4000000`). Ran the boost to 0 @4M. **Ajay-WR taper 4.3→4.3→5.9→5.9% @boost0 = HELD** (didn't collapse → the head-start was NOT a fake prop). BUT structural FLAT: **out-massed 99/99/98%**, garr@loss ~40 vs enemy-inbound ~90 (~2× out-massed, unchanged), peel-rate WON 0.64/0.59/0.64 (winner 0.43), planets@100 WON 11/9/11. **Reached rev38 parity (~6%) by REPRODUCING rev38's exact failure mode (out-massed 98% is rev38's own signature), not fixing it.** A matched-difficulty win-gradient vs the REAL planner, even with a tapering head-start, did NOT teach force concentration. Box 427065 destroyed @4M.
+> - **CONSOL (reward-shaping lever) — wall UNMOVED, no gain over 6M.** `--consolidation-coef 0.02 --consolidation-steps 40`, deb-dominant pool (ext 0.6), rev38-KL λ0.05, gate2, NO self-boost, full 6M. **Ajay 1M→6M = 6.2/5.1/2.0/3.9/3.5/3.9%** — flat-noisy ~4%, ENDED BELOW its own 1M point AND below rev38 6.2% (another Stage-B run that doesn't beat rev38). Structural FLAT end-to-end: **out-massed 99/98/97/96/97/98%** (the 96@4M was noise — the early "slope" was a composition artifact, abandonment rose 1→3% so fewer losses classified out-massed, NOT real holding), garr@loss ~40 vs enemy-inbound ~92-96 (~2.3× out-massed, unchanged), **peel-rate WON drifted WORSE 0.60→0.73 then 0.59** (no improvement; hint the reward may mildly encourage HOARDING a few over-garrisoned planets the peeler picks apart). zach held-out stayed healthy 80-88% throughout (the low-N Ajay dips were noise, NOT collapse); clip crept 0.20→0.30 (benign: KL low/EV stable/estop 0, [[feedback_clipfrac_lowkl_benign]]). Box 427092 destroyed @6M (clean completion, final ckpt `gpu_run_artifacts/consol/checkpoints/torch_step_6012928_consol_..._final.pt`).
+> - **⭐ THE VERDICT (both together):** a win-gradient lever AND a reward-shaping lever both left out-massed pinned ~98% and the garrison-vs-inbound gap at ~2×. **Reward/pool knobs at these magnitudes do NOT induce force concentration — the fix must be a STRUCTURAL training SIGNAL.** We SEE the incoming fleet (features ch13/pairwise14) but never learn to act on it; self-play never priced concentration ([[feedback_win_starvation]]).
+> - **🟢 NEXT-LEVER CANDIDATES (supply the concentration signal directly — pick ONE, user to steer):** (A) a **mass-to-floor gate/reward** — credit/require massing to ≥ the forward-projected defender count at arrival BEFORE a launch counts (mirror deb's `capture_floor` in `opponents/orbit_lite/planner_core.py`); (B) **imitate deb's `_plan_regroup`** (multi-source aggregation into one strike) via a targeted BC/DAgger on regroup decisions; (C) an **action/arch change** enabling multi-planet aggregation (we currently fire per-planet reactively → can't muster 94 from one planet). Avoid another scalar reward knob — that's the disproven class.
+> - **Eval/diagnostic tooling (kept):** Ajay full-panel logs carry the `hold-loss out-massed`/`garr@loss vs enemy-inbound`/`peel-rate WON` lines per ckpt — read those, don't re-probe ([[feedback_read_full_eval_not_reprobe]]). Local watcher/teardown/heartbeat scripts under `gpu_run_artifacts/` (`teardown.sh`, `heartbeat.sh`, `ajay_1m_eval.sh`) — bash-3.2/BSD-safe ([[feedback_mac_bash_monitor_scripts]]).
+>
+> **⭐⭐⭐⭐ SESSION 2026-06-15 — HANDICAP run (SUPERSEDED by EVE2 above — CONCLUDED; kept for config/mechanism detail).**
+> The lever the compass kept pointing at ([[project_phase3_compass_wall]] / [[feedback_win_starvation]]): nothing in self-play+pool punishes
+> a turtle/churner, so the policy settles at planets@50=6 sub-winner optima. **HANDICAP = make under-expansion LOSE vs the REAL planner.**
+> - **Mechanism (inverse-SSDR, built + unit-tested):** `--self-boost-planets 3 --self-boost-ramp-steps 4000000` grants OUR seat +3
+>   planets in POOL envs, tapering linearly to 0 over 4M steps (the inverse of SSDR, which boosts the OPPONENT). Hooks both reset
+>   paths; per-env mask; test confirmed seat-0 1→4 planets at k=3. Tests in `orbit_wars_rl/tests/` (self-boost).
+> - **Config:** resume **stageb4 1.5M** (best Stage-B mechanics) · teacher-KL anchor **rev38_5M_15g** (λ=0.05, the strong baseline, NOT weak
+>   BC) · **deb DOMINANT in pool** (`--pool-external-fraction 0.6`, ×8 workers) · NO rev38 pin (`--pool-pinned-fraction 0`) · gate2 ·
+>   win_margin 0.5 · speed 0 · early_capture 0.3 · fire-ent 0.02 · LR 5e-5 · 128 envs · total 6M. Script:
+>   `gpu_run_artifacts/handicap/run_remote_handicap_jarvis.sh` (GCP-L4 twin `..._gcp.sh` kept for reference).
+> - **Why it beats the stageb2r "learned-an-exploit-of-a-proxy" objection:** deb is the REAL planner, dominant in the pool, and we
+>   train ON the target with only a tapering head-start — so the win-gradient is against the actual wall, not a beatable surrogate.
+> - **⭐ DECISIVE READ:** as the boost tapers 3→0, does **WR-vs-deb HOLD/climb + peel-rate↓ + planets@100↑** — or collapse back to ~0?
+>   Collapse ⇒ the holding-under-peel wall is STRUCTURAL even with a real win-gradient (reward/pool can't fix it; the ceiling is the
+>   architecture/sim). Hold/climb ⇒ the handicap curriculum is a viable path and we lengthen/repeat it.
+> - **🔵 LIVE — Jarvis A100-80GB SPOT, machine `427065` @ `217.18.55.39`, 28 cores, ₹84/hr.** ⚠️ SPOT — `jl destroy 427065 --yes`
+>   when done (sync-verify first). **SPS ~360–400** (full 6M ≈ 3.7hr; partial-taper read ~1.5M ≈ 55min). iter-12 healthy: EV 0.83–0.93,
+>   KL ~0.01, estop 0, **il_kl bounded 0.35–0.78** (pulling toward rev38 as designed), **clip peaked 0.34 then settling 0.29** = benign
+>   teacher-swap adaptation ([[feedback_clipfrac_lowkl_benign]]), NOT divergence (KL low + EV stable + estop 0 → don't touch LR). deb
+>   loaded ×8 confirmed. Watcher LIVE (controller, zach held-out gate2) → `gpu_run_artifacts/handicap/` (spot box backed up).
+> - **⭐ BOX-MIGRATION LESSON:** first launched on the n2-standard-32 CPU eval box (deb-heavy "ideal for planners" reasoning) → **SPS 54**,
+>   load only 12.7/32. Root cause: **`torch_env` is the GPU-vectorised env — a CPU-only box starves its single-threaded main loop; the
+>   deb workers were NOT the bottleneck** (idle). Fix = a GPU box (A100 → 54→~370, ~7× + cheaper than the CPU box). L4 (8 vCPU) was also
+>   wrong for deb @0.6 (planner-bound). **Rule: torch_env training ALWAYS wants a GPU box; the CPU box is for EVAL panels only.**
+> - **EVAL workflow:** the 32-core **`orbit-wars-eval`** GCP box (n2-standard-32, asia-south1-a) is KEPT as the milestone evaluator
+>   (`run_eval_batch.sh`, ~12min/panel; the controller only does slow local zach). Run deb + Ajay + zach panels at the taper milestones
+>   (~1.5M / 3M / 4M(boost→0) / 6M). ⚠️ billing ~$1.55/hr — DELETE when the run concludes (`gcloud compute instances delete orbit-wars-eval --zone=asia-south1-a`).
+> - **✅ Fire-weighted BC (the pos_weight fix) — CONCLUDED:** retraining the snowball BC with fire-head class-imbalance `pos_weight=6`
+>   raised **planets@50 3.9→6.7** (WON@100 hit 9) — the passivity diagnosis was correct + fixable. BUT WR stayed **1/16 vs zach** —
+>   expansion improved, winning didn't. Confirms the predicted split: pos_weight cures the FIRING/expansion deficit, but the HOLDING wall
+>   is separate and BC doesn't touch it. Another data point that holding, not expansion, is the blocker.
+> - **⭐⭐⭐ ROOT DIAGNOSIS — WHY we can't hold = we get OUT-MASSED (force concentration), never learned to act on it.**
+>   Lost-capture autopsy (`orbit_wars_rl/hold_autopsy.py` + new eval `hold-loss` line: out-massed/abandoned/too-late % +
+>   garr@cap→loss vs enemy-inbound). 16-game autopsies vs deb, gate2:
+>   - We do NOT abandon caps — we garrison + reinforce them (handicap_500k 42→59, rev38 23→43) — but get **OUT-MASSED
+>     100%** of losses (rev38 98%): deb arrives ~96 vs our ~59 (peel 0.97). **UNIVERSAL wall, NOT a regression** — rev38
+>     (strongest, 967.6 LB) out-massed 98% too → no agent in our lineage ever learned force concentration. Reinforcing
+>     HARDER fails (handicap_500k garrisons 2× rev38, still 100%) = throwing good ships after bad into a visibly-lost contest.
+>   - **How deb does it** (`opponents/orbit_lite/planner_core.py`): `capture_floor` = ceil(defenders forward-projected to
+>     ARRIVAL + production + overhead), then `_plan_regroup` aggregates MULTIPLE source planets into one strike. We fire
+>     **per-planet, reactively, sized to CURRENT defense** → systematically under-send, can't muster 94 from one planet.
+>   - **⭐ DO WE SEE IT? YES** — `features.py` planet ch13 (`enemy_pressure`) + pairwise feat 14 (`enemy_contest`) = incoming
+>     enemy ships per planet. The 96 is in the obs; policy doesn't act on it. **→ fix is a training SIGNAL, not a feature/
+>     restart** (self-play never priced concentration → win-starvation). firew6 BC = **0/256 vs deb AND Ajay** (expansion
+>     w/o concentration = zero traction). **LEVER SEARCH reframed around DECISIVE ENGAGEMENT / CONCENTRATION** (watch eval
+>     `hold-loss out-massed%` ↓). 500k handicap baseline (boost~2.6): deb 2.0% / ajay 1.6% / zach 61.7%. Memory:
+>     `project_force_concentration_wall`.
+>
+> **⭐⭐⭐⭐ SESSION 2026-06-14 EVE — EVAL SWEEP: STAGE B IS ≤ rev38 BASELINE (sobering; read FIRST).**
+> Ran a full ladder sweep on a GCP CPU eval box (n2-standard-32, see infra below). **THE HEADLINE: rev38_5M — our
+> existing 967.6 LB record (Phase 1, NO reinforce/comets/game-phase) — MATCHES OR BEATS stageb3 on EVERY rung,** in
+> the comet-faithful env, gate-agnostic (rev38 has no reinforce so gate is ignored):
+>
+> | opponent | **rev38_5M** | stageb3 best | stageb3 @13.6M |
+> |---|---|---|---|
+> | zach | **95.7%** | 86.3% (6.29M) | ~83% |
+> | h12  | **56.2%** | 55.5% (9.96/11M) | 48.0% |
+> | h14  | **22.3%** | 23.0% (9.96M) | 21.9% |
+> | Ajay | **6.2%**  | 5.5% (11.0M)  | 2.3% |
+>
+> **So all of Stage B — from-scratch + comets + game-phase + teacher-KL + ramped pool + gate2 + early_capture — has NOT
+> beaten the checkpoint we already had on the board.** rev38 ties on h12/h14, EDGES on Ajay, and CRUSHES zach (95.7 vs
+> 86 — Stage B traded ~10pp of general strength for nothing). ⚠️ Caveat: Ajay panel isn't LB-predictive and we have
+> ZERO Stage-B LB submissions, so "worse on LB" isn't proven — but on every PANEL metric rev38 ≥ stageb3. **This is the
+> central problem: the bar is "beat rev38," and nothing in Stage B clears it.**
+>
+> **⭐ THE WALL READ (first-ever stageb3-vs-Ajay, full run):** 6.29→13.63M = 1.6/0.8/0.8/3.1/**5.5(peak@11.0M)**/4.3/1.2/2.3.
+> Peak-then-fall, best ~11.0M (5.5%) — same wall as all of Phase 2 (rev38 2.7-6.2, rev53b 10.9). NOT cracked. h12 trend:
+> 51/38/41/55.5/55.5/52/48 (peak ~10-11M). **stageb3 best ckpt = ~11.0M.**
+>
+> **⭐ BEHAVIOR vs Ajay (WON-subset, the honest "are we learning winner play"):** opening cap/atk WON ~0.47-0.50 ≈ winner
+> 0.51 ✅ and reinf ramp ≈ winner ✅ — BUT **planets@50 = 6-7 EVEN IN WINS** (winner 9) ❌ and **peel-rate 0.71-0.87 EVEN
+> IN WINS** (winner 0.43) ❌. **⚠️ CORRECTS the earlier "peel→winner 0.43" read — that was vs ZACH (a non-peeler); vs the
+> real peeler (Ajay) we don't hold at all.** Damning: our rare Ajay wins are achieved WITHOUT winner expansion/holding →
+> easy-board flukes → no win-gradient for the skills we need. The wall = **can't hold captures vs a strong peeler (peel
+> 0.7+) → planets@50 can't accumulate.** Holding-under-peel is THE bottleneck; it caps expansion.
+>
+> **⭐ DECISIVENESS / game length (your speed-coef question):** speed_coef IS **0.3** (not 0). vs Ajay WON games grind to
+> **~320 steps** (n=4), LOST ~116, vs zach ~362; winners eliminate ~100-150. So even our WINS aren't decisive — we win by
+> attrition, never snowball into a fast kill. BUT it reads as a **symptom of the expansion/holding root** (can't dominate
+> → can't close), not an independent lever. ⚠️ Raising speed_coef has a landmine: Rev26 speed_coef=0.5 → ship-bin-0
+> collapse (drained ships for fake-fast wins). Don't bribe decisiveness; fix expansion/holding and it falls out.
+>
+> **⭐ BEATABLE-PEELER evidence (stageb2r, h12-in-pool, gate3):** h12 WR CLIMBED over its life **25→28.5→43.4%** (1.05/3.15/
+> 5.77M) — the beatable peeler in the pool DID improve the in-pool-opponent WR. BUT Ajay stayed **0→0.4→2.0%** (no transfer
+> to the wall) and it turtled on zach (hollow ~58%). So a beatable peeler teaches you to beat THAT peeler, doesn't transfer
+> up to the strong peeler, and risks turtling. Mixed — not a clean win for lever B as run (confounded: stageb2r also had
+> 5 other deltas vs stageb3).
+>
+> **✅ lever A (loosen teacher-KL, stageb3lo) REFUTED + killed** (see PM block): planets@50 flat 7 + zach drift 84→76 →
+> anchor is NOT the expansion cap.
+>
+> **🟢 DECISIONS / NEXT (open — user to steer):**
+> 1. **Submit rev38_5M to the LB** for a ground-truth anchor (we have ZERO Stage-B submissions; rev38 is the strongest
+>    panel agent we have). And/or submit stageb3 11.0M to see if comets/reinforce moved LB despite ~equal panels.
+> 2. **Reckon with "Stage B ≤ rev38":** is the from-scratch reinforce/teacher-KL direction worth continuing, or return to
+>    the rev38 lineage + ONE targeted lever? The bar is now explicit: beat rev38 (zach 95.7 / h12 56 / Ajay 6.2).
+> 3. If continuing the expansion attack: the bottleneck is **holding-under-peel** (not raw expansion) — lever B (beatable
+>    peeler, but cleaner one-delta) and/or lever C (reward that makes HOLDING captures pay), judged vs rev38 + the wall.
+> 4. **GCP eval box `orbit-wars-eval` (n2-standard-32)** — ⚠️ SUPERSEDED by the 2026-06-15 block: now KEPT as the handicap run's
+>    milestone evaluator (delete only when that run concludes). Recipe: memory `reference_gcp_eval_box`. Reusable runner on box:
+>    `run_eval_batch.sh <jobs> [P]` (per-job gate via 4th field). Logs → `gpu_run_artifacts/eval_box/`.
+> 5. ⚠️ SUPERSEDED: a training box IS now running (handicap, Jarvis — see 2026-06-15 block). Process note: read metrics from full panel
+>    logs, don't re-probe ([[feedback_read_full_eval_not_reprobe]]).
+
+> **⭐⭐⭐ SESSION 2026-06-14 PM — COMPASS + DIRECTION FINDINGS (read this first; reframes everything below).**
+> The big shift this session: **stop steering by ladder/held-out WR — it's a guardrail, NOT the compass.** Beating our
+> own synthetic h-ladder (detuned Producers) ≠ progress (docs already say panel WR isn't LB-predictive). The metrics
+> that matter are **winner-referenced + opponent-agnostic** (Isaiah/top-player ref): **planets@50→9 · open<50 cap/atk
+> →0.51 · peel-rate→0.43 · reinf<50→0.29**. Only an **LB submission** is ground truth (we have ZERO this whole phase).
+> - **THE WALL: planets@50 = 6 in BOTH live runs** (winner 9), unbroken — the master expand-and-hold metric. Neither
+>   run improves it; both converge to **sub-winner equilibria** that survive the pool:
+>   - **stageb3 = CHURN failure.** Mediocre opening (open<50 0.41 vs 0.51), can't hold (peel-rate WON 0.49→0.66,
+>     degrades vs harder opp), grinds planets back by recapture, **floods reinforce at scale (13+ = 0.78** vs winner
+>     0.34-0.61). Its high ladder WR (zach 86 / h10 85 / h12 51 / h14 21 @ 6.29M, gate2) is **volume/churn vs weak
+>     planners, NOT skill** — mechanics are opponent-INVARIANT (same 0.41/6/0.20 regardless of WR). fire-rate/hoard are
+>     actually ~winner (corrected: NOT a sprayer).
+>   - **stageb2r = TURTLE/HOARD failure.** Near-winner opening (0.48) + holding (peel 0.38 ✅), no reinforce-flood
+>     (13+ = 0.51 ✅), BUT **over-garrisons (ships/planet@50 = 39 vs 22), under-launches (launch_rate 0.026 vs 0.036),
+>     under-expands (planets@50=6).** It hoards the army instead of spending it to expand.
+>   - **stageb2r mechanics TREND (0.5M→2.1M, `mechanics_trend.py` vs zach) = NOT improving, REGRESSING on the disease:**
+>     planets@50 flat 6 · garr_frac@50 ↑ 0.68→0.77 · ships/planet@50 ↑ 44→51 · launch_rate ↓ 0.022→0.014 · reinf<50
+>     flat ~0.13. **The stable ~58% zach WR is HOLLOW** — it's getting better at *turtling* vs a weak opp, not at
+>     winner-style expansion. (Corrects the earlier "WR holding = relaunch working" read — WR-hold masked a hoard drift.)
+> - **✅ ship0 panic hypothesis RESOLVED = artifact.** Eval ship0 (deployed/argmax) is ~0% in EVERY phase × outcome,
+>   even in LOST/late games (mean ships 32-80 throughout). Training-diag ship0 0.11 was a **self-play + sampling** tail
+>   (argmax rarely picks bin0); deployed play is clean. min-ship-bin worry is moot. (New eval metric: ship0-by-phase ×
+>   won/lost in `eval.py`.)
+> - **✅ reinf<50 is opponent-ROBUST** (stageb3: 0.19-0.22 across a 21→86% WR swing) → trustworthy compass axis. Late
+>   reinforce (>100) is LENGTH-confounded (shrinks vs harder opp via shorter games) — trust `<50`, discount `>100`.
+> - **✅ DECISION: adopt GATE2 going forward** (supersedes the gate3 "locked design"). Clean evidence: gate2 → reinforce
+>   @2-planets = 0.09 ≈ **winner 0.10**; gate3 BANS it (0.01). gate3 was stricter than winners actually play, and the
+>   gate2-vs-gate3 A/B that locked gate3 was *inconclusive*. ⚠️ It's a winner-faithful **standardization, NOT the fix**
+>   for planets@50. **✅ WIRED 2026-06-14:** `GATE=3→2` default flipped in `run_stageb_jarvis.sh` (GATE:-2),
+>   `run_watchers.sh` REINFORCE_MASKS default, `export_agent.py` (both the fn default + CLI `default=2`), + CLAUDE.md
+>   note. Applies to the NEXT build; the live stageb3 run stays gate3 (started pre-flip). Pass `GATE=3`/`REINFORCE_MASKS`
+>   to reproduce the old design.
+> - **⭐ THE DIRECTION VERDICT / NEXT LEVER:** the current setup (self-play + pool + teacher-KL) finds turtle/churn
+>   local optima that *survive* the pool — there's no pressure to expand because turtling/churning still wins vs the
+>   pool. The lever must make **UNDER-EXPANSION LOSE**: a pool opponent (or reward) that punishes a turtle/churner by
+>   **out-expanding** it. `--expansion-coef 0.03` is far too weak. (Ties to win-starvation / pool-seed-RL pivot.)
+> - **⭐⭐ EXPANSION PROBE (2026-06-14 PM, `orbit_wars_rl/expansion_probe.py`) — localizes the wall to the MID-GAME
+>   SNOWBALL + indicts the ANCHOR.** Two diagnostics, both on eval's own `game_conversion` (apples-to-apples w/ winner
+>   ref 2/6/9/10):
+>   - **BC baseline (`bc_snowball_15global.pt` vs zach, 16 seeds, gate2):** planets@50 = **3.9 all / 3.0 won**, WR 1/16.
+>     The warmstart + teacher-KL anchor (ratchet → own-best ≈6) is rooted in an agent that expands to only ~3 and loses
+>     94% vs zach. stageb3's il_kl 0.55 = the anchor pulling HARD toward this under-expander. **The anchor is plausibly
+>     the expansion CEILING** (PPO pushes expansion up to ~6, the KL drags it back toward ~3 → equilibrium at 6).
+>   - **Same-seed us-vs-Ajay-vs-deb (stageb3 13.6M, identical board+opponent, 3 seeds):** the gap is the **step ~50→130
+>     breakout**, not the opening or the economy. seed0 (all win): planners 2→5→11 eliminate @103; we 2→3→8 grind to
+>     500. seed8526 (we LOSE): we hit 6 @step65 and **STALL 6/6/6 through step100** while planners break 6→11→14 and
+>     eliminate @147. We are NOT ship-starved (g50=22, inflight50=85) — we **churn** (15 caps, keep 8) and hoard the army
+>     instead of pressing NEW planets mid-game. Ajay≡deb trajectories (both orbit_lite planners, deterministic). Logs:
+>     `gpu_run_artifacts/expansion_probe/`.
+>   - **Reframed wall:** "planets@50=6" is a **mid-game snowball failure** — we stop acquiring planets right when planners
+>     accelerate. Fix must produce the 6→12 breakout in steps 50-130 (redirect the parked/in-flight army at NEW planets),
+>     AND/OR stop the anchor from capping expansion at the ~3-6 it's rooted in. **Candidate single-delta experiments (pick
+>     one, see below):** (A) teacher-KL ablation/loosen (il-lambda 0.05→~0.01) — decisive cheap test of "anchor = ceiling"
+>     (risk: drift returns); (B) snowball/out-expander pool opp harder than h12 (h12 alone didn't break stageb2r) so
+>     under-expansion LOSES; (C) a NON-count expansion reward targeting NEW-planet captures in steps 50-130 (avoid the
+>     rev48/49 count-based carpet-bomb trap). DECISION PENDING — user to pick the first delta.
+> - **W&B is OFF** (`--wandb` never passed) → built **`orbit_wars_rl/plot_train_log.py`** (smoothed trend plots from the
+>   text logs, retroactive) + **`orbit_wars_rl/mechanics_trend.py`** (winner-ref conversion-mechanics trend from per-ckpt
+>   eval logs). Watcher CSV gained **`reinf_step_early`**. 🟡 OPEN: wire `garr_frac@50`/`ships_per_planet@50`/`launch_rate`
+>   into the watcher CSV so the hoard trend is captured live (now re-parsed from logs).
+> - **Live runs — UPDATED 2026-06-14 PM:** **stageb2r KILLED** (machine 426650/.108 DESTROYED — it was REGRESSING on the
+>   turtle/hoard disease while burning spot $; best-effort harvest of the 5.77M ckpt+log under `gpu_run_artifacts/stageb2r/`).
+>   **stageb3 REPURPOSED → stageb3lo** (machine 426674/.92): stageb3's 14M run KILLED (walled at planets@50=6 for 13M
+>   steps = the established CONTROL); relaunched from its own **13.63M ckpt** as **stageb3lo** with the ONE delta
+>   **il-lambda 0.05→0.01** (loosen the teacher-KL = the anchor=ceiling test). SAME teacher (il-ref still
+>   bc_snowball_15global), same pool (resumed 28-member mature pool, ramp 0 = full immediately), LR 1e-4, gate2, deb-ext
+>   0.10, early_capture 0.3 — all identical to stageb3. iter-1 = expected critic-warmup (EV 0.66<0.7, policy frozen, will
+>   exit). **WATCH (THE test):** does planets@50 climb OFF 6 over the next 1-3M steps (anchor was the ceiling) AND does
+>   drift return (held-out zach peak-then-fall)? Controller watcher LIVE on .92 (zach held-out, gate2 masks) →
+>   `gpu_run_artifacts/stageb3lo/`. 13.63M resume ckpt also synced locally under `gpu_run_artifacts/stageb3/checkpoints/`.
+>   ⚠️ spot — `jl destroy 426674 --yes` when done. Beatable-planner ladder (for option-B later): h10 44% · h12 28% · h14 0%.
+> - **✅ stageb3lo (loosen teacher-KL, lever A) — CONCLUDED + REFUTED + KILLED 2026-06-14.** il-lambda 0.05→0.01 from
+>   stageb3 13.6M; il_kl rose 0.55→2.07 (un-anchored as intended). Over 0.5→3.15M: **zach WR drifted DOWN 84→76**
+>   (both seats) AND **planets@50 FLAT at 7** (full-panel zach — same as the stageb3 6.29M/9.96M base; winner 9). →
+>   **drift with ZERO expansion payoff → anchor=ceiling REFUTED; the cap is the pool/reward dynamics, not the anchor.**
+>   Box 426674 DESTROYED, 3.15M harvested to `gpu_run_artifacts/stageb3lo/`. (planets@50 read from the FULL panel logs,
+>   not a re-probe — [[feedback_read_full_eval_not_reprobe]].) **NEXT lever = B (out-EXPANDER pool opp, not a peeler)
+>   and/or C (bounded mid-game expansion reward), pending the stageb3-vs-Ajay wall batch on the GCP eval box.**
 > **⭐ TWO CONCURRENT SPOT RUNS (2026-06-14) — both ⚠️ DESTROY when done (`jl destroy <id> --yes`):**
 > - **stageb2 = PRIMARY** (machine `426650` @ `217.18.55.108`): re-anchor from 6.29M, has the controller watcher (zach
 >   evals + sync). Details below. ⚠️ ship0 was creeping (0.14) — watch.
@@ -357,6 +548,18 @@ path to beating Producer is a strong RL policy (Stage B), not importing its heur
 FINAL.** Harness: `/tmp/enemy_mass_validate.py`; kernels at `/tmp/producer_v{1,2}/code.py`.
 
 ### ✅ GAME-PHASE features — BUILT + VALIDATED 2026-06-13 (Stage B feature set; off by default, opt-in)
+> **✅ WEIGHT + USAGE VERIFIED ON STAGEB3 13.6M (2026-06-14).** Asked: are the 4 phase channels getting real weight /
+> being used, or dead like rev38's zero-padded features? (1) **Weight = ALIVE.** `global_proj` AND `mode_proj` weight
+> phase cols 11-14 at **0.91-1.01× the orig-11-globals mean** — identical scale, stable from BC warmstart (~1.0)
+> through 13M PPO steps (~0.92-1.00). Opposite of rev38 (those <0.09 vs orig 0.8-1.4). BC warmstart gave real gradient
+> from iter 1, as designed. (2) **Used = YES but MODEST effect.** Flipping ONLY the phase one-hot on a fixed board
+> (sensitivity probe, inline): target-dist shifts L1 0.11-0.22 (~5-11% of mass moves), fire-prob barely moves in abs
+> (up to ~50% rel per-slot late-game). So the channel is read + conditions behavior (NOT inert) — but the agent isn't
+> *dramatically* re-strategizing by phase (cf. Isaiah). Targeting head is the phase-sensitive part; fire-rate isn't.
+> Caveat: flipping phase vs an informative board is partly OOD + board/step-scalar(col1) already encode progress →
+> one-hot's MARGINAL effect is redundancy-bounded. **Verdict: plumbing healthy — phase features are NOT where Phase 3
+> is broken; but the modest phase-conditioning matches the planets@50=6 wall (the "retire shaping via phase-obs"
+> hypothesis is only partially realized — wired in, not yet the expansion lever).**
 **DONE:** `--game-phase-features` appends 4 global channels (11→15): a 3-way phase one-hot (early<50 / mid50-100 /
 late>=100, the `<50` boundary deliberately = the first_strike/early_capture shaping window for the retire-shaping
 test) + normalized steps-to-next-comet-spawn. Single source of truth `features.game_phase_channels`; vectorized

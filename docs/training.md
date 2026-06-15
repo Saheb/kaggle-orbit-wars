@@ -101,6 +101,54 @@
 
 ---
 
+## Current State (2026-06-15) — HANDICAP run live (Stage-B lineage, the "make under-expansion LOSE" lever)
+
+**LIVE: handicap** — resume stageb4 1.5M + inverse-SSDR self-boost (+3 planets to our seat in pool, tapering to 0 over
+4M) + deb dominant in pool + rev38 teacher-KL anchor, on a Jarvis A100-80GB spot (box 427065 @ 217.18.55.39, SPS~370).
+The lever the compass kept pointing at: nothing in self-play+pool prices under-expansion, so train ON the real planner
+(deb) with a tapering head-start → does WR-vs-deb hold as the boost decays, or collapse (→ holding wall structural)?
+Full live detail + ops: `docs/next-steps.md` SESSION 2026-06-15 block. **⭐ The bar is now explicit: BEAT rev38_5M**
+(zach 95.7 / h12 56 / Ajay 6.2) — the EVE sweep found all of Stage B ≤ rev38. **LB submissions:** rev38_5M + stageb3 11M
+submitted 2026-06-14 (the first this phase; LB is the only ground truth). Selection stays **winner-referenced, NOT ladder
+WR** (panel WR isn't LB-predictive): winner ref = planets@50→9 · open<50 cap/atk→0.51 · peel→0.43 · reinf<50→0.29.
+
+### Phase 3 Stage A / earlier (2026-06-13–14)
+
+Stage A PASSED (β=0.05 anchor held the held-out band, no peak-then-fall; box destroyed — see 06-13 below). Stage B =
+the from-scratch run on the comet-faithful sim with the 15-global feature set (comets + game-phase); design:
+`docs/phase3.md` §5.
+
+### Phase 3 Stage B run history
+| Run | Delta / config | Result | Status |
+|---|---|---|---|
+| **gate A/B** | gate2 vs gate3 (single delta, p2rev5 4M base) | WR inconclusive; gate2 reinforce@2=0.09≈winner 0.10 vs gate3 0.01 → **adopt gate2** (winner-faithful standardization, NOT the planets@50 fix) | concluded; **gate2 wired 2026-06-14** (run/watcher/export/CLAUDE.md) |
+| **stageb** (GCP L4) | from-scratch BC warmstart + critic-warmup + ramped pool (rev38+deb) | zach 6→48% but **0% vs Ajay** (6.29/8.91/9.44M) — transfer to the wall FAILED; ship0 crept, zach 48→32 | KILLED, box DELETED |
+| **stageb2** | re-anchor stageb 6.29M, LR 2×, deb pool | clean **peak-then-fall** on zach held-out (peak 64.5%@1M → 31%@2.6M) + undercommit creep; read: β=0.05 too loose under 2× LR (il_kl plateaued ~0.26) | KILLED |
+| **stageb2r** | re-anchor stageb2 1M peak, LR 5e-5, deb→**h12** swap | **TURTLE/HOARD** — near-winner opening+hold but REGRESSING (garr_frac@50 0.68→0.77, ships/planet 44→51, launch_rate 0.026→0.014); hollow ~58% zach WR; planets@50 stuck 6 | KILLED 2026-06-14, box 426650 DESTROYED |
+| **stageb3** | from-scratch BC + **early_capture 0.3** + gate2 + deb-ext 0.10, LR 1e-4, ramp 6M | **CHURN that's LEARNING TO HOLD** (peel 0.49→winner 0.43, open cap/atk 0.41→0.44, whole 0.46→0.51 over 6.29→9.96M) but planets@50 STUCK 6. Ladder: zach 83 / h10 84 / **h12 51.2→55.5** / **h14 21.1→23.0** (full panels, 6.29→9.96M). Never evaled vs the true wall (Ajay/deb/h18) until the 13.6M panels now running. | repurposed→stageb3lo @14M |
+| **stageb3lo** | resume stageb3 **13.6M**, **il-lambda 0.05→0.01** (loosen teacher-KL) | **anchor=ceiling REFUTED**: il_kl rose 0.55→2.07 (un-anchored) but over 0.5→3.15M zach WR DRIFTED 84→76 AND planets@50 FLAT at 7 → drift with ZERO expansion payoff; the cap is pool/reward dynamics, not the anchor | KILLED 2026-06-14, box 426674 DESTROYED |
+| **stageb4** | evolve stageb3 11M w/ rev38's scaffolding restored (BC→**rev38 anchor**, win_margin 0.5, speed off, no-deb rev38-pin pool) | BEAT stageb3 head-to-head ~59-41, BUT the EVE eval sweep = **all of Stage B ≤ rev38_5M on every panel** (zach 95.7 vs 86, h12 56≈55, Ajay 6.2 edges 5.5) → the bar is now "beat rev38" | CONCLUDED, box 426996 DESTROYED (harvested 4.7M) |
+| **handicap** 🔵 | resume stageb4 **1.5M** + **inverse-SSDR self-boost** (our seat +3 planets in pool, taper→0 over 4M) + **deb DOMINANT** (ext 0.6) + rev38 anchor + gate2 | THE "make under-expansion LOSE" test: as boost tapers 3→0, does WR-vs-deb hold/climb + peel↓ + planets@100↑, or collapse to ~0 (→ holding wall is STRUCTURAL)? Also: fire-weighted BC (pos_weight 6) lifted planets@50 3.9→6.7 but WR flat 1/16 (expansion≠holding). | **LIVE** (Jarvis A100-80GB spot, box **427065**/.39, SPS~370); controller watcher (zach gate2) + `orbit-wars-eval` for milestone panels |
+
+### Stage B key findings (2026-06-14; detail in `docs/next-steps.md`, memory `project_phase3_compass_wall`)
+- **THE WALL: planets@50 = 6** in BOTH live runs (winner 9), unbroken across ~6 levers. Two sub-winner equilibria that
+  SURVIVE the pool: **stageb3 = churn** (improving hold/conversion, expansion stuck), **stageb2r = turtle/hoard**
+  (regressing). Nothing prices under-expansion (even h12 in stageb2r's pool didn't break it).
+- **⭐ EXPANSION PROBE** (`orbit_wars_rl/expansion_probe.py`) localizes the wall + indicts the ANCHOR: (1) the BC
+  warmstart we anchor to expands to only **planets@50 ≈ 3-4** (WR 1/16 vs zach) → warmstart + teacher-KL (il_kl 0.55,
+  pulling hard) plausibly CAP expansion at ~6. (2) Same-seed us-vs-Ajay-vs-deb: the gap is the **mid-game snowball**
+  (step ~50→130) — planners break 6→11→14 and eliminate by ~100-150; we stall ~6 and grind to 500, **churning + hoarding**
+  the army (NOT ship-starved: g50=22, inflight50=85) instead of pressing NEW planets. → stageb3lo tests the anchor;
+  follow-ons if it fails = out-expander pool opp / non-count mid-game expansion reward.
+- **Game-phase features VERIFIED** (stageb3 13.6M): both `global_proj`+`mode_proj` weight cols 11-14 at 0.91-1.01× the
+  orig globals (alive, NOT rev38-style dead); sensitivity probe shows the policy IS phase-conditioned (target-dist L1
+  0.11-0.22 when flipping phase) but the effect is MODEST — wired in, not yet the expansion lever.
+- **ship0 = artifact** (eval ship0 ~0% every phase); **reinf<50 opponent-robust** (trust `<50`, discount `>100`).
+- **Beatable-planner ladder** (detune `candidate_producer_1200.py` horizon; all crush random 100%): h4 trivial · h10
+  44% · **h12 28%** (the training pick) · h14 0% · h18(full)≈deb≈ajay = the wall (~0% transfer all phase).
+
+---
+
 ## Current State (2026-06-13)
 
 ### ⭐ PHASE 3 STARTED — Stage A (teacher-KL anti-cycling anchor); closed-loop fidelity is SPLIT

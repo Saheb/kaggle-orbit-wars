@@ -73,7 +73,7 @@ HOST='$HOST'
 REMOTE_LOG_DIR='$RLOG'
 REMOTE_CKPT_DIR='$RCKPT'
 OPP='$OPP'
-REINFORCE_MASKS='${REINFORCE_MASKS:---reinforce-gate-min-planets 3 --reinforce-garrison-floor 0}'
+REINFORCE_MASKS='${REINFORCE_MASKS:---reinforce-gate-min-planets 2 --reinforce-garrison-floor 0}'
 EVAL_GATE_FROM_RUNNAME='${EVAL_GATE_FROM_RUNNAME:-}'
 EOF
 }

@@ -360,6 +360,8 @@ def train(args):
               f"(frac {args.early_capture_anneal_frac}), then 0")
     print(f"First Strike: {args.first_strike_mult}x for t<{args.first_strike_steps} steps" if args.first_strike_steps > 0 else "First Strike: off")
     print(f"Speed coeff: {args.speed_coef}")
+    if args.consolidation_coef != 0:
+        print(f"Consolidation bonus: {args.consolidation_coef} per net-new capture HELD {args.consolidation_steps} steps (force-concentration lever)")
     if args.handicap_frac > 0:
         print(f"Handicap: {args.handicap_frac*100:.0f}% of games start with {args.handicap_ships} ships (vs normal 10)")
     if args.ssdr_frac > 0:
@@ -426,6 +428,8 @@ def train(args):
                       first_strike_steps=args.first_strike_steps,
                       first_strike_mult=args.first_strike_mult,
                       speed_coef=args.speed_coef,
+                      consolidation_coef=args.consolidation_coef,
+                      consolidation_steps=args.consolidation_steps,
                       handicap_frac=args.handicap_frac,
                       handicap_ships=args.handicap_ships,
                       ssdr_frac=args.ssdr_frac,
@@ -866,6 +870,17 @@ def train(args):
             self_mask = torch.zeros(N, dtype=torch.bool)
             self_mask[:N_self] = True
             env.set_ssdr_mask(self_mask)
+        # Handicapped-real-planner curriculum: grant OUR seat (current_seat) extra starting
+        # planets in the POOL envs (where a planner opponent lives), tapering k -> 0 over
+        # --self-boost-ramp-steps. Win-gradient for holding vs a strong planner, then weaned off.
+        if args.self_boost_planets > 0:
+            bramp = (min(total_env_steps / args.self_boost_ramp_steps, 1.0)
+                     if args.self_boost_ramp_steps > 0 else 1.0)
+            boost_k = int(round(args.self_boost_planets * (1.0 - bramp)))
+            boost_mask = torch.zeros(N, dtype=torch.bool)
+            if N_pool > 0:
+                boost_mask[N_self:N] = True
+            env.set_self_boost(boost_k, current_seat, boost_mask)
         # Training-wide anneal of early_capture_coef → 0 (dense→sparse shaping).
         # Cosine from the base coef at step 0 to 0 at frac*total_steps, then stays 0.
         # env.step() reads self.early_capture_coef fresh each step, so mutating the
@@ -1614,6 +1629,14 @@ if __name__ == "__main__":
                              "+((episode_steps - termination_step) / episode_steps) * coef, "
                              "so early eliminations are worth more than timeout/grind wins. "
                              "0 = off. Suggested start: 0.3-0.5.")
+    parser.add_argument("--consolidation-coef", type=float, default=0.0,
+                        help="Force-concentration lever: ONE-TIME bonus when a NET-NEW captured "
+                             "planet survives --consolidation-steps (success-gated → prices "
+                             "'commit enough to HOLD' without defense_coef's flood). 0 = off. "
+                             "Calibrate ≤10-15%% of terminal win (~6-10 sticky caps/game → 0.015-0.02).")
+    parser.add_argument("--consolidation-steps", type=int, default=40,
+                        help="Steps a captured planet must be held to earn --consolidation-coef "
+                             "(autopsy median churn-loss ~20 → 40 = 2x clears the churn band).")
     parser.add_argument("--handicap-frac", type=float, default=0.0,
                         help="Fraction of games where player 0 starts with --handicap-ships "
                              "instead of the normal 10. Forces exposure to losing positions "
@@ -1631,6 +1654,13 @@ if __name__ == "__main__":
     parser.add_argument("--ssdr-max-steps", type=int, default=20,
                         help="Max warmup steps for SSDR. Actual steps ~ U(1, ssdr_max_steps). "
                              "20 = up to ~4%% of a 500-step game pre-played. (default: 20)")
+    parser.add_argument("--self-boost-planets", type=int, default=0,
+                        help="Handicapped-real-planner curriculum: grant OUR seat this many extra "
+                             "starting planets in POOL envs at step 0, tapering to 0 over "
+                             "--self-boost-ramp-steps. Makes a strong pool planner (deb) beatable so "
+                             "RL gets a win-gradient for holding, then weans off the head-start. 0 = off.")
+    parser.add_argument("--self-boost-ramp-steps", type=int, default=5000000,
+                        help="Steps over which --self-boost-planets tapers linearly to 0.")
     parser.add_argument("--srcs-multi-penalty", type=float, default=0.0,
                         help="Per-step reward penalty per source over --srcs-multi-threshold. "
                              "Applied symmetrically to both players each rollout step. "
