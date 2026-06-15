@@ -250,6 +250,34 @@ def _friendly_inbound(fleets, tgt, seat):
     return s
 
 
+def _reinf_reciprocity(reinf_edges):
+    """Reinforce PING-PONG detector. `reinf_edges` = [(step, src_pid, tgt_pid), ...] of own-target
+    reinforce launches. Returns [r1, r2, r3] = count of reinforces whose NEAREST reverse edge
+    (tgt->src) lands within 1 / 2 / 3 steps after it (cumulative). An A->B reinforce then a B->A
+    reinforce a few turns later = ships oscillating between two own planets (pure waste). This is
+    a TEMPORAL loop (arrival, then reverse) — a same-turn role mutex does NOT catch it."""
+    from bisect import bisect_right
+    recip = [0, 0, 0]
+    if not reinf_edges:
+        return recip
+    by_edge: dict = {}
+    for (tt, a, b) in reinf_edges:
+        by_edge.setdefault((a, b), []).append(tt)
+    for lst in by_edge.values():
+        lst.sort()
+    for (tt, a, b) in reinf_edges:
+        rev = by_edge.get((b, a))
+        if not rev:
+            continue
+        j = bisect_right(rev, tt)                   # nearest reverse strictly after this launch
+        if j < len(rev):
+            d = rev[j] - tt
+            if d <= 3: recip[2] += 1
+            if d <= 2: recip[1] += 1
+            if d <= 1: recip[0] += 1
+    return recip
+
+
 def game_conversion(steps, seat):
     """Whole-game CONVERSION for `seat` from kaggle env.steps.
 
@@ -268,6 +296,7 @@ def game_conversion(steps, seat):
     atk_mid = caps_mid = 0                                           # mid-game window [50, 100)
     reinf_early = reinf_mid = 0                                      # reinforce launches by step-window
     reinf_fwd = reinf_rear = reinf_dirn = 0                          # reinforce direction (vs enemy centroid)
+    reinf_edges: list = []   # (step, src_pid, tgt_pid) per reinforce launch → reciprocal ping-pong below
     # Retention: of the planets we CAPTURE, how many do we then lose, and how long did we hold
     # them? cap_step[pid] = step we (most recently) took pid; on a later loss we close the episode.
     # lost_caps/captures is the recapture/turnover rate — immune to the end->0 churn degeneracy.
@@ -397,6 +426,7 @@ def game_conversion(steps, seat):
             if int(tgt[1]) == seat:
                 reinf += 1                          # reinforce: cannot capture
                 reinf_bin[bidx] += 1
+                reinf_edges.append((t, int(src[0]), int(tgt[0])))   # for reciprocal ping-pong
                 if _ecx is not None:               # direction: target vs source distance to enemy
                     dS = math.hypot(src[2] - _ecx, src[3] - _ecy)
                     dT = math.hypot(tgt[2] - _ecx, tgt[3] - _ecy)
@@ -445,7 +475,9 @@ def game_conversion(steps, seat):
             fire_frac_sum += fired_this_step / owned_dec
         launch_count += fired_this_step
     end_planets = sum(1 for p in (last or []) if int(p[1]) == seat)
+    reinf_recip = _reinf_reciprocity(reinf_edges)
     out = {"captures": caps, "attack_launches": atk, "reinforce_launches": reinf,
+           "reinf_recip": reinf_recip,
            "attack_ships": atk_ships, "end_planets": end_planets,
            "redundant": redundant, "underkill": underkill, "atk_early": atk_early,
            "caps_early": caps_early, "atk_mid": atk_mid, "caps_mid": caps_mid,
@@ -490,7 +522,7 @@ def new_conversion_acc():
            "attack_launches_won": 0, "attack_launches_lost": 0,
            "atk_early_won": 0, "atk_early_lost": 0, "caps_early_won": 0, "caps_early_lost": 0,
            "atk_mid": 0, "caps_mid": 0, "reinf_early": 0, "reinf_mid": 0,
-           "reinf_fwd": 0, "reinf_rear": 0, "reinf_dirn": 0,
+           "reinf_fwd": 0, "reinf_rear": 0, "reinf_dirn": 0, "reinf_recip": [0, 0, 0],
            "atk_mid_won": 0, "atk_mid_lost": 0, "caps_mid_won": 0, "caps_mid_lost": 0,
            "games_won": 0, "games_lost": 0,
            "reinf_bin": [0] * len(_REINF_BINS), "atk_bin": [0] * len(_REINF_BINS)}
@@ -511,6 +543,8 @@ def add_conversion(acc, conv, won=None):
               "fire_steps", "fire_frac_sum", "atk_mid", "caps_mid", "reinf_early", "reinf_mid",
               "reinf_fwd", "reinf_rear", "reinf_dirn"):
         acc[k] += conv[k]
+    for _k in range(3):                              # reinf_recip is a 1/2/3-step list
+        acc["reinf_recip"][_k] += conv["reinf_recip"][_k]
     # route the fire-rate fields into won/lost buckets so spray can be read free of the
     # losing-position confound (won=None from non-eval callers → overall only, no split)
     if won is not None:
@@ -569,6 +603,8 @@ def _fmt_conversion(acc):
     rsh_l = re_l / max(re_l + at_l, 1)
     rdf = 100 * acc["reinf_fwd"] / max(acc["reinf_dirn"], 1)   # forward-staging % of reinforces
     rdr = 100 * acc["reinf_rear"] / max(acc["reinf_dirn"], 1)  # rear-defense % (forward-only blocks these)
+    _rl = max(acc["reinforce_launches"], 1)                    # reinforce-ping-pong rate (of reinforces)
+    rr1, rr2, rr3 = (acc["reinf_recip"][0] / _rl, acc["reinf_recip"][1] / _rl, acc["reinf_recip"][2] / _rl)
     pl = lambda ms: (f"{acc[f'p{ms}_sum']/acc[f'p{ms}_n']:.0f}" if acc[f"p{ms}_n"] else "—")
     plw = lambda ms: (f"{acc[f'p{ms}_sum_won']/acc[f'p{ms}_n_won']:.0f}" if acc[f"p{ms}_n_won"] else "—")
     pll = lambda ms: (f"{acc[f'p{ms}_sum_lost']/acc[f'p{ms}_n_lost']:.0f}" if acc[f"p{ms}_n_lost"] else "—")
@@ -678,6 +714,8 @@ def _fmt_conversion(acc):
             f"  reinf by empire size  {ramp}   [ref:ramp {_REINF_RAMP_REF}]\n"
             f"  reinf by step  <50:{rsh_e:.2f}  50-100:{rsh_m:.2f}  >100:{rsh_l:.2f}   [ref:winner {_REINF_STEP_REF}]\n"
             f"  reinf direction  fwd {rdf:.0f}%  rear {rdr:.0f}%  (n={acc['reinf_dirn']})   [ref:winner fwd ~57% · rear ~26%]\n"
+            f"  reinf ping-pong  recip<=1/2/3st {rr1:.2f}/{rr2:.2f}/{rr3:.2f} of {acc['reinforce_launches']} reinf "
+            f"({acc['reinf_recip'][2]} within 3st)   [A->B then B->A = waste loop; 0=none, NOT caught by same-turn mutex]\n"
             f"  ship0 1-ship-probe by phase  {_s0('')}{s0wl}")
 
 
