@@ -1238,8 +1238,9 @@ class VecTorchEnv:
 
     # ---------------------------------------------------------------------
     # Owned-planet indices per player — vectorized.
-    # For each env, returns the planet-array indices of the first MAX_OWNED
-    # planets where owner == player. Pad with 0 and use a `slot_valid` mask.
+    # For each env, returns the planet-array indices of the highest-GARRISON
+    # MAX_OWNED owned planets (ties → lowest array index). `slot_valid` masks
+    # the empty slots when fewer than MAX_OWNED are owned. See the docstring.
     # ---------------------------------------------------------------------
 
     def owned_indices_for(self, player: int) -> tuple[torch.Tensor, torch.Tensor]:
