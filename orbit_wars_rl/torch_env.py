@@ -34,6 +34,17 @@ SUN_RADIUS = 10.0
 ROTATION_RADIUS_LIMIT = 50.0
 MAX_SHIP_SPEED = 6.0
 
+# Lever A (decisive-mass reward) — capture-floor constants, mirroring producer_v2's
+# ProducerLiteConfig + orbit_lite.capture_floor (opponents/candidate_producer_v2.py):
+# floor = projected_defenders_at_arrival + beta*rho(eta)*reachable_enemy_mass + overhead.
+# The beta*rho*enemy_mass margin = the ETA-aware REACTIVE reinforcement v2 anticipates
+# (the not-yet-launched defense that out-masses us); deb uses the bare floor (margin off).
+_DM_BETA = 2.2          # reinforce_size_beta
+_DM_ETA_FREE = 3.0      # reinforce_eta_free  (eta below which the enemy can't react → rho=0)
+_DM_ETA_SCALE = 12.0    # reinforce_eta_scale
+_DM_HORIZON = 18.0      # config.horizon — reach cap for enemy_mass AND eta cap
+_DM_OVERHEAD = 1.0      # capture_overhead
+
 # Tensor sizes (worst-case bounds from kaggle env)
 MAX_PLANETS = 48
 MAX_FLEETS = 256
@@ -210,6 +221,8 @@ class VecTorchEnv:
         speed_coef: float = 0.0,
         consolidation_coef: float = 0.0,
         consolidation_steps: int = 40,
+        decisive_mass_coef: float = 0.0,
+        decisive_mass_beta: float = _DM_BETA,
         handicap_frac: float = 0.0,
         handicap_ships: int = 5,
         ssdr_frac: float = 0.0,
@@ -355,6 +368,19 @@ class VecTorchEnv:
         # project_force_concentration_wall; KILL if reinforce-rate/garr floods like defense_coef.
         self.consolidation_coef = float(consolidation_coef)
         self.consolidation_steps = int(consolidation_steps)
+        # Lever A — decisive-mass reward: +coef once when our INFLIGHT force converging on an
+        # ENEMY target first reaches the capture floor (projected defenders + 3-turn reaction +
+        # overhead — deb's capture_floor). Board-grounded, NOT outcome-tied → injects the force-
+        # concentration gradient symmetric self-play structurally cannot price (the wall: we get
+        # out-massed ~2.3x, planets@50=6 invariant). One credit per crossing (capped, no over-mass
+        # scaling); re-arms when no longer sufficient. project_force_concentration_wall. 0.0 = off.
+        self.decisive_mass_coef = float(decisive_mass_coef)
+        # Weight on producer_v2's reactive-reinforcement margin (beta*rho(eta)*enemy_mass). v2
+        # uses 2.2 (planner-conservative); for a TRAINING reward a high beta makes crossings rare
+        # (sparse signal) — lower it if `decis` stays ~0 on the resumed (trained) policy.
+        self.decisive_mass_beta = float(decisive_mass_beta)
+        self.prev_decisive_suff = None       # (N, P, num_players) bool — allocated in reset()
+        self._decisive_credit = None         # (N, num_players) diag accumulator — reset_reinforce_stats()
         # Handicap curriculum: fraction of games where player 0 starts with fewer ships.
         # Forces the agent to practise fighting from behind — the bimodal collapse state
         # that pure symmetric self-play never generates enough gradient for.
@@ -547,6 +573,10 @@ class VecTorchEnv:
         self.cap_age = torch.zeros(self.num_envs, P, dtype=torch.long, device=self.device)
         self.cap_credited = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
         self.cap_is_capture = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
+        # Lever A: per (env, planet, player) "inflight force already sufficient to take this
+        # enemy planet" — so the bonus fires only on the crossing (assembly), not every step.
+        self.prev_decisive_suff = torch.zeros(
+            self.num_envs, P, self.num_players, dtype=torch.bool, device=self.device)
         return self._state_dict()
 
     def _compute_material(self) -> torch.Tensor:
@@ -581,6 +611,99 @@ class VecTorchEnv:
                 cnt = (ready & (cur_owner == pl)).float().sum(dim=1)    # (N,) planets consolidated
                 terminal_rewards[:, pl] = terminal_rewards[:, pl] + self.consolidation_coef * cnt
             self.cap_credited = self.cap_credited | ready
+        return terminal_rewards
+
+    def _fleet_target_idx(self) -> torch.Tensor:
+        """Geometry-only target planet index per fleet, (N, F), or -1 if none.
+        Mirrors the heading-projection in get_features (nearest alive planet ahead of
+        the fleet along its heading). Player-independent — depends only on geometry."""
+        fx = self.fleets[:, :, 2]
+        fy = self.fleets[:, :, 3]
+        fang = self.fleets[:, :, 4]
+        fcos = torch.cos(fang)
+        fsin = torch.sin(fang)
+        x = self.planets[:, :, 2]
+        y = self.planets[:, :, 3]
+        r = self.planets[:, :, 4]
+        F = self.fleets.shape[1]
+        vx_fp = x.unsqueeze(1) - fx.unsqueeze(2)                 # (N, F, P)
+        vy_fp = y.unsqueeze(1) - fy.unsqueeze(2)
+        along_fp = vx_fp * fcos.unsqueeze(2) + vy_fp * fsin.unsqueeze(2)
+        perp_fp = torch.abs(vx_fp * fsin.unsqueeze(2) - vy_fp * fcos.unsqueeze(2))
+        alive_expand = self.planet_alive.unsqueeze(1).expand(-1, F, -1)
+        candidate = (along_fp > 0) & (perp_fp < r.unsqueeze(1) + 2.0) & alive_expand
+        has_candidate = candidate.any(dim=2)
+        dists_fp = torch.sqrt(vx_fp * vx_fp + vy_fp * vy_fp)
+        tgt_idx = dists_fp.masked_fill(~candidate, 1e6).argmin(dim=2)    # (N, F)
+        return torch.where(has_candidate, tgt_idx, torch.full_like(tgt_idx, -1))
+
+    def _decisive_mass_bonus(self, terminal_rewards: torch.Tensor) -> torch.Tensor:
+        """Lever A: +decisive_mass_coef the step our inflight force converging on an ENEMY
+        target first reaches producer_v2's capture floor. Board-grounded, NOT outcome-tied →
+        the force-concentration gradient symmetric self-play can't price (project_force_
+        concentration_wall). One credit per crossing (no over-mass scaling); prev_decisive_suff
+        re-arms when mass drops below floor / the planet stops being enemy.
+
+        floor_t = garrison + prod*eta + enemy_inbound_now      (projected defenders at arrival)
+                + beta*rho(eta)*reachable_enemy_mass           (v2's reactive-reinforcement margin)
+                + overhead
+        mass_t = our alive inflight fleet ships converging on t. eta = ships-weighted mean ETA
+        of that mass (capped at the horizon). enemy_mass = cheap_enemy_pressure (reachable enemy
+        PLANET mass); enemy_inbound_now = enemy FLEET ships already racing to defend t."""
+        N, P = self.planets.shape[0], self.planets.shape[1]
+        owner = self.planets[:, :, 1].long()                            # (N, P)
+        garr = self.planets[:, :, 5]
+        prod = self.planets[:, :, 6]
+        px, py = self.planets[:, :, 2], self.planets[:, :, 3]
+        alive = self.planet_alive
+        # Reachable-enemy-mass scaffolding (player-independent): pairwise planet distance +
+        # per-source reach decay (cheap_enemy_pressure: closer enemy planets reinforce more).
+        dx = px.unsqueeze(2) - px.unsqueeze(1)                          # (N, P_src, P_tgt)
+        dy = py.unsqueeze(2) - py.unsqueeze(1)
+        pdist = torch.sqrt(dx * dx + dy * dy)
+        src_reach = (_ship_speed(garr) * _DM_HORIZON).clamp(min=1e-6)   # (N, P_src)
+        decay = (1.0 - pdist / src_reach.unsqueeze(2)).clamp(min=0.0)   # (N, P_src, P_tgt)
+        not_self = ~torch.eye(P, dtype=torch.bool, device=self.device).unsqueeze(0)
+        # Our converging fleets: target, ships, and ETA to that target.
+        tgt_idx = self._fleet_target_idx()                             # (N, F)
+        f_owner = self.fleets[:, :, 1].long()
+        f_ships_raw = self.fleets[:, :, 6]
+        fx, fy = self.fleets[:, :, 2], self.fleets[:, :, 3]
+        tgt_safe = tgt_idx.clamp(min=0)
+        tx = torch.gather(px, 1, tgt_safe)                             # (N, F) target planet x
+        ty = torch.gather(py, 1, tgt_safe)
+        f_eta = (torch.sqrt((fx - tx) ** 2 + (fy - ty) ** 2)
+                 / _ship_speed(f_ships_raw).clamp(min=1e-6)).clamp(max=_DM_HORIZON)
+        f_ships = f_ships_raw * self.fleet_alive.float()
+        valid_f = (tgt_idx >= 0) & self.fleet_alive
+        for pl in range(self.num_players):
+            mine = (valid_f & (f_owner == pl)).float()                 # (N, F)
+            w = f_ships * mine
+            mass = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
+            mass.scatter_add_(1, tgt_safe, w)                          # our inflight per target
+            eta_num = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
+            eta_num.scatter_add_(1, tgt_safe, w * f_eta)
+            eta = eta_num / mass.clamp(min=1.0)                        # ships-weighted mean ETA
+            # enemy fleets already inbound to the target (current reinforcements en route)
+            enemy_f = (valid_f & (f_owner != pl) & (f_owner >= 0)).float()
+            inbound = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
+            inbound.scatter_add_(1, tgt_safe, f_ships * enemy_f)
+            # reachable enemy PLANET mass for each target (producer_v2 cheap_enemy_pressure)
+            enemy_src = (alive & (owner != pl) & (owner >= 0)).unsqueeze(2)   # (N, P_src, 1)
+            valid_sp = enemy_src & alive.unsqueeze(1) & not_self
+            enemy_mass = torch.where(valid_sp, garr.unsqueeze(2) * decay,
+                                     torch.zeros_like(decay)).sum(dim=1)      # (N, P_tgt)
+            rho = ((eta - _DM_ETA_FREE) / _DM_ETA_SCALE).clamp(0.0, 1.0)
+            floor = (garr + prod * eta + inbound
+                     + self.decisive_mass_beta * rho * enemy_mass + _DM_OVERHEAD)
+            is_enemy = alive & (owner != pl) & (owner >= 0)
+            suff = is_enemy & (mass >= floor)
+            crossing = suff & ~self.prev_decisive_suff[:, :, pl]
+            cnt = crossing.float().sum(dim=1)
+            terminal_rewards[:, pl] = terminal_rewards[:, pl] + self.decisive_mass_coef * cnt
+            self.prev_decisive_suff[:, :, pl] = suff
+            if self._decisive_credit is not None:
+                self._decisive_credit[:, pl] += cnt
         return terminal_rewards
 
     def _compute_production(self) -> torch.Tensor:
@@ -1558,6 +1681,9 @@ class VecTorchEnv:
         self._obs_total_ships = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
         self._obs_trunc_enemy_ships = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
         self._obs_total_enemy_ships = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
+        # Lever A: count of decisive-mass crossings credited this rollout (per env, per player).
+        self._decisive_credit = torch.zeros(
+            self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
 
     # ---------------------------------------------------------------------
     # Step — pure tensor ops, runs all N envs in one pass.
@@ -1859,6 +1985,8 @@ class VecTorchEnv:
         # Consolidation bonus: ONE-TIME +coef when a net-new CAPTURED planet survives K steps.
         if self.consolidation_coef != 0.0:
             terminal_rewards = self._consolidation_bonus(terminal_rewards)
+        if self.decisive_mass_coef != 0.0:
+            terminal_rewards = self._decisive_mass_bonus(terminal_rewards)
         # Reinforcement transit cost (#2): price the ships each player sent to its own
         # planets this step. Costless reinforcement floods (rev56, ~30× launch volume);
         # this prunes the wasteful tail. Calibrate reinforce_cost so reinforce_rate

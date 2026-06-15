@@ -391,6 +391,8 @@ def train(args):
     print(f"Speed coeff: {args.speed_coef}")
     if args.consolidation_coef != 0:
         print(f"Consolidation bonus: {args.consolidation_coef} per net-new capture HELD {args.consolidation_steps} steps (force-concentration lever)")
+    if args.decisive_mass_coef != 0:
+        print(f"Decisive-mass bonus (Lever A): {args.decisive_mass_coef} per inflight strike reaching producer_v2's ENEMY capture floor (reactive-margin beta={args.decisive_mass_beta}) — force-concentration signal")
     if args.handicap_frac > 0:
         print(f"Handicap: {args.handicap_frac*100:.0f}% of games start with {args.handicap_ships} ships (vs normal 10)")
     if args.ssdr_frac > 0:
@@ -470,6 +472,8 @@ def train(args):
                       speed_coef=args.speed_coef,
                       consolidation_coef=args.consolidation_coef,
                       consolidation_steps=args.consolidation_steps,
+                      decisive_mass_coef=args.decisive_mass_coef,
+                      decisive_mass_beta=args.decisive_mass_beta,
                       handicap_frac=args.handicap_frac,
                       handicap_ships=args.handicap_ships,
                       ssdr_frac=args.ssdr_frac,
@@ -1370,6 +1374,10 @@ def train(args):
                 # ENEMY omitted ship mass ÷ all enemy ship mass — the obs256 decider (is the
                 # hidden mass the OPPONENT's, e.g. an inbound strike we can't see?).
                 metrics["obs_trunc_enemy_ship_frac"] = float(env._obs_trunc_enemy_ships.sum().item()) / max(float(env._obs_total_enemy_ships.sum().item()), 1.0)
+            if getattr(env, "_decisive_credit", None) is not None:
+                # Lever A: avg decisive-mass crossings per (env,seat) this rollout, current policy.
+                tm2 = tmu.squeeze(-1)                                  # (N, players) to match _decisive_credit
+                metrics["decisive_strikes"] = float((env._decisive_credit * tm2).sum().item()) / max(float(tm2.sum().item()), 1.0)
         with torch.no_grad():
             metrics["old_value_mean"] = float(flat["values"].mean().item())
             metrics["old_value_std"] = float(flat["values"].std(unbiased=False).item())
@@ -1485,6 +1493,7 @@ def train(args):
                     f"obstrunc {metrics.get('obs_trunc_rate',0):.3f} "
                     f"(fleet {metrics.get('obs_trunc_fleet_frac',0):.3f} ship {metrics.get('obs_trunc_ship_frac',0):.3f} "
                     f"enemyship {metrics.get('obs_trunc_enemy_ship_frac',0):.3f}) | "
+                    f"decis {metrics.get('decisive_strikes',0):.2f} | "
                     f"{reinfstr}"
                     f"H_ship {metrics.get('ship_entropy', 0):.2f} "
                     f"H_tgt {metrics.get('target_entropy', 0):.2f} | "
@@ -1835,6 +1844,18 @@ if __name__ == "__main__":
     parser.add_argument("--consolidation-steps", type=int, default=40,
                         help="Steps a captured planet must be held to earn --consolidation-coef "
                              "(autopsy median churn-loss ~20 → 40 = 2x clears the churn band).")
+    parser.add_argument("--decisive-mass-coef", type=float, default=0.0,
+                        help="Lever A (force-concentration): ONE-TIME bonus the step our INFLIGHT "
+                             "force converging on an ENEMY planet first reaches the capture floor "
+                             "(ships+prod*3+1 = deb's capture_floor). Board-grounded, not outcome-tied "
+                             "→ injects the concentration gradient self-play can't price (we get "
+                             "out-massed ~2.3x, planets@50=6 invariant). 0 = off. Start ~0.2; read "
+                             "eval out-massed%% / garr@loss-vs-inbound. project_force_concentration_wall.")
+    parser.add_argument("--decisive-mass-beta", type=float, default=2.2,
+                        help="Weight on producer_v2's reactive-reinforcement floor margin "
+                             "(beta*rho(eta)*reachable_enemy_mass). 2.2 = v2-faithful (planner-"
+                             "conservative). LOWER it (e.g. 0.5-1.0) if `decis` stays ~0 on the "
+                             "resumed policy — a high beta makes the floor strict → sparse signal.")
     parser.add_argument("--handicap-frac", type=float, default=0.0,
                         help="Fraction of games where player 0 starts with --handicap-ships "
                              "instead of the normal 10. Forces exposure to losing positions "
