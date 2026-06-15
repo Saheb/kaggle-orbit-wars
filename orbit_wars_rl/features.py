@@ -118,6 +118,7 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
     planet_mask = np.zeros(max_planets, dtype=np.bool_)
     owned_indices = np.zeros(max_owned, dtype=np.int64)
     owned_count = 0
+    owned_cands = []  # (array_idx, round(ships)) for every owned planet; top-MAX_OWNED chosen below
 
     # Pre-compute initial planet lookup for orbit prediction
     init_by_id = {}
@@ -228,10 +229,20 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
             1.0,                               # 19: active mask
         ]
 
-        # Track owned planets
-        if owner == player and owned_count < max_owned:
-            owned_indices[owned_count] = i
-            owned_count += 1
+        # Track owned planets: collect ALL owned (idx, garrison); the top-MAX_OWNED by
+        # garrison are selected after the loop (source ranking — mirrors owned_indices_for).
+        if owner == player:
+            owned_cands.append((i, int(round(ships))))
+
+    # Source selection: the highest-GARRISON owned planets fill the MAX_OWNED source slots
+    # (ties -> lowest array index). Parity-exact with VecTorchEnv.owned_indices_for and
+    # action_mask (-round(ships)*P + idx ordering). No-op at <=max_owned owned. Owning >16 is
+    # ~16% of steps (up to 30 owned) — firing only from the first-16-by-index left force-
+    # bearing planets inert; rank by garrison so the planets that can contribute get the slots.
+    owned_cands.sort(key=lambda t: (-t[1], t[0]))
+    owned_count = min(len(owned_cands), max_owned)
+    for _slot in range(owned_count):
+        owned_indices[_slot] = owned_cands[_slot][0]
 
     # --- Fleet features (13) ---
     # New features 9-12: fleet destination ETA, distance, threatens_owned flag,

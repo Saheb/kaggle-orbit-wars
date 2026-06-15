@@ -1245,18 +1245,26 @@ class VecTorchEnv:
     def owned_indices_for(self, player: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (owned_idx: (N, MAX_OWNED) long, slot_valid: (N, MAX_OWNED) bool).
 
-        Single-pass topk: planets are scored by their array index (lowest first)
-        with non-mine slots assigned a sentinel > P. Top-K smallest = first K mine.
+        SOURCE SELECTION (2026-06-15): when more than MAX_OWNED planets are owned, the 16
+        source slots are the highest-GARRISON owned planets (ties → lowest array index), NOT
+        the first 16 by array index. Owning >16 happens ~16% of steps (up to 30 owned), and
+        firing only from the lowest-index 16 left up to 14 force-bearing planets inert. Ranking
+        by garrison keeps the planets that can actually contribute ships (attack/reinforce/hold).
+        Integer key `-round(ships)*P + idx` == sort by (-ships, idx): a 1-ship difference (=P)
+        always outweighs any index difference (idx < P), so it is parity-exact with the eval/
+        export selection in features.py / action_mask.py. No-op at <=16 owned (all get a slot).
         """
         owner = self.planets[:, :, 1]
+        ships = self.planets[:, :, 5]
         is_mine = (owner.long() == player) & self.planet_alive          # (N, P)
         N, P = is_mine.shape
-        SENTINEL = P + 1
         idx_grid = torch.arange(P, device=self.device).expand(N, P)
-        scores = torch.where(is_mine, idx_grid, torch.full_like(idx_grid, SENTINEL))
-        owned_idx, _ = torch.topk(scores, MAX_OWNED, dim=1, largest=False)  # (N, MAX_OWNED)
-        slot_valid = owned_idx < P
-        owned_idx = owned_idx.clamp(max=P - 1)  # keep gather-safe
+        mine_key = -torch.round(ships).long() * P + idx_grid            # smaller = higher garrison
+        SENTINEL = 1 << 40                                              # > any mine_key
+        scores = torch.where(is_mine, mine_key, torch.full_like(idx_grid, SENTINEL))
+        # topk INDICES (not values) → the selected planets' array indices.
+        _, owned_idx = torch.topk(scores, MAX_OWNED, dim=1, largest=False)  # (N, MAX_OWNED)
+        slot_valid = torch.gather(is_mine, 1, owned_idx)                # masked-out where filled by a non-mine
         return owned_idx, slot_valid
 
     # ---------------------------------------------------------------------

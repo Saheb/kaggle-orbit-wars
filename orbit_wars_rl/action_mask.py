@@ -54,8 +54,13 @@ def compute_action_masks(obs, player, max_owned=MAX_OWNED_PLANETS):
     planets = obs["planets"]
     fleets = obs["fleets"]
 
-    # Find owned planets
+    # Find owned planets. Source selection: the highest-GARRISON owned planets fill the
+    # MAX_OWNED slots (ties -> lowest array index), NOT the first-16-by-index. Parity-exact
+    # with features.py / VecTorchEnv.owned_indices_for (-round(ships)*P + idx). No-op at
+    # <=max_owned owned; matters when >16 are owned (~16% of steps, up to 30) so the
+    # force-bearing planets — not arbitrary low-index ones — get the action slots.
     my_planets = [(i, p) for i, p in enumerate(planets) if p[1] == player]
+    my_planets.sort(key=lambda ip: (-int(round(ip[1][5])), ip[0]))
     n_owned = min(len(my_planets), max_owned)
 
     owned_indices = np.zeros(max_owned, dtype=np.int64)
