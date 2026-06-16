@@ -5,6 +5,21 @@
 
 ---
 
+## Current State (2026-06-16)
+
+**LIVE: `hladder`** — Jarvis H200 SPOT 217.18.55.153 (machine 428118), 10M (~4.9h). Producer-horizon LEAGUE: ~80% PFSP over **h10 + h12 + h14** + 20% self-play; resume + IL-ref = **3e 4.7M**, anchor **loosened to il-lambda 0.025**, NO decmass, LR 1e-4, 512/32/12, fresh pool (no deb). iter1 healthy (SPS 571, EV 0.71, KL 0.009, 0 OOM). WATCH: easiest rung **h10 training-wr > ~40-50%** = win-gradient caught → then `outmassed_pct` (now a CSV col) vs Ajay below 96%. Tripwire: rung-wr↑ but Ajay/Zach held-out↓ = overfit. ⚠️ `jl destroy 428118` when done; balance ₹890 (~thin runway). Script `gpu_run_artifacts/hladder/`.
+
+**The force-concentration wall — three negatives this session, one root cause (WIN-STARVATION):**
+- **decmass (Lever A — decisive-mass reward) ⛔ NEGATIVE.** decmass1 (Jarvis) + decmass1b (GCP L4): out-massed% flat 95-97% to ~4M; decis climbed 13→19 (reward optimized) but behavior/garr@loss unmoved → board-grounded proxy is **gameable** (weak self-play defenders; symmetric Nash; skill is opponent-relative). decmass1b killed, GCP L4 deleted. Code fixes shipped (P1 max-ETA, CLI, boundary test).
+- **corrpack3f (plain-3e continuation) ✅ killed early; 3e backfill = plateaued.** 4.7M→6M Ajay flat 16-18%, out-massed 96-97% → vanilla longer-3e tapped out on the wall; **4.7M confirmed a fine anchor** (not a missed peak).
+- **h14only (win-gradient vs ONE planner) ⛔ NEGATIVE.** Training-wr vs h14 stuck **~25%** over 2.1M — NOT the 39.8% real-env panel (the **train/eval SIM-GAP**: torch_env 144-bin angle quantization weakens our aim vs the fixed-aimer panel → h14 harder in-sim → still win-starved). Motivated `hladder` (find the rung winnable IN-SIM). Torn down.
+
+**Submitted:** corrpack3e 4.7M → sub **53722560** (LB pending). Best-ever panel (Zach 98.8% / Ajay 18.0%); cross-eval validated broad — beats rev38 (LB record) **81% H2H**, 75-94% vs non-planner heuristics.
+
+**Staged (next one-delta, post-hladder):** reverse-edge reinforce cooldown — train+eval wired+tested (`reinforce_cooldown.py`, `--reverse-edge-cooldown K`), export deferred to submission. Hygiene lever, not the wall fix.
+
+---
+
 ## Phase 1 Run History — Quick Reference
 
 | Run | Delta from prev | Expected | What happened | Killed because | Best ckpt LB |

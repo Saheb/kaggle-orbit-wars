@@ -461,6 +461,7 @@ class PPOLearner:
                 # instead of relying on CLI flags being remembered (a panel/submission footgun).
                 "reinforce_gate_min_planets": int(getattr(model_cfg, "reinforce_gate_min_planets", 0)),
                 "reinforce_forward_only": bool(getattr(model_cfg, "reinforce_forward_only", False)),
+                "reverse_edge_cooldown": int(getattr(model_cfg, "reverse_edge_cooldown", 0)),
                 "reinforce_garrison_floor": float(getattr(model_cfg, "reinforce_garrison_floor", 0.0)),
                 "sufficient_commit_factor": float(getattr(model_cfg, "sufficient_commit_factor", 0.0)),
                 # provenance: how the ckpt was trained (eval always clamps, so not an eval-contract field)

@@ -13,6 +13,9 @@ import math
 import numpy as np
 import torch
 
+from reinforce_cooldown import is_blocked as _cd_is_blocked, record as _cd_record, \
+    on_ownership_loss as _cd_on_loss
+
 # --- ship-commitment audit (probe-only; enable via action_mask._SHIP_AUDIT["on"]=True) ---
 _SHIP_AUDIT = {"on": False}
 _SHIP_AUDIT_DATA = {
@@ -233,6 +236,9 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
                                reinforce_gate_min_planets: int = 0,
                                reinforce_forward_only: bool = False,
                                reinforce_garrison_floor: float = 0.0,
+                               reverse_edge_cooldown: int = 0,
+                               cooldown_last: dict = None,
+                               cooldown_step: int = 0,
                                sufficient_commit_factor: float = 0.0,
                                veto_stats: dict = None):
     """Convert policy outputs to actions using target planet logits for aiming.
@@ -268,13 +274,19 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         px, py = float(p[2]), float(p[3])
         return min(math.hypot(px - ex, py - ey) for ex, ey in enemy_xy)
 
+    cd_on = (reverse_edge_cooldown > 0 and cooldown_last is not None)
+
     def _own_reinforce_illegal(src_planet, tgt_planet):
-        """True if an own (reinforce) target is barred by gate/forward-staging."""
+        """True if an own (reinforce) target is barred by gate / forward-staging / reverse-edge cooldown."""
         if gate_block_own:
             return True
         if reinforce_forward_only and enemy_xy:  # no live enemy -> forward moot
             if not (_nearest_enemy_dist(tgt_planet) < _nearest_enemy_dist(src_planet)):
                 return True
+        # Reverse-edge cooldown: block reinforce src->dst if the reverse dst->src fired within K steps.
+        if cd_on and _cd_is_blocked(cooldown_last, cooldown_step,
+                                    int(src_planet[0]), int(tgt_planet[0]), reverse_edge_cooldown):
+            return True
         return False
 
     # Restrict target choice to legal launch targets before argmax / sampling.
@@ -317,6 +329,7 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         ship_bins = torch.argmax(ship_logits, dim=-1).cpu().numpy().squeeze(0)
 
     moves = []
+    _new_reinf_edges = []   # (src_id, dst_id) executed reinforces this step → recorded into cooldown_last after the loop
     max_moves = MAX_OWNED_PLANETS  # = model's owned-slot width (16); kaggle env has NO move cap,
     # the old 8 was a self-nerf + train/eval mismatch (torch_env fires all 16). Bounded by owned_count.
     for slot in range(min(masks["owned_count"], fire_decisions.shape[0])):
@@ -363,6 +376,8 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
 
         angle = _target_intercept_angle(planets[pidx], planets[tidx], ships, obs)
         moves.append([int(planets[pidx][0]), angle, ships])
+        if cd_on and is_own_target:   # executed reinforce → arm the reverse edge after the loop
+            _new_reinf_edges.append((int(planets[pidx][0]), int(planets[tidx][0])))
 
     # ----- veto diagnostics: of the reinforces the policy WANTS, which mask blocks them? -----
     # "want" = the unmasked-argmax target (over real planets, source excluded) for a fire-positive
@@ -401,6 +416,16 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
                     veto_stats["blocked_floor"] = veto_stats.get("blocked_floor", 0) + 1
                 else:
                     veto_stats["reinforce_allowed"] = veto_stats.get("reinforce_allowed", 0) + 1
+
+    # Reverse-edge cooldown commit (mirrors torch_env._apply_actions): consult used PRIOR state,
+    # so update only now — (1) clear edges touching any planet we don't currently own (ownership
+    # reset → recaptured planets aren't mis-blocked), (2) arm this step's executed reinforces.
+    if cd_on:
+        for p in planets:
+            if int(p[1]) != player:
+                _cd_on_loss(cooldown_last, int(p[0]))
+        for s_id, d_id in _new_reinf_edges:
+            _cd_record(cooldown_last, cooldown_step, s_id, d_id)
 
     return moves
 

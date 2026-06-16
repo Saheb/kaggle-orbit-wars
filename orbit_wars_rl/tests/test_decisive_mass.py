@@ -113,10 +113,32 @@ def test_reactive_margin_raises_floor():
     assert abs(_credit(env)) < 1e-6, "v2 reactive margin must lift the floor above 15 → no credit"
 
 
+def test_rearm_on_episode_boundary():
+    # Drive the REAL production path (step → _auto_reset), not a hand-replayed reset. A far fleet
+    # keeps planet 1 "sufficient", so the per-step _decisive_mass_bonus that runs INSIDE step()
+    # would KEEP prev_decisive_suff[1] True (crossing already armed) — only the auto-reset re-arm
+    # should clear it. We force termination via time_up so it's ownership-independent.
+    env = _env()
+    _add_fleet(env, 0, owner=0, ships=15)        # far → stays inflight; mass 15 ≥ bare floor 11
+    tr = torch.zeros(1, 2)
+    env._decisive_mass_bonus(tr)                 # arm planet 1
+    assert bool(env.prev_decisive_suff[0, 1, 0]), "planet 1 should be armed (sufficient inflight mass)"
+    # Force the next step() to terminate (time_up) and run the auto-reset path.
+    env.step_count[0] = int(env.episode_steps)
+    _, _, done = env.step()
+    assert bool(done[0]), "env should terminate via time_up"
+    # The fresh board has no fleets; step()'s internal _decisive_mass_bonus would have re-set
+    # prev[1]=True (planet 1 still enemy + sufficient pre-reset), so a clean prev here proves the
+    # auto-reset re-arm — not the per-step bonus — cleared it.
+    assert not bool(env.prev_decisive_suff[0].any()), \
+        "step()/_auto_reset must re-arm (clear) prev_decisive_suff for the done env"
+
+
 if __name__ == "__main__":
     test_target_resolves()
     test_subfloor_no_credit()
     test_aggregation_credits_once_on_crossing()
     test_own_and_neutral_gated()
     test_reactive_margin_raises_floor()
-    print("PASS: decisive-mass (producer_v2 floor) — aggregation, crossing-once, gate, reactive margin")
+    test_rearm_on_episode_boundary()
+    print("PASS: decisive-mass (producer_v2 floor) — aggregation, crossing-once, gate, reactive margin, boundary re-arm")

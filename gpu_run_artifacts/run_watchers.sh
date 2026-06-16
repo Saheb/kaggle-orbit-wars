@@ -102,7 +102,7 @@ _eval() {  # _eval <run> [opp_override]   (platform-independent — local files 
   local DIR="$ROOT/gpu_run_artifacts/$1/checkpoints" LOGDIR="$ROOT/gpu_run_artifacts/$1/eval_logs"
   local OUT="$ROOT/gpu_run_artifacts/$1/eval_$(basename "${OPP%.py}" | sed 's/candidate_//').csv"
   mkdir -p "$LOGDIR"; cd "$ROOT"
-  [ -f "$OUT" ] || echo "utc_time,step,win_rate,seat0_wr,seat1_wr,open_capatk_WON,mid_capatk_WON,peelrate_WON,planets100_WON,reinf_step_early,reinf_step_mid,reinf_dir_fwd,games,checkpoint" > "$OUT"
+  [ -f "$OUT" ] || echo "utc_time,step,win_rate,seat0_wr,seat1_wr,outmassed_pct,open_capatk_WON,mid_capatk_WON,peelrate_WON,planets100_WON,reinf_step_early,reinf_step_mid,reinf_dir_fwd,games,checkpoint" > "$OUT"
   while _still_active "$RUN"; do
     while IFS= read -r ckpt; do
       [ -n "$ckpt" ] || continue
@@ -131,7 +131,9 @@ _eval() {  # _eval <run> [opp_override]   (platform-independent — local files 
       rse=$(grep -E "reinf by step" "$elog" | tail -1 | sed -E 's#.*reinf by step +<50:([0-9.]+).*#\1#')
       rsm=$(grep -E "reinf by step" "$elog" | tail -1 | sed -E 's#.*reinf by step +<50:[0-9.]+ +50-100:([0-9.]+).*#\1#')
       rdf=$(grep -E "reinf direction" "$elog" | tail -1 | sed -E 's#.*fwd ([0-9]+)%.*#\1#')
-      echo "$(date -u +%FT%TZ),${step},${wr:-ERR},${s0:-ERR},${s1:-ERR},${oc:-NA},${mc:-NA},${pr:-NA},${p100:-NA},${rse:-NA},${rsm:-NA},${rdf:-NA},256,${base}" >> "$OUT"
+      # hold-loss out-massed%% — THE force-concentration verdict (enemy fleet > our garrison at loss).
+      om=$(grep -E "hold-loss" "$elog" | tail -1 | sed -E 's#.*out-massed ([0-9]+)%.*#\1#')
+      echo "$(date -u +%FT%TZ),${step},${wr:-ERR},${s0:-ERR},${s1:-ERR},${om:-NA},${oc:-NA},${mc:-NA},${pr:-NA},${p100:-NA},${rse:-NA},${rsm:-NA},${rdf:-NA},256,${base}" >> "$OUT"
     done < <(find "$DIR" -maxdepth 1 -name "torch_step_*${MATCH}*.pt" -mmin +2 2>/dev/null | sort -rV)
     sleep "$POLL"
   done
@@ -164,7 +166,7 @@ case "${1:-}" in
     OUT="$ROOT/gpu_run_artifacts/$RUN/eval_$(basename "${OPP%.py}" | sed 's/candidate_//').csv"
     DIR="$ROOT/gpu_run_artifacts/$RUN/checkpoints"
     if [ "$MODE" = "from-latest" ]; then
-      echo "utc_time,step,win_rate,seat0_wr,seat1_wr,open_capatk_WON,mid_capatk_WON,peelrate_WON,planets100_WON,reinf_step_early,reinf_step_mid,reinf_dir_fwd,games,checkpoint" > "$OUT"
+      echo "utc_time,step,win_rate,seat0_wr,seat1_wr,outmassed_pct,open_capatk_WON,mid_capatk_WON,peelrate_WON,planets100_WON,reinf_step_early,reinf_step_mid,reinf_dir_fwd,games,checkpoint" > "$OUT"
       newest=$(find "$DIR" -maxdepth 1 -name "torch_step_*${MATCH}*.pt" 2>/dev/null | sort -V | tail -1)
       while IFS= read -r ck; do
         [ -n "$ck" ] || continue

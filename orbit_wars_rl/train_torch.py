@@ -439,6 +439,7 @@ def train(args):
     # policy self-sabotages. Previously eval relied on CLI flags being remembered.
     cfg.model.reinforce_gate_min_planets = args.reinforce_gate_min_planets
     cfg.model.reinforce_forward_only = args.reinforce_forward_only
+    cfg.model.reverse_edge_cooldown = args.reverse_edge_cooldown
     cfg.model.reinforce_garrison_floor = args.reinforce_garrison_floor
     cfg.model.sufficient_commit_factor = args.sufficient_commit_factor
     # PROVENANCE only (eval always clamps via _ship_bin_to_count, so this doesn't change the eval
@@ -460,6 +461,7 @@ def train(args):
                       reinforce_cost=args.reinforce_cost,
                       reinforce_gate_min_planets=args.reinforce_gate_min_planets,
                       reinforce_forward_only=args.reinforce_forward_only,
+                      reverse_edge_cooldown=args.reverse_edge_cooldown,
                       sufficient_commit_factor=args.sufficient_commit_factor,
                       win_margin_coeff=args.win_margin_coeff,
                       shaping_coef=args.shaping_coef,
@@ -1774,6 +1776,13 @@ if __name__ == "__main__":
                              "forward-staging in top-player replays; removes the costless safe-fire "
                              "outlet that floods symmetric self-play. Enemy/neutral targets "
                              "unconstrained. Only active with --allow-reinforce.")
+    parser.add_argument("--reverse-edge-cooldown", type=int, default=0,
+                        help="Reinforce discipline (reverse-edge cooldown): after an own-target "
+                             "reinforce A->B, the reverse B->A reinforce is illegal for this many "
+                             "steps — blocks the A->B->A ping-pong (rank1 recip<=3st <0.01 vs our "
+                             "0.06-0.10). Ownership-change & episode resets clear stale edges so a "
+                             "recaptured planet is never mis-blocked. Pure mask, internalised at "
+                             "inference. 0 = off. Try 3. Enemy/neutral untouched; needs --allow-reinforce.")
     parser.add_argument("--game-phase-features", action="store_true",
                         help="Append 4 game-phase global channels (phase one-hot early<50/mid/late + "
                              "normalized steps-to-next-comet-spawn); global feature dim 11->15. "
@@ -1846,11 +1855,13 @@ if __name__ == "__main__":
                              "(autopsy median churn-loss ~20 → 40 = 2x clears the churn band).")
     parser.add_argument("--decisive-mass-coef", type=float, default=0.0,
                         help="Lever A (force-concentration): ONE-TIME bonus the step our INFLIGHT "
-                             "force converging on an ENEMY planet first reaches the capture floor "
-                             "(ships+prod*3+1 = deb's capture_floor). Board-grounded, not outcome-tied "
-                             "→ injects the concentration gradient self-play can't price (we get "
-                             "out-massed ~2.3x, planets@50=6 invariant). 0 = off. Start ~0.2; read "
-                             "eval out-massed%% / garr@loss-vs-inbound. project_force_concentration_wall.")
+                             "force converging on an ENEMY planet first reaches producer_v2's capture "
+                             "floor = garrison + prod*eta + enemy_inbound + beta*rho(eta)*reachable_"
+                             "enemy_mass + 1 (eta = MAX arrival ETA of our converging mass; see "
+                             "--decisive-mass-beta). Board-grounded, not outcome-tied → injects the "
+                             "concentration gradient self-play can't price (we get out-massed ~2.3x, "
+                             "planets@50=6 invariant). 0 = off. Start ~0.2; read eval out-massed%% / "
+                             "garr@loss-vs-inbound. project_force_concentration_wall.")
     parser.add_argument("--decisive-mass-beta", type=float, default=2.2,
                         help="Weight on producer_v2's reactive-reinforcement floor margin "
                              "(beta*rho(eta)*reachable_enemy_mass). 2.2 = v2-faithful (planner-"

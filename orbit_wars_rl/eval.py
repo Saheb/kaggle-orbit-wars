@@ -77,6 +77,7 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     # still require CLI flags, as before. evaluate_checkpoint uses these unless CLI overrides.
     cfg.model.reinforce_gate_min_planets = int(ckpt_cfg.get("reinforce_gate_min_planets", 0))
     cfg.model.reinforce_forward_only = bool(ckpt_cfg.get("reinforce_forward_only", False))
+    cfg.model.reverse_edge_cooldown = int(ckpt_cfg.get("reverse_edge_cooldown", 0))
     cfg.model.reinforce_garrison_floor = float(ckpt_cfg.get("reinforce_garrison_floor", 0.0))
     cfg.model.sufficient_commit_factor = float(ckpt_cfg.get("sufficient_commit_factor", 0.0))
     cfg.model._discipline_persisted = ("reinforce_gate_min_planets" in ckpt_cfg)
@@ -100,6 +101,11 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
     degenerate (e.g. 1-ship-fleet trap).
     """
     model.eval()
+    # Reverse-edge cooldown state: a per-GAME edge-history dict (canonical rule in
+    # reinforce_cooldown.py), kept in this closure across steps. Reset when the step counter
+    # resets (new game / new seat run), so a prior game's edges never mis-block the next.
+    _cd_K = int(getattr(model, "reverse_edge_cooldown", 0))
+    _cd = {"last": {}, "prev_step": -1}
 
     def agent_fn(obs):
         # obs may be a dict or an Observation namedtuple depending on caller
@@ -118,6 +124,12 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
             }
 
         player = obs["player"]
+        # Reverse-edge cooldown: detect a new game (step counter reset) and clear the edge history.
+        if _cd_K > 0:
+            step_now = int(obs.get("step", 0))
+            if step_now <= _cd["prev_step"]:
+                _cd["last"].clear()
+            _cd["prev_step"] = step_now
         features = extract_features(obs, player, num_players=2)
         masks = compute_action_masks(obs, player)
 
@@ -155,6 +167,9 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 reinforce_forward_only=getattr(model, "reinforce_forward_only", False),
                 reinforce_garrison_floor=getattr(model, "reinforce_garrison_floor", 0.0),
                 sufficient_commit_factor=getattr(model, "sufficient_commit_factor", 0.0),
+                reverse_edge_cooldown=_cd_K,
+                cooldown_last=_cd["last"] if _cd_K > 0 else None,
+                cooldown_step=int(obs.get("step", 0)),
                 veto_stats=veto_stats,
             )
 
@@ -1018,6 +1033,9 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     # Not stored in the checkpoint config, so they come from CLI flags.
     model.reinforce_gate_min_planets = int(reinforce_gate_min_planets)
     model.reinforce_forward_only = bool(reinforce_forward_only)
+    # Reverse-edge cooldown auto-loads from the checkpoint (persisted, stateful — eval keeps the
+    # per-game edge history in build_agent_fn's closure). Parity with training.
+    model.reverse_edge_cooldown = int(getattr(cfg.model, "reverse_edge_cooldown", 0))
     model.reinforce_garrison_floor = float(reinforce_garrison_floor)
     # Sufficient-commit mask (attacks) — also MUST match training. Independent of reinforce.
     model.sufficient_commit_factor = float(sufficient_commit_factor)
@@ -1025,7 +1043,8 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         print(f"Reinforcement: ON (own planets are legal targets) | "
               f"gate>={model.reinforce_gate_min_planets} planets, "
               f"forward_only={model.reinforce_forward_only}, "
-              f"garrison_floor={model.reinforce_garrison_floor}")
+              f"garrison_floor={model.reinforce_garrison_floor}, "
+              f"reverse_edge_cooldown={model.reverse_edge_cooldown}")
     if model.sufficient_commit_factor > 0.0:
         print(f"Sufficient-commit mask: ON | veto attacks with ships <= "
               f"target_defense × {model.sufficient_commit_factor}")

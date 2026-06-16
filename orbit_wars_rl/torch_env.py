@@ -45,6 +45,10 @@ _DM_ETA_SCALE = 12.0    # reinforce_eta_scale
 _DM_HORIZON = 18.0      # config.horizon — reach cap for enemy_mass AND eta cap
 _DM_OVERHEAD = 1.0      # capture_overhead
 
+# Reverse-edge reinforce cooldown — "edge never fired" sentinel; must match
+# reinforce_cooldown.NEVER so the train mask and the eval/export canonical rule agree.
+_REINF_CD_NEVER = -(1 << 30)
+
 # Tensor sizes (worst-case bounds from kaggle env)
 MAX_PLANETS = 48
 MAX_FLEETS = 256
@@ -232,6 +236,7 @@ class VecTorchEnv:
         reinforce_cost: float = 0.0,
         reinforce_gate_min_planets: int = 0,
         reinforce_forward_only: bool = False,
+        reverse_edge_cooldown: int = 0,
         sufficient_commit_factor: float = 0.0,
         game_phase_features: bool = False,
     ):
@@ -275,6 +280,12 @@ class VecTorchEnv:
         #      training-only, internalised at inference. 0/False = off. Enemy/neutral
         #      targets are never constrained.
         self.reinforce_forward_only = bool(reinforce_forward_only)
+        #   REVERSE-EDGE COOLDOWN: after an own-target reinforce A→B, the reverse B→A reinforce
+        #   is illegal for K steps (block the A→B→A ping-pong; rank1 recip<=3st <0.01 vs our
+        #   0.06-0.10). Canonical rule in reinforce_cooldown.py; ownership-change & episode resets
+        #   clear stale edges. Pure mask, training-internalised. 0 = off. project_reinforce_pingpong.
+        self.reverse_edge_cooldown = int(reverse_edge_cooldown)
+        self.reinf_cd = None   # (N, num_players, P, P) long: last step each reinforce edge fired
         #   SUFFICIENT-COMMIT MASK: veto an ATTACK launch (enemy/neutral target) whose
         #   ship_count <= target's current defense × this factor → fragments fired under a
         #   target's garrison become impossible by construction, forcing concentration
@@ -577,6 +588,12 @@ class VecTorchEnv:
         # enemy planet" — so the bonus fires only on the crossing (assembly), not every step.
         self.prev_decisive_suff = torch.zeros(
             self.num_envs, P, self.num_players, dtype=torch.bool, device=self.device)
+        # Reverse-edge reinforce cooldown: last step each (player, src, tgt) reinforce edge fired.
+        # _DM-style NEVER sentinel so untouched edges never trip the (step - last) <= K test.
+        if self.reverse_edge_cooldown > 0:
+            self.reinf_cd = torch.full(
+                (self.num_envs, self.num_players, P, P), _REINF_CD_NEVER,
+                dtype=torch.long, device=self.device)
         return self._state_dict()
 
     def _compute_material(self) -> torch.Tensor:
@@ -681,9 +698,15 @@ class VecTorchEnv:
             w = f_ships * mine
             mass = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
             mass.scatter_add_(1, tgt_safe, w)                          # our inflight per target
-            eta_num = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
-            eta_num.scatter_add_(1, tgt_safe, w * f_eta)
-            eta = eta_num / mass.clamp(min=1.0)                        # ships-weighted mean ETA
+            # MAX (not mean) ETA over our contributing fleets: the floor must hold at the LAST
+            # arrival — when all the counted mass is actually present — and rho(eta) then gives the
+            # enemy the full reaction window. Mean ETA gave FALSE credit: a fast large fleet + a
+            # slower supporting fleet could satisfy the floor at the averaged time before the
+            # combined mass co-arrives (P1 faithfulness fix). Non-mine fleets get -1 so they never
+            # win the max; the 0-init is harmless (targets with no mine fleet have mass=0 → suff=False).
+            eta_src = torch.where(mine.bool(), f_eta, torch.full_like(f_eta, -1.0))
+            eta = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
+            eta.scatter_reduce_(1, tgt_safe, eta_src, reduce='amax', include_self=True)
             # enemy fleets already inbound to the target (current reinforcements en route)
             enemy_f = (valid_f & (f_owner != pl) & (f_owner >= 0)).float()
             inbound = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
@@ -1180,6 +1203,19 @@ class VecTorchEnv:
                 # envs with no live enemy planet: forward-staging is moot → don't constrain
                 forward_ok = forward_ok | (~enemy_planet.any(dim=1)).view(-1, 1, 1)
                 target_mask = target_mask & (~is_own | forward_ok)
+            # Reverse-edge cooldown: an own (reinforce) target d is illegal from source s if the
+            # REVERSE edge d→s reinforced within K steps (block A→B→A ping-pong). reinf_cd[n,p,u,v]
+            # = last step reinforce u→v fired; reverse edge active iff (step - reinf_cd) <= K, so
+            # candidate s→d is blocked by reinf_cd[d,s] (the transpose). Ownership/episode resets
+            # keep it from mis-blocking recaptured planets. reinforce_cooldown.py is the canon.
+            if self.reverse_edge_cooldown > 0 and self.reinf_cd is not None:
+                cd = self.reinf_cd[:, player]                            # (N, P_u, P_v) = u→v last step
+                rev_active = (self.step_count.view(-1, 1, 1) - cd) <= self.reverse_edge_cooldown
+                blocked = rev_active.transpose(1, 2)                     # (N, P_src, P_tgt): s→d blocked by d→s
+                blocked_slot = torch.gather(
+                    blocked, 1, owned_idx.unsqueeze(-1).expand(-1, -1, owner.shape[1]))  # (N, MAX_OWNED, P)
+                is_own_cd = (target_owner == player)
+                target_mask = target_mask & ~(is_own_cd & blocked_slot)
         else:
             target_mask = target_alive & (target_owner != player) & slot_valid.unsqueeze(-1)
         # Per-env owned_count for the model
@@ -1551,6 +1587,24 @@ class VecTorchEnv:
             if self.reinforce_garrison_floor > 0.0:
                 would_underflow = is_reinforce & ((src_ships - ship_count) < self.reinforce_garrison_floor)
                 can_fire = can_fire & ~would_underflow
+            # Reverse-edge cooldown bookkeeping (after the floor veto, so only REALIZED reinforces
+            # arm the reverse block): (1) clear edges touching any planet we don't currently own —
+            # recapture starts clean (the ownership-change reset, better than a static exception);
+            # (2) record this step's executed reinforces src→tgt at the current step.
+            if self.reverse_edge_cooldown > 0 and self.reinf_cd is not None:
+                cur_owner = self.planets[:, :, 1].long()                 # (N, P)
+                no = (cur_owner != owner_id)                             # (N, P): not ours now
+                cd = self.reinf_cd[:, owner_id]                          # (N, P, P)
+                clear = no.unsqueeze(-1) | no.unsqueeze(1)               # edge touches a non-owned planet
+                cd = torch.where(clear, torch.full_like(cd, _REINF_CD_NEVER), cd)
+                rec = can_fire & is_reinforce                            # (N, MAX_OWNED)
+                step_now = self.step_count                               # (N,)
+                for slot in range(rec.shape[1]):
+                    m = rec[:, slot]
+                    if bool(m.any()):
+                        ni = m.nonzero(as_tuple=True)[0]
+                        cd[ni, owned_idx[ni, slot], target_idx[ni, slot]] = step_now[ni]
+                self.reinf_cd[:, owner_id] = cd
             # #2 Per-ship transit cost: accumulate ships sent to own planets this step
             # for the launching player; the penalty is applied to the reward in step().
             # Counts only launches that actually fire (post-floor-veto).
@@ -2012,6 +2066,15 @@ class VecTorchEnv:
             self.cap_age[done] = 0
             self.cap_credited[done] = False
             self.cap_is_capture[done] = False
+        # Re-arm the decisive-mass crossing detector for done envs: fresh boards have no
+        # fleets (mass=0), so terminal-step sufficiency must NOT carry over — else a decisive
+        # opening launch landing on a previously-armed index would be suppressed (uncredited).
+        if self.decisive_mass_coef != 0.0 and done.any():
+            self.prev_decisive_suff[done] = False
+        # Reverse-edge cooldown: clear the per-edge history for fresh games (else a prior game's
+        # reinforce edges mis-block the new board — same boundary bug class as decmass re-arm).
+        if self.reverse_edge_cooldown > 0 and self.reinf_cd is not None and done.any():
+            self.reinf_cd[done] = _REINF_CD_NEVER
         return self._state_dict(), terminal_rewards, done
 
     # ---------------------------------------------------------------------
