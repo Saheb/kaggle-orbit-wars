@@ -466,6 +466,10 @@ class PPOLearner:
                 "sufficient_commit_factor": float(getattr(model_cfg, "sufficient_commit_factor", 0.0)),
                 # provenance: how the ckpt was trained (eval always clamps, so not an eval-contract field)
                 "ship_overflow_mode": str(getattr(model_cfg, "ship_overflow_mode", "drop")),
+                # reward-shaping provenance only; eval/export do not consume these.
+                "capture_utility_coef": float(getattr(model_cfg, "capture_utility_coef", 0.0)),
+                "capture_utility_window": int(getattr(model_cfg, "capture_utility_window", 30)),
+                "capture_idle_penalty": float(getattr(model_cfg, "capture_idle_penalty", 0.0)),
             }
         return {
             "model": self.model.state_dict(),

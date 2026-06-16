@@ -59,6 +59,26 @@ def test_single_external_is_uniform_noop():
     assert pool.sample(rng=random.Random(0)).name == "solo", "1 external must still be picked"
 
 
+def test_external_fraction_leaves_pool_self_slice():
+    pool = _pool(pfsp_externals=True)
+    pool.external_fraction = 0.8
+    pool.members.append(PoolMember(name="self_step_0", kind="self", step_saved=0))
+    rng = random.Random(1)
+    n = 20000
+    external = 0
+    self_snap = 0
+    for _ in range(n):
+        m = pool.sample(rng=rng)
+        if m.kind == "external_heuristic":
+            external += 1
+        elif m.kind == "self":
+            self_snap += 1
+    ef = external / n
+    sf = self_snap / n
+    assert abs(ef - 0.8) < 0.03, f"external slice should be ~0.8, got {ef:.3f}"
+    assert abs(sf - 0.2) < 0.03, f"pool-self slice should be ~0.2, got {sf:.3f}"
+
+
 def test_persists_across_save_load():
     import torch  # noqa
     for val in (True, False):
@@ -74,5 +94,6 @@ if __name__ == "__main__":
     test_uniform_when_off()
     test_pfsp_weighted_when_on()
     test_single_external_is_uniform_noop()
+    test_external_fraction_leaves_pool_self_slice()
     test_persists_across_save_load()
-    print("PASS: pfsp-externals — uniform off, PFSP-weighted on, single-noop, save/load round-trip")
+    print("PASS: pfsp-externals — uniform off, PFSP-weighted on, self slice, single-noop, save/load round-trip")

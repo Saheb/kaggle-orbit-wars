@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# ONE controller for ALL run watchers (sync + held-out eval), on ANY platform.
+# ONE controller for run watchers (sync + held-out eval), on ANY platform.
 # Solves the recurring "stale prior-run watcher still pointed at the old folder" bug two ways:
 #   1. `start` ALWAYS tears down every existing watcher before launching new ones.
 #   2. each watcher self-terminates when it is no longer the active run — it checks the marker
 #      file gpu_run_artifacts/.active_run every cycle and exits if RUN changed. So even a watcher
 #      that escapes the pkill dies on its own at the next launch.
+# For intentional concurrent GPU runs, use `start-parallel`: it uses a per-run marker
+# (`gpu_run_artifacts/<run>/.watch_active`) and does not tear down other watchers.
 #
 # Usage:
 #   run_watchers.sh start <run> <platform> <target> [held_out_opp]
+#   run_watchers.sh start-parallel <run> <platform> <target> [held_out_opp]
 #       platform = jarvis | gcp | custom
 #         jarvis : target = IP            (ssh -i ~/.ssh/jarvis-labs-key root@IP, /home paths)
 #         gcp    : target = config-ssh alias (ssh <alias>, ~/orbit_wars_rl paths)
 #         custom : target unused; set env RSYNC_SSH / HOST / REMOTE_LOG_DIR / REMOTE_CKPT_DIR yourself
+#   run_watchers.sh stop-run <run>        # stop one parallel watcher set
 #   run_watchers.sh stop                  # kill all watchers
-#   run_watchers.sh status                # active run + live procs
+#   run_watchers.sh status                # active runs + live procs
 #
 #   <run> is BOTH the local artifact folder (gpu_run_artifacts/<run>/) and, by default, the
 #   substring matched in remote log/checkpoint filenames. For a multi-arm A/B whose arms use
@@ -31,16 +35,65 @@
 set -uo pipefail
 ROOT=/Users/saheb/home/kaggle-orbit-wars
 PY="$ROOT/orbit_wars_rl/.venv/bin/python"
+SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 MARKER="$ROOT/gpu_run_artifacts/.active_run"
 POLL="${POLL:-120}"
 
-_still_active() { [ "$(head -1 "$MARKER" 2>/dev/null | awk '{print $1}')" = "$1" ]; }
+run_marker() { echo "$ROOT/gpu_run_artifacts/$1/.watch_active"; }
+
+_still_active() {
+  local RUN="$1" RM
+  RM="$(run_marker "$RUN")"
+  if [ -f "$RM" ]; then
+    [ "$(head -1 "$RM" 2>/dev/null | awk '{print $1}')" = "$RUN" ]
+  else
+    [ "$(head -1 "$MARKER" 2>/dev/null | awk '{print $1}')" = "$RUN" ]
+  fi
+}
 
 stop_all() {
+  : > "$MARKER"
+  find "$ROOT/gpu_run_artifacts" -maxdepth 2 -name .watch_active -exec sh -c ': > "$1"' sh {} \; 2>/dev/null
   pkill -f "run_watchers.sh _" 2>/dev/null && echo "stopped managed watchers" || echo "no managed watchers running"
   # also catch legacy ad-hoc per-run watchers from before this controller existed
   pkill -f "gpu_run_artifacts/.*sync_watcher.sh" 2>/dev/null && echo "stopped legacy sync_watcher" || true
   pkill -f "gpu_run_artifacts/.*_watch.sh" 2>/dev/null && echo "stopped legacy eval watchers" || true
+}
+
+stop_run() {
+  local RUN="$1" RM
+  RM="$(run_marker "$RUN")"
+  mkdir -p "$ROOT/gpu_run_artifacts/$RUN"
+  : > "$RM"
+  if [ "$(head -1 "$MARKER" 2>/dev/null | awk '{print $1}')" = "$RUN" ]; then
+    : > "$MARKER"
+  fi
+  pkill -f "run_watchers.sh _sync $RUN" 2>/dev/null || true
+  pkill -f "run_watchers.sh _eval $RUN" 2>/dev/null || true
+  echo "stopped watchers for run=$RUN"
+}
+
+start_loops() {
+  local RUN="$1" PLAT="$2" TGT="$3" OPP="$4" MODE="$5"
+  if [ "$MODE" = "parallel" ]; then
+    echo "$RUN $PLAT $TGT" > "$(run_marker "$RUN")"
+  else
+    echo "$RUN $PLAT $TGT" > "$MARKER"
+    rm -f "$(run_marker "$RUN")"
+  fi
+  nohup bash "$SCRIPT_PATH" _sync "$RUN" >/dev/null 2>&1 &
+  nohup bash "$SCRIPT_PATH" _eval "$RUN" >/dev/null 2>&1 &
+}
+
+sync_once() {
+  local RUN="$1"; . "$ROOT/gpu_run_artifacts/$1/.watch_env"
+  local DST="$ROOT/gpu_run_artifacts/$1"; mkdir -p "$DST/logs" "$DST/checkpoints"
+  rsync -az -e "$RSYNC_SSH" --include="train_gpu_phase1_${MATCH}*.log" --exclude='*' \
+    "$HOST:$REMOTE_LOG_DIR" "$DST/logs/"
+  rsync -azL -e "$RSYNC_SSH" \
+    --include="torch_step_*${MATCH}*.pt" --include="pool_step_*${MATCH}*.pt" \
+    --include="torch_best_${MATCH}*.pt" --exclude='*' \
+    "$HOST:$REMOTE_CKPT_DIR" "$DST/checkpoints/"
 }
 
 # resolve a platform preset into the per-run .watch_env (sourced by the loops)
@@ -146,10 +199,15 @@ case "${1:-}" in
     TGT="${4:?need target (IP for jarvis, ssh-alias for gcp)}"; OPP="${5:-opponents/candidate_ajay_1200.py}"
     write_env "$RUN" "$PLAT" "$TGT" "$OPP"
     stop_all; sleep 1
-    echo "$RUN $PLAT $TGT" > "$MARKER"
-    nohup bash "$0" _sync "$RUN" >/dev/null 2>&1 &
-    nohup bash "$0" _eval "$RUN" >/dev/null 2>&1 &
+    start_loops "$RUN" "$PLAT" "$TGT" "$OPP" "exclusive"
     echo "started watchers: run=$RUN platform=$PLAT target=$TGT held-out-eval=$OPP"
+    ;;
+  start-parallel)
+    RUN="${2:?usage: start-parallel <run> <platform> <target> [opp]}"; PLAT="${3:?need platform jarvis|gcp|custom}"
+    TGT="${4:?need target (IP for jarvis, ssh-alias for gcp)}"; OPP="${5:-opponents/candidate_ajay_1200.py}"
+    write_env "$RUN" "$PLAT" "$TGT" "$OPP"
+    start_loops "$RUN" "$PLAT" "$TGT" "$OPP" "parallel"
+    echo "started parallel watchers: run=$RUN platform=$PLAT target=$TGT held-out-eval=$OPP"
     ;;
   add-eval)
     # Add a SECOND held-out eval loop for another opponent to the CURRENTLY ACTIVE run,
@@ -176,15 +234,32 @@ case "${1:-}" in
       done < <(find "$DIR" -maxdepth 1 -name "torch_step_*${MATCH}*.pt" 2>/dev/null)
       echo "seeded $(basename "$OUT") to start from latest: $(basename "${newest:-<none>}")"
     fi
-    nohup bash "$0" _eval "$RUN" "$OPP" >/dev/null 2>&1 &
+    nohup bash "$SCRIPT_PATH" _eval "$RUN" "$OPP" >/dev/null 2>&1 &
     echo "added eval loop: run=$RUN opp=$OPP -> $(basename "$OUT")"
     ;;
-  stop)    : > "$MARKER"; stop_all ;;
+  sync-once)
+    RUN="${2:?usage: sync-once <run>}"
+    sync_once "$RUN"
+    ;;
+  stop-run)
+    RUN="${2:?usage: stop-run <run>}"
+    stop_run "$RUN"
+    ;;
+  stop)    stop_all ;;
   status)
-    echo "active run: $(cat "$MARKER" 2>/dev/null || echo none)"
-    echo "live watcher procs:"; pgrep -af "run_watchers.sh _" || echo "  (none)"
+    echo "exclusive active run: $(cat "$MARKER" 2>/dev/null || echo none)"
+    echo "parallel active runs:"
+    found=0
+    while IFS= read -r f; do
+      line="$(cat "$f" 2>/dev/null)"
+      [ -n "$line" ] || continue
+      echo "  $line"
+      found=1
+    done < <(find "$ROOT/gpu_run_artifacts" -maxdepth 2 -name .watch_active 2>/dev/null | sort)
+    [ "$found" = 1 ] || echo "  (none)"
+    echo "live watcher procs:"; pgrep -af "run_watchers.sh _" 2>/dev/null || echo "  (none)"
     ;;
   _sync)  _sync "$2" ;;
   _eval)  _eval "$2" "${3:-}" ;;
-  *) echo "usage: $0 {start <run> <platform> <target> [opp] | add-eval <run> <opp> [from-latest] | stop | status}"; exit 1 ;;
+  *) echo "usage: $0 {start|start-parallel <run> <platform> <target> [opp] | add-eval <run> <opp> [from-latest] | sync-once <run> | stop-run <run> | stop | status}"; exit 1 ;;
 esac

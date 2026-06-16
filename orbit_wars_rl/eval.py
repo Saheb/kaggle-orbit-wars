@@ -197,6 +197,8 @@ _CONV_MILESTONES = (16, 32, 50, 100)
 # mid-game collapse. <50 isolates that phase. (phase2 / metrics.md)
 _LAUNCH_WINDOW = 50
 _MID_WINDOW = 100      # mid-game cap/atk window = [_LAUNCH_WINDOW, _MID_WINDOW) = steps 50-100
+_TRIAGE_LOSS_WINDOWS = (10, 20, 30)
+_SAFE_REINF_LOOKAHEAD = 30
 # Isaiah (#1 player) hoard reference at the same milestones. Contested phase (16-50)
 # is the clean read: ~half the army deployed, ~11-22 ships/planet. The @100 jump
 # (garr 0.87, 60 ships/planet) is won-game accumulation, not hoarding.
@@ -559,6 +561,7 @@ def game_conversion(steps, seat):
     # lost_caps/captures is the recapture/turnover rate — immune to the end->0 churn degeneracy.
     # Home/initial planets are excluded by construction (never entered cap_step).
     cap_step: dict = {}
+    cap_class: dict = {}         # triage class at capture time (capture-born doomed read)
     lost_caps = 0
     hold_durations: list = []   # steps held before losing (lost episodes only; held-to-end censored)
     # lost-capture AUTOPSY (why do held planets fall?): measured at the step of loss from the t-1
@@ -580,8 +583,16 @@ def game_conversion(steps, seat):
     reinf_to_lost = 0.0
     reinf_class_ships = [0.0, 0.0, 0.0, 0.0]   # reinforce ships by TARGET class at launch [safe,cheap,exp,hopeless]
     lost_by_class = [0, 0, 0, 0]               # planets we LOST, by their threat class at loss-time
+    lost_by_class_cap_nt = [0, 0, 0, 0]        # captured planet losses only, excluding terminal collapse
     hopeless_lost_reinforced = 0               # hopeless losses we'd poured ships into (good-after-bad)
     hopeless_lost_abandoned = 0                # hopeless losses we correctly let go (recycled the mass)
+    hopeless_lost_reinf_ships = 0.0            # ship-weighted version of hopeless_lost_reinforced
+    reinf_events_by_pid: dict = {}             # pid -> [(launch_step, ships, class)] for loss-window reads
+    reinf_lost_within = [0.0, 0.0, 0.0]        # reinforce ships whose target is lost within 10/20/30 steps
+    safe_reinf_events: list = []               # (launch_step, target_pid, ships) for future utility read
+    safe_reinf_util = [0.0, 0.0, 0.0]          # safe-class reinforce ships -> [later attack, frontline, idle]
+    cap_born_class = [0, 0, 0, 0]              # captures by triage class immediately after capture
+    cap_born_lost_nt = [0, 0, 0, 0]            # nonterminal captured losses, bucketed by birth class
     reinf_bin = [0] * len(_REINF_BINS)   # own-target launches by empire size at launch
     atk_bin = [0] * len(_REINF_BINS)     # attack launches by empire size at launch
     # launch_rate / fire_frac (vs Isaiah 0.036 / 0.17): ALL legal launches (attack+reinforce),
@@ -627,6 +638,7 @@ def game_conversion(steps, seat):
         p1 = steps[t][seat].observation.get("planets")
         acts = steps[t][seat].action or []
         if p1:
+            terminal_loss_step = not any(int(q[1]) == seat for q in p1)
             owned_now = garrison_now = 0
             for p in p1:
                 pid, own = p[0], int(p[1])
@@ -634,6 +646,8 @@ def game_conversion(steps, seat):
                     owned_now += 1
                     garrison_now += p[5]
                 was = prev.get(pid)
+                _captured_loss = False
+                _born_cls = None
                 if was is not None and was != seat and own == seat:
                     caps += 1
                     if t < _LAUNCH_WINDOW:
@@ -642,7 +656,13 @@ def game_conversion(steps, seat):
                         caps_mid += 1                  # mid-game (50-100) captures
                     cap_step[pid] = t                  # open a hold episode
                     cap_garr[pid] = p[5]               # garrison right after capture
+                    _f1cap = steps[t][seat].observation.get("fleets") or []
+                    _born_cls = _threat_class(p1, _f1cap, p, seat)
+                    cap_class[pid] = _born_cls
+                    cap_born_class[_born_cls] += 1
                 elif was == seat and own != seat and pid in cap_step:
+                    _captured_loss = True
+                    _born_cls = cap_class.get(pid)
                     hold_durations.append(t - cap_step[pid])   # lost what we took
                     lost_caps += 1
                     # AUTOPSY: why? use t-1 state (just before the flip).
@@ -663,6 +683,7 @@ def game_conversion(steps, seat):
                         else:
                             loss_mode[3] += 1                          # OTHER
                     del cap_step[pid]
+                    cap_class.pop(pid, None)
                 # TRIAGE on LOSS (any owned planet, incl. home): classify it at the loss decision
                 # (t-1) → was it cheaply savable (a MISS) or hopeless (correctly let go)? + route the
                 # reinforce ships we'd poured into it to "to_lost", and for hopeless losses record
@@ -673,13 +694,25 @@ def game_conversion(steps, seat):
                         _f0loss = steps[t - 1][seat].observation.get("fleets") or []
                         _cls = _threat_class(p0, _f0loss, _t0, seat)
                         lost_by_class[_cls] += 1
+                        if _captured_loss and not terminal_loss_step:
+                            lost_by_class_cap_nt[_cls] += 1
+                            if _born_cls is not None:
+                                cap_born_lost_nt[_born_cls] += 1
                         if _cls == 3:
-                            if reinf_into.get(pid, 0.0) > 0:
+                            _lost_reinf_ships = reinf_into.get(pid, 0.0)
+                            if _lost_reinf_ships > 0:
                                 hopeless_lost_reinforced += 1
+                                hopeless_lost_reinf_ships += _lost_reinf_ships
                             else:
                                 hopeless_lost_abandoned += 1
                     if pid in reinf_into:
                         reinf_to_lost += reinf_into.pop(pid)
+                    if pid in reinf_events_by_pid:
+                        for _rt, _rs, _rcls in reinf_events_by_pid.pop(pid):
+                            _age = t - _rt
+                            for _wi, _ww in enumerate(_TRIAGE_LOSS_WINDOWS):
+                                if _age <= _ww:
+                                    reinf_lost_within[_wi] += _rs
                 prev[pid] = own
             last = p1
             if t in planets_at:
@@ -743,7 +776,11 @@ def game_conversion(steps, seat):
                 # TRIAGE: tally these ships against the target planet (resolved to_lost/to_saved on
                 # outcome) + bucket by the target's hold-triage class at decision time (obs t-1).
                 reinf_into[tgt[0]] = reinf_into.get(tgt[0], 0.0) + sent
-                reinf_class_ships[_threat_class(p0, f0, tgt, seat)] += sent
+                _rcls = _threat_class(p0, f0, tgt, seat)
+                reinf_class_ships[_rcls] += sent
+                reinf_events_by_pid.setdefault(tgt[0], []).append((t, float(sent), _rcls))
+                if _rcls == 0:
+                    safe_reinf_events.append((t, int(tgt[0]), float(sent)))
                 if _ecx is not None:               # direction: target vs source distance to enemy
                     dS = math.hypot(src[2] - _ecx, src[3] - _ecy)
                     dT = math.hypot(tgt[2] - _ecx, tgt[3] - _ecy)
@@ -805,6 +842,37 @@ def game_conversion(steps, seat):
             fire_steps += 1
             fire_frac_sum += fired_this_step / owned_dec
         launch_count += fired_this_step
+    for _rt, _pid, _ships in safe_reinf_events:
+        _attacked = False
+        _frontline = False
+        for _s in range(_rt + 1, min(T, _rt + _SAFE_REINF_LOOKAHEAD + 1)):
+            if seat >= len(steps[_s]):
+                continue
+            _src_prev = None
+            if _s > 0 and seat < len(steps[_s - 1]):
+                _ps_prev = steps[_s - 1][seat].observation.get("planets") or []
+                _src_prev = next((q for q in _ps_prev if q[0] == _pid and int(q[1]) == seat), None)
+            if _src_prev is not None:
+                for _mv in (steps[_s][seat].action or []):
+                    if not _mv or len(_mv) < 3 or int(_mv[0]) != _pid:
+                        continue
+                    _tgt_prev = _resolve_launch_target(_ps_prev, _src_prev, float(_mv[1]))
+                    if _tgt_prev is not None and int(_tgt_prev[1]) != seat:
+                        _attacked = True
+                        break
+            if _attacked:
+                break
+            _ps_now = steps[_s][seat].observation.get("planets") or []
+            _now = next((q for q in _ps_now if q[0] == _pid), None)
+            if _now is None or int(_now[1]) != seat:
+                break
+            _enemy_now = [q for q in _ps_now if int(q[1]) != seat and int(q[1]) >= 0]
+            _own_now = [q for q in _ps_now if int(q[1]) == seat]
+            if _enemy_now and _own_now:
+                _de_now = lambda q: min(math.hypot(q[2] - e[2], q[3] - e[3]) for e in _enemy_now)
+                if _pid in {q[0] for q in sorted(_own_now, key=_de_now)[:3]}:
+                    _frontline = True
+        safe_reinf_util[0 if _attacked else (1 if _frontline else 2)] += _ships
     end_planets = sum(1 for p in (last or []) if int(p[1]) == seat)
     reinf_to_saved = float(sum(reinf_into.values()))   # reinforce ships on planets still held at end
     reinf_recip, reinf_recip3_ph = _reinf_reciprocity(reinf_edges)
@@ -829,8 +897,13 @@ def game_conversion(steps, seat):
            "dm_ratios_ph": dm_ratios_ph, "hold_ph": hold_ph, "hold_age": hold_age,
            "reinf_class_ships": reinf_class_ships, "reinf_to_lost": reinf_to_lost,
            "reinf_to_saved": reinf_to_saved, "lost_by_class": lost_by_class,
+           "lost_by_class_cap_nt": lost_by_class_cap_nt,
            "hopeless_lost_reinforced": hopeless_lost_reinforced,
-           "hopeless_lost_abandoned": hopeless_lost_abandoned}
+           "hopeless_lost_abandoned": hopeless_lost_abandoned,
+           "hopeless_lost_reinf_ships": hopeless_lost_reinf_ships,
+           "reinf_lost_within": reinf_lost_within,
+           "safe_reinf_util": safe_reinf_util,
+           "cap_born_class": cap_born_class, "cap_born_lost_nt": cap_born_lost_nt}
     for ms in _CONV_MILESTONES:
         out[f"p{ms}"] = planets_at[ms]
         out[f"g{ms}"] = garrison_at[ms]
@@ -885,7 +958,12 @@ def new_conversion_acc():
                       "to_lost": 0.0, "to_saved": 0.0,
                       "to_lost_won": 0.0, "to_saved_won": 0.0, "to_lost_lost": 0.0, "to_saved_lost": 0.0,
                       "lost_by_class": [0, 0, 0, 0],
-                      "hopeless_reinf": 0, "hopeless_aband": 0},
+                      "lost_by_class_cap_nt": [0, 0, 0, 0],
+                      "hopeless_reinf": 0, "hopeless_aband": 0,
+                      "hopeless_reinf_ships": 0.0,
+                      "lost_within": [0.0, 0.0, 0.0],
+                      "safe_util": [0.0, 0.0, 0.0],
+                      "cap_born": [0, 0, 0, 0], "cap_born_lost_nt": [0, 0, 0, 0]},
            # outmassed/WR conditioned on the OPENING-expansion bucket (planets@32): separates the
            # upstream economic-tempo lever ("we didn't expand fast/wide enough → less mass before the
            # peel") from the tactical aggregation/retention wall. Per bucket: lost-capture loss_mode
@@ -942,10 +1020,17 @@ def add_conversion(acc, conv, won=None):
     for i in range(4):
         tr["class_ships"][i] += conv["reinf_class_ships"][i]
         tr["lost_by_class"][i] += conv["lost_by_class"][i]
+        tr["lost_by_class_cap_nt"][i] += conv["lost_by_class_cap_nt"][i]
+        tr["cap_born"][i] += conv["cap_born_class"][i]
+        tr["cap_born_lost_nt"][i] += conv["cap_born_lost_nt"][i]
     tr["to_lost"] += conv["reinf_to_lost"]
     tr["to_saved"] += conv["reinf_to_saved"]
     tr["hopeless_reinf"] += conv["hopeless_lost_reinforced"]
     tr["hopeless_aband"] += conv["hopeless_lost_abandoned"]
+    tr["hopeless_reinf_ships"] += conv["hopeless_lost_reinf_ships"]
+    for i in range(3):
+        tr["lost_within"][i] += conv["reinf_lost_within"][i]
+        tr["safe_util"][i] += conv["safe_reinf_util"][i]
     if won is not None:
         suf = "won" if won else "lost"
         for i in range(4):
@@ -1128,7 +1213,11 @@ def _fmt_conversion(acc):
         return part / whole if whole else 0.0
     _cs = _tr["class_ships"]; _cst = sum(_cs) or 1.0
     _lbc = _tr["lost_by_class"]; _lbt = sum(_lbc) or 1.0
+    _lbc_cap = _tr["lost_by_class_cap_nt"]; _lbc_capt = sum(_lbc_cap) or 1.0
     _hl = _tr["hopeless_reinf"] + _tr["hopeless_aband"]
+    _lw = _tr["lost_within"]; _reinf_mass = sum(_cs) or 1.0
+    _su = _tr["safe_util"]; _sut = sum(_su) or 1.0
+    _born = _tr["cap_born"]; _born_lost = _tr["cap_born_lost_nt"]
     def _hopeless_share(suf):                       # reinforce mass → hopeless targets, won/lost/overall
         cs = _tr[f"class_ships_{suf}"] if suf else _cs
         return _share(cs[3], sum(cs) or 1.0)
@@ -1141,9 +1230,23 @@ def _fmt_conversion(acc):
         f"exp-save {_share(_cs[2],_cst):.0%} HOPELESS {_share(_cs[3],_cst):.0%}  (β={_DM_BETA_EVAL:.1f})\n"
         f"     reinforce mass on LOST planets {_tolost_share(''):.0%} (to-saved {1-_tolost_share(''):.0%})  ·  "
         f"of LOST planets: cheap-save-MISSED {_share(_lbc[1],_lbt):.0%} hopeless(ok-to-drop) {_share(_lbc[3],_lbt):.0%}\n"
-        f"     of HOPELESS losses: wasted-ships {_share(_tr['hopeless_reinf'],_hl or 1):.0%} abandoned {_share(_tr['hopeless_aband'],_hl or 1):.0%} (n{_hl})  ·  "
+        f"     captured-only nonterminal LOST: cheap-save-MISSED {_share(_lbc_cap[1],_lbc_capt):.0%} "
+        f"hopeless(ok-to-drop) {_share(_lbc_cap[3],_lbc_capt):.0%} (n{sum(_lbc_cap)})\n"
+        f"     hopeless-loss events: reinforced {_share(_tr['hopeless_reinf'],_hl or 1):.0%} abandoned {_share(_tr['hopeless_aband'],_hl or 1):.0%} (n{_hl}); "
+        f"ship-waste {_tr['hopeless_reinf_ships']:.0f} ({_share(_tr['hopeless_reinf_ships'], _tr['to_lost'] or 1.0):.0%} of to-lost mass)\n"
+        f"     lost≤{_TRIAGE_LOSS_WINDOWS[0]}/{_TRIAGE_LOSS_WINDOWS[1]}/{_TRIAGE_LOSS_WINDOWS[2]}st after reinforce "
+        f"{_share(_lw[0],_reinf_mass):.0%}/{_share(_lw[1],_reinf_mass):.0%}/{_share(_lw[2],_reinf_mass):.0%} of reinforce mass  ·  "
+        f"safe-reinf≤{_SAFE_REINF_LOOKAHEAD} utility attack/frontline/idle "
+        f"{_share(_su[0],_sut):.0%}/{_share(_su[1],_sut):.0%}/{_share(_su[2],_sut):.0%}\n"
+        f"     capture-born class safe/cheap/exp/hopeless "
+        f"{_share(_born[0],sum(_born) or 1):.0%}/{_share(_born[1],sum(_born) or 1):.0%}/"
+        f"{_share(_born[2],sum(_born) or 1):.0%}/{_share(_born[3],sum(_born) or 1):.0%}; "
+        f"nonterminal lost-rate by birth "
+        f"{_share(_born_lost[0],_born[0] or 1):.0%}/{_share(_born_lost[1],_born[1] or 1):.0%}/"
+        f"{_share(_born_lost[2],_born[2] or 1):.0%}/{_share(_born_lost[3],_born[3] or 1):.0%}\n"
+        f"     "
         f"WON/LOST hopeless-reinf-share {_hopeless_share('won'):.0%}/{_hopeless_share('lost'):.0%}  to-lost {_tolost_share('won'):.0%}/{_tolost_share('lost'):.0%}\n"
-        f"   [high HOPELESS/to-lost + winners lower = bad triage (reinforce wrong planets), not 'reinforce more']\n")
+        f"   [born-hopeless high = capture quality/follow-up issue; safe-idle high = staging/churn, not useful defense]\n")
     # outmassed/WR conditioned on opening expansion (planets@32 bucket). The verdict is computed
     # from THIS panel (>=6 vs <=4), not asserted — if >=6 has materially lower out-massed / higher
     # WR, opening expansion looks upstream; if not, the wall is downstream (defensive/tactical).

@@ -225,6 +225,9 @@ class VecTorchEnv:
         speed_coef: float = 0.0,
         consolidation_coef: float = 0.0,
         consolidation_steps: int = 40,
+        capture_utility_coef: float = 0.0,
+        capture_utility_window: int = 30,
+        capture_idle_penalty: float = 0.0,
         decisive_mass_coef: float = 0.0,
         decisive_mass_beta: float = _DM_BETA,
         decisive_diag: bool = False,
@@ -380,6 +383,17 @@ class VecTorchEnv:
         # project_force_concentration_wall; KILL if reinforce-rate/garr floods like defense_coef.
         self.consolidation_coef = float(consolidation_coef)
         self.consolidation_steps = int(consolidation_steps)
+        # Capture follow-through reward (project_capture_quality): the triage diagnostic showed
+        # the wall is not "reinforce more"; captured planets are often born/left unproductive.
+        # A net-new capture gets one window to prove utility: either it launches an ATTACK from
+        # that planet, or it is still one of the holder's top-3 frontline planets at window end.
+        # Optional idle penalty prices captures that do neither. Off by default.
+        self.capture_utility_coef = float(capture_utility_coef)
+        self.capture_utility_window = int(capture_utility_window)
+        self.capture_idle_penalty = float(capture_idle_penalty)
+        self.capture_utility_active = (
+            self.capture_utility_coef != 0.0 or self.capture_idle_penalty != 0.0
+        )
         # Lever A — decisive-mass reward: +coef once when our INFLIGHT force converging on an
         # ENEMY target first reaches the capture floor (projected defenders + 3-turn reaction +
         # overhead — deb's capture_floor). Board-grounded, NOT outcome-tied → injects the force-
@@ -597,6 +611,13 @@ class VecTorchEnv:
         self.cap_age = torch.zeros(self.num_envs, P, dtype=torch.long, device=self.device)
         self.cap_credited = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
         self.cap_is_capture = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
+        # Capture-utility state mirrors cap_* but tracks whether the current holding episode has
+        # used the captured planet as an attack source within the utility window.
+        self.cu_owner = owner_p.clone()
+        self.cu_age = torch.zeros(self.num_envs, P, dtype=torch.long, device=self.device)
+        self.cu_credited = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
+        self.cu_is_capture = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
+        self.cu_used_attack = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
         # Lever A: per (env, planet, player) "inflight force already sufficient to take this
         # enemy planet" — so the bonus fires only on the crossing (assembly), not every step.
         self.prev_decisive_suff = torch.zeros(
@@ -641,6 +662,78 @@ class VecTorchEnv:
                 cnt = (ready & (cur_owner == pl)).float().sum(dim=1)    # (N,) planets consolidated
                 terminal_rewards[:, pl] = terminal_rewards[:, pl] + self.consolidation_coef * cnt
             self.cap_credited = self.cap_credited | ready
+        return terminal_rewards
+
+    def _capture_frontline_mask(self, cur_owner: torch.Tensor) -> torch.Tensor:
+        """Top-3 owned planets nearest to any enemy planet for each player/env."""
+        P = cur_owner.shape[1]
+        x = self.planets[:, :, 2]
+        y = self.planets[:, :, 3]
+        alive = self.planet_alive
+        dx = x.unsqueeze(2) - x.unsqueeze(1)
+        dy = y.unsqueeze(2) - y.unsqueeze(1)
+        dist = torch.sqrt(dx * dx + dy * dy + 1e-6)                 # (N, P, P)
+        frontline = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
+        big = torch.full((self.num_envs, P), 1e9, dtype=torch.float32, device=self.device)
+        k = min(3, P)
+        for pl in range(self.num_players):
+            mine = (cur_owner == pl) & alive
+            enemy = (cur_owner >= 0) & (cur_owner != pl) & alive
+            enemy_any = enemy.any(dim=1, keepdim=True)
+            nearest_enemy = torch.where(enemy.unsqueeze(1), dist, 1e9).min(dim=2).values
+            scores = torch.where(mine & enemy_any, nearest_enemy, big)
+            idx = torch.topk(scores, k, dim=1, largest=False).indices
+            picked = torch.zeros_like(frontline)
+            picked.scatter_(1, idx, True)
+            picked &= scores < 1e9
+            frontline |= picked & mine
+        return frontline
+
+    def _capture_utility_bonus(self, terminal_rewards: torch.Tensor) -> torch.Tensor:
+        """One-time reward/penalty for whether a net-new capture becomes useful within K steps."""
+        # First credit attack utility against the PRE-change holder. Actions launch before combat;
+        # if the source is lost on the same tick, the attack still happened and should be credited.
+        attack_ready = (
+            self.cu_is_capture
+            & self.cu_used_attack
+            & ~self.cu_credited
+            & (self.cu_owner >= 0)
+            & self.planet_alive
+        )
+        if attack_ready.any():
+            for pl in range(self.num_players):
+                cnt = (attack_ready & (self.cu_owner == pl)).float().sum(dim=1)
+                terminal_rewards[:, pl] = terminal_rewards[:, pl] + self.capture_utility_coef * cnt
+            self.cu_credited = self.cu_credited | attack_ready
+
+        cur_owner = self.planets[:, :, 1].long()
+        changed = cur_owner != self.cu_owner
+        self.cu_age = torch.where(changed, torch.zeros_like(self.cu_age), self.cu_age + 1)
+        self.cu_credited = self.cu_credited & ~changed
+        self.cu_is_capture = torch.where(changed, cur_owner >= 0, self.cu_is_capture)
+        self.cu_used_attack = self.cu_used_attack & ~changed
+        self.cu_owner = cur_owner
+
+        window_ready = (
+            self.cu_is_capture
+            & ~self.cu_credited
+            & (self.cu_age >= self.capture_utility_window)
+            & (cur_owner >= 0)
+            & self.planet_alive
+        )
+        if window_ready.any():
+            frontline = self._capture_frontline_mask(cur_owner)
+            useful = window_ready & frontline
+            idle = window_ready & ~frontline
+            for pl in range(self.num_players):
+                useful_cnt = (useful & (cur_owner == pl)).float().sum(dim=1)
+                idle_cnt = (idle & (cur_owner == pl)).float().sum(dim=1)
+                terminal_rewards[:, pl] = (
+                    terminal_rewards[:, pl]
+                    + self.capture_utility_coef * useful_cnt
+                    - self.capture_idle_penalty * idle_cnt
+                )
+            self.cu_credited = self.cu_credited | window_ready
         return terminal_rewards
 
     def _fleet_target_idx(self) -> torch.Tensor:
@@ -1739,6 +1832,17 @@ class VecTorchEnv:
             self._slotstarve_step[:, owner_id, 1] += _ss * _v1
             self._slotstarve_step[:, owner_id, 2] += _ss * _v2
 
+        # Capture-utility reward: mark newly captured planets that became useful by
+        # launching a REAL emitted attack (not reinforce, not vetoed, not slot-starved).
+        if (self.capture_utility_active and self.action_decode == "target"
+                and actions.shape[-1] >= 4):
+            emitted_attack = target_valid & use_target_decode & (target_owner != owner_id)
+            for slot in range(emitted_attack.shape[1]):
+                m = emitted_attack[:, slot]
+                if bool(m.any()):
+                    ni = m.nonzero(as_tuple=True)[0]
+                    self.cu_used_attack[ni, owned_idx[ni, slot]] = True
+
         # Per-env IDs for new fleets: next_fleet_id + 0, 1, 2, ... within env.
         new_id_within_env = (target_valid.long().cumsum(dim=1) - 1).clamp(min=0)
         new_ids = self.next_fleet_id.unsqueeze(1) + new_id_within_env  # (N, MAX_OWNED)
@@ -2102,6 +2206,8 @@ class VecTorchEnv:
         # Consolidation bonus: ONE-TIME +coef when a net-new CAPTURED planet survives K steps.
         if self.consolidation_coef != 0.0:
             terminal_rewards = self._consolidation_bonus(terminal_rewards)
+        if self.capture_utility_active:
+            terminal_rewards = self._capture_utility_bonus(terminal_rewards)
         if self.decisive_mass_coef != 0.0 or self.decisive_diag:
             dm_fields = self._decisive_mass_fields()
             if self.decisive_mass_coef != 0.0:
@@ -2133,6 +2239,13 @@ class VecTorchEnv:
             self.cap_age[done] = 0
             self.cap_credited[done] = False
             self.cap_is_capture[done] = False
+        if self.capture_utility_active and done.any():
+            fresh_owner = self.planets[:, :, 1].long()
+            self.cu_owner[done] = fresh_owner[done]
+            self.cu_age[done] = 0
+            self.cu_credited[done] = False
+            self.cu_is_capture[done] = False
+            self.cu_used_attack[done] = False
         # Re-arm the decisive-mass crossing detector for done envs: fresh boards have no
         # fleets (mass=0), so terminal-step sufficiency must NOT carry over — else a decisive
         # opening launch landing on a previously-armed index would be suppressed (uncredited).

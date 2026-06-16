@@ -79,10 +79,50 @@ def test_reachability_respects_threat_eta():
     assert ev._threat_class(planets, near_fast, planets[0], SEAT) == 3   # → hopeless
 
 
+class _Step:
+    def __init__(self, planets, fleets=None, action=None):
+        self.observation = {"planets": planets, "fleets": fleets or []}
+        self.action = action or []
+
+
+def _row(planets, fleets=None, action=None):
+    return [_Step(planets, fleets=fleets, action=action)]
+
+
+def test_game_conversion_triage_refinements():
+    # Timeline:
+    # t=1 observes planet 1 neutral, then t=2 captures it.
+    # t=3 safely reinforces planet 1 from planet 2.
+    # t=4 planet 1 launches an attack, so safe-reinf utility should be "attack".
+    # t=5 planet 1 is lost while planet 2 stays ours, so it is a captured-only nonterminal loss.
+    p_neutral = [1, -1, 300.0, 300.0, 8.0, 5.0, 2.0]
+    p_held = [1, SEAT, 300.0, 300.0, 8.0, 30.0, 2.0]
+    p_lost = [1, 1, 300.0, 300.0, 8.0, 30.0, 2.0]
+    p_src = [2, SEAT, 250.0, 300.0, 8.0, 50.0, 1.0]
+    p_enemy = [3, 1, 360.0, 300.0, 8.0, 0.0, 1.0]
+    steps = [
+        _row([p_neutral, p_src, p_enemy]),
+        _row([p_neutral, p_src, p_enemy]),
+        _row([p_held, p_src, p_enemy]),
+        _row([p_held, p_src, p_enemy], action=[[2, 0.0, 10]]),  # p2 -> p1 reinforce
+        _row([p_held, p_src, p_enemy], action=[[1, 0.0, 5]]),   # p1 -> p3 attack
+        _row([p_lost, p_src, p_enemy]),
+    ]
+
+    conv = ev.game_conversion(steps, SEAT)
+    assert conv["cap_born_class"][0] == 1, conv["cap_born_class"]
+    assert conv["cap_born_lost_nt"][0] == 1, conv["cap_born_lost_nt"]
+    assert conv["lost_by_class_cap_nt"][0] == 1, conv["lost_by_class_cap_nt"]
+    assert conv["reinf_lost_within"] == [10.0, 10.0, 10.0], conv["reinf_lost_within"]
+    assert conv["safe_reinf_util"] == [10.0, 0.0, 0.0], conv["safe_reinf_util"]
+    assert conv["reinf_to_lost"] == 10.0, conv["reinf_to_lost"]
+
+
 if __name__ == "__main__":
     test_already_safe()
     test_hopeless_when_no_reachable_friendly()
     test_cheap_save_with_reachable_spare()
     test_doomed_source_drains_fully()
     test_reachability_respects_threat_eta()
+    test_game_conversion_triage_refinements()
     print("PASS: reinforce-triage — already-safe / hopeless / cheap-save / doomed-drains-fully / ETA-reachability")

@@ -391,6 +391,10 @@ def train(args):
     print(f"Speed coeff: {args.speed_coef}")
     if args.consolidation_coef != 0:
         print(f"Consolidation bonus: {args.consolidation_coef} per net-new capture HELD {args.consolidation_steps} steps (force-concentration lever)")
+    if args.capture_utility_coef != 0 or args.capture_idle_penalty != 0:
+        print(f"Capture-utility reward: +{args.capture_utility_coef} when a net-new capture "
+              f"attacks or remains frontline within {args.capture_utility_window} steps; "
+              f"idle penalty={args.capture_idle_penalty}")
     if args.decisive_mass_coef != 0:
         print(f"Decisive-mass bonus (Lever A): {args.decisive_mass_coef} per inflight strike reaching producer_v2's ENEMY capture floor (reactive-margin beta={args.decisive_mass_beta}) — force-concentration signal")
     if args.handicap_frac > 0:
@@ -442,6 +446,9 @@ def train(args):
     cfg.model.reverse_edge_cooldown = args.reverse_edge_cooldown
     cfg.model.reinforce_garrison_floor = args.reinforce_garrison_floor
     cfg.model.sufficient_commit_factor = args.sufficient_commit_factor
+    cfg.model.capture_utility_coef = args.capture_utility_coef
+    cfg.model.capture_utility_window = args.capture_utility_window
+    cfg.model.capture_idle_penalty = args.capture_idle_penalty
     # PROVENANCE only (eval always clamps via _ship_bin_to_count, so this doesn't change the eval
     # contract) — but record how the ckpt was trained (drop vs clamp) so it's never ambiguous.
     cfg.model.ship_overflow_mode = args.ship_overflow_mode
@@ -474,6 +481,9 @@ def train(args):
                       speed_coef=args.speed_coef,
                       consolidation_coef=args.consolidation_coef,
                       consolidation_steps=args.consolidation_steps,
+                      capture_utility_coef=args.capture_utility_coef,
+                      capture_utility_window=args.capture_utility_window,
+                      capture_idle_penalty=args.capture_idle_penalty,
                       decisive_mass_coef=args.decisive_mass_coef,
                       decisive_mass_beta=args.decisive_mass_beta,
                       decisive_diag=args.decisive_diag,
@@ -695,6 +705,25 @@ def train(args):
         pool_opp_model.eval()
         print(f"Pool initialised: mode={args.pool_mode}, members={len(pool)} (at init), "
               f"pool-fraction={args.pool_fraction}, snapshot_every={args.pool_checkpoint_interval:,} steps")
+        _pool_ext = max(0.0, min(1.0, args.pool_external_fraction))
+        _pool_pin = max(0.0, min(1.0, args.pool_pinned_fraction))
+        if args.pool_pinned_fraction > 0.0:
+            _pool_self = max(0.0, 1.0 - _pool_ext - _pool_pin)
+            _pin_total = args.pool_fraction * _pool_pin
+        else:
+            _pool_self = max(0.0, 1.0 - _pool_ext)
+            _pin_total = 0.0
+        _ext_total = args.pool_fraction * _pool_ext
+        _pool_self_total = args.pool_fraction * _pool_self
+        _current_self_total = max(0.0, 1.0 - args.pool_fraction)
+        print(f"  pool exposure target: external≈{_ext_total:.2f} total, "
+              f"pool-self≈{_pool_self_total:.2f} total, current-self≈{_current_self_total:.2f} total"
+              + (f", pinned≈{_pin_total:.2f} total" if args.pool_pinned_fraction > 0.0 else ""))
+        if (args.pool_mode == "mixed" and args.external_opponents and args.pool_external_fraction >= 1.0
+                and any(m.kind == "self" for m in pool.members)):
+            print("  WARN: --pool-external-fraction >= 1.0 means self-checkpoints in the pool "
+                  "will not be sampled (their pool wr stays n=0). If you intended 80% external "
+                  "+ 20% pool-self, use --pool-fraction 1.0 --pool-external-fraction 0.8.")
         if args.pool_pinned_fraction > 0.0:
             print(f"  Opponent-difficulty RAMP active: pinned-RL + external ease in 0 -> "
                   f"{args.pool_pinned_fraction:.3f}/{args.pool_external_fraction:.3f} of the pool slice "
@@ -735,6 +764,9 @@ def train(args):
                     "srcs_multi_penalty": args.srcs_multi_penalty,
                     "srcs_multi_threshold": args.srcs_multi_threshold,
                     "fleet_activity_coef": args.fleet_activity_coef,
+                    "capture_utility_coef": args.capture_utility_coef,
+                    "capture_utility_window": args.capture_utility_window,
+                    "capture_idle_penalty": args.capture_idle_penalty,
                     "il_lambda": cfg.ppo.il_lambda,
                     "win_margin_coeff": args.win_margin_coeff,
                     "speed_coef": args.speed_coef,
@@ -1904,6 +1936,20 @@ if __name__ == "__main__":
     parser.add_argument("--consolidation-steps", type=int, default=40,
                         help="Steps a captured planet must be held to earn --consolidation-coef "
                              "(autopsy median churn-loss ~20 → 40 = 2x clears the churn band).")
+    parser.add_argument("--capture-utility-coef", type=float, default=0.0,
+                        help="Capture follow-through reward: ONE-TIME bonus when a net-new captured "
+                             "planet proves useful within --capture-utility-window by launching an "
+                             "attack from that planet, or by still being one of the holder's top-3 "
+                             "frontline planets at window end. Targets the capture-born/idle-safe "
+                             "diagnostic: capture -> use/convert tempo, not capture -> sit/peel. "
+                             "0 = off. Start small, e.g. 0.03-0.06.")
+    parser.add_argument("--capture-utility-window", type=int, default=30,
+                        help="Steps after a net-new capture during which it can earn "
+                             "--capture-utility-coef. Matches the eval utility<=30 diagnostic.")
+    parser.add_argument("--capture-idle-penalty", type=float, default=0.0,
+                        help="Optional ONE-TIME penalty at --capture-utility-window for a net-new "
+                             "capture that neither launched an attack nor remained frontline. "
+                             "0 = no penalty; prefer small values if enabled.")
     parser.add_argument("--decisive-mass-coef", type=float, default=0.0,
                         help="Lever A (force-concentration): ONE-TIME bonus the step our INFLIGHT "
                              "force converging on an ENEMY planet first reaches producer_v2's capture "
