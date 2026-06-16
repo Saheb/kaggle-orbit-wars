@@ -476,6 +476,7 @@ def train(args):
                       consolidation_steps=args.consolidation_steps,
                       decisive_mass_coef=args.decisive_mass_coef,
                       decisive_mass_beta=args.decisive_mass_beta,
+                      decisive_diag=args.decisive_diag,
                       handicap_frac=args.handicap_frac,
                       handicap_ships=args.handicap_ships,
                       ssdr_frac=args.ssdr_frac,
@@ -593,6 +594,11 @@ def train(args):
                 print(f"  override external_fraction {pool.external_fraction:.2f} -> "
                       f"{args.pool_external_fraction:.2f} (CLI --pool-external-fraction wins on resume)")
                 pool.external_fraction = args.pool_external_fraction
+            # Same resume footgun for pfsp_externals (a CONFIG knob): CLI flag must govern.
+            if pool.pfsp_externals != args.pfsp_externals:
+                print(f"  override pfsp_externals {pool.pfsp_externals} -> "
+                      f"{args.pfsp_externals} (CLI --pfsp-externals wins on resume)")
+                pool.pfsp_externals = args.pfsp_externals
         else:
             pool = OpponentPool(
                 max_self_members=args.pool_max_size,
@@ -601,6 +607,7 @@ def train(args):
                 mastered_min_games=args.pool_mastered_min_games,
                 pfsp_min_games=args.pool_pfsp_min_games,
                 external_fraction=args.pool_external_fraction,
+                pfsp_externals=args.pfsp_externals,
             )
             # Seed pool with the starting weights so it isn't empty on iteration 1
             pool.add_self_checkpoint(0, model.state_dict())
@@ -1380,6 +1387,31 @@ def train(args):
                 # Lever A: avg decisive-mass crossings per (env,seat) this rollout, current policy.
                 tm2 = tmu.squeeze(-1)                                  # (N, players) to match _decisive_credit
                 metrics["decisive_strikes"] = float((env._decisive_credit * tm2).sum().item()) / max(float(tm2.sum().item()), 1.0)
+            # dm_* GAP diagnostic: of the current policy's attacked enemy targets, how close does
+            # the assembled inflight mass get to producer_v2's capture floor (the decmass target)?
+            # All quantities are the EXACT reward floor (torch_env._decisive_mass_fields). gap DOWN +
+            # cross UP = the policy is concentrating force; flat while WR climbs = adjacent competence.
+            if args.decisive_diag and getattr(env, "_dm_targets", None) is not None:
+                tg = (env._dm_targets * tmu).sum(dim=(0, 1))          # (3,) phase: e/m/l
+                cr = (env._dm_cross * tmu).sum(dim=(0, 1))
+                rs = (env._dm_ratio_sum * tmu).sum(dim=(0, 1))
+                gp = (env._dm_gap_sum * tmu).sum(dim=(0, 1))
+                ok = (env._dm_overkill_sum * tmu).sum(dim=(0, 1))
+                nm = (env._dm_nearmiss * tmu).sum(dim=(0, 1))
+                tg_tot = tg.sum().clamp(min=1.0)
+                cr_tot = cr.sum().clamp(min=1.0)
+                for i, ph in enumerate(("e", "m", "l")):
+                    d = tg[i].clamp(min=1.0)
+                    metrics[f"dm_gap_{ph}"] = float((gp[i] / d).item())
+                    metrics[f"dm_cross_{ph}"] = float((cr[i] / d).item())
+                metrics["dm_gap"] = float((gp.sum() / tg_tot).item())
+                metrics["dm_cross"] = float((cr.sum() / tg_tot).item())
+                metrics["dm_ratio"] = float((rs.sum() / tg_tot).item())
+                metrics["dm_overkill"] = float((ok.sum() / cr_tot).item())   # mean ratio on crossed
+                metrics["dm_nearmiss"] = float((nm.sum() / tg_tot).item())
+                # mean attacked enemy targets per controlled env-step (assembly breadth)
+                slotsteps = float(train_frac.sum().item()) * storage["train_mask"].shape[0]
+                metrics["dm_tgt"] = float(tg.sum().item()) / max(slotsteps, 1.0)
         with torch.no_grad():
             metrics["old_value_mean"] = float(flat["values"].mean().item())
             metrics["old_value_std"] = float(flat["values"].std(unbiased=False).item())
@@ -1512,6 +1544,18 @@ def train(args):
                     f"(orig~{metrics.get('wnorm_pw_orig', 0):.2f})"
                     + actcoef + pencoef
                 )
+                # dm | decisive-mass GAP: are our inflight attacks reaching producer_v2's capture
+                # floor? gap DOWN + cross UP = concentrating force toward the decmass target.
+                if args.decisive_diag:
+                    print(
+                        f"   dm   | gap <50/50-100/>100 {metrics.get('dm_gap_e',0):.2f}/"
+                        f"{metrics.get('dm_gap_m',0):.2f}/{metrics.get('dm_gap_l',0):.2f} "
+                        f"| cross {metrics.get('dm_cross_e',0):.2f}/{metrics.get('dm_cross_m',0):.2f}/"
+                        f"{metrics.get('dm_cross_l',0):.2f} | ratio {metrics.get('dm_ratio',0):.2f} "
+                        f"overkill {metrics.get('dm_overkill',0):.2f} "
+                        f"nearmiss {metrics.get('dm_nearmiss',0):.2f} "
+                        f"tgt/step {metrics.get('dm_tgt',0):.2f}"
+                    )
                 # SPS patch A: per-rollout wall-time breakdown (where the per-step tax is).
                 _tt = sum(_t_acc.values()) or 1.0
                 _ext = _t_acc['ext_obs'] + _t_acc['ext_wait'] + _t_acc['ext_conv']
@@ -1567,6 +1611,13 @@ def train(args):
                     # IL (zero when not active)
                     "il/kl": metrics.get("il_kl", 0),
                     "il/coef": metrics.get("il_coef", 0),
+                    # decisive-mass GAP diagnostic (force concentration toward producer_v2's floor)
+                    "dm/gap": metrics.get("dm_gap", 0),
+                    "dm/cross": metrics.get("dm_cross", 0),
+                    "dm/ratio": metrics.get("dm_ratio", 0),
+                    "dm/overkill": metrics.get("dm_overkill", 0),
+                    "dm/nearmiss": metrics.get("dm_nearmiss", 0),
+                    "dm/tgt_per_step": metrics.get("dm_tgt", 0),
                 }, step=total_env_steps)
 
             # Collapse warnings — flag early instead of finding via replay at 10M
@@ -1867,6 +1918,18 @@ if __name__ == "__main__":
                              "(beta*rho(eta)*reachable_enemy_mass). 2.2 = v2-faithful (planner-"
                              "conservative). LOWER it (e.g. 0.5-1.0) if `decis` stays ~0 on the "
                              "resumed policy — a high beta makes the floor strict → sparse signal.")
+    parser.add_argument("--decisive-diag", action=argparse.BooleanOptionalAction, default=True,
+                        help="Compute the dm_* GAP diagnostic every step using the EXACT decisive-"
+                             "mass reward floor, even when --decisive-mass-coef=0. The `dm` diag "
+                             "line reports, split by phase: dm_gap (mean max(0,floor-mass)/floor — "
+                             "DOWN if attacks concentrate), dm_cross (fraction reaching the floor — "
+                             "UP), plus ratio/overkill/near-miss/targets-per-step. Tells whether PPO "
+                             "is moving toward the decmass target vs only improving adjacent "
+                             "competence. project_force_concentration_wall. NOTE: runs "
+                             "_decisive_mass_fields() EVERY step (a P×P enemy-pressure pass + fleet-"
+                             "target resolution) — benchmark the SPS delta on the GPU box; use "
+                             "--no-decisive-diag for max-throughput production once the measurement "
+                             "need is satisfied.")
     parser.add_argument("--handicap-frac", type=float, default=0.0,
                         help="Fraction of games where player 0 starts with --handicap-ships "
                              "instead of the normal 10. Forces exposure to losing positions "
@@ -1947,10 +2010,17 @@ if __name__ == "__main__":
     parser.add_argument("--pool-external-fraction", type=float, default=0.0,
                         help="Fixed fraction of pool samples reserved for external heuristic "
                              "opponents, bypassing PFSP. e.g. 0.4 = 40%% of pool games always "
-                             "go to external opponents (split uniformly among them); the "
-                             "remaining 60%% is governed by PFSP over self-checkpoints. "
-                             "Use for targeted runs where you need sustained pressure from "
-                             "a specific opponent regardless of rollout win-rate.")
+                             "go to external opponents (split uniformly among them by default — "
+                             "see --pfsp-externals); the remaining 60%% is governed by PFSP over "
+                             "self-checkpoints. Use for targeted runs where you need sustained "
+                             "pressure from a specific opponent regardless of rollout win-rate.")
+    parser.add_argument("--pfsp-externals", action=argparse.BooleanOptionalAction, default=False,
+                        help="Sample the EXTERNAL slice PFSP-weighted (by (1-ema_wr)^alpha) instead "
+                             "of UNIFORM, so a multi-rung league (e.g. h10/h12/h14) concentrates "
+                             "games on the rungs we lose to most / the matched-difficulty band "
+                             "instead of 1/N each. Default OFF = legacy uniform (the pool's pfsp_w "
+                             "column is display-only for externals when off). Flag-overridden on "
+                             "resume like --pool-external-fraction.")
     parser.add_argument("--pool-pinned-fraction", type=float, default=0.0,
                         help="TARGET fraction of pool samples reserved for PINNED RL champions "
                              "(--pool-seed-rl, e.g. rev38), pulling them OUT of PFSP into a fixed "

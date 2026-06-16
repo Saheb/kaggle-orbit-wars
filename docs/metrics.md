@@ -69,6 +69,44 @@ trusted ones.
 accumulated across the rollout — controlled-time, so not skewed by episode length or end-state. Full set
 (`garr_frac@`, `ships_per_planet@`, `planets@` for all four milestones) goes to W&B under `hoard/*`.
 
+## The `dm` (decisive-mass GAP) line (every 5 iters — `--decisive-diag`, default ON)
+
+Measures **whether the policy is moving toward the decmass target** (force concentration), not just the
+outcome symptom (`out-massed%`). For each enemy target the current policy has inflight mass converging on,
+it computes `ratio = own_inflight_mass / floor` using the **EXACT same capture floor as the Lever-A reward**
+(`floor = garrison + prod·eta + enemy_inbound + beta·rho(eta)·reachable_enemy_mass + overhead`, eta = MAX
+arrival ETA) — shared code (`torch_env._decisive_mass_fields`) so the diag and reward can never drift. Runs
+**even when `--decisive-mass-coef 0`** (reads on any lineage, incl. hladder). Train-mask-weighted (current
+policy only); phase-split `<50 / 50-100 / >100`.
+
+```
+dm | gap <50/50-100/>100 g/g/g | cross c/c/c | ratio r overkill o nearmiss n tgt/step t
+```
+
+| Field | Meaning | If decmass/curriculum is working |
+|---|---|---|
+| **`gap`** | mean `max(0, floor−mass)/floor` over attacked targets (the headline) | **DOWN** (attacks closing the floor) |
+| **`cross`** | fraction of attacked targets where `mass ≥ floor` | **UP** |
+| `ratio` | mean `mass/floor` | rises toward/past 1.0 |
+| `overkill` | mean `mass/floor` on **crossed** targets | NOT exploding (≫2 = dumb 3× overkill, wasted) |
+| `nearmiss` | fraction in `[0.75, 1.0)` | useful tell: approaching but not yet crossing |
+| `tgt/step` | attacked enemy **target-observations** per controlled env-step (duration-weighted: a long-ETA attack counts each step it's inflight — NOT unique targets/launches) | assembly breadth |
+
+**Read rules:** `gap↓ + cross↑ + overkill steady + out-massed% eventually↓` = teaching concentration. **WR↑
+but gap flat** = adjacent competence, NOT concentration (the decmass1/h14only failure signature). **gap↓ but
+out-massed% flat** = learning *attack* concentration but not *post-capture retention*. W&B: `dm/*`.
+
+Eval has the same line (`decisive-mass …` in the conversion block) and adds **p50** per phase + a
+`target-steps/game` (the same duration-weighted count as `tgt/step`) — train tells whether PPO responds to
+the reward, eval whether it survives argmax + held-out.
+
+**Caveats.** (1) **beta:** the floor's reactive margin uses `--decisive-mass-beta` (default 2.2). It is an
+env param, **not stored in the ckpt** — so eval defaults to 2.2 and prints `(beta X.X)` on the line; to read a
+run trained with a non-default beta, pass the same `--decisive-mass-beta` to eval (parity-tested at non-default
+beta). (2) **SPS:** `_decisive_mass_fields()` runs EVERY step (a P×P enemy-pressure pass + fleet-target
+resolution) — benchmark the delta on the GPU box; `--no-decisive-diag` for max-throughput production once the
+measurement need is satisfied. [[project_decisive_mass_lever]] [[project_force_concentration_wall]]
+
 ## The `CKPT_METRICS` line (at each checkpoint — parsed by track.py)
 
 `step EV KL clip fire_frac owned garrfrac@50 shipspp@50 fire_rate Hfire reinf`
@@ -125,6 +163,12 @@ defined below; all compute identically from top-player replays via `conversion_f
   band: **Isaiah 1.59 · TonyK 1.16 · Jake 1.23 · 213tubo 1.48.** Even normalized it's a *secondary* read;
   the clean hold signal is the **planets@N trajectory turning over** (peak then decline) + the
   proximity crossover step (`deb_proximity.py`).
+- **game-len** (`game-len  median WON Xst (Ng)  ·  LOST Yst (Ng)`, added 2026-06-16) — **median** game length
+  split by outcome (the `churn` line's `mean-len` is the mean over ALL games — confounded by the loss/win mix).
+  Tells whether our WINS are **decisive snowballs** (short) or **stall-and-win attrition** (long). Prior ad-hoc
+  read: vs Ajay WON ground to ~320st, LOST ~116st — i.e. even our wins were attrition, never a fast kill (a
+  symptom of the expansion/holding root, NOT an independent lever — don't bribe decisiveness with speed_coef,
+  which caused the Rev26 ship-bin-0 collapse). Read WON median dropping over training = we're learning to close.
 - **retention** (`retention  lost-cap X (lost/total caps)  median-hold Xst`, added 2026-06-11) — the
   **denominator-free** hold signal, built to replace churn's degeneracy. `lost-cap` = of the planets we
   CAPTURE, the fraction we then lose (`lost_caps ÷ captures`); `median-hold` = median steps from capture to
@@ -146,6 +190,44 @@ defined below; all compute identically from top-player replays via `conversion_f
   planets into one decisive strike; we fire per-planet sized to current defense. The incoming fleet IS in our features
   (planet ch13 `enemy_pressure` / pairwise feat 14 `enemy_contest`) → the fix is a training SIGNAL, not a feature. Watch
   `out-massed%` DROP as a concentration lever works. Standalone tool: `orbit_wars_rl/hold_autopsy.py`. Memory:
+  `project_force_concentration_wall`.
+- **hold-floor** (`hold-floor (garr+friendly_in)/(enemy_in+β·reach+1) β=2.2 … by phase … by age-after-capture 0-5/6-15/16+`,
+  added 2026-06-16) — the **DEFENSIVE mirror** of the decisive-mass attack gap, and the most direct read on the
+  capture-then-lose wall. For each OWN planet under an actual inbound threat (an enemy fleet converging on it — same
+  condition as the hold-loss `out-massed` autopsy), `hold = (our_garrison + friendly_inbound) / (enemy_inbound +
+  β·reachable_enemy_mass + 1)`; ratio `<1` = under-defended (will likely be peeled). Reported as `under%(ratio<1)/p50`,
+  split **by phase** AND **by age-after-capture** (0-5 / 6-15 / 16+ steps, from `cap_step`; home/initial planets have no
+  capture step → excluded from age buckets). **The age axis is the headline:** high under% at **0-5** = we lose captures
+  IMMEDIATELY (can't route defensive mass in time → a timing/action-grammar problem, supports multi-move/source); high at
+  **16+** = later logistics/churn. β/overhead/reachable reuse the decisive-mass floor constants (β via `--decisive-mass-beta`,
+  printed). Duration-weighted (a planet threatened N steps = N observations, like dm `target-steps`). Eval-only (like the
+  hold-loss autopsy). `_hold_floor_step`; `project_force_concentration_wall`.
+- **reinforce-triage / save-efficiency** (`reinforce-triage  ships→ safe X% cheap-save X% exp-save X% HOPELESS X% …`,
+  added 2026-06-16) — tests the **"are we reinforcing the WRONG planets?"** hunch: maybe the wall isn't "reinforce more,"
+  it's **bad triage** — pouring mass into planets we then lose instead of recycling it into the next attack. Mirrors
+  producer_v2's actual defense logic (`orbit_lite/planner_core.py`): `safe_drain` (a source sheds only what it can spare
+  while holding ITSELF; a **doomed** source drains fully) + the `roi_threshold` gate (a reinforce fires only if its
+  competitive net-ship-delta clears 1.5). Each reinforce launch's target is classified at decision time via `_threat_class`
+  into **already-safe / cheap-save / expensive-save / hopeless** (`defense_cost = enemy_in + β·reach_enemy + 1 − garrison`;
+  `friendly_available` = inbound arriving before the threat ETA + **safe-drain-able spare** of owned sources reachable in
+  time, doomed-drain-full; `value = prod·horizon`; hopeless = `friendly_available < defense_cost`). Reads: `HOPELESS%` of
+  reinforce mass, reinforce mass **on planets we then LOST** (to-lost), of LOST planets the **cheap-save-MISSED** vs
+  **hopeless(ok-to-drop)** split, of hopeless losses **wasted-ships vs abandoned**, and **WON/LOST** split. **Hunch
+  confirmed if:** high `HOPELESS%`/`to-lost`, high `cheap-save-MISSED`, and **winners lower** — i.e. we waste ships on
+  doomed planets while winners abandon them and recycle into attacks. ⚠ **Diagnostic only — do NOT turn into reward yet;**
+  if confirmed, the lever is a *selective* reinforce/abandon signal or mask-prior, NOT another global "defend more" reward.
+  Eval-only. `_threat_class` / `_reachable_friendly_mass` (FORK #2 = the faithful safe-drain version). `project_reinforce_triage`.
+- **outmassed by planets@32** (`outmassed by planets@32  <=4: outmassed X% WR X% (nN)  5: …  >=6: …`, added 2026-06-16) —
+  the SAME out-massed% (+ WR) **conditioned on the opening-expansion bucket** (the game's planets@32). Separates two
+  compounding gaps: **upstream economic tempo** ("we entered the midgame at 4 planets vs winner's 6+ → less production /
+  fewer source planets / fewer regroup options → less mass to aggregate") from the **tactical** aggregation/retention wall.
+  The **verdict is COMPUTED from the panel** (not asserted): if `>=6` has materially lower out-massed (≥4pp) OR higher
+  WR (≥5pp) than `<=4` it prints "opening expansion looks UPSTREAM"; else "NOT the lever; wall is downstream"; needs
+  ≥15 games in both end buckets else "inconclusive". Bucketed per game (needs panel-style `won`; games ending before
+  step 32 are unbucketable → skipped). **⭐ 2026-06-16 Ajay panel finding: NOT the lever — `<=4` 97%/13% (n165), `5`
+  96%/12% (n50), `>=6` 97%/15% (n41)** → reaching 6+ by step 32 gave ~0pp out-massed reduction and only +2pp WR. So
+  opening expansion is **deprioritized as the main wall fix** (kept as a competence lever); the wall is downstream
+  (defensive routing / post-capture positioning / action grammar) → read the hold-floor age split next.
   `project_force_concentration_wall`.
 - **launch-waste<50** (printed `launch-waste<50  redundant X (WG X)  underkill X (WG X)`) — the OPENING
   (step <50) launch-discipline pair, both keyed to `cap_cost_at_arrival` (the SAME quantity the roi-deflation

@@ -14,6 +14,15 @@ from config import Config
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH
 from features import extract_features, _ETA_PROBE_SPEED, set_game_phase_features
 from action_mask import compute_action_masks, actions_from_policy, actions_from_target_policy
+# Decisive-mass floor constants — IMPORTED from torch_env so the eval dm_* gap diagnostic uses the
+# EXACT same floor as the training reward/diag (they can never drift). project_force_concentration_wall.
+from torch_env import (_DM_BETA, _DM_ETA_FREE, _DM_ETA_SCALE, _DM_HORIZON, _DM_OVERHEAD,
+                       MAX_SHIP_SPEED as _DM_MAX_SPEED)
+# Reactive-margin weight for the eval dm_* floor. Defaults to torch_env's 2.2 (= training default).
+# A decmass run trained with a NON-default --decisive-mass-beta must pass --decisive-mass-beta to
+# eval for "eval floor == reward floor" to hold (beta is an env param, not persisted in the ckpt).
+# The value used is printed on the `decisive-mass` line so the floor is never ambiguous.
+_DM_BETA_EVAL = _DM_BETA
 
 
 def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
@@ -265,6 +274,224 @@ def _friendly_inbound(fleets, tgt, seat):
     return s
 
 
+def _ship_speed_py(ships):
+    """Scalar mirror of torch_env._ship_speed (kaggle speed formula)."""
+    s = max(float(ships), 1.0)
+    base = (math.log(s) / math.log(1000.0)) ** 1.5
+    return min(1.0 + (_DM_MAX_SPEED - 1.0) * base, _DM_MAX_SPEED)
+
+
+def _dm_fleet_target(planets, f):
+    """Planet a fleet `f` is converging on — nearest alive candidate with along>0 and
+    perp < radius+2.0. Mirrors torch_env._fleet_target_idx (argmin distance among candidates),
+    NOT _friendly_inbound (which sums to every roughly-aligned target). Returns planet record."""
+    fx, fy, ang = f[2], f[3], f[4]
+    c, sn = math.cos(ang), math.sin(ang)
+    best, bd = None, None
+    for p in planets:
+        vx, vy = p[2] - fx, p[3] - fy
+        along = vx * c + vy * sn
+        if along <= 0:
+            continue
+        perp = abs(vx * sn - vy * c)
+        if perp < p[4] + 2.0:
+            d = math.hypot(vx, vy)
+            if bd is None or d < bd:
+                bd, best = d, p
+    return best
+
+
+def _decisive_gap_step(planets, fleets, seat, beta=None):
+    """Per attacked-enemy-target decisive-mass RATIO (mass/floor) for `seat` from one observation,
+    using the EXACT floor of torch_env._decisive_mass_fields:
+        floor = garr + prod*eta + enemy_inbound + beta*rho(eta)*reachable_enemy_mass + overhead
+    (eta = MAX arrival ETA of our converging mass). `beta` defaults to _DM_BETA_EVAL (= the training
+    default 2.2; pass explicitly to match a non-default-beta run). Returns a list of ratios, one per
+    enemy planet we have inflight mass converging on. cross/gap/near-miss/overkill all derive from
+    the ratio (cross = ratio>=1, gap = max(0,1-ratio)), so the eval read can't drift from the reward."""
+    if beta is None:
+        beta = _DM_BETA_EVAL
+    if not planets:
+        return []
+    our_mass: dict = {}
+    our_eta: dict = {}
+    enemy_inbound: dict = {}
+    for f in (fleets or []):
+        own = int(f[1])
+        if own < 0:
+            continue
+        tgt = _dm_fleet_target(planets, f)
+        if tgt is None:
+            continue
+        tid = tgt[0]
+        if own == seat:
+            our_mass[tid] = our_mass.get(tid, 0.0) + f[6]
+            dist = math.hypot(tgt[2] - f[2], tgt[3] - f[3])
+            eta = min(dist / max(_ship_speed_py(f[6]), 1e-6), _DM_HORIZON)
+            our_eta[tid] = max(our_eta.get(tid, 0.0), eta)             # MAX ETA over our fleets
+        else:
+            enemy_inbound[tid] = enemy_inbound.get(tid, 0.0) + f[6]
+    enemy_planets = [p for p in planets if int(p[1]) != seat and int(p[1]) >= 0]
+    ratios = []
+    for tgt in enemy_planets:
+        tid = tgt[0]
+        mass = our_mass.get(tid, 0.0)
+        if mass <= 0:
+            continue                                                  # attacked-with-mass only
+        eta = our_eta.get(tid, 0.0)
+        inbound = enemy_inbound.get(tid, 0.0)
+        em = 0.0                                                       # reachable enemy PLANET mass
+        for src in enemy_planets:
+            if src[0] == tid:
+                continue
+            pd = math.hypot(src[2] - tgt[2], src[3] - tgt[3])
+            reach = max(_ship_speed_py(src[5]) * _DM_HORIZON, 1e-6)
+            em += src[5] * max(1.0 - pd / reach, 0.0)
+        rho = min(max((eta - _DM_ETA_FREE) / _DM_ETA_SCALE, 0.0), 1.0)
+        floor = max(tgt[5] + tgt[6] * eta + inbound + beta * rho * em + _DM_OVERHEAD, 1e-6)
+        ratios.append(mass / floor)
+    return ratios
+
+
+def _hold_floor_step(planets, fleets, seat, cap_step, t, beta=None):
+    """Defensive mirror of _decisive_gap_step: for each OWN planet under an actual inbound threat
+    (enemy fleet converging on it — the same condition as the hold-loss 'out-massed' autopsy), the
+    HOLD ratio = can we keep it?
+        hold = (our_garrison + friendly_inbound) / (enemy_inbound + beta*reachable_enemy_mass + 1)
+    ratio < 1 = under-defended (will likely be peeled). `beta`/overhead reuse the decisive-mass
+    constants; reachable_enemy_mass = cheap_enemy_pressure (the forward-projected reinforcement
+    behind the inbound — the out-massing mechanism). Returns [(ratio, age_after_capture)] per
+    threatened own planet; age is None for home/initial planets (never captured → not in cap_step).
+    Duration-weighted: a planet threatened N steps contributes N observations (like dm target-steps)."""
+    if beta is None:
+        beta = _DM_BETA_EVAL
+    if not planets:
+        return []
+    our_in: dict = {}
+    enemy_in: dict = {}
+    for f in (fleets or []):
+        own = int(f[1])
+        if own < 0:
+            continue
+        tgt = _dm_fleet_target(planets, f)
+        if tgt is None:
+            continue
+        tid = tgt[0]
+        if own == seat:
+            our_in[tid] = our_in.get(tid, 0.0) + f[6]
+        else:
+            enemy_in[tid] = enemy_in.get(tid, 0.0) + f[6]
+    enemy_planets = [p for p in planets if int(p[1]) != seat and int(p[1]) >= 0]
+    out = []
+    for p in planets:
+        if int(p[1]) != seat:
+            continue                                                  # OUR planets only
+        ein = enemy_in.get(p[0], 0.0)
+        if ein <= 0:
+            continue                                                  # threatened (inbound) only
+        em = 0.0                                                       # reachable enemy PLANET mass
+        for src in enemy_planets:
+            pd = math.hypot(src[2] - p[2], src[3] - p[3])
+            reach = max(_ship_speed_py(src[5]) * _DM_HORIZON, 1e-6)
+            em += src[5] * max(1.0 - pd / reach, 0.0)
+        floor = max(ein + beta * em + _DM_OVERHEAD, 1e-6)
+        ratio = (p[5] + our_in.get(p[0], 0.0)) / floor
+        age = (t - cap_step[p[0]]) if p[0] in cap_step else None
+        out.append((ratio, age))
+    return out
+
+
+def _enemy_threat(planets, fleets, tgt, seat):
+    """(enemy_inbound, threat_eta) on `tgt`: total enemy fleet ships converging on it + the SOONEST
+    enemy arrival ETA (the window we must get defenders in by). threat_eta = +inf if none inbound."""
+    ein = 0.0
+    eta = math.inf
+    for f in (fleets or []):
+        o = int(f[1])
+        if o < 0 or o == seat:
+            continue
+        r = _dm_fleet_target(planets, f)
+        if r is None or r[0] != tgt[0]:
+            continue
+        ein += f[6]
+        d = math.hypot(tgt[2] - f[2], tgt[3] - f[3])
+        eta = min(eta, d / max(_ship_speed_py(f[6]), 1e-6))
+    return ein, eta
+
+
+def _reachable_enemy_mass(planets, tgt, seat):
+    """cheap_enemy_pressure on `tgt`: reachable ENEMY planet mass (forward-projected reinforcement
+    behind the inbound — the out-massing mechanism), same decay as the decisive-mass floor."""
+    em = 0.0
+    for src in planets:
+        o = int(src[1])
+        if o != seat and o >= 0 and src[0] != tgt[0]:
+            pd = math.hypot(src[2] - tgt[2], src[3] - tgt[3])
+            reach = max(_ship_speed_py(src[5]) * _DM_HORIZON, 1e-6)
+            em += src[5] * max(1.0 - pd / reach, 0.0)
+    return em
+
+
+def _reachable_friendly_mass(planets, fleets, tgt, seat, threat_eta):
+    """FAITHFUL (safe_drain-like) friendly mass that can defend `tgt` BEFORE the threat arrives: our
+    fleets already inbound that ARRIVE in time + the SPARE garrison of owned sources that can reach it
+    in time. Spare = full garrison for a DOOMED source (its own inbound ≥ its garrison → nothing to
+    hold, recycle it all — orbit_lite.safe_drain's doomed-source rule), else garrison − own inbound
+    (shed only what it can spare and still hold). This is the chosen FORK-#2 (a) faithful version —
+    it answers 'could we have spared/recycled nearby mass?', not just 'was help already in flight?'."""
+    if not math.isfinite(threat_eta):
+        threat_eta = float(_DM_HORIZON)
+    avail = 0.0
+    enemy_in_src: dict = {}
+    for f in (fleets or []):
+        o = int(f[1])
+        if o < 0:
+            continue
+        r = _dm_fleet_target(planets, f)
+        if r is None:
+            continue
+        if o == seat and r[0] == tgt[0]:
+            d = math.hypot(tgt[2] - f[2], tgt[3] - f[3])
+            if d / max(_ship_speed_py(f[6]), 1e-6) <= threat_eta:
+                avail += f[6]                                          # our reinforcement arriving in time
+        elif o != seat:
+            enemy_in_src[r[0]] = enemy_in_src.get(r[0], 0.0) + f[6]
+    for src in planets:
+        if int(src[1]) != seat or src[0] == tgt[0]:
+            continue
+        g = src[5]
+        own_threat = enemy_in_src.get(src[0], 0.0)
+        spare = g if own_threat >= g else (g - own_threat)            # doomed → drain fully
+        if spare <= 0:
+            continue
+        d = math.hypot(src[2] - tgt[2], src[3] - tgt[3])
+        if d / max(_ship_speed_py(spare), 1e-6) <= threat_eta:        # reachable BEFORE the threat
+            avail += spare
+    return avail
+
+
+def _threat_class(planets, fleets, tgt, seat, beta=None):
+    """Triage class of a threatened OWN planet `tgt`, mirroring producer_v2's 'can I profitably hold
+    this, and can a neighbour spare the ships?' (safe_drain + roi gate):
+        defense_cost = enemy_inbound + beta*reachable_enemy_mass + 1 − garrison   (hold-floor shortfall)
+        friendly_available = _reachable_friendly_mass (faithful, ETA-aware)
+        value = production * horizon   (ship-equivalent of the production stream we keep — the unit
+                competitive_score works in; current garrison is sunk, not counted)
+        save_ratio = defense_cost / max(value, 1)
+    Returns 0 already-safe (cost<=0) / 1 cheap-save (savable, ratio<1) / 2 expensive-save (savable,
+    ratio>=1) / 3 hopeless (friendly_available < defense_cost → planner abandons + recycles mass)."""
+    if beta is None:
+        beta = _DM_BETA_EVAL
+    enemy_in, threat_eta = _enemy_threat(planets, fleets, tgt, seat)
+    defense_cost = enemy_in + beta * _reachable_enemy_mass(planets, tgt, seat) + _DM_OVERHEAD - tgt[5]
+    if defense_cost <= 0:
+        return 0                                                      # already safe
+    if _reachable_friendly_mass(planets, fleets, tgt, seat, threat_eta) < defense_cost:
+        return 3                                                      # hopeless → recycle the mass
+    value = max(tgt[6] * _DM_HORIZON, 1.0)
+    return 1 if (defense_cost / value) < 1.0 else 2                   # cheap vs expensive save
+
+
 def _reinf_reciprocity(reinf_edges):
     """Reinforce PING-PONG detector. `reinf_edges` = [(step, src_pid, tgt_pid), ...] of own-target
     reinforce launches. Returns (recip, recip3_ph):
@@ -344,6 +571,17 @@ def game_conversion(steps, seat):
     loss_garr_cap: list = []     # garrison at capture, per lost planet
     loss_garr_at: list = []      # garrison just before loss
     loss_enemy_in: list = []     # enemy ships inbound to it just before loss
+    # REINFORCE TRIAGE / save-efficiency (the "are we reinforcing the wrong planets?" read):
+    #   reinf_into[pid] = reinforce ships we've poured into a currently-held planet; on LOSS the tally
+    #   goes to to_lost (good ships after bad), held-to-end → to_saved. reinf_class_ships buckets each
+    #   reinforce launch by the TARGET's hold-triage class AT DECISION TIME (safe/cheap/expensive/
+    #   hopeless — see _reinforce_target_class). Confirms the hunch if to_lost% and hopeless% are high.
+    reinf_into: dict = {}
+    reinf_to_lost = 0.0
+    reinf_class_ships = [0.0, 0.0, 0.0, 0.0]   # reinforce ships by TARGET class at launch [safe,cheap,exp,hopeless]
+    lost_by_class = [0, 0, 0, 0]               # planets we LOST, by their threat class at loss-time
+    hopeless_lost_reinforced = 0               # hopeless losses we'd poured ships into (good-after-bad)
+    hopeless_lost_abandoned = 0                # hopeless losses we correctly let go (recycled the mass)
     reinf_bin = [0] * len(_REINF_BINS)   # own-target launches by empire size at launch
     atk_bin = [0] * len(_REINF_BINS)     # attack launches by empire size at launch
     # launch_rate / fire_frac (vs Isaiah 0.036 / 0.17): ALL legal launches (attack+reinforce),
@@ -361,6 +599,15 @@ def game_conversion(steps, seat):
     planets_at = {ms: None for ms in _CONV_MILESTONES}
     garrison_at = {ms: None for ms in _CONV_MILESTONES}   # ships parked on owned planets
     inflight_at = {ms: None for ms in _CONV_MILESTONES}   # ships in owned fleets (deployed)
+    # decisive-mass GAP: ratios (our inflight mass / producer_v2 capture floor) per attacked enemy
+    # target, split by phase (<50/50-100/>=100). Survives-argmax read of the decmass target — does
+    # the policy assemble force to the capture floor vs only improving adjacent competence?
+    dm_ratios_ph = [[], [], []]
+    # hold-floor (DEFENSIVE mirror): hold ratio per threatened OWN planet, split by phase and by
+    # age-after-capture (0-5 / 6-15 / 16+ steps). Tells whether we lose captures IMMEDIATELY (can't
+    # route defense in time) or LATER (logistics/churn). Uses cap_step for age.
+    hold_ph = [[], [], []]
+    hold_age = [[], [], []]
     # Pre-scan ownership timeline (keyed by GLOBAL planet id → no slot-reorder issue) so a launch
     # can look FORWARD: did its target actually become ours shortly after arrival? Used for the
     # forward-looking underkill (a per-launch threshold mis-flags legit multi-wave as underkill).
@@ -416,6 +663,23 @@ def game_conversion(steps, seat):
                         else:
                             loss_mode[3] += 1                          # OTHER
                     del cap_step[pid]
+                # TRIAGE on LOSS (any owned planet, incl. home): classify it at the loss decision
+                # (t-1) → was it cheaply savable (a MISS) or hopeless (correctly let go)? + route the
+                # reinforce ships we'd poured into it to "to_lost", and for hopeless losses record
+                # whether we wasted ships on it (reinforced) or abandoned it (recycled the mass).
+                if was == seat and own != seat:
+                    _t0 = next((q for q in p0 if q[0] == pid), None) if p0 else None
+                    if _t0 is not None:
+                        _f0loss = steps[t - 1][seat].observation.get("fleets") or []
+                        _cls = _threat_class(p0, _f0loss, _t0, seat)
+                        lost_by_class[_cls] += 1
+                        if _cls == 3:
+                            if reinf_into.get(pid, 0.0) > 0:
+                                hopeless_lost_reinforced += 1
+                            else:
+                                hopeless_lost_abandoned += 1
+                    if pid in reinf_into:
+                        reinf_to_lost += reinf_into.pop(pid)
                 prev[pid] = own
             last = p1
             if t in planets_at:
@@ -423,6 +687,17 @@ def game_conversion(steps, seat):
                 planets_at[t] = owned_now
                 garrison_at[t] = garrison_now
                 inflight_at[t] = sum(f[6] for f in fleets if int(f[1]) == seat)
+            # decisive-mass gap on the post-step state (mirrors training's per-step measurement)
+            _f_dm = steps[t][seat].observation.get("fleets") or []
+            _ph_dm = 0 if t < _LAUNCH_WINDOW else (1 if t < _MID_WINDOW else 2)
+            dm_ratios_ph[_ph_dm].extend(_decisive_gap_step(p1, _f_dm, seat))
+            # hold-floor (defensive): cap_step here reflects current holdings (capture/loss for step t
+            # processed above), so age-after-capture is correct. Bucket by phase + by age.
+            for _hr, _age in _hold_floor_step(p1, _f_dm, seat, cap_step, t):
+                hold_ph[_ph_dm].append(_hr)
+                if _age is not None:
+                    _ab = 0 if _age <= 5 else (1 if _age <= 15 else 2)
+                    hold_age[_ab].append(_hr)
         if not p0:
             continue
         byid = {p[0]: p for p in p0}
@@ -465,6 +740,10 @@ def game_conversion(steps, seat):
                 reinf += 1                          # reinforce: cannot capture
                 reinf_bin[bidx] += 1
                 reinf_edges.append((t, int(src[0]), int(tgt[0])))   # for reciprocal ping-pong
+                # TRIAGE: tally these ships against the target planet (resolved to_lost/to_saved on
+                # outcome) + bucket by the target's hold-triage class at decision time (obs t-1).
+                reinf_into[tgt[0]] = reinf_into.get(tgt[0], 0.0) + sent
+                reinf_class_ships[_threat_class(p0, f0, tgt, seat)] += sent
                 if _ecx is not None:               # direction: target vs source distance to enemy
                     dS = math.hypot(src[2] - _ecx, src[3] - _ecy)
                     dT = math.hypot(tgt[2] - _ecx, tgt[3] - _ecy)
@@ -527,6 +806,7 @@ def game_conversion(steps, seat):
             fire_frac_sum += fired_this_step / owned_dec
         launch_count += fired_this_step
     end_planets = sum(1 for p in (last or []) if int(p[1]) == seat)
+    reinf_to_saved = float(sum(reinf_into.values()))   # reinforce ships on planets still held at end
     reinf_recip, reinf_recip3_ph = _reinf_reciprocity(reinf_edges)
     out = {"captures": caps, "attack_launches": atk, "reinforce_launches": reinf,
            "reinf_recip": reinf_recip, "reinf_recip3_ph": reinf_recip3_ph,
@@ -545,7 +825,12 @@ def game_conversion(steps, seat):
            "glen": len(steps), "reinf_bin": reinf_bin, "atk_bin": atk_bin,
            "launch_states": launch_states, "launch_count": launch_count,
            "fire_steps": fire_steps, "fire_frac_sum": fire_frac_sum,
-           "launches_ph": launches_ph, "ship1_ph": ship1_ph, "ship_ph_sum": ship_ph_sum}
+           "launches_ph": launches_ph, "ship1_ph": ship1_ph, "ship_ph_sum": ship_ph_sum,
+           "dm_ratios_ph": dm_ratios_ph, "hold_ph": hold_ph, "hold_age": hold_age,
+           "reinf_class_ships": reinf_class_ships, "reinf_to_lost": reinf_to_lost,
+           "reinf_to_saved": reinf_to_saved, "lost_by_class": lost_by_class,
+           "hopeless_lost_reinforced": hopeless_lost_reinforced,
+           "hopeless_lost_abandoned": hopeless_lost_abandoned}
     for ms in _CONV_MILESTONES:
         out[f"p{ms}"] = planets_at[ms]
         out[f"g{ms}"] = garrison_at[ms]
@@ -572,6 +857,9 @@ def new_conversion_acc():
            # LOST the game), so the won-game value is the honest "can we hold mid-game?" read.
            "captures_won": 0, "captures_lost": 0, "lost_caps_won": 0, "lost_caps_lost": 0,
            "hold_durations_won": [], "hold_durations_lost": [],
+           # per-game LENGTHS split by outcome → median game length for wins (stall-and-win vs
+           # quick wrap-up) and losses. glen_sum/n is the mean over ALL games; this is the median split.
+           "game_len_won": [], "game_len_lost": [],
            # conversion + expansion split by outcome (planets@/open-cap aggregates are dominated by
            # the majority class — mostly losses vs a strong opp — so the won-game ramp is the real read)
            "attack_launches_won": 0, "attack_launches_lost": 0,
@@ -583,7 +871,28 @@ def new_conversion_acc():
            "reinf_n_sz": [0, 0, 0], "reinf_fwde_sz": [0, 0, 0],
            "atk_mid_won": 0, "atk_mid_lost": 0, "caps_mid_won": 0, "caps_mid_lost": 0,
            "games_won": 0, "games_lost": 0,
-           "reinf_bin": [0] * len(_REINF_BINS), "atk_bin": [0] * len(_REINF_BINS)}
+           "reinf_bin": [0] * len(_REINF_BINS), "atk_bin": [0] * len(_REINF_BINS),
+           # decisive-mass gap: pooled mass/floor ratios per phase (cross/gap/p50/overkill derive)
+           "dm_ratios_ph": [[], [], []],
+           # hold-floor (defensive): pooled hold ratios per phase + per age-after-capture bucket
+           "hold_ph": [[], [], []], "hold_age": [[], [], []],
+           # reinforce triage / save-efficiency. class_ships = reinforce ships by target class at
+           # launch [safe,cheap,exp,hopeless]; to_lost/to_saved = reinforce ships on planets we then
+           # lost vs kept; lost_by_class = the class of planets we LOST; hopeless_{reinf,aband} =
+           # of hopeless losses, did we waste ships or recycle. _won/_lost = winner/loser split.
+           "triage": {"class_ships": [0.0, 0.0, 0.0, 0.0],
+                      "class_ships_won": [0.0, 0.0, 0.0, 0.0], "class_ships_lost": [0.0, 0.0, 0.0, 0.0],
+                      "to_lost": 0.0, "to_saved": 0.0,
+                      "to_lost_won": 0.0, "to_saved_won": 0.0, "to_lost_lost": 0.0, "to_saved_lost": 0.0,
+                      "lost_by_class": [0, 0, 0, 0],
+                      "hopeless_reinf": 0, "hopeless_aband": 0},
+           # outmassed/WR conditioned on the OPENING-expansion bucket (planets@32): separates the
+           # upstream economic-tempo lever ("we didn't expand fast/wide enough → less mass before the
+           # peel") from the tactical aggregation/retention wall. Per bucket: lost-capture loss_mode
+           # [abandoned,out-massed,too-late,other], games, wins. Keyed <=4 / 5 / >=6 (winners ~6+).
+           "om32": {"<=4": {"lm": [0, 0, 0, 0], "games": 0, "wins": 0},
+                    "5":   {"lm": [0, 0, 0, 0], "games": 0, "wins": 0},
+                    ">=6": {"lm": [0, 0, 0, 0], "games": 0, "wins": 0}}}
     for ms in _CONV_MILESTONES:
         acc[f"p{ms}_sum"] = 0
         acc[f"p{ms}_n"] = 0
@@ -614,6 +923,7 @@ def add_conversion(acc, conv, won=None):
                   "atk_mid", "caps_mid"):
             acc[f"{k}_{suf}"] += conv[k]
         acc[f"hold_durations_{suf}"].extend(conv["hold_durations"])
+        acc[f"game_len_{suf}"].append(conv["glen"])
         acc["games_won" if won else "games_lost"] += 1
     acc["hold_durations"].extend(conv["hold_durations"])
     for i in range(4):
@@ -624,6 +934,34 @@ def add_conversion(acc, conv, won=None):
     for i in range(len(_REINF_BINS)):
         acc["reinf_bin"][i] += conv["reinf_bin"][i]
         acc["atk_bin"][i] += conv["atk_bin"][i]
+    for i in range(3):
+        acc["dm_ratios_ph"][i].extend(conv["dm_ratios_ph"][i])
+        acc["hold_ph"][i].extend(conv["hold_ph"][i])
+        acc["hold_age"][i].extend(conv["hold_age"][i])
+    tr = acc["triage"]
+    for i in range(4):
+        tr["class_ships"][i] += conv["reinf_class_ships"][i]
+        tr["lost_by_class"][i] += conv["lost_by_class"][i]
+    tr["to_lost"] += conv["reinf_to_lost"]
+    tr["to_saved"] += conv["reinf_to_saved"]
+    tr["hopeless_reinf"] += conv["hopeless_lost_reinforced"]
+    tr["hopeless_aband"] += conv["hopeless_lost_abandoned"]
+    if won is not None:
+        suf = "won" if won else "lost"
+        for i in range(4):
+            tr[f"class_ships_{suf}"][i] += conv["reinf_class_ships"][i]
+        tr[f"to_lost_{suf}"] += conv["reinf_to_lost"]
+        tr[f"to_saved_{suf}"] += conv["reinf_to_saved"]
+    # outmassed/WR conditioned on opening expansion (planets@32). Needs the per-game outcome (won)
+    # and a game that actually reached step 32 (p32 None = ended earlier → unbucketable, skipped).
+    if won is not None and conv.get("p32") is not None:
+        p32 = conv["p32"]
+        b = "<=4" if p32 <= 4 else ("5" if p32 == 5 else ">=6")
+        bk = acc["om32"][b]
+        bk["games"] += 1
+        bk["wins"] += 1 if won else 0
+        for i in range(4):
+            bk["lm"][i] += conv["loss_mode"][i]
     for i in range(3):
         acc["launches_ph"][i] += conv["launches_ph"][i]
         acc["ship1_ph"][i] += conv["ship1_ph"][i]
@@ -710,6 +1048,8 @@ def _fmt_conversion(acc):
     lostr_w = acc["lost_caps_won"] / max(acc["captures_won"], 1)
     lostr_l = acc["lost_caps_lost"] / max(acc["captures_lost"], 1)
     medh_w, medh_l = _med(acc["hold_durations_won"]), _med(acc["hold_durations_lost"])
+    # median game LENGTH split by outcome: long wins = stall-and-win (attrition), short = decisive snowball.
+    medlen_w, medlen_l = _med(acc["game_len_won"]), _med(acc["game_len_lost"])
     # lost-capture autopsy: WHY held planets fall. out-massed = enemy fleet > our garrison (the
     # force-concentration gap — planners mass a decisive strike; we hold a thin line everywhere).
     lmt = sum(acc["loss_mode"]) or 1
@@ -758,17 +1098,116 @@ def _fmt_conversion(acc):
             (f"{nm} {100*s1[i]/lp[i]:.0f}%(mean{ss[i]/lp[i]:.0f},n{lp[i]})" if lp[i] else f"{nm} —(n0)")
             for i, nm in enumerate(("early<50", "mid50-100", "late>=100")))
     s0wl = (f"\n     WON  {_s0('_won')}\n     LOST {_s0('_lost')}" if (gw + gl) > 0 else "")
+    # decisive-mass GAP (force concentration toward producer_v2's capture floor; same floor as the
+    # training reward). Per phase: gap = mean max(0,1-mass/floor) (DOWN=concentrating), cross =
+    # mean(mass>=floor) (UP), p50 = median ratio. overkill = mean ratio on crossed (catch 3x dumb-
+    # overkill); near-miss = fraction in [0.75,1) (approaching but not crossing). target-steps/game
+    # = duration-weighted target observations per game (a long-ETA attack counts each step it is
+    # inflight — a state-time signal, NOT unique targets/launches). project_force_concentration_wall.
+    # hold-floor (DEFENSIVE): of threatened own planets, what fraction are under-defended (hold
+    # ratio < 1), split by phase and by age-after-capture. High under% at 0-5 = we lose captures
+    # immediately (can't route defensive mass in time → action-grammar/timing); high at 16+ =
+    # later logistics/churn. The defensive mirror of the decisive-mass attack gap.
+    def _hold_stats(rs):
+        if not rs:
+            return "—/— (n0)"
+        under = sum(1 for r in rs if r < 1.0) / len(rs)
+        p50 = sorted(rs)[len(rs) // 2]
+        return f"{under:.0%}/{p50:.2f} (n{len(rs)})"
+    hold_line = (
+        f"  hold-floor (garr+friendly_in)/(enemy_in+β·reach+1) β={_DM_BETA_EVAL:.1f}, threatened own [under%(ratio<1)/p50]\n"
+        f"     by phase <50/50-100/>=100  "
+        + "  ".join(_hold_stats(acc["hold_ph"][i]) for i in range(3)) + "\n"
+        f"     by age-after-capture 0-5/6-15/16+  "
+        + "  ".join(_hold_stats(acc["hold_age"][i]) for i in range(3))
+        + "   [under% high at 0-5 = fail immediately (route defense too slow); at 16+ = logistics/churn]\n")
+    # reinforce TRIAGE / save-efficiency: are we reinforcing the WRONG planets (pouring mass into
+    # hopeless/eventually-lost ones) instead of recycling it? Mirrors producer_v2 (safe_drain + roi).
+    _tr = acc["triage"]
+    def _share(part, whole):
+        return part / whole if whole else 0.0
+    _cs = _tr["class_ships"]; _cst = sum(_cs) or 1.0
+    _lbc = _tr["lost_by_class"]; _lbt = sum(_lbc) or 1.0
+    _hl = _tr["hopeless_reinf"] + _tr["hopeless_aband"]
+    def _hopeless_share(suf):                       # reinforce mass → hopeless targets, won/lost/overall
+        cs = _tr[f"class_ships_{suf}"] if suf else _cs
+        return _share(cs[3], sum(cs) or 1.0)
+    def _tolost_share(suf):                         # reinforce mass on planets we then LOST
+        tl = _tr[f"to_lost_{suf}"] if suf else _tr["to_lost"]
+        ts = _tr[f"to_saved_{suf}"] if suf else _tr["to_saved"]
+        return _share(tl, (tl + ts) or 1.0)
+    triage_line = (
+        f"  reinforce-triage  ships→ safe {_share(_cs[0],_cst):.0%} cheap-save {_share(_cs[1],_cst):.0%} "
+        f"exp-save {_share(_cs[2],_cst):.0%} HOPELESS {_share(_cs[3],_cst):.0%}  (β={_DM_BETA_EVAL:.1f})\n"
+        f"     reinforce mass on LOST planets {_tolost_share(''):.0%} (to-saved {1-_tolost_share(''):.0%})  ·  "
+        f"of LOST planets: cheap-save-MISSED {_share(_lbc[1],_lbt):.0%} hopeless(ok-to-drop) {_share(_lbc[3],_lbt):.0%}\n"
+        f"     of HOPELESS losses: wasted-ships {_share(_tr['hopeless_reinf'],_hl or 1):.0%} abandoned {_share(_tr['hopeless_aband'],_hl or 1):.0%} (n{_hl})  ·  "
+        f"WON/LOST hopeless-reinf-share {_hopeless_share('won'):.0%}/{_hopeless_share('lost'):.0%}  to-lost {_tolost_share('won'):.0%}/{_tolost_share('lost'):.0%}\n"
+        f"   [high HOPELESS/to-lost + winners lower = bad triage (reinforce wrong planets), not 'reinforce more']\n")
+    # outmassed/WR conditioned on opening expansion (planets@32 bucket). The verdict is computed
+    # from THIS panel (>=6 vs <=4), not asserted — if >=6 has materially lower out-massed / higher
+    # WR, opening expansion looks upstream; if not, the wall is downstream (defensive/tactical).
+    def _om32_vals(b):
+        bk = acc["om32"][b]
+        g = bk["games"]
+        if g == 0:
+            return None
+        tot_lm = sum(bk["lm"])
+        return (bk["lm"][1] / tot_lm if tot_lm else 0.0, bk["wins"] / g, g)
+    def _om32(b):
+        v = _om32_vals(b)
+        return f"{b}: —(n0)" if v is None else f"{b}: outmassed {v[0]:.0%} WR {v[1]:.0%} (n{v[2]})"
+    _lo, _hi = _om32_vals("<=4"), _om32_vals(">=6")
+    if _lo is None or _hi is None or _lo[2] < 15 or _hi[2] < 15:
+        _verdict = "low-n in a bucket → inconclusive"
+    else:
+        d_om = _lo[0] - _hi[0]            # +ve = >=6 is LESS out-massed (expansion helps)
+        d_wr = _hi[1] - _lo[1]            # +ve = >=6 wins MORE
+        if d_om >= 0.04 or d_wr >= 0.05:
+            _verdict = (f">=6 better (outmassed {d_om:+.0%}, WR {d_wr:+.0%} vs <=4) "
+                        "→ opening expansion looks UPSTREAM")
+        else:
+            _verdict = (f">=6 ~ <=4 (outmassed {d_om:+.0%}, WR {d_wr:+.0%}) "
+                        "→ opening expansion NOT the lever; wall is downstream")
+    om32_line = ("  outmassed by planets@32  "
+                 + "  ".join(_om32(b) for b in ("<=4", "5", ">=6"))
+                 + f"   [{_verdict}]\n")
+    _dmp = acc["dm_ratios_ph"]
+    _dm_all = _dmp[0] + _dmp[1] + _dmp[2]
+    def _dm_ph(rs):
+        if not rs:
+            return "—/—/—"
+        gap = sum(max(0.0, 1.0 - r) for r in rs) / len(rs)
+        cross = sum(1 for r in rs if r >= 1.0) / len(rs)
+        return f"{gap:.2f}/{cross:.2f}/{sorted(rs)[len(rs)//2]:.2f}"
+    _cross_all = [r for r in _dm_all if r >= 1.0]
+    dm_gap = sum(max(0.0, 1.0 - r) for r in _dm_all) / max(len(_dm_all), 1)
+    dm_cross = len(_cross_all) / max(len(_dm_all), 1)
+    dm_over = sum(_cross_all) / max(len(_cross_all), 1) if _cross_all else 0.0
+    dm_nm = sum(1 for r in _dm_all if 0.75 <= r < 1.0) / max(len(_dm_all), 1)
+    dm_tpg = len(_dm_all) / n
+    dm_line = (f"  decisive-mass  gap {dm_gap:.2f}  cross {dm_cross:.2f}  overkill {dm_over:.2f}  "
+               f"near-miss {dm_nm:.2f}  target-steps/game {dm_tpg:.1f}  (beta {_DM_BETA_EVAL:.1f})\n"
+               f"     by phase <50/50-100/>=100 (gap/cross/p50)  "
+               f"{_dm_ph(_dmp[0])}  {_dm_ph(_dmp[1])}  {_dm_ph(_dmp[2])}"
+               f"   [gap DOWN + cross UP = assembling to the capture floor; floor == decmass reward]\n")
     return (f"Conversion: caps/game {c/n:.1f}  atk-launch/game {al/n:.1f}  "
             f"cap/atk-launch {c/max(al,1):.3f} (open<50 {cap_open:.3f}  mid50-100 {cap_mid:.3f})  ships/cap {acc['attack_ships']/max(c,1):.0f}  "
             f"reinf_share {rl/max(al+rl,1):.2f}\n"
             f"  planets@16/32/50/100 {pl(16)}/{pl(32)}/{pl(50)}/{pl(100)}  end {acc['end_planets']/n:.1f}"
-            f"   churn {churn:.2f} ({churn_n:.2f}/100st, len {glen:.0f})\n"
+            f"   churn {churn:.2f} ({churn_n:.2f}/100st, mean-len {glen:.0f})\n"
+            f"  game-len  median WON {medlen_w}st ({acc['games_won']}g)  ·  LOST {medlen_l}st ({acc['games_lost']}g)"
+            f"   [long WON = stall-and-win/attrition; short = decisive snowball]\n"
             f"{pwl}"
             f"\n  retention  peel-rate {lost_rate:.2f} ({acc['lost_caps']}/{c} caps lost)  median-hold {med_hold}st\n"
             f"{rwl}"
             f"  hold-loss  out-massed {lm[1]:.0%} · abandoned {lm[0]:.0%} · too-late {lm[2]:.0%} · other {lm[3]:.0%}"
             f"   garr@cap {gcap_med:.0f}→@loss {gloss_med:.0f} vs enemy-inbound {einb_med:.0f}"
             f"   [out-massed = enemy fleet > our garrison = force-concentration gap]\n"
+            f"{hold_line}"
+            f"{triage_line}"
+            f"{om32_line}"
+            f"{dm_line}"
             f"  launch-waste<50  redundant {redf:.2f} (WG {redf_wg:.2f})  underkill {undf:.2f} (WG {undf_wg:.2f})"
             f"   [⚠ underkill NON-discriminating: winners also ~0.40. THE signal = open<50 cap/atk above]\n"
             f"   [ref:winner  cap/atk whole 0.53 · open<50 0.51 · mid50-100 0.47 · planets 2/6/9/10 · reinf 0.30]\n"
@@ -1131,7 +1570,13 @@ if __name__ == "__main__":
     parser.add_argument("--sufficient-commit-factor", type=float, default=None,
                         help="Sufficient-commit parity: veto an attack whose ships <= target "
                              "defense × this factor. Default=auto-load from ckpt (1.0 = strict).")
+    parser.add_argument("--decisive-mass-beta", type=float, default=_DM_BETA,
+                        help="Reactive-margin weight for the decisive-mass GAP diagnostic floor "
+                             "(beta*rho(eta)*reachable_enemy_mass). Default 2.2 (= training default). "
+                             "Pass the run's --decisive-mass-beta to match a non-default-beta decmass "
+                             "run so the eval floor == the reward floor (beta isn't stored in the ckpt).")
     args = parser.parse_args()
+    _DM_BETA_EVAL = args.decisive_mass_beta   # module global → used by _decisive_gap_step
 
     cfg = Config()
     cfg.env.num_players = args.num_players

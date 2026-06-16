@@ -69,7 +69,7 @@ class OpponentPool:
     def __init__(self, max_self_members: int = 20, pfsp_alpha: float = 2.0,
                  mastered_winrate: float = 0.9, mastered_min_games: int = 50,
                  pfsp_min_games: int = 30, external_fraction: float = 0.0,
-                 ema_alpha: float = 0.01):
+                 ema_alpha: float = 0.01, pfsp_externals: bool = False):
         self.members: list[PoolMember] = []
         self.max_self_members = max_self_members
         self.pfsp_alpha = pfsp_alpha
@@ -93,6 +93,21 @@ class OpponentPool:
         # Self-checkpoints still use lifetime win rate (stable enough given their
         # smaller n and shorter lifespan).
         self.ema_alpha: float = float(ema_alpha)
+        # When True, the external slice is sampled PFSP-weighted (by _pfsp_weight, i.e. toward the
+        # rung we lose to most / matched-difficulty) instead of UNIFORM r.choice. Default False =
+        # legacy uniform-over-externals (the `pfsp_w` column is then display-only for externals).
+        # Opt-in so a flag flip is needed to change sampling — never a silent behaviour change.
+        self.pfsp_externals: bool = bool(pfsp_externals)
+
+    def _choose_external(self, externals, r):
+        """Pick one external — PFSP-weighted by recent win-rate when pfsp_externals is on (favours
+        the rung we lose to most), else uniform (legacy). Falls back to uniform if all weights are 0."""
+        if not self.pfsp_externals or len(externals) == 1:
+            return r.choice(externals)
+        weights = [self._pfsp_weight(m) for m in externals]
+        if sum(weights) <= 0:
+            return r.choice(externals)
+        return r.choices(externals, weights=weights, k=1)[0]
 
     def __len__(self) -> int:
         return len(self.members)
@@ -175,7 +190,7 @@ class OpponentPool:
             organic = [m for m in self.members if m.kind == "self" and not m.pinned]
             roll = r.random()
             if externals and roll < ext_frac:
-                return r.choice(externals)
+                return self._choose_external(externals, r)
             if pinned and roll < ext_frac + pinned_fraction:
                 return r.choice(pinned)
             if not organic:
@@ -185,7 +200,7 @@ class OpponentPool:
         elif externals and ext_frac > 0.0:
             # Legacy 2-way: fixed external slice vs PFSP over all self-members (incl. pinned).
             if r.random() < ext_frac:
-                return r.choice(externals)
+                return self._choose_external(externals, r)
             self_members = [m for m in self.members if m.kind == "self"]
             candidates = self_members if self_members else self.members
         else:
@@ -290,6 +305,7 @@ class OpponentPool:
                 "pfsp_min_games": self.pfsp_min_games,
                 "external_fraction": self.external_fraction,
                 "ema_alpha": self.ema_alpha,
+                "pfsp_externals": self.pfsp_externals,
             },
         }
         tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
@@ -315,6 +331,7 @@ class OpponentPool:
             pfsp_min_games=cfg.get("pfsp_min_games", 30),
             external_fraction=cfg.get("external_fraction", 0.0),
             ema_alpha=cfg.get("ema_alpha", 0.01),
+            pfsp_externals=cfg.get("pfsp_externals", False),
         )
         for m in data.get("self_members", []):
             pool.members.append(PoolMember(
@@ -352,7 +369,10 @@ class OpponentPool:
         rows = top_self + externals
         # NOTE: this is the CONFIGURED target/cap; under a ramp (train_torch) the LIVE
         # per-rollout fraction is lower — see the "pool hard-ramp" line for the live value.
+        # external slice sampling: pfsp-weighted (toward low-wr rungs) or uniform. Surfaced so the
+        # pfsp_w column isn't misread as the external sampling distribution when it's uniform.
         ext_note = (f"  external_target_frac={self.external_fraction:.2f}"
+                    f" ({'pfsp-weighted' if self.pfsp_externals else 'uniform'})"
                     if self.external_fraction > 0 else "")
         lines = [f"  pool size={len(self.members)}  alpha={self.pfsp_alpha}{ext_note}"]
         for m in rows:

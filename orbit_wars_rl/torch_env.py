@@ -227,6 +227,7 @@ class VecTorchEnv:
         consolidation_steps: int = 40,
         decisive_mass_coef: float = 0.0,
         decisive_mass_beta: float = _DM_BETA,
+        decisive_diag: bool = False,
         handicap_frac: float = 0.0,
         handicap_ships: int = 5,
         ssdr_frac: float = 0.0,
@@ -390,8 +391,20 @@ class VecTorchEnv:
         # uses 2.2 (planner-conservative); for a TRAINING reward a high beta makes crossings rare
         # (sparse signal) — lower it if `decis` stays ~0 on the resumed (trained) policy.
         self.decisive_mass_beta = float(decisive_mass_beta)
+        # Decisive-mass GAP diagnostic: measure how far our inflight attacks fall short of the
+        # capture floor (dm_gap/dm_cross/...) using the EXACT reward floor, EVEN when the reward
+        # itself is off (decisive_mass_coef=0) — tells us whether the policy is moving toward the
+        # decmass target vs only improving adjacent competence. project_force_concentration_wall.
+        self.decisive_diag = bool(decisive_diag)
         self.prev_decisive_suff = None       # (N, P, num_players) bool — allocated in reset()
         self._decisive_credit = None         # (N, num_players) diag accumulator — reset_reinforce_stats()
+        # dm_* phase-split (early<50 / mid50-100 / late>=100) accumulators — reset_reinforce_stats()
+        self._dm_targets = None              # (N, num_players, 3) enemy targets w/ our inflight mass>0
+        self._dm_cross = None                # of those, mass >= floor
+        self._dm_ratio_sum = None            # sum mass/floor over targets
+        self._dm_gap_sum = None              # sum max(0,floor-mass)/floor over targets
+        self._dm_overkill_sum = None         # sum mass/floor over CROSSED targets (denom = _dm_cross)
+        self._dm_nearmiss = None             # of targets, ratio in [0.75, 1.0)
         # Handicap curriculum: fraction of games where player 0 starts with fewer ships.
         # Forces the agent to practise fighting from behind — the bimodal collapse state
         # that pure symmetric self-play never generates enough gradient for.
@@ -654,19 +667,20 @@ class VecTorchEnv:
         tgt_idx = dists_fp.masked_fill(~candidate, 1e6).argmin(dim=2)    # (N, F)
         return torch.where(has_candidate, tgt_idx, torch.full_like(tgt_idx, -1))
 
-    def _decisive_mass_bonus(self, terminal_rewards: torch.Tensor) -> torch.Tensor:
-        """Lever A: +decisive_mass_coef the step our inflight force converging on an ENEMY
-        target first reaches producer_v2's capture floor. Board-grounded, NOT outcome-tied →
-        the force-concentration gradient symmetric self-play can't price (project_force_
-        concentration_wall). One credit per crossing (no over-mass scaling); prev_decisive_suff
-        re-arms when mass drops below floor / the planet stops being enemy.
+    def _decisive_mass_fields(self):
+        """Per-(N,P,num_players) inflight mass, capture floor, max-ETA and is_enemy mask — the
+        EXACT quantities producer_v2's capture floor uses. Shared by the Lever-A reward
+        (_decisive_mass_bonus) and the dm_* gap diagnostic (_accumulate_decisive_diag) so the two
+        can never drift. project_force_concentration_wall.
 
         floor_t = garrison + prod*eta + enemy_inbound_now      (projected defenders at arrival)
                 + beta*rho(eta)*reachable_enemy_mass           (v2's reactive-reinforcement margin)
                 + overhead
-        mass_t = our alive inflight fleet ships converging on t. eta = ships-weighted mean ETA
-        of that mass (capped at the horizon). enemy_mass = cheap_enemy_pressure (reachable enemy
-        PLANET mass); enemy_inbound_now = enemy FLEET ships already racing to defend t."""
+        mass_t = our alive inflight fleet ships converging on t. eta = MAX ETA of that mass
+        (capped at the horizon — the floor must hold at the LAST arrival, when all counted mass is
+        present, and rho(eta) then gives the enemy the full reaction window). enemy_mass =
+        cheap_enemy_pressure (reachable enemy PLANET mass); enemy_inbound_now = enemy FLEET ships
+        already racing to defend t."""
         N, P = self.planets.shape[0], self.planets.shape[1]
         owner = self.planets[:, :, 1].long()                            # (N, P)
         garr = self.planets[:, :, 5]
@@ -693,17 +707,17 @@ class VecTorchEnv:
                  / _ship_speed(f_ships_raw).clamp(min=1e-6)).clamp(max=_DM_HORIZON)
         f_ships = f_ships_raw * self.fleet_alive.float()
         valid_f = (tgt_idx >= 0) & self.fleet_alive
+        mass = torch.zeros(N, P, self.num_players, dtype=garr.dtype, device=self.device)
+        floor = torch.zeros_like(mass)
+        eta_out = torch.zeros_like(mass)
+        is_enemy = torch.zeros(N, P, self.num_players, dtype=torch.bool, device=self.device)
         for pl in range(self.num_players):
             mine = (valid_f & (f_owner == pl)).float()                 # (N, F)
             w = f_ships * mine
-            mass = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
-            mass.scatter_add_(1, tgt_safe, w)                          # our inflight per target
-            # MAX (not mean) ETA over our contributing fleets: the floor must hold at the LAST
-            # arrival — when all the counted mass is actually present — and rho(eta) then gives the
-            # enemy the full reaction window. Mean ETA gave FALSE credit: a fast large fleet + a
-            # slower supporting fleet could satisfy the floor at the averaged time before the
-            # combined mass co-arrives (P1 faithfulness fix). Non-mine fleets get -1 so they never
-            # win the max; the 0-init is harmless (targets with no mine fleet have mass=0 → suff=False).
+            m = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
+            m.scatter_add_(1, tgt_safe, w)                             # our inflight per target
+            # MAX ETA over our contributing fleets (non-mine get -1 so they never win the max;
+            # the 0-init is harmless — targets with no mine fleet have mass=0).
             eta_src = torch.where(mine.bool(), f_eta, torch.full_like(f_eta, -1.0))
             eta = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
             eta.scatter_reduce_(1, tgt_safe, eta_src, reduce='amax', include_self=True)
@@ -717,10 +731,22 @@ class VecTorchEnv:
             enemy_mass = torch.where(valid_sp, garr.unsqueeze(2) * decay,
                                      torch.zeros_like(decay)).sum(dim=1)      # (N, P_tgt)
             rho = ((eta - _DM_ETA_FREE) / _DM_ETA_SCALE).clamp(0.0, 1.0)
-            floor = (garr + prod * eta + inbound
-                     + self.decisive_mass_beta * rho * enemy_mass + _DM_OVERHEAD)
-            is_enemy = alive & (owner != pl) & (owner >= 0)
-            suff = is_enemy & (mass >= floor)
+            mass[:, :, pl] = m
+            floor[:, :, pl] = (garr + prod * eta + inbound
+                               + self.decisive_mass_beta * rho * enemy_mass + _DM_OVERHEAD)
+            eta_out[:, :, pl] = eta
+            is_enemy[:, :, pl] = alive & (owner != pl) & (owner >= 0)
+        return mass, floor, eta_out, is_enemy
+
+    def _decisive_mass_bonus(self, terminal_rewards: torch.Tensor, fields=None) -> torch.Tensor:
+        """Lever A: +decisive_mass_coef the step our inflight force converging on an ENEMY target
+        first reaches producer_v2's capture floor (one credit per crossing, no over-mass scaling;
+        prev_decisive_suff re-arms when mass drops below floor / the planet stops being enemy).
+        `fields` = a precomputed (mass, floor, eta, is_enemy) from _decisive_mass_fields() so
+        step() shares one computation with the diagnostic; None → compute fresh."""
+        mass, floor, _eta, is_enemy = fields if fields is not None else self._decisive_mass_fields()
+        for pl in range(self.num_players):
+            suff = is_enemy[:, :, pl] & (mass[:, :, pl] >= floor[:, :, pl])
             crossing = suff & ~self.prev_decisive_suff[:, :, pl]
             cnt = crossing.float().sum(dim=1)
             terminal_rewards[:, pl] = terminal_rewards[:, pl] + self.decisive_mass_coef * cnt
@@ -728,6 +754,32 @@ class VecTorchEnv:
             if self._decisive_credit is not None:
                 self._decisive_credit[:, pl] += cnt
         return terminal_rewards
+
+    def _accumulate_decisive_diag(self, mass, floor, eta, is_enemy):
+        """Phase-split dm_* GAP diagnostic from the EXACT reward floor (decisive_diag). Per
+        (env, player): targets = enemy planets with our inflight mass>0; ratio = mass/floor;
+        cross = ratio>=1; gap = max(0,1-ratio); near-miss = ratio in [0.75,1); overkill = ratio
+        on crossed. Reward-side OFF is fine — this reads whether the policy moves toward the
+        decmass target regardless. project_force_concentration_wall."""
+        sc = self.step_count.float()                                   # (N,)
+        w = torch.stack([(sc < 50).float(),
+                         ((sc >= 50) & (sc < 100)).float(),
+                         (sc >= 100).float()], dim=1)                  # (N, 3) phase one-hot
+        fl = floor.clamp(min=1e-6)
+        ratio = mass / fl                                              # (N, P, players)
+        gap = (fl - mass).clamp(min=0.0) / fl
+        crossed = (mass >= floor).float()
+        nearmiss = ((ratio >= 0.75) & (ratio < 1.0)).float()
+        att = (is_enemy & (mass > 0)).float()                         # attacked enemy targets
+        we = w.unsqueeze(1)                                            # (N, 1, 3) → over players
+        def acc(per_target):                                          # (N,P,players) → (N,players,3)
+            return (att * per_target).sum(dim=1).unsqueeze(-1) * we
+        self._dm_targets += att.sum(dim=1).unsqueeze(-1) * we
+        self._dm_cross += acc(crossed)
+        self._dm_ratio_sum += acc(ratio)
+        self._dm_gap_sum += acc(gap)
+        self._dm_overkill_sum += acc(crossed * ratio)
+        self._dm_nearmiss += acc(nearmiss)
 
     def _compute_production(self) -> torch.Tensor:
         """Total production rate of planets owned by each player. (N, num_players)"""
@@ -1738,6 +1790,17 @@ class VecTorchEnv:
         # Lever A: count of decisive-mass crossings credited this rollout (per env, per player).
         self._decisive_credit = torch.zeros(
             self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
+        # dm_* GAP diagnostic: phase-split (early/mid/late) per-(env,player) sums over the rollout,
+        # accumulated every step (when decisive_diag) from the EXACT reward floor so the diag and
+        # the Lever-A reward can never drift. Read train_frac-weighted in train_torch.
+        z3 = lambda: torch.zeros(self.num_envs, self.num_players, 3,
+                                 dtype=torch.float32, device=self.device)
+        self._dm_targets = z3()
+        self._dm_cross = z3()
+        self._dm_ratio_sum = z3()
+        self._dm_gap_sum = z3()
+        self._dm_overkill_sum = z3()
+        self._dm_nearmiss = z3()
 
     # ---------------------------------------------------------------------
     # Step — pure tensor ops, runs all N envs in one pass.
@@ -2039,8 +2102,12 @@ class VecTorchEnv:
         # Consolidation bonus: ONE-TIME +coef when a net-new CAPTURED planet survives K steps.
         if self.consolidation_coef != 0.0:
             terminal_rewards = self._consolidation_bonus(terminal_rewards)
-        if self.decisive_mass_coef != 0.0:
-            terminal_rewards = self._decisive_mass_bonus(terminal_rewards)
+        if self.decisive_mass_coef != 0.0 or self.decisive_diag:
+            dm_fields = self._decisive_mass_fields()
+            if self.decisive_mass_coef != 0.0:
+                terminal_rewards = self._decisive_mass_bonus(terminal_rewards, dm_fields)
+            if self.decisive_diag and self._dm_targets is not None:
+                self._accumulate_decisive_diag(*dm_fields)
         # Reinforcement transit cost (#2): price the ships each player sent to its own
         # planets this step. Costless reinforcement floods (rev56, ~30× launch volume);
         # this prunes the wasteful tail. Calibrate reinforce_cost so reinforce_rate
