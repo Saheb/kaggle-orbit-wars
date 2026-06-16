@@ -117,7 +117,7 @@ CPU core count and VRAM (env capacity) do.**
 |---|---|---|---|---|---|
 | H200 (₹189) | 28 | 143 GB | 512 envs / 6 workers | **~850** | GPU 0%; 512 is the sweet spot (1024 doesn't scale — single-thread cap) |
 | A100 40 GB (₹75) | 16 | 40 GB | **256** envs / 4 workers | ~431 | **512 envs OOMs (~45 GB needed)** — must cap envs; 16 cores oversubscribe at load ~20 |
-| A100 80 GB (₹84) | ? | 80 GB | 512 envs fits (~45 GB) | TBD | no OOM; SPS gated by core count, not GPU |
+| A100 80 GB (`A100-SXM4-80GB`) | 28 | 80 GB | 512 envs / 12 workers | **~416** | no OOM; **must request `--gpu A100-80GB`** (see gotcha below) |
 
 **Practical rules:**
 - **VRAM:** 512 envs needs **~45 GB** → 40 GB cards OOM (the historical "A100 didn't work"). Use
@@ -134,13 +134,21 @@ on local Mac CPU). Two concurrent panels on same instance: ~20-25 min each.
 
 ## Launch a training instance
 
+> **⚠️ GPU-NAME GOTCHA — how to actually get an 80 GB A100 (2026-06-16).** `jl create --gpu A100`
+> gives the **40 GB PCIE** variant (`A100-PCIE-40GB`) → 512 envs OOMs, must cap to 256. The **80 GB**
+> card is a SEPARATELY-NAMED gpu type: **`--gpu A100-80GB`** → provisions `A100-SXM4-80GB` (80 GB,
+> 28 cores) → runs 512 envs. **`--storage N` is DISK GB, not VRAM** — it does NOT influence the card.
+> So for 512-env training prefer `--gpu A100-80GB` (or H100/H200, also 80 GB+). The deploy/launch
+> scripts auto-detect VRAM and cap NUM_ENVS to 256 below 70 GB, but requesting the right gpu type
+> avoids the fallback. (Burned ~4 spot boxes rediscovering this — don't.)
+
 ```bash
 source /Users/saheb/home/.venv/bin/activate
 source .env
 export JL_API_KEY="${JL_API_KEY:-$JARVIS_API_KEY}"
 ssh-add ~/.ssh/jarvis-labs-key
 
-jl create --gpu A30 --storage 100 --name orbit-wars-train --yes --json
+jl create --gpu A100-80GB --storage 100 --name orbit-wars-train --spot --yes --json   # 80 GB / 28 cores / 512 envs
 jl list
 ```
 

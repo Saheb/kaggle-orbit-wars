@@ -73,6 +73,8 @@ _REINFORCE_FORWARD_ONLY = {reinforce_forward_only}
 _REINFORCE_GARRISON_FLOOR = {reinforce_garrison_floor}
 # Sufficient-commit mask (ATTACKS) — also MUST match training. Independent of reinforce.
 _SUFFICIENT_COMMIT_FACTOR = {sufficient_commit_factor}
+# Reverse-edge reinforce cooldown (MUST match training; auto-loaded from ckpt). 0 = off.
+_REVERSE_EDGE_COOLDOWN = {reverse_edge_cooldown}
 
 
 # --- Embedded parameters (base64-encoded torch state_dict) ---
@@ -253,12 +255,25 @@ def _get_model():
 set_game_phase_features({game_phase_features})
 
 
+# --- Reverse-edge cooldown rule (inlined from reinforce_cooldown.py) ---
+
+{reinforce_cooldown_code}
+_cd_is_blocked = is_blocked
+_cd_record = record
+_cd_on_loss = on_ownership_loss
+
+
 # --- Action masks (inlined from action_mask.py) ---
 
 {action_mask_code}
 
 
 # --- Kaggle agent entry point ---
+
+# Reverse-edge cooldown per-game state (canonical rule in reinforce_cooldown.py; mirrors
+# eval.build_agent_fn). Cleared when the step counter resets (a new game in the same process).
+_CD = {{"last": {{}}, "prev_step": -1}}
+
 
 def agent(obs, cfg=None):
     model = _get_model()
@@ -278,6 +293,11 @@ def agent(obs, cfg=None):
         }}
 
     player = obs["player"]
+    if _REVERSE_EDGE_COOLDOWN > 0:
+        _step_now = int(obs.get("step", 0))
+        if _step_now <= _CD["prev_step"]:
+            _CD["last"].clear()
+        _CD["prev_step"] = _step_now
     features = extract_features(obs, player, num_players=2)
     masks = compute_action_masks(obs, player)
 
@@ -310,6 +330,9 @@ def agent(obs, cfg=None):
             reinforce_forward_only=_REINFORCE_FORWARD_ONLY,
             reinforce_garrison_floor=_REINFORCE_GARRISON_FLOOR,
             sufficient_commit_factor=_SUFFICIENT_COMMIT_FACTOR,
+            reverse_edge_cooldown=_REVERSE_EDGE_COOLDOWN,
+            cooldown_last=_CD["last"] if _REVERSE_EDGE_COOLDOWN > 0 else None,
+            cooldown_step=int(obs.get("step", 0)),
         )
     else:
         raise NotImplementedError(
@@ -479,6 +502,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     src_dir = os.path.dirname(os.path.abspath(__file__))
     features_code = _read_module_body(os.path.join(src_dir, "features.py"))
     action_mask_code = _read_module_body(os.path.join(src_dir, "action_mask.py"))
+    reinforce_cooldown_code = _read_module_body(os.path.join(src_dir, "reinforce_cooldown.py"))
 
     m = cfg.model
     # Auto-detect reinforcement from the checkpoint so the exported mask matches how
@@ -486,6 +510,11 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     _ckpt = _load_checkpoint(checkpoint_path)
     allow_reinforce = bool(_ckpt.get("config", {}).get("allow_reinforce", False)) if isinstance(_ckpt, dict) else False
     game_phase_features = bool(_ckpt.get("config", {}).get("game_phase_features", False)) if isinstance(_ckpt, dict) else False
+    # Reverse-edge cooldown is persisted in the ckpt config (not a CLI flag here) → bake it so
+    # the submission applies the SAME reinforce-ping-pong veto the policy trained+evaluated with.
+    reverse_edge_cooldown = int(_ckpt.get("config", {}).get("reverse_edge_cooldown", 0)) if isinstance(_ckpt, dict) else 0
+    if reverse_edge_cooldown > 0:
+        print(f"  Reverse-edge cooldown: {reverse_edge_cooldown} (baked, matches training)")
     if allow_reinforce:
         print("  Reinforcement: ON (own planets are legal targets)")
         print(f"  Reinforce DISCIPLINE (must match training): gate_min_planets="
@@ -514,9 +543,11 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         reinforce_forward_only=reinforce_forward_only,
         reinforce_garrison_floor=reinforce_garrison_floor,
         sufficient_commit_factor=sufficient_commit_factor,
+        reverse_edge_cooldown=reverse_edge_cooldown,
         params_b64=params_b64,
         features_code=features_code,
         action_mask_code=action_mask_code,
+        reinforce_cooldown_code=reinforce_cooldown_code,
     )
 
     with open(output_path, "w") as f:

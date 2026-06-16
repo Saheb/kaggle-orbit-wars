@@ -13,8 +13,7 @@ import math
 import numpy as np
 import torch
 
-from reinforce_cooldown import is_blocked as _cd_is_blocked, record as _cd_record, \
-    on_ownership_loss as _cd_on_loss
+from reinforce_cooldown import is_blocked as _cd_is_blocked, record as _cd_record, on_ownership_loss as _cd_on_loss
 
 # --- ship-commitment audit (probe-only; enable via action_mask._SHIP_AUDIT["on"]=True) ---
 _SHIP_AUDIT = {"on": False}
