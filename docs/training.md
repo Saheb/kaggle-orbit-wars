@@ -7,9 +7,47 @@
 
 ## Current State (2026-06-18)
 
-**No live run.** Peeler curriculum CONCLUDED NEGATIVE (see below + `docs/peeler-curriculum.md`
-"C2 / Gate verdict"). Redirecting off the peeler family — picking next branch
-(board-curriculum / VDN+signal / direct-LB loop) before any GPU launch.
+**No live run.** Both the peeler family AND the board-curriculum CONCLUDED
+NEGATIVE this session (see below + `docs/peeler-curriculum.md` "C2 / Gate
+verdict"). Redirecting — the opponent/board curriculum families are exhausted;
+VDN+concentration-signal and direct-LB-loop are the remaining candidates.
+
+**⛔ BOARD-CURRICULUM FATAL (2026-06-18, boardc1 run).** `--neutral-garrison-scale 3.0`
+(neutrals ×3 ships, symmetric) + self-play (`--pool-mode self`, organic snapshots
+from revedge1 4.72M) + self-anchor IL-ref. Ran to 3.14M on Jarvis A100-80GB spot
+429385 (destroyed). SPS 1,020-1,140 (pure GPU, no CPU externals).
+
+Ajay held-out panels (256 games, **normal boards** = the transfer probe):
+
+| step | Ajay WR | out-massed% | peel-rate WON | cap/atk open<50 | garr@loss/inbound |
+|---|---|---|---|---|---|
+| 524k | 24.2% | 95% | 0.55 | 0.42 | 27/64 |
+| 1M | 25.8% | 95% | 0.57 | 0.43 | 28/66 |
+| 1.5M | 22.7% | 95% | 0.59 | 0.44 | 28/65 |
+| 2M | 19.9% | 96% | 0.60 | 0.43 | 27/68 |
+
+**Transfer FAILED**: out-massed flat 95-96% (wall did not bend on normal boards),
+Ajay WR flat-to-declining (24→20%).
+
+**Worse — concentration did NOT improve even ON the ×3 training board.** Train
+`dm` line: gap <50 flat ~0.40, cross <50 flat ~0.22, **ratio DECLINING 0.91→0.67**
+(policy sending LESS mass relative to floor — the opposite of concentration).
+`il_kl` rising 0.006→0.092 (drifting from anchor, toward something degenerate).
+H_fire declining 0.115→0.099 (entropy collapsing). Seat-asymmetry emerging
+(r_p0 +0.76, r_p1 -0.26 at iter 45 — degenerate exploit on a symmetric board).
+
+**The mechanism (why it failed):** ×3 garrison makes captures expensive, but the
+policy's response is NOT "aggregate multiple sources" — it's "send less / don't
+attack" (ratio declining, entropy collapsing). The cheap Nash on an expensive
+board is even MORE passive than on default boards. **The board-curriculum made
+the passivity problem WORSE, not the concentration problem better.** Same
+structural trap as the srcs_multi penalty (Rev41-45: fire=0 Nash) and the SSDR
+regression: **any lever that makes attacking expensive pushes toward passivity,
+not toward concentration.** Concentration is a POSITIVE skill (aggregate to
+capture), not a negative one (don't attack thin). You cannot price a positive
+skill by making the negative behavior more expensive — you just get less of
+everything. ×2.0 or ×4.0 won't fix this (any scale >1.0 makes attacking
+expensive → more passive). The board-curriculum family is exhausted.
 
 **⛔ PEELER FAMILY FATAL (2026-06-18).** Two cheap diagnostics closed it:
 - **C1-2M vs peeler_t1 (64g):** WR 62.5% but **out-massed 97%**, planets@32=4,

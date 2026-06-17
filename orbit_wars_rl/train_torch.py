@@ -401,6 +401,9 @@ def train(args):
         print(f"Handicap: {args.handicap_frac*100:.0f}% of games start with {args.handicap_ships} ships (vs normal 10)")
     if args.ssdr_frac > 0:
         print(f"SSDR: {args.ssdr_frac*100:.0f}% of resets grant opponent 1..{args.ssdr_max_steps} extra planets (asymmetric start)")
+    if args.neutral_garrison_scale > 1.0:
+        print(f"Neutral garrison scale: {args.neutral_garrison_scale:.1f}x (board-curriculum: "
+              f"expensive neutrals force multi-source concentration; symmetric, both players)")
     if args.srcs_multi_penalty > 0.0:
         print(f"srcs_multi penalty: coef={args.srcs_multi_penalty}, threshold={args.srcs_multi_threshold}, "
               f"decay_frac={args.srcs_multi_penalty_decay_frac} "
@@ -490,7 +493,8 @@ def train(args):
                       handicap_frac=args.handicap_frac,
                       handicap_ships=args.handicap_ships,
                       ssdr_frac=args.ssdr_frac,
-                      ssdr_max_steps=args.ssdr_max_steps)
+                      ssdr_max_steps=args.ssdr_max_steps,
+                      neutral_garrison_scale=args.neutral_garrison_scale)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
 
     model = EntityTransformer(cfg.model).to(device)
@@ -1993,6 +1997,12 @@ if __name__ == "__main__":
     parser.add_argument("--ssdr-max-steps", type=int, default=20,
                         help="Max warmup steps for SSDR. Actual steps ~ U(1, ssdr_max_steps). "
                              "20 = up to ~4%% of a 500-step game pre-played. (default: 20)")
+    parser.add_argument("--neutral-garrison-scale", type=float, default=1.0,
+                        help="Board-curriculum: multiply neutral planet ships by this factor at "
+                             "reset, symmetrically (both players face the same board). >1.0 makes "
+                             "captures expensive → single-source can't capture early → must "
+                             "aggregate multiple sources (concentration). Training-only; eval/LB "
+                             "use default boards (1.0). 1.0 = off. Suggested: 3.0.")
     parser.add_argument("--self-boost-planets", type=int, default=0,
                         help="Handicapped-real-planner curriculum: grant OUR seat this many extra "
                              "starting planets in POOL envs at step 0, tapering to 0 over "

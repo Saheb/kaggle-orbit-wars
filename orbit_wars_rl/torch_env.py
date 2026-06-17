@@ -235,6 +235,7 @@ class VecTorchEnv:
         handicap_ships: int = 5,
         ssdr_frac: float = 0.0,
         ssdr_max_steps: int = 20,
+        neutral_garrison_scale: float = 1.0,
         allow_reinforce: bool = False,
         reinforce_garrison_floor: float = 0.0,
         reinforce_cost: float = 0.0,
@@ -431,6 +432,14 @@ class VecTorchEnv:
         # This shatters the symmetric-start passive Nash equilibrium.
         self.ssdr_frac = float(ssdr_frac)
         self.ssdr_max_steps = int(ssdr_max_steps)  # now = max extra planets granted to opponent
+        # Neutral garrison scale (board-curriculum): multiply neutral planet ships by
+        # this factor at reset, symmetrically (both players face the same board). >1.0
+        # makes captures expensive → single-source can't capture → must aggregate
+        # multiple sources (concentration). Applied BEFORE home assignment so home
+        # planets (overwritten to 10 ships) are unaffected. Training-only; eval/LB
+        # use default boards (scale 1.0) — the transfer test is whether the
+        # concentration habit carries to normal-garrison boards.
+        self.neutral_garrison_scale = float(neutral_garrison_scale)
         # Asymmetric Planet SSDR: with probability ssdr_frac, grant opponent 1..ssdr_max_steps
         # extra neutral planets at reset. No random play, no fleet explosion.
         # Breaks symmetric-start Nash cleanly.
@@ -540,6 +549,13 @@ class VecTorchEnv:
             pad = np.zeros((MAX_PLANETS, 7), dtype=np.float32)
             for i, p in enumerate(raw_planets):
                 pad[i] = p
+            # Board-curriculum: scale neutral garrison symmetrically. Applied BEFORE
+            # home assignment (next block overwrites home planets' ships to 10), so
+            # only the neutrals that REMAIN neutral after assignment are scaled.
+            if self.neutral_garrison_scale > 1.0:
+                for i in range(n):
+                    if pad[i, 1] == -1:  # neutral (all are at this point)
+                        pad[i, 5] = float(int(pad[i, 5] * self.neutral_garrison_scale))
             planets_list.append(pad)
 
             alive = np.zeros(MAX_PLANETS, dtype=bool)

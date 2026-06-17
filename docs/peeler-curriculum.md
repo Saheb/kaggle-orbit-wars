@@ -2,7 +2,12 @@
 
 Date: 2026-06-17
 
-Status: next curriculum candidate. Build only after the de-risk gate passes.
+Status: **⛔ FATAL — peeler family CONCLUDED NEGATIVE (2026-06-18). See "C2 / Gate
+verdict" section at the bottom. The board-curriculum successor ALSO failed
+(boardc1, 2026-06-18 — see `docs/training.md` Current State). Both opponent- and
+board-curriculum families are exhausted; redirecting to VDN+concentration-signal
+and direct-LB-loop.** The de-risk gate and C1 run sections below are kept as the
+record of why the family was tried and how it failed.
 
 ## Starting Point
 
