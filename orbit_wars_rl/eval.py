@@ -102,7 +102,13 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                    target_sanity_penalty: float = 0.0,
                    reserve_frac: float = 0.0,
                    allow_reinforce: bool = False,
-                   veto_stats: dict = None):
+                   veto_stats: dict = None,
+                   defensive_reinforce_k: int = 0,
+                   defensive_reinforce_beta: float = 2.2,
+                   defensive_reinforce_max_targets: int = 1,
+                   defensive_reinforce_stats: dict = None,
+                   natural_head_audit_stats: dict = None,
+                   natural_head_audit_beta: float = 2.2):
     """Return a kaggle_environments-compatible agent function wrapping the model.
 
     sample=True uses Bernoulli/Categorical sampling instead of threshold/argmax —
@@ -179,6 +185,12 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 reverse_edge_cooldown=_cd_K,
                 cooldown_last=_cd["last"] if _cd_K > 0 else None,
                 cooldown_step=int(obs.get("step", 0)),
+                defensive_reinforce_k=defensive_reinforce_k,
+                defensive_reinforce_beta=defensive_reinforce_beta,
+                defensive_reinforce_max_targets=defensive_reinforce_max_targets,
+                defensive_reinforce_stats=defensive_reinforce_stats,
+                natural_head_audit_stats=natural_head_audit_stats,
+                natural_head_audit_beta=natural_head_audit_beta,
                 veto_stats=veto_stats,
             )
 
@@ -1342,6 +1354,11 @@ def evaluate_against_baseline(
     ship_bin_mode: str = "absolute",
     target_decode: bool = False,
     target_sanity_penalty: float = 0.0,
+    defensive_reinforce_k: int = 0,
+    defensive_reinforce_beta: float = 2.2,
+    defensive_reinforce_max_targets: int = 1,
+    natural_head_audit: bool = False,
+    natural_head_audit_beta: float = 2.2,
 ) -> dict:
     """Evaluate trained policy against a baseline using kaggle_environments.
 
@@ -1351,9 +1368,17 @@ def evaluate_against_baseline(
     """
     from kaggle_environments import make
 
+    def_reinf_stats = {}
+    natural_head_stats = {} if natural_head_audit else None
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
                               ship_bin_mode=ship_bin_mode, target_decode=target_decode,
-                              target_sanity_penalty=target_sanity_penalty)
+                              target_sanity_penalty=target_sanity_penalty,
+                              defensive_reinforce_k=defensive_reinforce_k,
+                              defensive_reinforce_beta=defensive_reinforce_beta,
+                              defensive_reinforce_max_targets=defensive_reinforce_max_targets,
+                              defensive_reinforce_stats=def_reinf_stats,
+                              natural_head_audit_stats=natural_head_stats,
+                              natural_head_audit_beta=natural_head_audit_beta)
     opponents = [opponent] * (num_players - 1)
     agents = [agent_fn] + opponents
 
@@ -1394,6 +1419,8 @@ def evaluate_against_baseline(
         "win_rate": wins / num_games,
         "avg_material": total_material / num_games,
         "conversion": conv_tot,
+        "defensive_reinforce": def_reinf_stats,
+        "natural_head_audit": natural_head_stats or {},
         "results": results,
     }
 
@@ -1407,6 +1434,11 @@ def evaluate_panel(
     ship_bin_mode: str = "absolute",
     target_decode: bool = False,
     target_sanity_penalty: float = 0.0,
+    defensive_reinforce_k: int = 0,
+    defensive_reinforce_beta: float = 2.2,
+    defensive_reinforce_max_targets: int = 1,
+    natural_head_audit: bool = False,
+    natural_head_audit_beta: float = 2.2,
 ) -> dict:
     """Stratified eval over the 128-seed community panel, playing both seats.
 
@@ -1418,9 +1450,17 @@ def evaluate_panel(
     from kaggle_environments import make
     from eval_panel import BY_ARCHETYPE
 
+    def_reinf_stats = {}
+    natural_head_stats = {} if natural_head_audit else None
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
                               ship_bin_mode=ship_bin_mode, target_decode=target_decode,
-                              target_sanity_penalty=target_sanity_penalty)
+                              target_sanity_penalty=target_sanity_penalty,
+                              defensive_reinforce_k=defensive_reinforce_k,
+                              defensive_reinforce_beta=defensive_reinforce_beta,
+                              defensive_reinforce_max_targets=defensive_reinforce_max_targets,
+                              defensive_reinforce_stats=def_reinf_stats,
+                              natural_head_audit_stats=natural_head_stats,
+                              natural_head_audit_beta=natural_head_audit_beta)
 
     per_arch: dict[str, dict] = {arch: {"wins": 0, "total": 0,
                                         "wins_seat0": 0, "wins_seat1": 0,
@@ -1469,7 +1509,118 @@ def evaluate_panel(
                           f"({100*overall['wins']/max(overall['total'],1):.1f}%)",
                           flush=True)
 
-    return {"overall": overall, "per_archetype": per_arch, "conversion": conv_tot}
+    return {"overall": overall, "per_archetype": per_arch, "conversion": conv_tot,
+            "defensive_reinforce": def_reinf_stats,
+            "natural_head_audit": natural_head_stats or {}}
+
+
+def _fmt_defensive_reinforce(stats: dict) -> str:
+    if not stats:
+        return "Defensive reinforce overlay: no events recorded"
+    forced = stats.get("forced_moves", 0.0)
+    targets = stats.get("forced_targets", 0.0)
+    threatened = stats.get("threatened_targets", 0.0)
+    fillable = stats.get("fillable_targets", 0.0)
+    ships = stats.get("forced_ships", 0.0)
+    orig_total = max(forced, 1.0)
+    same = stats.get("orig_same_target", 0.0) / orig_total
+    nofire = stats.get("orig_no_fire", 0.0) / orig_total
+    enemy = stats.get("orig_enemy", 0.0) / orig_total
+    neutral = stats.get("orig_neutral", 0.0) / orig_total
+    other_own = stats.get("orig_other_own", 0.0) / orig_total
+    undersent = stats.get("orig_undersent", 0.0) / max(
+        forced - stats.get("orig_no_fire", 0.0), 1.0)
+    replaced = stats.get("policy_move_replaced", 0.0)
+    capdrop = stats.get("policy_move_dropped_for_cap", 0.0)
+    db = stats.get("deficit_before", 0.0)
+    da = stats.get("deficit_after", 0.0)
+    hn = max(stats.get("head_fire_n", 0.0), 1.0)
+    tn = max(stats.get("head_target_rank_n", 0.0), 1.0)
+    sn = max(stats.get("head_ship_rank_n", 0.0), 1.0)
+    fire_mean = stats.get("head_fire_prob_sum", 0.0) / hn
+    target_rank = stats.get("head_target_rank_sum", 0.0) / tn
+    ship_rank = stats.get("head_ship_rank_sum", 0.0) / sn
+    return (
+        "Defensive reinforce overlay:\n"
+        f"  threatened {threatened:.0f} · fillable {fillable:.0f} · forced targets {targets:.0f} "
+        f"moves {forced:.0f} ships {ships:.0f}\n"
+        f"  deficit before/after {db:.0f}/{da:.0f} · hopeless {stats.get('hopeless_targets', 0.0):.0f} "
+        f"· blocked cooldown/mask {stats.get('blocked_by_cooldown_or_mask', 0.0):.0f}\n"
+        f"  original policy on forced sources: no-fire {nofire:.0%} · same-target {same:.0%} "
+        f"· other-own {other_own:.0%} · enemy {enemy:.0%} · neutral {neutral:.0%} "
+        f"· undersent(if fired) {undersent:.0%}\n"
+        f"  head audit on forced sources: fire_p mean {fire_mean:.2f} "
+        f"(<0.1/{stats.get('head_fire_lt_01',0.0)/hn:.0%}, <0.3/{stats.get('head_fire_lt_03',0.0)/hn:.0%}, "
+        f"<0.5/{stats.get('head_fire_lt_05',0.0)/hn:.0%})\n"
+        f"     target rank avg {target_rank:.1f} top1/top3/top5 "
+        f"{stats.get('head_target_top1',0.0)/tn:.0%}/{stats.get('head_target_top3',0.0)/tn:.0%}/"
+        f"{stats.get('head_target_top5',0.0)/tn:.0%} · ship sufficient rank avg {ship_rank:.1f} "
+        f"top1/top3/top5 {stats.get('head_ship_top1_ge_send',0.0)/sn:.0%}/"
+        f"{stats.get('head_ship_top3_ge_send',0.0)/sn:.0%}/{stats.get('head_ship_top5_ge_send',0.0)/sn:.0%}\n"
+        f"     joint ready top1/top3 {stats.get('head_all_top1_ready',0.0)/orig_total:.0%}/"
+        f"{stats.get('head_all_top3_ready',0.0)/orig_total:.0%}\n"
+        f"  replaced policy moves {replaced:.0f} · dropped-for-cap {capdrop:.0f}"
+    )
+
+
+def _fmt_natural_head_audit(stats: dict) -> str:
+    if not stats:
+        return "Natural head audit: no events recorded"
+
+    def row(label: str, prefix: str) -> str:
+        slots = max(stats.get(f"{prefix}_slots", 0.0), 1.0)
+        fire_mean = stats.get(f"{prefix}_fire_prob_sum", 0.0) / slots
+        fired = stats.get(f"{prefix}_fired", 0.0) / slots
+        chosen_own = stats.get(f"{prefix}_chosen_own", 0.0) / max(stats.get(f"{prefix}_fired", 0.0), 1.0)
+        chosen_enemy = stats.get(f"{prefix}_chosen_enemy", 0.0) / max(stats.get(f"{prefix}_fired", 0.0), 1.0)
+        chosen_neutral = stats.get(f"{prefix}_chosen_neutral", 0.0) / max(stats.get(f"{prefix}_fired", 0.0), 1.0)
+        atk_n = max(stats.get(f"{prefix}_attack_n", 0.0), 1.0)
+        save_n = max(stats.get(f"{prefix}_save_n", 0.0), 1.0)
+        atk_tr_n = max(stats.get(f"{prefix}_attack_target_rank_n", 0.0), 1.0)
+        save_tr_n = max(stats.get(f"{prefix}_save_target_rank_n", 0.0), 1.0)
+        atk_sr_n = max(stats.get(f"{prefix}_attack_ship_rank_n", 0.0), 1.0)
+        save_sr_n = max(stats.get(f"{prefix}_save_ship_rank_n", 0.0), 1.0)
+        atk_rank = stats.get(f"{prefix}_attack_target_rank_sum", 0.0) / atk_tr_n
+        save_rank = stats.get(f"{prefix}_save_target_rank_sum", 0.0) / save_tr_n
+        atk_ship = stats.get(f"{prefix}_attack_ship_rank_sum", 0.0) / atk_sr_n
+        save_ship = stats.get(f"{prefix}_save_ship_rank_sum", 0.0) / save_sr_n
+        return (
+            f"  {label:<5s} slots {slots:.0f} fire_p {fire_mean:.2f} fired {fired:.0%} "
+            f"(<0.5 {stats.get(f'{prefix}_fire_lt_05',0.0)/slots:.0%}; "
+            f"fired own/enemy/neutral {chosen_own:.0%}/{chosen_enemy:.0%}/{chosen_neutral:.0%})\n"
+            f"        attack-cand {stats.get(f'{prefix}_attack_n',0.0):.0f}: "
+            f"fire>=.5 {stats.get(f'{prefix}_attack_fire_ready',0.0)/atk_n:.0%} · "
+            f"target avg {atk_rank:.1f} top1/3/5 "
+            f"{stats.get(f'{prefix}_attack_target_top1',0.0)/atk_tr_n:.0%}/"
+            f"{stats.get(f'{prefix}_attack_target_top3',0.0)/atk_tr_n:.0%}/"
+            f"{stats.get(f'{prefix}_attack_target_top5',0.0)/atk_tr_n:.0%} · "
+            f"ship>=req avg {atk_ship:.1f} top1/3 "
+            f"{stats.get(f'{prefix}_attack_ship_top1',0.0)/atk_sr_n:.0%}/"
+            f"{stats.get(f'{prefix}_attack_ship_top3',0.0)/atk_sr_n:.0%} · "
+            f"joint top1/3 {stats.get(f'{prefix}_attack_joint_top1',0.0)/atk_n:.0%}/"
+            f"{stats.get(f'{prefix}_attack_joint_top3',0.0)/atk_n:.0%} · "
+            f"chosen-best {stats.get(f'{prefix}_attack_chosen',0.0)/atk_n:.0%}\n"
+            f"        save-cand   {stats.get(f'{prefix}_save_n',0.0):.0f}: "
+            f"fire>=.5 {stats.get(f'{prefix}_save_fire_ready',0.0)/save_n:.0%} · "
+            f"target avg {save_rank:.1f} top1/3/5 "
+            f"{stats.get(f'{prefix}_save_target_top1',0.0)/save_tr_n:.0%}/"
+            f"{stats.get(f'{prefix}_save_target_top3',0.0)/save_tr_n:.0%}/"
+            f"{stats.get(f'{prefix}_save_target_top5',0.0)/save_tr_n:.0%} · "
+            f"ship>=req avg {save_ship:.1f} top1/3 "
+            f"{stats.get(f'{prefix}_save_ship_top1',0.0)/save_sr_n:.0%}/"
+            f"{stats.get(f'{prefix}_save_ship_top3',0.0)/save_sr_n:.0%} · "
+            f"joint top1/3 {stats.get(f'{prefix}_save_joint_top1',0.0)/save_n:.0%}/"
+            f"{stats.get(f'{prefix}_save_joint_top3',0.0)/save_n:.0%} · "
+            f"chosen-best {stats.get(f'{prefix}_save_chosen',0.0)/save_n:.0%}"
+        )
+
+    return "\n".join([
+        "Natural head audit (passive; lightweight planner-like attack/save candidates):",
+        row("all", "natural_all"),
+        row("<50", "natural_open"),
+        row("50-99", "natural_mid"),
+        row("100+", "natural_late"),
+    ])
 
 
 def print_panel_report(result: dict, opponent: str) -> None:
@@ -1488,6 +1639,10 @@ def print_panel_report(result: dict, opponent: str) -> None:
     print(f"  asymmetry (seat0 − seat1): {asym:+.1f}pp")
     if "conversion" in result:
         print(_fmt_conversion(result["conversion"]))
+    if result.get("defensive_reinforce"):
+        print(_fmt_defensive_reinforce(result["defensive_reinforce"]))
+    if result.get("natural_head_audit"):
+        print(_fmt_natural_head_audit(result["natural_head_audit"]))
     print()
     print("Per archetype  (8 games each = 4 seeds × 2 seats):")
     print(f"  {'archetype':<48s}  {'WR':>6s}  {'s0/s1':>10s}  {'mat':>8s}")
@@ -1520,7 +1675,12 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         reinforce_gate_min_planets: int = None,
                         reinforce_forward_only: bool = None,
                         reinforce_garrison_floor: float = None,
-                        sufficient_commit_factor: float = None):
+                        sufficient_commit_factor: float = None,
+                        defensive_reinforce_k: int = 0,
+                        defensive_reinforce_beta: float = 2.2,
+                        defensive_reinforce_max_targets: int = 1,
+                        natural_head_audit: bool = False,
+                        natural_head_audit_beta: float = 2.2):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
 
@@ -1590,6 +1750,15 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     if model.sufficient_commit_factor > 0.0:
         print(f"Sufficient-commit mask: ON | veto attacks with ships <= "
               f"target_defense × {model.sufficient_commit_factor}")
+    if defensive_reinforce_k > 0:
+        print(f"Defensive reinforce overlay: ON | nearest_k={defensive_reinforce_k} "
+              f"beta={defensive_reinforce_beta} max_targets={defensive_reinforce_max_targets} "
+              f"(eval-time hard override; training unchanged)")
+        if not model.allow_reinforce:
+            print("  ⚠ overlay is inert unless checkpoint/eval has allow_reinforce=True")
+    if natural_head_audit:
+        print(f"Natural head audit: ON | beta={natural_head_audit_beta} "
+              f"(passive logits/intent diagnostics; actions unchanged)")
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     allowed_missing = {"target_head.weight", "target_head.bias"}
     bad_missing = [k for k in missing if k not in allowed_missing]
@@ -1605,7 +1774,12 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                                  fire_threshold=fire_threshold, sample=sample,
                                  ship_bin_mode=cfg.model.ship_bin_mode,
                                  target_decode=target_decode,
-                                 target_sanity_penalty=target_sanity_penalty)
+                                 target_sanity_penalty=target_sanity_penalty,
+                                 defensive_reinforce_k=defensive_reinforce_k,
+                                 defensive_reinforce_beta=defensive_reinforce_beta,
+                                 defensive_reinforce_max_targets=defensive_reinforce_max_targets,
+                                 natural_head_audit=natural_head_audit,
+                                 natural_head_audit_beta=natural_head_audit_beta)
         print_panel_report(results, opponent)
         return results
 
@@ -1620,6 +1794,11 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         fire_threshold=fire_threshold,
         sample=sample,
         target_sanity_penalty=target_sanity_penalty,
+        defensive_reinforce_k=defensive_reinforce_k,
+        defensive_reinforce_beta=defensive_reinforce_beta,
+        defensive_reinforce_max_targets=defensive_reinforce_max_targets,
+        natural_head_audit=natural_head_audit,
+        natural_head_audit_beta=natural_head_audit_beta,
     )
 
     print(f"Win rate vs {opponent}: {results['win_rate']:.2%}  "
@@ -1629,6 +1808,10 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     print(f"Target sanity penalty: {target_sanity_penalty}")
     print(f"Avg material: {results['avg_material']:.1f}")
     print(_fmt_conversion(results["conversion"]))
+    if results.get("defensive_reinforce"):
+        print(_fmt_defensive_reinforce(results["defensive_reinforce"]))
+    if results.get("natural_head_audit"):
+        print(_fmt_natural_head_audit(results["natural_head_audit"]))
     for r in results["results"][:5]:
         print(f"  seed={r['seed']} win={r['win']} "
               f"material={r['material']} rewards={r['rewards']}")
@@ -1678,6 +1861,22 @@ if __name__ == "__main__":
                              "(beta*rho(eta)*reachable_enemy_mass). Default 2.2 (= training default). "
                              "Pass the run's --decisive-mass-beta to match a non-default-beta decmass "
                              "run so the eval floor == the reward floor (beta isn't stored in the ckpt).")
+    parser.add_argument("--defensive-reinforce-k", type=int, default=0,
+                        help="Eval-time hard defensive overlay: for threatened own planets, force "
+                             "up to K nearest reachable safe-drain sources to reinforce enough mass "
+                             "to fill the hold-floor deficit. 0=off.")
+    parser.add_argument("--defensive-reinforce-beta", type=float, default=None,
+                        help="Reactive-margin beta for --defensive-reinforce-k. Default reuses "
+                             "--decisive-mass-beta so the overlay and hold-floor diagnostic agree.")
+    parser.add_argument("--defensive-reinforce-max-targets", type=int, default=1,
+                        help="Max threatened own planets the eval-time defensive overlay may fill "
+                             "per agent step.")
+    parser.add_argument("--natural-head-audit", action="store_true",
+                        help="Passive target-decode audit: log fire/target/ship agreement with "
+                             "lightweight planner-like attack and save candidates. No action changes.")
+    parser.add_argument("--natural-head-audit-beta", type=float, default=None,
+                        help="Reactive-margin beta for --natural-head-audit save candidates. "
+                             "Default reuses --decisive-mass-beta.")
     args = parser.parse_args()
     _DM_BETA_EVAL = args.decisive_mass_beta   # module global → used by _decisive_gap_step
 
@@ -1698,4 +1897,11 @@ if __name__ == "__main__":
         reinforce_forward_only=args.reinforce_forward_only,
         reinforce_garrison_floor=args.reinforce_garrison_floor,
         sufficient_commit_factor=args.sufficient_commit_factor,
+        defensive_reinforce_k=args.defensive_reinforce_k,
+        defensive_reinforce_beta=(args.decisive_mass_beta if args.defensive_reinforce_beta is None
+                                  else args.defensive_reinforce_beta),
+        defensive_reinforce_max_targets=args.defensive_reinforce_max_targets,
+        natural_head_audit=args.natural_head_audit,
+        natural_head_audit_beta=(args.decisive_mass_beta if args.natural_head_audit_beta is None
+                                 else args.natural_head_audit_beta),
     )

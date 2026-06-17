@@ -226,6 +226,534 @@ def _target_intercept_angle(src_planet, target_planet, ships: int, obs) -> float
     return float(math.atan2(py - sy, px - sx))
 
 
+_DEF_HORIZON = 18.0
+_DEF_OVERHEAD = 1.0
+
+
+def _def_stat(stats: dict | None, key: str, value: float = 1.0):
+    if stats is not None:
+        stats[key] = stats.get(key, 0.0) + value
+
+
+def _def_fleet_target(planets, fleet):
+    """Loose current-heading target resolver, matching the eval hold/decisive diagnostics."""
+    best = None
+    best_d = None
+    c, s = math.cos(float(fleet[4])), math.sin(float(fleet[4]))
+    fx, fy = float(fleet[2]), float(fleet[3])
+    for p in planets:
+        px, py, pr = float(p[2]), float(p[3]), float(p[4])
+        vx, vy = px - fx, py - fy
+        along = vx * c + vy * s
+        if along <= 0:
+            continue
+        perp = abs(vx * s - vy * c)
+        if perp >= pr + 1.5:
+            continue
+        d = math.hypot(vx, vy)
+        if best_d is None or d < best_d:
+            best_d, best = d, p
+    return best
+
+
+def _def_eta(src, tgt, ships: int) -> float:
+    sx, sy, sr = float(src[2]), float(src[3]), float(src[4])
+    tx, ty, tr = float(tgt[2]), float(tgt[3]), float(tgt[4])
+    dist = max(0.0, math.hypot(tx - sx, ty - sy) - (sr + _LAUNCH_OFFSET + tr))
+    return dist / max(_fleet_speed(max(1, int(ships))), 1e-6)
+
+
+def _def_ship_count_for_cap(desired: float, cap: int, mode: str) -> int:
+    """Pick a policy-representable ship count, bounded by safe-drain cap."""
+    cap = int(max(0, cap))
+    if cap <= 0:
+        return 0
+    options = [_ship_bin_to_count(i, cap, mode=mode)
+               for i in range(len(FRACTION_BIN_VALUES) if mode == "fraction" else len(SHIP_COUNTS))]
+    options = sorted(set(int(o) for o in options if 0 < int(o) <= cap))
+    if not options:
+        return 0
+    want = max(1, int(math.ceil(desired)))
+    ge = [o for o in options if o >= want]
+    return ge[0] if ge else options[-1]
+
+
+def _def_rank(scores, idx: int):
+    if scores is None or idx is None or idx < 0 or idx >= len(scores):
+        return None
+    val = float(scores[idx])
+    if val <= -1e20:
+        return None
+    return 1 + sum(1 for s in scores if float(s) > val)
+
+
+def _def_ship_adequacy_rank(scores, required: int, max_ships: int, mode: str):
+    if scores is None:
+        return None
+    pairs = []
+    for i, s in enumerate(scores):
+        count = _ship_bin_to_count(i, max_ships, mode=mode)
+        pairs.append((float(s), i, count))
+    pairs.sort(key=lambda x: x[0], reverse=True)
+    for rank, (_score, _idx, count) in enumerate(pairs, start=1):
+        if count >= required:
+            return rank
+    return None
+
+
+def _head_prefixes(step: int):
+    ph = "open" if step < 50 else ("mid" if step < 100 else "late")
+    return ("natural_all", f"natural_{ph}")
+
+
+def _head_stat(stats: dict | None, key: str, value: float = 1.0):
+    if stats is not None:
+        stats[key] = stats.get(key, 0.0) + value
+
+
+def _head_attack_floor(tgt, eta: float, player: int) -> float:
+    owner = int(tgt[1])
+    if owner == player:
+        return math.inf
+    ships_at = float(tgt[5]) + max(1.0, float(eta)) * float(tgt[6])
+    return ships_at + (1.0 if owner < 0 else float(tgt[6]) * 3.0 + 1.0)
+
+
+def _head_best_attack_candidate(src, planets, player: int, cap: int):
+    if cap <= 0:
+        return None
+    best = None
+    for tidx, tgt in enumerate(planets):
+        if int(tgt[0]) == int(src[0]) or int(tgt[1]) == player:
+            continue
+        eta = _def_eta(src, tgt, cap)
+        floor = _head_attack_floor(tgt, eta, player)
+        required = int(math.ceil(floor))
+        if required <= 0 or cap < required:
+            continue
+        # Lightweight planner-like value: production stream and enemy ships are useful,
+        # but high cost and slow arrival are bad. This is a diagnostic target, not a policy.
+        score = (
+            float(tgt[6]) * _DEF_HORIZON
+            + (0.25 * float(tgt[5]) if int(tgt[1]) >= 0 else 0.0)
+            - float(required)
+            - 0.5 * float(eta)
+        )
+        if best is None or score > best["score"]:
+            best = {
+                "target_idx": tidx,
+                "target_id": int(tgt[0]),
+                "required": required,
+                "score": score,
+            }
+    return best
+
+
+def _head_threat_maps(planets, fleets, player: int):
+    enemy_in: dict[int, float] = {}
+    enemy_eta: dict[int, float] = {}
+    friendly_in: dict[int, list[tuple[float, float]]] = {}
+    for f in fleets or []:
+        owner = int(f[1])
+        if owner < 0:
+            continue
+        tgt = _def_fleet_target(planets, f)
+        if tgt is None:
+            continue
+        tid = int(tgt[0])
+        dist = math.hypot(float(tgt[2]) - float(f[2]), float(tgt[3]) - float(f[3]))
+        eta = dist / max(_fleet_speed(int(f[6])), 1e-6)
+        if owner == player:
+            friendly_in.setdefault(tid, []).append((float(f[6]), eta))
+        else:
+            enemy_in[tid] = enemy_in.get(tid, 0.0) + float(f[6])
+            enemy_eta[tid] = min(enemy_eta.get(tid, math.inf), eta)
+    return enemy_in, enemy_eta, friendly_in
+
+
+def _head_best_save_candidate(
+    src,
+    planets,
+    fleets,
+    player: int,
+    cap: int,
+    beta: float,
+    own_reinforce_illegal,
+    threat_maps=None,
+):
+    if cap <= 0:
+        return None
+    enemy_in, enemy_eta, friendly_in = (
+        threat_maps if threat_maps is not None else _head_threat_maps(planets, fleets, player)
+    )
+    enemy_planets = [p for p in planets if int(p[1]) >= 0 and int(p[1]) != player]
+    best = None
+    for tidx, tgt in enumerate(planets):
+        if int(tgt[1]) != player or int(tgt[0]) == int(src[0]):
+            continue
+        if own_reinforce_illegal(src, tgt):
+            continue
+        tid = int(tgt[0])
+        ein = enemy_in.get(tid, 0.0)
+        if ein <= 0:
+            continue
+        threat_eta = enemy_eta.get(tid, math.inf)
+        eta = _def_eta(src, tgt, cap)
+        if math.isfinite(threat_eta) and eta > threat_eta:
+            continue
+        em = 0.0
+        for ep in enemy_planets:
+            if int(ep[0]) == tid:
+                continue
+            d = math.hypot(float(ep[2]) - float(tgt[2]), float(ep[3]) - float(tgt[3]))
+            reach = max(_fleet_speed(int(ep[5])) * _DEF_HORIZON, 1e-6)
+            em += float(ep[5]) * max(1.0 - d / reach, 0.0)
+        floor = ein + float(beta) * em + _DEF_OVERHEAD
+        have = float(tgt[5]) + sum(
+            ships for ships, f_eta in friendly_in.get(tid, [])
+            if (not math.isfinite(threat_eta)) or f_eta <= threat_eta
+        )
+        deficit = int(math.ceil(floor - have))
+        if deficit <= 0 or cap < deficit:
+            continue
+        score = float(tgt[6]) * _DEF_HORIZON - float(deficit) - 0.5 * float(eta)
+        if best is None or score > best["score"]:
+            best = {
+                "target_idx": tidx,
+                "target_id": tid,
+                "required": deficit,
+                "score": score,
+            }
+    return best
+
+
+def _record_natural_candidate(stats, prefix: str, kind: str, intent: dict, cand: dict):
+    _head_stat(stats, f"{prefix}_{kind}_n")
+    fp = intent.get("fire_prob")
+    if fp is not None and fp >= 0.5:
+        _head_stat(stats, f"{prefix}_{kind}_fire_ready")
+    if intent.get("target_id") == cand["target_id"]:
+        _head_stat(stats, f"{prefix}_{kind}_chosen")
+    target_rank = _def_rank(intent.get("target_scores"), cand.get("target_idx"))
+    if target_rank is not None:
+        _head_stat(stats, f"{prefix}_{kind}_target_rank_n")
+        _head_stat(stats, f"{prefix}_{kind}_target_rank_sum", float(target_rank))
+        if target_rank <= 1:
+            _head_stat(stats, f"{prefix}_{kind}_target_top1")
+        if target_rank <= 3:
+            _head_stat(stats, f"{prefix}_{kind}_target_top3")
+        if target_rank <= 5:
+            _head_stat(stats, f"{prefix}_{kind}_target_top5")
+    ship_rank = _def_ship_adequacy_rank(
+        intent.get("ship_scores"),
+        int(cand.get("required", 0)),
+        int(intent.get("max_ships", 0)),
+        intent.get("ship_bin_mode", "absolute"),
+    )
+    if ship_rank is not None:
+        _head_stat(stats, f"{prefix}_{kind}_ship_rank_n")
+        _head_stat(stats, f"{prefix}_{kind}_ship_rank_sum", float(ship_rank))
+        if ship_rank <= 1:
+            _head_stat(stats, f"{prefix}_{kind}_ship_top1")
+        if ship_rank <= 3:
+            _head_stat(stats, f"{prefix}_{kind}_ship_top3")
+        if ship_rank <= 5:
+            _head_stat(stats, f"{prefix}_{kind}_ship_top5")
+    if fp is not None and target_rank is not None and ship_rank is not None:
+        if fp >= 0.5 and target_rank <= 1 and ship_rank <= 1:
+            _head_stat(stats, f"{prefix}_{kind}_joint_top1")
+        if fp >= 0.5 and target_rank <= 3 and ship_rank <= 3:
+            _head_stat(stats, f"{prefix}_{kind}_joint_top3")
+
+
+def _audit_natural_heads(
+    slot_intents: dict[int, dict],
+    planets,
+    fleets,
+    player: int,
+    owned_indices,
+    owned_count: int,
+    max_ships,
+    ship_bin_mode: str,
+    beta: float,
+    own_reinforce_illegal,
+    stats: dict | None,
+    step: int,
+):
+    """Passive head-coordination audit for natural policy logits.
+
+    Logs whether fire/target/ship heads agree with lightweight planner-like attack and
+    save candidates. It never changes the decoded action list.
+    """
+    if stats is None:
+        return
+    prefixes = _head_prefixes(int(step))
+    threat_maps = _head_threat_maps(planets, fleets, player)
+    for slot in range(min(int(owned_count), len(owned_indices), len(max_ships))):
+        pidx = int(owned_indices[slot])
+        if pidx < 0 or pidx >= len(planets):
+            continue
+        src = planets[pidx]
+        if int(src[1]) != player:
+            continue
+        sid = int(src[0])
+        intent = slot_intents.get(sid)
+        if not intent:
+            continue
+        intent["ship_bin_mode"] = ship_bin_mode
+        fp = intent.get("fire_prob")
+        owner = intent.get("target_owner")
+        for prefix in prefixes:
+            _head_stat(stats, f"{prefix}_slots")
+            if fp is not None:
+                _head_stat(stats, f"{prefix}_fire_prob_sum", float(fp))
+                if fp < 0.1:
+                    _head_stat(stats, f"{prefix}_fire_lt_01")
+                if fp < 0.3:
+                    _head_stat(stats, f"{prefix}_fire_lt_03")
+                if fp < 0.5:
+                    _head_stat(stats, f"{prefix}_fire_lt_05")
+            if intent.get("fired", False):
+                _head_stat(stats, f"{prefix}_fired")
+                if owner == player:
+                    _head_stat(stats, f"{prefix}_chosen_own")
+                elif owner is None or owner < 0:
+                    _head_stat(stats, f"{prefix}_chosen_neutral")
+                else:
+                    _head_stat(stats, f"{prefix}_chosen_enemy")
+        cap = int(max_ships[slot])
+        attack = _head_best_attack_candidate(src, planets, player, cap)
+        save = _head_best_save_candidate(
+            src, planets, fleets, player, cap, beta, own_reinforce_illegal, threat_maps)
+        for prefix in prefixes:
+            if attack is None:
+                _head_stat(stats, f"{prefix}_attack_none")
+            else:
+                _record_natural_candidate(stats, prefix, "attack", intent, attack)
+            if save is None:
+                _head_stat(stats, f"{prefix}_save_none")
+            else:
+                _record_natural_candidate(stats, prefix, "save", intent, save)
+
+
+def _apply_defensive_reinforce_overlay(
+    move_records: list[dict],
+    slot_intents: dict[int, dict],
+    planets,
+    fleets,
+    player: int,
+    obs,
+    owned_indices,
+    max_ships,
+    ship_bin_mode: str,
+    k_sources: int,
+    beta: float,
+    max_targets: int,
+    reinforce_garrison_floor: float,
+    own_reinforce_illegal,
+    stats: dict | None,
+):
+    """Eval-time defensive deficit-fill overlay.
+
+    For threatened own planets, fill the defensive floor from nearest reachable safe-drain
+    sources. This is a hard diagnostic overlay: it deliberately bypasses the learned target
+    and ship heads, while logging what those heads would have done.
+    """
+    if k_sources <= 0 or max_targets <= 0:
+        return move_records
+    _def_stat(stats, "steps")
+    pid_to_idx = {int(p[0]): i for i, p in enumerate(planets)}
+    enemy_in: dict[int, float] = {}
+    enemy_eta: dict[int, float] = {}
+    friendly_in: dict[int, list[tuple[float, float]]] = {}
+    enemy_in_src: dict[int, float] = {}
+
+    for f in fleets or []:
+        owner = int(f[1])
+        if owner < 0:
+            continue
+        tgt = _def_fleet_target(planets, f)
+        if tgt is None:
+            continue
+        tid = int(tgt[0])
+        dist = math.hypot(float(tgt[2]) - float(f[2]), float(tgt[3]) - float(f[3]))
+        eta = dist / max(_fleet_speed(int(f[6])), 1e-6)
+        if owner == player:
+            friendly_in.setdefault(tid, []).append((float(f[6]), eta))
+        else:
+            enemy_in[tid] = enemy_in.get(tid, 0.0) + float(f[6])
+            enemy_eta[tid] = min(enemy_eta.get(tid, math.inf), eta)
+            enemy_in_src[tid] = enemy_in_src.get(tid, 0.0) + float(f[6])
+
+    owned_slot_pids = []
+    for slot in range(min(len(owned_indices), len(max_ships))):
+        pidx = int(owned_indices[slot])
+        if 0 <= pidx < len(planets) and int(planets[pidx][1]) == player:
+            owned_slot_pids.append(int(planets[pidx][0]))
+
+    enemy_planets = [p for p in planets if int(p[1]) >= 0 and int(p[1]) != player]
+    source_planets = [planets[pid_to_idx[pid]] for pid in owned_slot_pids if pid in pid_to_idx]
+    candidates = []
+    for tgt in planets:
+        if int(tgt[1]) != player:
+            continue
+        tid = int(tgt[0])
+        ein = enemy_in.get(tid, 0.0)
+        if ein <= 0:
+            continue
+        _def_stat(stats, "threatened_targets")
+        threat_eta = enemy_eta.get(tid, math.inf)
+        em = 0.0
+        for ep in enemy_planets:
+            if int(ep[0]) == tid:
+                continue
+            d = math.hypot(float(ep[2]) - float(tgt[2]), float(ep[3]) - float(tgt[3]))
+            reach = max(_fleet_speed(int(ep[5])) * _DEF_HORIZON, 1e-6)
+            em += float(ep[5]) * max(1.0 - d / reach, 0.0)
+        floor = ein + float(beta) * em + _DEF_OVERHEAD
+        have = float(tgt[5]) + sum(
+            ships for ships, eta in friendly_in.get(tid, [])
+            if (not math.isfinite(threat_eta)) or eta <= threat_eta
+        )
+        deficit = floor - have
+        if deficit <= 0:
+            _def_stat(stats, "already_safe_targets")
+            continue
+        sources = []
+        for src in source_planets:
+            sid = int(src[0])
+            if sid == tid:
+                continue
+            if own_reinforce_illegal(src, tgt):
+                _def_stat(stats, "blocked_by_cooldown_or_mask")
+                continue
+            garr = int(float(src[5]))
+            src_threat = enemy_in_src.get(sid, 0.0)
+            spare = garr if src_threat >= garr else int(max(0.0, garr - src_threat))
+            if reinforce_garrison_floor > 0.0:
+                spare = min(spare, int(max(0.0, garr - reinforce_garrison_floor)))
+            if spare <= 0:
+                continue
+            eta = _def_eta(src, tgt, spare)
+            if math.isfinite(threat_eta) and eta > threat_eta:
+                continue
+            sources.append((eta, sid, src, spare))
+        sources.sort(key=lambda x: (x[0], -x[3], x[1]))
+        # Fillability is tested with the nearest-k cap; otherwise this diagnostic can
+        # silently require more sources than the requested hard constraint permits.
+        fillable = sum(s[3] for s in sources[:k_sources])
+        if fillable + 1e-6 < deficit:
+            _def_stat(stats, "hopeless_targets")
+            _def_stat(stats, "hopeless_deficit", deficit)
+            continue
+        candidates.append((threat_eta, -deficit, tid, tgt, deficit, sources[:k_sources]))
+
+    if not candidates:
+        return move_records
+
+    candidates.sort()
+    forced: dict[int, dict] = {}
+    forced_targets = 0
+    for _threat_eta, _neg_def, tid, tgt, deficit, sources in candidates[:max_targets]:
+        remaining = float(deficit)
+        target_forced = 0
+        _def_stat(stats, "fillable_targets")
+        _def_stat(stats, "deficit_before", deficit)
+        for _eta, sid, src, spare in sources:
+            if remaining <= 0:
+                break
+            if sid in forced:
+                continue
+            send = _def_ship_count_for_cap(remaining, int(spare), ship_bin_mode)
+            if send <= 0:
+                continue
+            forced[sid] = {
+                "move": [sid, _target_intercept_angle(src, tgt, send, obs), int(send)],
+                "src_id": sid,
+                "target_id": tid,
+                "is_own_target": True,
+                "forced": True,
+            }
+            remaining -= send
+            target_forced += 1
+            _def_stat(stats, "forced_moves")
+            _def_stat(stats, "forced_ships", send)
+            intent = slot_intents.get(sid, {})
+            if not intent.get("fired", False):
+                _def_stat(stats, "orig_no_fire")
+            else:
+                owner = intent.get("target_owner")
+                if intent.get("target_id") == tid:
+                    _def_stat(stats, "orig_same_target")
+                elif owner == player:
+                    _def_stat(stats, "orig_other_own")
+                elif owner is None or owner < 0:
+                    _def_stat(stats, "orig_neutral")
+                else:
+                    _def_stat(stats, "orig_enemy")
+                _def_stat(stats, "orig_ships", float(intent.get("ships", 0)))
+                if float(intent.get("ships", 0)) < send:
+                    _def_stat(stats, "orig_undersent")
+                elif float(intent.get("ships", 0)) > send:
+                    _def_stat(stats, "orig_oversent")
+            fp = intent.get("fire_prob")
+            if fp is not None:
+                _def_stat(stats, "head_fire_n")
+                _def_stat(stats, "head_fire_prob_sum", float(fp))
+                if fp < 0.1:
+                    _def_stat(stats, "head_fire_lt_01")
+                if fp < 0.3:
+                    _def_stat(stats, "head_fire_lt_03")
+                if fp < 0.5:
+                    _def_stat(stats, "head_fire_lt_05")
+            target_rank = _def_rank(intent.get("target_scores"), pid_to_idx.get(tid))
+            if target_rank is not None:
+                _def_stat(stats, "head_target_rank_n")
+                _def_stat(stats, "head_target_rank_sum", float(target_rank))
+                if target_rank <= 1:
+                    _def_stat(stats, "head_target_top1")
+                if target_rank <= 3:
+                    _def_stat(stats, "head_target_top3")
+                if target_rank <= 5:
+                    _def_stat(stats, "head_target_top5")
+            ship_rank = _def_ship_adequacy_rank(
+                intent.get("ship_scores"), int(send), int(intent.get("max_ships", 0)), ship_bin_mode)
+            if ship_rank is not None:
+                _def_stat(stats, "head_ship_rank_n")
+                _def_stat(stats, "head_ship_rank_sum", float(ship_rank))
+                if ship_rank <= 1:
+                    _def_stat(stats, "head_ship_top1_ge_send")
+                if ship_rank <= 3:
+                    _def_stat(stats, "head_ship_top3_ge_send")
+                if ship_rank <= 5:
+                    _def_stat(stats, "head_ship_top5_ge_send")
+            if fp is not None and target_rank is not None and ship_rank is not None:
+                if fp >= 0.5 and target_rank <= 1 and ship_rank <= 1:
+                    _def_stat(stats, "head_all_top1_ready")
+                if fp >= 0.5 and target_rank <= 3 and ship_rank <= 3:
+                    _def_stat(stats, "head_all_top3_ready")
+        if target_forced:
+            forced_targets += 1
+            _def_stat(stats, "forced_targets")
+            _def_stat(stats, "deficit_after", max(0.0, remaining))
+
+    if not forced:
+        return move_records
+
+    # Forced defensive moves have priority. Keep non-conflicting policy moves up to the
+    # model width so the overlay does not exceed the old eval/train action budget.
+    final_records = list(forced.values())
+    for rec in move_records:
+        if rec["src_id"] in forced:
+            _def_stat(stats, "policy_move_replaced")
+            continue
+        if len(final_records) >= MAX_OWNED_PLANETS:
+            _def_stat(stats, "policy_move_dropped_for_cap")
+            continue
+        final_records.append(rec)
+    return final_records
+
+
 def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, obs, player,
                                fire_threshold=0.5, sample: bool = False,
                                ship_bin_mode: str = "absolute",
@@ -239,6 +767,12 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
                                cooldown_last: dict = None,
                                cooldown_step: int = 0,
                                sufficient_commit_factor: float = 0.0,
+                               defensive_reinforce_k: int = 0,
+                               defensive_reinforce_beta: float = 2.2,
+                               defensive_reinforce_max_targets: int = 1,
+                               defensive_reinforce_stats: dict = None,
+                               natural_head_audit_stats: dict = None,
+                               natural_head_audit_beta: float = 2.2,
                                veto_stats: dict = None):
     """Convert policy outputs to actions using target planet logits for aiming.
 
@@ -323,22 +857,38 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         target_indices = target_dist.sample().cpu().numpy().squeeze(0)
         ship_bins = ship_dist.sample().cpu().numpy().squeeze(0)
     else:
+        fire_prob_values = torch.sigmoid(fire_probs).cpu().numpy().squeeze(0)
         fire_decisions = (torch.sigmoid(fire_probs) > fire_threshold).cpu().numpy().squeeze(0)
         target_indices = torch.argmax(target_logits, dim=-1).cpu().numpy().squeeze(0)
         ship_bins = torch.argmax(ship_logits, dim=-1).cpu().numpy().squeeze(0)
 
-    moves = []
-    _new_reinf_edges = []   # (src_id, dst_id) executed reinforces this step → recorded into cooldown_last after the loop
+    move_records = []
+    slot_intents: dict[int, dict] = {}
     max_moves = MAX_OWNED_PLANETS  # = model's owned-slot width (16); kaggle env has NO move cap,
     # the old 8 was a self-nerf + train/eval mismatch (torch_env fires all 16). Bounded by owned_count.
     for slot in range(min(masks["owned_count"], fire_decisions.shape[0])):
-        if len(moves) >= max_moves:
+        if len(move_records) >= max_moves:
             break
+
+        pidx = int(owned_indices[slot])
+        if pidx >= len(planets):
+            continue
+        src_id = int(planets[pidx][0])
+        tidx = int(target_indices[slot])
+        decoded_ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
+        slot_intents[src_id] = {
+            "fired": bool(fire_decisions[slot]),
+            "fire_prob": float(fire_prob_values[slot]) if not sample else None,
+            "target_id": int(planets[tidx][0]) if 0 <= tidx < len(planets) else None,
+            "target_owner": int(planets[tidx][1]) if 0 <= tidx < len(planets) else None,
+            "ships": int(decoded_ships),
+            "max_ships": int(max_ships[slot]),
+            "target_scores": [float(x) for x in target_logits[0, slot, :len(planets)].detach().cpu().tolist()],
+            "ship_scores": [float(x) for x in ship_logits[0, slot].detach().cpu().tolist()],
+        }
         if not fire_decisions[slot]:
             continue
 
-        pidx = int(owned_indices[slot])
-        tidx = int(target_indices[slot])
         if pidx >= len(planets) or tidx >= len(planets):
             continue
         is_source = int(planets[pidx][0]) == int(planets[tidx][0])
@@ -350,7 +900,7 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         if is_own_target and allow_reinforce and _own_reinforce_illegal(planets[pidx], planets[tidx]):
             continue
 
-        ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
+        ships = decoded_ships
         if _SHIP_AUDIT["on"]:
             _nom = SHIP_COUNTS[int(ship_bins[slot])] if ship_bin_mode == "absolute" else ships
             _ship_audit_record(_nom, int(planets[pidx][5]), is_own_target)
@@ -374,9 +924,52 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
             continue
 
         angle = _target_intercept_angle(planets[pidx], planets[tidx], ships, obs)
-        moves.append([int(planets[pidx][0]), angle, ships])
-        if cd_on and is_own_target:   # executed reinforce → arm the reverse edge after the loop
-            _new_reinf_edges.append((int(planets[pidx][0]), int(planets[tidx][0])))
+        move_records.append({
+            "move": [src_id, angle, ships],
+            "src_id": src_id,
+            "target_id": int(planets[tidx][0]),
+            "is_own_target": bool(is_own_target),
+            "forced": False,
+        })
+
+    if natural_head_audit_stats is not None and not sample:
+        _audit_natural_heads(
+            slot_intents,
+            planets,
+            obs.get("fleets", []),
+            player,
+            owned_indices,
+            int(masks["owned_count"]),
+            max_ships,
+            ship_bin_mode,
+            float(natural_head_audit_beta),
+            _own_reinforce_illegal,
+            natural_head_audit_stats,
+            int(obs.get("step", 0)),
+        )
+
+    if defensive_reinforce_k > 0 and allow_reinforce:
+        move_records = _apply_defensive_reinforce_overlay(
+            move_records,
+            slot_intents,
+            planets,
+            obs.get("fleets", []),
+            player,
+            obs,
+            owned_indices,
+            max_ships,
+            ship_bin_mode,
+            int(defensive_reinforce_k),
+            float(defensive_reinforce_beta),
+            int(defensive_reinforce_max_targets),
+            float(reinforce_garrison_floor),
+            _own_reinforce_illegal,
+            defensive_reinforce_stats,
+        )
+
+    moves = [rec["move"] for rec in move_records[:max_moves]]
+    _new_reinf_edges = [(int(rec["src_id"]), int(rec["target_id"]))
+                        for rec in move_records[:max_moves] if rec.get("is_own_target")]
 
     # ----- veto diagnostics: of the reinforces the policy WANTS, which mask blocks them? -----
     # "want" = the unmasked-argmax target (over real planets, source excluded) for a fire-positive
