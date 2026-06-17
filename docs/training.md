@@ -5,6 +5,41 @@
 
 ---
 
+## Current State (2026-06-18)
+
+**No live run.** Peeler curriculum CONCLUDED NEGATIVE (see below + `docs/peeler-curriculum.md`
+"C2 / Gate verdict"). Redirecting off the peeler family — picking next branch
+(board-curriculum / VDN+signal / direct-LB loop) before any GPU launch.
+
+**⛔ PEELER FAMILY FATAL (2026-06-18).** Two cheap diagnostics closed it:
+- **C1-2M vs peeler_t1 (64g):** WR 62.5% but **out-massed 97%**, planets@32=4,
+  peel WON 0.39 — concentration signature *identical to vs Ajay* (94% / 4 / 0.55).
+  We beat the peeler **despite being out-massed by it** (win on attrition,
+  game-len WON 153st, end 15 vs Ajay end 6). Refutes "out-expansion cheese" —
+  the peel IS applied but is non-decisive at t1's strength, so there's no
+  gradient to fix the out-massing. The real mechanism is "win despite the
+  failure," not "exploit a bypass."
+- **GATE — C1-2M vs peeler_t2 (32g):** WR **25.00%** — identical to the de-risk
+  baseline (revedge1 4.72M was 25% vs t2 at gate). C1's 2M steps of t1 mastery
+  lifted t2-WR by **0pp**. Concentration signature identical to vs t1.
+
+**Verdict:** matched-WR ≠ matched-skill-bar. A beatable (~50%) opponent's bar
+is always below Ajay's, and the ladder **doesn't bridge** (t1-mastery → 0pp
+t2 lift). The tension is structural to beatable opponents — opponent-relative
+matched-difficulty cannot force Ajay-level concentration. The ratchet-up-tiers
+fix is also ruled out (you can't climb a ladder whose rungs don't bridge).
+C1 checkpoints (1M, 2M) banked locally under
+`gpu_run_artifacts/peeler_c1_t1/checkpoints/` as the diagnostic record. Boxes
+429262 (preempted) + 429359 (destroyed) — no instances billing.
+
+**C1 run record (2026-06-17, killed by kill criterion @ 2M):** Jarvis A100-80GB
+spot 429262, resume+IL-ref revedge1 4.72M, pool = peeler_t1 @ 0.8, 512/32/12,
+LR 1e-4. Ajay panels: 1M 19.9% / 2M 21.5% — WR-vs-peeler climbed (0.50→0.66
+ema) but out-massed flat 96→94%, peel WON flat 0.57→0.55 → kill criterion
+triggered. Script `gpu_run_artifacts/peeler_c1/run_remote_peeler_c1_t1_jarvis.sh`.
+
+---
+
 ## Current State (2026-06-16)
 
 **LIVE: `revedge1`** — Jarvis H200 SPOT 217.18.55.153, 6M. **Reverse-edge reinforce cooldown** (the staged hygiene lever) replacing **hladder** (killed @4.19M — league training did NOT convert to an out-massed% drop; the diagnostics added this session point the wall DOWNSTREAM of opening expansion). Resume + self-anchor IL-ref = **corrpack3e 4.7M** (il-λ 0.05), LR 1e-4, 512/32/12. **DELTAS:** (1) `--reverse-edge-cooldown 3` — block own-target A→B→A reinforce ping-pong (rank1 recip<=3st <0.01 vs our 0.06-0.10; pure inference mask, persisted in ckpt → eval auto-loads); (2) `--pfsp-externals` (the flag added this session) — the h10/h12/h14 league is now PFSP-weighted (toward the lose-most rung) instead of uniform 1/3. iter healthy (EV 0.78, KL 0.008, clip 0.11, estop 0, reinf 0.31). Watcher: ajay+zach held-out (cooldown auto-loads from ckpt metadata → eval parity automatic; eval has no `--reverse-edge-cooldown` CLI). **JUDGE BY GUARDRAILS** — Ajay/Zach held-out must HOLD; the cooldown forces recip→0 by construction, so the real test is the policy ROUTES AROUND it productively (a veto mask removes the bad behavior but doesn't supply the replacement — watch reinf_rate doesn't just collapse). Script `gpu_run_artifacts/revedge1/`. ⚠️ Jarvis spot → `jl destroy` when done. hladder banked locally (524k–4.19M); its 4.19M Ajay panel was interrupted by the watcher switch.

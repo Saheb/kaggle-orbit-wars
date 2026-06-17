@@ -406,3 +406,111 @@ peeler:
 
 A failed de-risk gate is a useful result. Do not force a GPU run if no tier is
 both beatable and skill-punishing.
+
+---
+
+## C1 Run (2026-06-17) — kill criterion triggered @ 2M
+
+C1 launched on Jarvis A100-80GB spot (instance 429262, IP 217.18.55.112):
+resume + self-anchor IL-ref = **revedge1 4.72M**, pool = peeler_t1 only at
+`--pool-external-fraction 0.8` (80% peeler / 20% self-snapshots), PFSP-externals
+on, LR 1e-4, 512/32/12, reward/model discipline unchanged from revedge1. Script:
+`gpu_run_artifacts/peeler_c1/run_remote_peeler_c1_t1_jarvis.sh`.
+
+Training was healthy throughout (EV 0.84-0.87, KL ~0.01, clip ~0.18, il_kl ~0.04,
+estop 0). Pool WR vs peeler_t1 climbed 0.50 → 0.66 (ema). Box preempted at
+iter 46 / 3.01M; latest saved ckpt was 2M (synced locally:
+`gpu_run_artifacts/peeler_c1_t1/checkpoints/torch_step_2097152_*.pt`).
+
+**Ajay held-out panels (256 games, watcher):**
+
+| ckpt | Ajay WR | out-massed% | peel-rate WON | cap/atk open<50 |
+|---|---|---|---|---|
+| 1M | 19.9% | 96% | 0.57 | 0.45 |
+| 2M | 21.5% | 94% | 0.55 | 0.43 |
+
+**Kill criterion triggered at 2M** (per "C1 Read" above): WR-vs-peeler climbed
+but Ajay out-massed flat at 94%, peel-rate WON flat at 0.55, cap/atk open<50
+flat at 0.43. The policy learned to beat peeler_t1 more but the concentration
+wall did not bend. Log:
+`gpu_run_artifacts/peeler_c1_t1/eval_logs/eval_torch_step_2097152_*__ajay_1200.log`.
+
+## C2 / Gate verdict (2026-06-18) — peeler family FATAL
+
+### Two cheap diagnostics that closed the family
+
+**Diagnostic 1 — C1-2M vs peeler_t1 (64 games, local):** WR 62.5% (40/64), but
+**out-massed 97%**, planets@32 = 4, peel-rate WON 0.39, garr@loss 28 vs
+enemy-inbound 86. The concentration signature vs the *weak* peeler is
+**identical to vs Ajay** (out-massed 94%, planets@32=4, peel WON 0.55, garr 26
+vs inbound 64). We beat the peeler **despite being out-massed by it**, not by
+avoiding the peel. The peel *is* applied (97% out-massed) but is
+**non-decisive** at t1's strength — we win on aggregate/attrition
+(game-len WON 153st, end 15 vs Ajay end 6). Log:
+`gpu_run_artifacts/peeler/eval_logs/c1_2m_vs_peeler_t1_64.log`.
+
+This refutes the "out-expansion cheese" hypothesis (we are NOT out-expanding:
+planets@32 = 4 on both, out-massed 97% vs peeler). The real mechanism is
+**"win despite the failure"** — the peel is present but doesn't *force* the fix.
+
+**Diagnostic 2 — THE GATE: C1-2M vs peeler_t2 (32 games, local):** WR
+**25.00% (8/32)** — identical to the de-risk baseline (revedge1 4.72M was 25%
+vs t2 at the original gate). C1's 2M steps of peeler_t1 mastery **lifted t2-WR
+by 0pp**. Concentration signature identical to vs t1 (out-massed 95%, peel WON
+0.45, planets@32=4, garr 29 vs inbound 88). Log:
+`gpu_run_artifacts/peeler/eval_logs/c1_2m_vs_peeler_t2_32.log`.
+
+### The verdict
+
+Per the predefined decision rule ("t2-WR still ~25% → t1-mastery is
+rung-specific win-despite-out-massed that doesn't transfer even to the next
+peeler → the ladder doesn't bridge"), the peeler family is **FATAL**:
+
+- **Matched-WR ≠ matched-skill-bar.** A beatable opponent (~50%) has, almost by
+  definition, a lower skill bar — that's *why* it's beatable. Mastering t1
+  reaches *t1's* concentration bar, which is below Ajay's.
+- **The ladder doesn't bridge.** t1-mastery (62.5% vs t1) lifted t2-WR by 0pp.
+  Each rung is a separate low-bar win; mastering one doesn't climb to the next.
+- **The tension is structural to beatable opponents.** An opponent strong enough
+  that out-massing loses is ~Ajay-strength → win-starved (24%). An opponent
+  beatable at ~50% is one whose out-massing pressure is non-decisive. The
+  ladder's whole hope was that mastering t1 lifts you enough that t2 becomes
+  the new matched rung and you climb toward Ajay — the gate proves this
+  doesn't happen.
+
+### What was NOT the flaw
+
+C1's flaw was **not** "single low rung, no ratchet" (the first-guess fix that
+motivated a past-self-league C2). The gate rules that out: if t1-mastery
+transferred up the ladder, t2-WR would have risen; it didn't. A ratchet up
+tiers would just climb a ladder whose rungs don't bridge. The flaw is the
+**family** — opponent-relative matched-difficulty cannot force Ajay-level
+concentration because the bar of a beatable opponent is always below Ajay's.
+
+### Cleanup
+
+- Jarvis 429262 (C1) preempted; 429359 (briefly launched for a mis-aimed C2
+  past-self-league design, rationale killed by diagnostic 1) destroyed.
+  No instances billing.
+- `opponents/candidate_peeler_t1p.py` (briefly built for a "stronger peel"
+  retune, superseded by diagnostic 1 before it was ever used) removed.
+- C1 checkpoints (1M, 2M) banked locally under
+  `gpu_run_artifacts/peeler_c1_t1/checkpoints/` — kept as the record of the
+  peeler-adapted policy (diagnostic 1 + 2 material).
+
+### Redirect (next-steps)
+
+Off the peeler family. Candidate branches:
+1. **Board-curriculum** — vary the *board* (planet density / production / layout)
+   so concentration is necessary regardless of opponent skill; not
+   opponent-relative. The only lever class that escapes the matched-WR≠matched-
+   bar trap (the board sets the bar, not the opponent).
+2. **VDN + concentration signal** — per-planet value head paired with a
+   concentration reward/signal (the shelved-but-not-closed door;
+   `outmass-limits.md` Part 1 #4 is the candidate edge-hypothesis for *where*
+   concentration credit should flow).
+3. **Direct-LB loop** — submit, mine loss replays, target the actual LB-loss
+   failure modes instead of the Ajay proxy (which is NOT LB-predictive:
+   rev53b 10.9% Ajay → 933 LB < rev38 2.7% → 994).
+
+Pick one and build.
