@@ -99,6 +99,86 @@ def test_overlay_skips_hopeless_target():
     assert "forced_moves" not in stats
 
 
+def test_overlay_value_gate_can_skip_fillable_target():
+    obs = {
+        "step": 12,
+        "player": 0,
+        "angular_velocity": 0.0,
+        "planets": [
+            [0, 0, 50.0, 50.0, 2.0, 5.0, 1.0],
+            [1, 0, 40.0, 50.0, 2.0, 80.0, 1.0],
+            [2, 1, 80.0, 50.0, 2.0, 10.0, 5.0],
+        ],
+        "fleets": [
+            [0, 1, 60.0, 50.0, math.pi, 9, 20.0],
+        ],
+    }
+    masks = compute_action_masks(obs, player=0)
+    n_planets = len(obs["planets"])
+    stats = {}
+
+    moves = actions_from_target_policy(
+        torch.full((1, 16), -10.0),
+        torch.zeros((1, 16, n_planets)),
+        torch.zeros((1, 16, 32)),
+        masks,
+        obs,
+        player=0,
+        allow_reinforce=True,
+        defensive_reinforce_k=1,
+        defensive_reinforce_beta=0.0,
+        defensive_reinforce_value_margin=999.0,
+        defensive_reinforce_stats=stats,
+    )
+
+    assert moves == []
+    assert stats["value_gate_checked"] == 1
+    assert stats["value_gate_skipped_targets"] == 1
+    assert "forced_moves" not in stats
+
+
+def test_overlay_overfill_scales_requested_mass_and_logs_realized_fill():
+    obs = {
+        "step": 12,
+        "player": 0,
+        "angular_velocity": 0.0,
+        "planets": [
+            [0, 0, 50.0, 50.0, 2.0, 5.0, 1.0],
+            [1, 0, 40.0, 50.0, 2.0, 80.0, 1.0],
+            [2, 1, 80.0, 50.0, 2.0, 10.0, 1.0],
+        ],
+        "fleets": [
+            [0, 1, 60.0, 50.0, math.pi, 9, 20.0],
+        ],
+    }
+    masks = compute_action_masks(obs, player=0)
+    n_planets = len(obs["planets"])
+    stats = {}
+
+    moves = actions_from_target_policy(
+        torch.full((1, 16), -10.0),
+        torch.zeros((1, 16, n_planets)),
+        torch.zeros((1, 16, 32)),
+        masks,
+        obs,
+        player=0,
+        allow_reinforce=True,
+        defensive_reinforce_k=1,
+        defensive_reinforce_beta=0.0,
+        defensive_reinforce_max_targets=1,
+        defensive_reinforce_overfill=1.5,
+        defensive_reinforce_stats=stats,
+    )
+
+    assert len(moves) == 1
+    assert stats["deficit_before"] == 16.0
+    assert stats["requested_deficit"] == 24.0
+    assert stats["forced_ships"] >= 24.0
+    assert stats["realized_fill_forced_sum"] == stats["forced_ships"]
+    assert stats["realized_fill_requested_sum"] == 24.0
+    assert stats["realized_fill_full_targets"] == 1
+
+
 def test_natural_head_audit_logs_attack_and_save_candidate_readiness():
     obs = {
         "step": 20,
@@ -146,5 +226,7 @@ def test_natural_head_audit_logs_attack_and_save_candidate_readiness():
 if __name__ == "__main__":
     test_overlay_forces_nearest_safe_source_and_logs_original_no_fire()
     test_overlay_skips_hopeless_target()
+    test_overlay_value_gate_can_skip_fillable_target()
+    test_overlay_overfill_scales_requested_mass_and_logs_realized_fill()
     test_natural_head_audit_logs_attack_and_save_candidate_readiness()
     print("PASS: defensive reinforce overlay + natural head audit")

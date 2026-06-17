@@ -12,8 +12,9 @@ import numpy as np
 
 from config import Config
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH
-from features import extract_features, _ETA_PROBE_SPEED, set_game_phase_features
-from action_mask import compute_action_masks, actions_from_policy, actions_from_target_policy
+from features import extract_features, _ETA_PROBE_SPEED, set_game_phase_features, set_ablate_roi, set_ablate_channels
+from action_mask import (compute_action_masks, actions_from_policy, actions_from_target_policy, _fleet_speed,
+                         _ship_bin_to_count, _target_intercept_angle, MAX_OWNED_PLANETS)
 # Decisive-mass floor constants — IMPORTED from torch_env so the eval dm_* gap diagnostic uses the
 # EXACT same floor as the training reward/diag (they can never drift). project_force_concentration_wall.
 from torch_env import (_DM_BETA, _DM_ETA_FREE, _DM_ETA_SCALE, _DM_HORIZON, _DM_OVERHEAD,
@@ -95,6 +96,119 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     return sd, action_decode
 
 
+# Fire-head isolation override (eval diagnostic). On sources the fire head VETOES (fire_prob <
+# threshold) that have a high-holdable-ROI attack available, FORCE fire toward the head's own
+# argmax target (fall back to the top-ROI target if the head's pick is illegal/own), with the
+# head's own ship sizing. Isolates "does the fire veto cost us winnable attacks" from selection.
+# WR rises => fire veto suppresses valuable attacks (audit right); ties/falls => vetoes correct.
+_FORCE_FIRE = {"on": False, "roi": 0.3, "forced": 0, "states": 0, "to_head_tgt": 0}
+
+
+def set_force_fire_high_roi(on: bool, roi_threshold: float = 0.3) -> None:
+    _FORCE_FIRE.update(on=bool(on), roi=float(roi_threshold), forced=0, states=0, to_head_tgt=0)
+
+
+def _apply_force_fire(moves, outputs, masks, obs, player, fire_threshold, ship_bin_mode):
+    fire_p = torch.sigmoid(outputs["fire_logits"][0]).cpu().numpy()
+    tgt_arg = torch.argmax(outputs["target_logits"][0], dim=-1).cpu().numpy()
+    ship_arg = torch.argmax(outputs["ship_logits"][0], dim=-1).cpu().numpy()
+    owned_idx = masks["owned_indices"].cpu().numpy()
+    max_ships = masks["max_ships"].cpu().numpy().reshape(-1)
+    planets = obs["planets"]
+    fleets = obs.get("fleets") or []
+    owned_count = int(masks["owned_count"])
+    fired_src = {int(m[0]) for m in moves}
+    _FORCE_FIRE["states"] += 1
+    for slot in range(min(owned_count, fire_p.shape[0])):
+        if len(moves) >= MAX_OWNED_PLANETS:
+            break
+        if fire_p[slot] >= fire_threshold:
+            continue                                          # head already fires → not a veto
+        pidx = int(owned_idx[slot])
+        if pidx >= len(planets):
+            continue
+        src = planets[pidx]
+        if int(src[0]) in fired_src or src[5] <= 0:
+            continue
+        best_roi = best_tgt = None                            # best holdable-ROI attack from this source
+        for tgt in planets:
+            if int(tgt[1]) == player or int(tgt[0]) == int(src[0]):
+                continue
+            hr = _holdable_roi(src, tgt, planets, fleets, player)
+            if hr is not None and (best_roi is None or hr > best_roi):
+                best_roi, best_tgt = hr, tgt
+        if best_roi is None or best_roi < _FORCE_FIRE["roi"]:
+            continue                                          # no worthwhile attack → don't force (avoid spray)
+        ti = int(tgt_arg[slot])                               # keep head's target if it's a legal attack
+        head_tgt = planets[ti] if 0 <= ti < len(planets) else None
+        use_head = head_tgt is not None and int(head_tgt[1]) != player and int(head_tgt[0]) != int(src[0])
+        use_tgt = head_tgt if use_head else best_tgt
+        ships = min(int(_ship_bin_to_count(int(ship_arg[slot]), int(max_ships[slot]), mode=ship_bin_mode)), int(src[5]))
+        if ships <= 0:
+            continue
+        angle = _target_intercept_angle(src, use_tgt, ships, obs)
+        moves.append([int(src[0]), float(angle), int(ships)])
+        fired_src.add(int(src[0]))
+        _FORCE_FIRE["forced"] += 1
+        if use_head:
+            _FORCE_FIRE["to_head_tgt"] += 1
+    return moves
+
+
+# Retarget override (eval diagnostic, selection isolation). Leaves fire/ship as-is; for each ATTACK
+# the policy actually launches, redirect its target to the top-holdable-ROI candidate from that
+# source (keep source + ship count). No new launches (no spray), no fire change → clean test of
+# "of the attacks we make, does picking the best target raise WR?" Raises best% to ~100%.
+_RETARGET = {"on": False, "resize": False, "retargeted": 0, "attacks": 0, "uniq_sum": 0.0, "turns": 0}
+
+
+def set_retarget_top_roi(on: bool, resize: bool = False) -> None:
+    _RETARGET.update(on=bool(on), resize=bool(resize), retargeted=0, attacks=0, uniq_sum=0.0, turns=0)
+
+
+def _apply_retarget(moves, obs, player):
+    planets = obs["planets"]
+    fleets = obs.get("fleets") or []
+    byid = {int(p[0]): p for p in planets}
+    for m in moves:
+        src = byid.get(int(m[0]))
+        if src is None:
+            continue
+        cur = _resolve_launch_target(planets, src, m[1])
+        if cur is None or int(cur[1]) == player:
+            continue                                          # leave reinforces / unresolved alone
+        _RETARGET["attacks"] += 1
+        best_roi = best = None
+        for tgt in planets:
+            if int(tgt[1]) == player or int(tgt[0]) == int(src[0]):
+                continue
+            hr = _holdable_roi(src, tgt, planets, fleets, player)
+            if hr is not None and (best_roi is None or hr > best_roi):
+                best_roi, best = hr, tgt
+        if best is not None and int(best[0]) != int(cur[0]):
+            ships = int(m[2])
+            if _RETARGET["resize"]:                            # size to actually capture the NEW target
+                need = int(best[5]) + (1 if int(best[1]) < 0 else int(best[6]) * 3 + 1)
+                ships = min(int(src[5]), max(ships, need))
+            m[2] = int(ships)
+            m[1] = float(_target_intercept_angle(src, best, ships, obs))
+            _RETARGET["retargeted"] += 1
+    # target-funnel diagnostic: distinct attack targets this turn / number of attacks (1.0 = all distinct,
+    # low = many sources piling on the same ROI-greedy target = no expansion spread)
+    atk_tgts = []
+    for m in moves:
+        s = byid.get(int(m[0]))
+        if s is None:
+            continue
+        rt = _resolve_launch_target(planets, s, m[1])
+        if rt is not None and int(rt[1]) != player:
+            atk_tgts.append(int(rt[0]))
+    if atk_tgts:
+        _RETARGET["uniq_sum"] += len(set(atk_tgts)) / len(atk_tgts)
+        _RETARGET["turns"] += 1
+    return moves
+
+
 def build_agent_fn(model: EntityTransformer, device: torch.device,
                    fire_threshold: float = 0.5, sample: bool = False,
                    ship_bin_mode: str = "absolute",
@@ -106,6 +220,8 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                    defensive_reinforce_k: int = 0,
                    defensive_reinforce_beta: float = 2.2,
                    defensive_reinforce_max_targets: int = 1,
+                   defensive_reinforce_value_margin: float | None = None,
+                   defensive_reinforce_overfill: float = 1.0,
                    defensive_reinforce_stats: dict = None,
                    natural_head_audit_stats: dict = None,
                    natural_head_audit_beta: float = 2.2):
@@ -166,7 +282,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
 
         action_fn = actions_from_target_policy if target_decode else actions_from_policy
         if target_decode:
-            return action_fn(
+            moves = action_fn(
                 outputs["fire_logits"].cpu(),
                 outputs["target_logits"].cpu(),
                 outputs["ship_logits"].cpu(),
@@ -188,11 +304,18 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 defensive_reinforce_k=defensive_reinforce_k,
                 defensive_reinforce_beta=defensive_reinforce_beta,
                 defensive_reinforce_max_targets=defensive_reinforce_max_targets,
+                defensive_reinforce_value_margin=defensive_reinforce_value_margin,
+                defensive_reinforce_overfill=defensive_reinforce_overfill,
                 defensive_reinforce_stats=defensive_reinforce_stats,
                 natural_head_audit_stats=natural_head_audit_stats,
                 natural_head_audit_beta=natural_head_audit_beta,
                 veto_stats=veto_stats,
             )
+            if _RETARGET["on"] and not sample:
+                _apply_retarget(moves, obs, player)
+            if _FORCE_FIRE["on"] and not sample:
+                _apply_force_fire(moves, outputs, masks, obs, player, fire_threshold, ship_bin_mode)
+            return moves
 
         raise NotImplementedError(
             "angle-decode path removed (angle head deleted); Phase 1 checkpoints "
@@ -267,6 +390,31 @@ def _cap_cost_at_arrival(src, tgt, seat):
     return ships_at_arrival + (1.0 if owner == -1 else tgt[6] * 3 + 1.0)
 
 
+def _holdable_roi(src, tgt, planets, fleets, seat, beta=_DM_BETA):
+    """Reactive-aware ROI of attacking `tgt` from `src`: value (prod·20) minus producer_v2's capture
+    FLOOR — projected defenders + enemy inbound + beta·rho(eta)·reachable enemy PLANET mass + overhead,
+    the SAME floor as the decisive-mass reward (torch_env._decisive_mass_fields). Unlike the static
+    ch12 roi_20, the cost prices the REACTIVE peel, so a closer/richer-but-unholdable target scores
+    LOW. Returns None for an own target (can't attack it)."""
+    owner = int(tgt[1])
+    if owner == seat:
+        return None
+    dist = math.hypot(tgt[2] - src[2], tgt[3] - src[3])
+    eta = min(max(1.0, math.ceil(dist / _ETA_PROBE_SPEED)), _DM_HORIZON)
+    inbound = _friendly_inbound(fleets, tgt, 1 - seat)        # enemy FLEET ships already inbound
+    enemy_mass = 0.0                                          # reachable enemy PLANET mass (cheap_enemy_pressure)
+    for ep in planets:
+        eo = int(ep[1])
+        if eo < 0 or eo == seat or int(ep[0]) == int(tgt[0]):
+            continue                                          # enemy planets only (excl neutral/self/target)
+        reach = max(_fleet_speed(int(ep[5])) * _DM_HORIZON, 1e-6)
+        d = math.hypot(ep[2] - tgt[2], ep[3] - tgt[3])
+        enemy_mass += ep[5] * max(1.0 - d / reach, 0.0)
+    rho = min(max((eta - _DM_ETA_FREE) / _DM_ETA_SCALE, 0.0), 1.0)
+    floor = tgt[5] + tgt[6] * eta + inbound + beta * rho * enemy_mass + _DM_OVERHEAD
+    return (tgt[6] * 20.0 - floor) / max(floor, 1.0)
+
+
 def _friendly_inbound(fleets, tgt, seat):
     """Own (seat) ships in flight already HEADED toward planet `tgt` — same geometry the
     friendly-contest feature reads (along>0, perp < radius+1.5). Used to flag a *redundant*
@@ -315,7 +463,7 @@ def _dm_fleet_target(planets, f):
     return best
 
 
-def _decisive_gap_step(planets, fleets, seat, beta=None):
+def _decisive_gap_step(planets, fleets, seat, beta=None, targets="enemy"):
     """Per attacked-enemy-target decisive-mass RATIO (mass/floor) for `seat` from one observation,
     using the EXACT floor of torch_env._decisive_mass_fields:
         floor = garr + prod*eta + enemy_inbound + beta*rho(eta)*reachable_enemy_mass + overhead
@@ -345,6 +493,20 @@ def _decisive_gap_step(planets, fleets, seat, beta=None):
             our_eta[tid] = max(our_eta.get(tid, 0.0), eta)             # MAX ETA over our fleets
         else:
             enemy_inbound[tid] = enemy_inbound.get(tid, 0.0) + f[6]
+    if targets == "neutral":
+        # NEUTRAL capture sufficiency: neutrals don't grow or reinforce, so the floor is just the
+        # static garrison (+overhead) — the "did we send enough to TAKE this neutral" gap the enemy
+        # dm line (owner>=0) skips. This is the opening land-grab undercommit (e.g. 16 ships at g25).
+        ratios = []
+        for tgt in planets:
+            if int(tgt[1]) != -1:
+                continue                                              # neutrals only
+            mass = our_mass.get(tgt[0], 0.0)
+            if mass <= 0:
+                continue                                              # attacked-with-mass only
+            floor = max(tgt[5] + _DM_OVERHEAD, 1e-6)                  # static garrison; no prod growth / no reactive term
+            ratios.append(mass / floor)
+        return ratios
     enemy_planets = [p for p in planets if int(p[1]) != seat and int(p[1]) >= 0]
     ratios = []
     for tgt in enemy_planets:
@@ -619,6 +781,28 @@ def game_conversion(steps, seat):
     launches_ph = [0, 0, 0]
     ship1_ph = [0, 0, 0]
     ship_ph_sum = [0, 0, 0]
+    # attack target NEAR-vs-FAR (the "target head reaches for far planets when a nearer one is
+    # available" question): per attack launch, compare the chosen target's distance-from-source to
+    # the NEAREST legal attack target (any non-seat planet). nearest = chose the closest; ratio =
+    # chosen_dist / nearest_dist (1.0 = nearest). Current-position approx (ignores orbital motion),
+    # but the won/lost split controls for that — the approx applies equally to both buckets, so a
+    # won-vs-lost gap is real: bigger far-reach in LOST games => losing-state artifact, not a head defect.
+    atkfar_n_ph = [0, 0, 0]
+    atkfar_nearest_ph = [0, 0, 0]
+    atkfar_ratio_sum_ph = [0.0, 0.0, 0.0]
+    # value-aware DOMINANCE: distance alone over-flags value-driven far-targeting (a far planet with
+    # higher production is a correct pick). dominated = a strictly BETTER target was passed up — one
+    # both CLOSER and at least as PRODUCTIVE as the chosen (p[6] = production). Far-but-richer is NOT
+    # flagged; near-and-richer-passed-up IS → the unambiguous target-head defect rate (no value excuse).
+    atkdom_ph = [0, 0, 0]
+    # value-aware HOLDABLE-ROI rank: dom% above ranks by RAW production, so it over-flags a
+    # closer-richer-but-UNHOLDABLE target the head correctly skipped. Here we rank candidates by
+    # reactive-aware holdable ROI (prices the peel via the decisive-mass floor). best = chose the
+    # top holdable-ROI target; top3 = within the top 3. LOST≫WON => value-aware targeting IS the
+    # lever; WON≈LOST => systematic but not outcome-relevant (selection isn't the wall).
+    atkh_n_ph = [0, 0, 0]
+    atkh_best_ph = [0, 0, 0]
+    atkh_top3_ph = [0, 0, 0]
     planets_at = {ms: None for ms in _CONV_MILESTONES}
     garrison_at = {ms: None for ms in _CONV_MILESTONES}   # ships parked on owned planets
     inflight_at = {ms: None for ms in _CONV_MILESTONES}   # ships in owned fleets (deployed)
@@ -626,6 +810,7 @@ def game_conversion(steps, seat):
     # target, split by phase (<50/50-100/>=100). Survives-argmax read of the decmass target — does
     # the policy assemble force to the capture floor vs only improving adjacent competence?
     dm_ratios_ph = [[], [], []]
+    dm_neutral_ratios_ph = [[], [], []]   # NEUTRAL capture sufficiency (mass / static garrison) by phase
     # hold-floor (DEFENSIVE mirror): hold ratio per threatened OWN planet, split by phase and by
     # age-after-capture (0-5 / 6-15 / 16+ steps). Tells whether we lose captures IMMEDIATELY (can't
     # route defense in time) or LATER (logistics/churn). Uses cap_step for age.
@@ -736,6 +921,7 @@ def game_conversion(steps, seat):
             _f_dm = steps[t][seat].observation.get("fleets") or []
             _ph_dm = 0 if t < _LAUNCH_WINDOW else (1 if t < _MID_WINDOW else 2)
             dm_ratios_ph[_ph_dm].extend(_decisive_gap_step(p1, _f_dm, seat))
+            dm_neutral_ratios_ph[_ph_dm].extend(_decisive_gap_step(p1, _f_dm, seat, targets="neutral"))
             # hold-floor (defensive): cap_step here reflects current holdings (capture/loss for step t
             # processed above), so age-after-capture is correct. Bucket by phase + by age.
             for _hr, _age in _hold_floor_step(p1, _f_dm, seat, cap_step, t):
@@ -821,6 +1007,37 @@ def game_conversion(steps, seat):
                 atk += 1
                 atk_ships += sent
                 atk_bin[bidx] += 1
+                # near-vs-far: nearest legal attack target (any non-seat planet) from this source
+                _cand = [q for q in p0 if int(q[1]) != seat]
+                if _cand:
+                    _d_near = min(math.hypot(q[2] - src[2], q[3] - src[3]) for q in _cand)
+                    if _d_near > 1e-6:
+                        _d_chosen = math.hypot(tgt[2] - src[2], tgt[3] - src[3])
+                        atkfar_n_ph[_ph] += 1
+                        atkfar_ratio_sum_ph[_ph] += _d_chosen / _d_near
+                        if _d_chosen <= _d_near + 1e-6:
+                            atkfar_nearest_ph[_ph] += 1
+                        _p_chosen = tgt[6]
+                        if any(int(q[0]) != int(tgt[0])
+                               and math.hypot(q[2] - src[2], q[3] - src[3]) < _d_chosen - 1e-6
+                               and q[6] >= _p_chosen for q in _cand):
+                            atkdom_ph[_ph] += 1            # passed up a closer-AND-richer target
+                        # holdable-ROI rank (reactive-aware): how many candidates beat the chosen?
+                        if len(_cand) >= 2:
+                            _hr_chosen = _holdable_roi(src, tgt, p0, f0, seat)
+                            if _hr_chosen is not None:
+                                _better = 0
+                                for q in _cand:
+                                    if int(q[0]) == int(tgt[0]):
+                                        continue
+                                    _hr_q = _holdable_roi(src, q, p0, f0, seat)
+                                    if _hr_q is not None and _hr_q > _hr_chosen + 1e-9:
+                                        _better += 1
+                                atkh_n_ph[_ph] += 1
+                                if _better == 0:
+                                    atkh_best_ph[_ph] += 1   # chose the top holdable-ROI target
+                                if _better < 3:
+                                    atkh_top3_ph[_ph] += 1   # chosen within top-3 holdable-ROI
                 early = t < _LAUNCH_WINDOW
                 if early:
                     atk_early += 1
@@ -906,7 +1123,11 @@ def game_conversion(steps, seat):
            "launch_states": launch_states, "launch_count": launch_count,
            "fire_steps": fire_steps, "fire_frac_sum": fire_frac_sum,
            "launches_ph": launches_ph, "ship1_ph": ship1_ph, "ship_ph_sum": ship_ph_sum,
-           "dm_ratios_ph": dm_ratios_ph, "hold_ph": hold_ph, "hold_age": hold_age,
+           "atkfar_n_ph": atkfar_n_ph, "atkfar_nearest_ph": atkfar_nearest_ph,
+           "atkfar_ratio_sum_ph": atkfar_ratio_sum_ph, "atkdom_ph": atkdom_ph,
+           "atkh_n_ph": atkh_n_ph, "atkh_best_ph": atkh_best_ph, "atkh_top3_ph": atkh_top3_ph,
+           "dm_ratios_ph": dm_ratios_ph, "dm_neutral_ratios_ph": dm_neutral_ratios_ph,
+           "hold_ph": hold_ph, "hold_age": hold_age,
            "reinf_class_ships": reinf_class_ships, "reinf_to_lost": reinf_to_lost,
            "reinf_to_saved": reinf_to_saved, "lost_by_class": lost_by_class,
            "lost_by_class_cap_nt": lost_by_class_cap_nt,
@@ -938,6 +1159,15 @@ def new_conversion_acc():
            "launches_ph": [0, 0, 0], "ship1_ph": [0, 0, 0], "ship_ph_sum": [0, 0, 0],
            "launches_ph_won": [0, 0, 0], "ship1_ph_won": [0, 0, 0], "ship_ph_sum_won": [0, 0, 0],
            "launches_ph_lost": [0, 0, 0], "ship1_ph_lost": [0, 0, 0], "ship_ph_sum_lost": [0, 0, 0],
+           # attack target near-vs-far by phase × outcome — is far-targeting a losing-state artifact?
+           "atkfar_n_ph": [0, 0, 0], "atkfar_nearest_ph": [0, 0, 0], "atkfar_ratio_sum_ph": [0.0, 0.0, 0.0],
+           "atkfar_n_ph_won": [0, 0, 0], "atkfar_nearest_ph_won": [0, 0, 0], "atkfar_ratio_sum_ph_won": [0.0, 0.0, 0.0],
+           "atkfar_n_ph_lost": [0, 0, 0], "atkfar_nearest_ph_lost": [0, 0, 0], "atkfar_ratio_sum_ph_lost": [0.0, 0.0, 0.0],
+           "atkdom_ph": [0, 0, 0], "atkdom_ph_won": [0, 0, 0], "atkdom_ph_lost": [0, 0, 0],
+           # holdable-ROI rank (reactive-aware target selection) by phase × outcome
+           "atkh_n_ph": [0, 0, 0], "atkh_best_ph": [0, 0, 0], "atkh_top3_ph": [0, 0, 0],
+           "atkh_n_ph_won": [0, 0, 0], "atkh_best_ph_won": [0, 0, 0], "atkh_top3_ph_won": [0, 0, 0],
+           "atkh_n_ph_lost": [0, 0, 0], "atkh_best_ph_lost": [0, 0, 0], "atkh_top3_ph_lost": [0, 0, 0],
            # retention split by outcome — lost-cap → 1 on elimination (lose every planet because you
            # LOST the game), so the won-game value is the honest "can we hold mid-game?" read.
            "captures_won": 0, "captures_lost": 0, "lost_caps_won": 0, "lost_caps_lost": 0,
@@ -958,7 +1188,7 @@ def new_conversion_acc():
            "games_won": 0, "games_lost": 0,
            "reinf_bin": [0] * len(_REINF_BINS), "atk_bin": [0] * len(_REINF_BINS),
            # decisive-mass gap: pooled mass/floor ratios per phase (cross/gap/p50/overkill derive)
-           "dm_ratios_ph": [[], [], []],
+           "dm_ratios_ph": [[], [], []], "dm_neutral_ratios_ph": [[], [], []],
            # hold-floor (defensive): pooled hold ratios per phase + per age-after-capture bucket
            "hold_ph": [[], [], []], "hold_age": [[], [], []],
            # reinforce triage / save-efficiency. class_ships = reinforce ships by target class at
@@ -1026,6 +1256,7 @@ def add_conversion(acc, conv, won=None):
         acc["atk_bin"][i] += conv["atk_bin"][i]
     for i in range(3):
         acc["dm_ratios_ph"][i].extend(conv["dm_ratios_ph"][i])
+        acc["dm_neutral_ratios_ph"][i].extend(conv["dm_neutral_ratios_ph"][i])
         acc["hold_ph"][i].extend(conv["hold_ph"][i])
         acc["hold_age"][i].extend(conv["hold_age"][i])
     tr = acc["triage"]
@@ -1063,11 +1294,25 @@ def add_conversion(acc, conv, won=None):
         acc["launches_ph"][i] += conv["launches_ph"][i]
         acc["ship1_ph"][i] += conv["ship1_ph"][i]
         acc["ship_ph_sum"][i] += conv["ship_ph_sum"][i]
+        acc["atkfar_n_ph"][i] += conv["atkfar_n_ph"][i]
+        acc["atkfar_nearest_ph"][i] += conv["atkfar_nearest_ph"][i]
+        acc["atkfar_ratio_sum_ph"][i] += conv["atkfar_ratio_sum_ph"][i]
+        acc["atkdom_ph"][i] += conv["atkdom_ph"][i]
+        acc["atkh_n_ph"][i] += conv["atkh_n_ph"][i]
+        acc["atkh_best_ph"][i] += conv["atkh_best_ph"][i]
+        acc["atkh_top3_ph"][i] += conv["atkh_top3_ph"][i]
         if won is not None:
             suf = "won" if won else "lost"
             acc[f"launches_ph_{suf}"][i] += conv["launches_ph"][i]
             acc[f"ship1_ph_{suf}"][i] += conv["ship1_ph"][i]
             acc[f"ship_ph_sum_{suf}"][i] += conv["ship_ph_sum"][i]
+            acc[f"atkfar_n_ph_{suf}"][i] += conv["atkfar_n_ph"][i]
+            acc[f"atkfar_nearest_ph_{suf}"][i] += conv["atkfar_nearest_ph"][i]
+            acc[f"atkfar_ratio_sum_ph_{suf}"][i] += conv["atkfar_ratio_sum_ph"][i]
+            acc[f"atkdom_ph_{suf}"][i] += conv["atkdom_ph"][i]
+            acc[f"atkh_n_ph_{suf}"][i] += conv["atkh_n_ph"][i]
+            acc[f"atkh_best_ph_{suf}"][i] += conv["atkh_best_ph"][i]
+            acc[f"atkh_top3_ph_{suf}"][i] += conv["atkh_top3_ph"][i]
     acc["games"] += 1
     for ms in _CONV_MILESTONES:
         v = conv[f"p{ms}"]
@@ -1195,6 +1440,20 @@ def _fmt_conversion(acc):
             (f"{nm} {100*s1[i]/lp[i]:.0f}%(mean{ss[i]/lp[i]:.0f},n{lp[i]})" if lp[i] else f"{nm} —(n0)")
             for i, nm in enumerate(("early<50", "mid50-100", "late>=100")))
     s0wl = (f"\n     WON  {_s0('_won')}\n     LOST {_s0('_lost')}" if (gw + gl) > 0 else "")
+    def _nf(suf):
+        n, nr, rs, dm = (acc[f"atkfar_n_ph{suf}"], acc[f"atkfar_nearest_ph{suf}"],
+                         acc[f"atkfar_ratio_sum_ph{suf}"], acc[f"atkdom_ph{suf}"])
+        return "  ".join(
+            (f"{nm} nearest {100*nr[i]/n[i]:.0f}% ratio {rs[i]/n[i]:.2f} dom {100*dm[i]/n[i]:.0f}%(n{n[i]})"
+             if n[i] else f"{nm} —(n0)")
+            for i, nm in enumerate(("early<50", "mid50-100", "late>=100")))
+    nfwl = (f"\n     WON  {_nf('_won')}\n     LOST {_nf('_lost')}" if (gw + gl) > 0 else "")
+    def _hr(suf):
+        n, bst, t3 = acc[f"atkh_n_ph{suf}"], acc[f"atkh_best_ph{suf}"], acc[f"atkh_top3_ph{suf}"]
+        return "  ".join(
+            (f"{nm} best {100*bst[i]/n[i]:.0f}% top3 {100*t3[i]/n[i]:.0f}%(n{n[i]})" if n[i] else f"{nm} —(n0)")
+            for i, nm in enumerate(("early<50", "mid50-100", "late>=100")))
+    hrwl = (f"\n     WON  {_hr('_won')}\n     LOST {_hr('_lost')}" if (gw + gl) > 0 else "")
     # decisive-mass GAP (force concentration toward producer_v2's capture floor; same floor as the
     # training reward). Per phase: gap = mean max(0,1-mass/floor) (DOWN=concentrating), cross =
     # mean(mass>=floor) (UP), p50 = median ratio. overkill = mean ratio on crossed (catch 3x dumb-
@@ -1306,6 +1565,16 @@ def _fmt_conversion(acc):
                f"     by phase <50/50-100/>=100 (gap/cross/p50)  "
                f"{_dm_ph(_dmp[0])}  {_dm_ph(_dmp[1])}  {_dm_ph(_dmp[2])}"
                f"   [gap DOWN + cross UP = assembling to the capture floor; floor == decmass reward]\n")
+    _dmn = acc["dm_neutral_ratios_ph"]
+    _dmn_all = _dmn[0] + _dmn[1] + _dmn[2]
+    dmn_gap = sum(max(0.0, 1.0 - r) for r in _dmn_all) / max(len(_dmn_all), 1)
+    dmn_cross = sum(1 for r in _dmn_all if r >= 1.0) / max(len(_dmn_all), 1)
+    dmn_tpg = len(_dmn_all) / n
+    dm_neutral_line = (f"  decisive-mass NEUTRAL  gap {dmn_gap:.2f}  cross {dmn_cross:.2f}  "
+                       f"target-steps/game {dmn_tpg:.1f}   (floor = static garrison; the opening land-grab)\n"
+                       f"     by phase <50/50-100/>=100 (gap/cross/p50)  "
+                       f"{_dm_ph(_dmn[0])}  {_dm_ph(_dmn[1])}  {_dm_ph(_dmn[2])}"
+                       f"   [cross = sent enough to TAKE the neutral; low <50 cross = undercommit in the land-grab]\n")
     return (f"Conversion: caps/game {c/n:.1f}  atk-launch/game {al/n:.1f}  "
             f"cap/atk-launch {c/max(al,1):.3f} (open<50 {cap_open:.3f}  mid50-100 {cap_mid:.3f})  ships/cap {acc['attack_ships']/max(c,1):.0f}  "
             f"reinf_share {rl/max(al+rl,1):.2f}\n"
@@ -1323,6 +1592,7 @@ def _fmt_conversion(acc):
             f"{triage_line}"
             f"{om32_line}"
             f"{dm_line}"
+            f"{dm_neutral_line}"
             f"  launch-waste<50  redundant {redf:.2f} (WG {redf_wg:.2f})  underkill {undf:.2f} (WG {undf_wg:.2f})"
             f"   [⚠ underkill NON-discriminating: winners also ~0.40. THE signal = open<50 cap/atk above]\n"
             f"   [ref:winner  cap/atk whole 0.53 · open<50 0.51 · mid50-100 0.47 · planets 2/6/9/10 · reinf 0.30]\n"
@@ -1339,7 +1609,13 @@ def _fmt_conversion(acc):
             f"  reinf by phase  n {rnp[0]}/{rnp[1]}/{rnp[2]} (<50/50-100/>100)  fwd-enemy {fwde[0]:.2f}/{fwde[1]:.2f}/{fwde[2]:.2f} [rank1 0.77/0.50/0.48]\n"
             f"     centroid-out {cout[0]:.2f}/{cout[1]:.2f}/{cout[2]:.2f} [rank1 0.83/0.69/0.70]  target-front-top3 {ftop3[0]:.2f}/{ftop3[1]:.2f}/{ftop3[2]:.2f} [rank1 0.81/0.34/0.27]\n"
             f"  reinf fwd-enemy by size  <=20/21-50/51+ {fwsz[0]:.2f}/{fwsz[1]:.2f}/{fwsz[2]:.2f}  (n {acc['reinf_n_sz'][0]}/{acc['reinf_n_sz'][1]}/{acc['reinf_n_sz'][2]})   [rank1 <=20:0.42 51-100:0.71]\n"
-            f"  ship0 1-ship-probe by phase  {_s0('')}{s0wl}")
+            f"  ship0 1-ship-probe by phase  {_s0('')}{s0wl}\n"
+            f"  attack target near-vs-far  {_nf('')}{nfwl}\n"
+            f"     [nearest%=chose closest enemy/neutral; ratio=chosen/nearest dist; dom%=passed up a CLOSER-AND-RICHER "
+            f"target (value-aware defect, no production excuse). WON≈LOST dom => systematic; LOST≫WON => losing-state artifact]\n"
+            f"  attack target holdable-ROI rank  {_hr('')}{hrwl}\n"
+            f"     [best%=chose top holdable-ROI target (value priced w/ reactive peel = decisive-mass floor); top3=within 3. "
+            f"LOST best%≪WON => value-aware selection IS the lever; WON≈LOST => systematic but not outcome-relevant]")
 
 
 def evaluate_against_baseline(
@@ -1357,6 +1633,8 @@ def evaluate_against_baseline(
     defensive_reinforce_k: int = 0,
     defensive_reinforce_beta: float = 2.2,
     defensive_reinforce_max_targets: int = 1,
+    defensive_reinforce_value_margin: float | None = None,
+    defensive_reinforce_overfill: float = 1.0,
     natural_head_audit: bool = False,
     natural_head_audit_beta: float = 2.2,
 ) -> dict:
@@ -1376,6 +1654,8 @@ def evaluate_against_baseline(
                               defensive_reinforce_k=defensive_reinforce_k,
                               defensive_reinforce_beta=defensive_reinforce_beta,
                               defensive_reinforce_max_targets=defensive_reinforce_max_targets,
+                              defensive_reinforce_value_margin=defensive_reinforce_value_margin,
+                              defensive_reinforce_overfill=defensive_reinforce_overfill,
                               defensive_reinforce_stats=def_reinf_stats,
                               natural_head_audit_stats=natural_head_stats,
                               natural_head_audit_beta=natural_head_audit_beta)
@@ -1437,6 +1717,8 @@ def evaluate_panel(
     defensive_reinforce_k: int = 0,
     defensive_reinforce_beta: float = 2.2,
     defensive_reinforce_max_targets: int = 1,
+    defensive_reinforce_value_margin: float | None = None,
+    defensive_reinforce_overfill: float = 1.0,
     natural_head_audit: bool = False,
     natural_head_audit_beta: float = 2.2,
 ) -> dict:
@@ -1458,6 +1740,8 @@ def evaluate_panel(
                               defensive_reinforce_k=defensive_reinforce_k,
                               defensive_reinforce_beta=defensive_reinforce_beta,
                               defensive_reinforce_max_targets=defensive_reinforce_max_targets,
+                              defensive_reinforce_value_margin=defensive_reinforce_value_margin,
+                              defensive_reinforce_overfill=defensive_reinforce_overfill,
                               defensive_reinforce_stats=def_reinf_stats,
                               natural_head_audit_stats=natural_head_stats,
                               natural_head_audit_beta=natural_head_audit_beta)
@@ -1540,12 +1824,35 @@ def _fmt_defensive_reinforce(stats: dict) -> str:
     fire_mean = stats.get("head_fire_prob_sum", 0.0) / hn
     target_rank = stats.get("head_target_rank_sum", 0.0) / tn
     ship_rank = stats.get("head_ship_rank_sum", 0.0) / sn
+    value_checked = stats.get("value_gate_checked", 0.0)
+    value_line = ""
+    if value_checked > 0:
+        vg = max(value_checked, 1.0)
+        value_line = (
+            f"\n  value gate: checked {value_checked:.0f} · skipped "
+            f"{stats.get('value_gate_skipped_targets', 0.0):.0f} "
+            f"({stats.get('value_gate_skipped_targets', 0.0) / vg:.0%}) · "
+            f"avg save/opportunity/net "
+            f"{stats.get('value_gate_save_value', 0.0) / vg:.1f}/"
+            f"{stats.get('value_gate_opportunity', 0.0) / vg:.1f}/"
+            f"{stats.get('value_gate_net', 0.0) / vg:.1f}"
+        )
+    requested = stats.get("realized_fill_requested_sum", 0.0)
+    realized_line = ""
+    if requested > 0:
+        fill = stats.get("realized_fill_forced_sum", 0.0)
+        realized_line = (
+            f"\n  realized fill: forced/requested {fill:.0f}/{requested:.0f} "
+            f"({fill / requested:.2f}x) · full targets "
+            f"{stats.get('realized_fill_full_targets', 0.0):.0f}/{max(targets, 1.0):.0f}"
+        )
     return (
         "Defensive reinforce overlay:\n"
         f"  threatened {threatened:.0f} · fillable {fillable:.0f} · forced targets {targets:.0f} "
         f"moves {forced:.0f} ships {ships:.0f}\n"
         f"  deficit before/after {db:.0f}/{da:.0f} · hopeless {stats.get('hopeless_targets', 0.0):.0f} "
-        f"· blocked cooldown/mask {stats.get('blocked_by_cooldown_or_mask', 0.0):.0f}\n"
+        f"· blocked cooldown/mask {stats.get('blocked_by_cooldown_or_mask', 0.0):.0f}"
+        f"{value_line}{realized_line}\n"
         f"  original policy on forced sources: no-fire {nofire:.0%} · same-target {same:.0%} "
         f"· other-own {other_own:.0%} · enemy {enemy:.0%} · neutral {neutral:.0%} "
         f"· undersent(if fired) {undersent:.0%}\n"
@@ -1679,6 +1986,8 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         defensive_reinforce_k: int = 0,
                         defensive_reinforce_beta: float = 2.2,
                         defensive_reinforce_max_targets: int = 1,
+                        defensive_reinforce_value_margin: float | None = None,
+                        defensive_reinforce_overfill: float = 1.0,
                         natural_head_audit: bool = False,
                         natural_head_audit_beta: float = 2.2):
     """Load a checkpoint and evaluate it."""
@@ -1753,7 +2062,11 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     if defensive_reinforce_k > 0:
         print(f"Defensive reinforce overlay: ON | nearest_k={defensive_reinforce_k} "
               f"beta={defensive_reinforce_beta} max_targets={defensive_reinforce_max_targets} "
+              f"overfill={defensive_reinforce_overfill} "
               f"(eval-time hard override; training unchanged)")
+        if defensive_reinforce_value_margin is not None:
+            print(f"  value gate: save_value - foregone_attack_value >= "
+                  f"{defensive_reinforce_value_margin}")
         if not model.allow_reinforce:
             print("  ⚠ overlay is inert unless checkpoint/eval has allow_reinforce=True")
     if natural_head_audit:
@@ -1778,6 +2091,8 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                                  defensive_reinforce_k=defensive_reinforce_k,
                                  defensive_reinforce_beta=defensive_reinforce_beta,
                                  defensive_reinforce_max_targets=defensive_reinforce_max_targets,
+                                 defensive_reinforce_value_margin=defensive_reinforce_value_margin,
+                                 defensive_reinforce_overfill=defensive_reinforce_overfill,
                                  natural_head_audit=natural_head_audit,
                                  natural_head_audit_beta=natural_head_audit_beta)
         print_panel_report(results, opponent)
@@ -1797,6 +2112,8 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         defensive_reinforce_k=defensive_reinforce_k,
         defensive_reinforce_beta=defensive_reinforce_beta,
         defensive_reinforce_max_targets=defensive_reinforce_max_targets,
+        defensive_reinforce_value_margin=defensive_reinforce_value_margin,
+        defensive_reinforce_overfill=defensive_reinforce_overfill,
         natural_head_audit=natural_head_audit,
         natural_head_audit_beta=natural_head_audit_beta,
     )
@@ -1829,6 +2146,14 @@ if __name__ == "__main__":
                         help="'random' or path to agent .py file")
     parser.add_argument("--num-players", type=int, choices=[2, 4], default=2)
     parser.add_argument("--fire-threshold", type=float, default=0.5)
+    parser.add_argument("--ablate-roi", action="store_true",
+                        help="DIAGNOSTIC: permute precomputed roi_20/roi_50 across targets per source slot "
+                             "(destroys target<->roi mapping). If target-selection metrics/WR don't move vs "
+                             "the control panel, the net is NOT using the precomputed ROI channel.")
+    parser.add_argument("--ablate-sun", action="store_true",
+                        help="PLACEBO control for --ablate-roi: permute the sun_safe channel (ch4) the same way. "
+                             "If WR also drops, the roi drop is general brittleness to inconsistent inputs; "
+                             "if WR holds, the roi effect is roi-specific.")
     parser.add_argument("--panel", action="store_true",
                         help="Use 128-seed community panel with both-seat eval "
                              "(256 games, per-archetype breakdown).")
@@ -1871,6 +2196,28 @@ if __name__ == "__main__":
     parser.add_argument("--defensive-reinforce-max-targets", type=int, default=1,
                         help="Max threatened own planets the eval-time defensive overlay may fill "
                              "per agent step.")
+    parser.add_argument("--defensive-reinforce-value-margin", type=float, default=None,
+                        help="Optional value/opportunity gate for --defensive-reinforce-k. "
+                             "When set, force a save only if save_value - foregone_attack_value "
+                             "is at least this margin. Default off preserves the original overlay.")
+    parser.add_argument("--defensive-reinforce-overfill", type=float, default=1.0,
+                        help="Multiplier applied to the selected defensive deficit after value "
+                             "selection. 1.0 preserves current overlay; >1.0 tests aggregate "
+                             "arrival sufficiency without changing target selection.")
+    parser.add_argument("--retarget-top-roi", action="store_true",
+                        help="SELECTION ISOLATION: leave fire/ship as-is; redirect each ATTACK the policy "
+                             "launches to the top-holdable-ROI target from that source (keep source+ships). "
+                             "No spray, no fire change. Tests if better target choice raises WR.")
+    parser.add_argument("--retarget-resize", action="store_true",
+                        help="With --retarget-top-roi: also re-size the redirected attack to capture its "
+                             "NEW target (capped at garrison), removing the size<->target mismatch confound.")
+    parser.add_argument("--force-fire-high-roi", action="store_true",
+                        help="FIRE-HEAD ISOLATION: on sources the fire head vetoes (fire_prob<thr) that "
+                             "have a high-holdable-ROI attack available, force fire toward the head's own "
+                             "target+ship (fallback top-ROI). Tests if the fire veto costs winnable attacks.")
+    parser.add_argument("--force-fire-roi-threshold", type=float, default=0.3,
+                        help="Min holdable-ROI of the best available attack for --force-fire-high-roi to "
+                             "force a vetoed source (avoids forcing spray on worthless targets).")
     parser.add_argument("--natural-head-audit", action="store_true",
                         help="Passive target-decode audit: log fire/target/ship agreement with "
                              "lightweight planner-like attack and save candidates. No action changes.")
@@ -1879,6 +2226,19 @@ if __name__ == "__main__":
                              "Default reuses --decisive-mass-beta.")
     args = parser.parse_args()
     _DM_BETA_EVAL = args.decisive_mass_beta   # module global → used by _decisive_gap_step
+    if args.ablate_roi:
+        set_ablate_roi(True)
+        print("ABLATION: roi_20/roi_50 permuted across targets per slot (target<->roi mapping destroyed)")
+    if args.ablate_sun:
+        set_ablate_channels((4,))
+        print("PLACEBO ABLATION: sun_safe (ch4) permuted across targets per slot")
+    if args.retarget_top_roi:
+        set_retarget_top_roi(True, resize=args.retarget_resize)
+        print(f"SELECTION ISOLATION: retarget each attack to top-holdable-ROI target "
+              f"(resize={'ON' if args.retarget_resize else 'OFF'})")
+    if args.force_fire_high_roi:
+        set_force_fire_high_roi(True, args.force_fire_roi_threshold)
+        print(f"FIRE-HEAD ISOLATION: force-fire vetoed sources w/ best holdable-ROI >= {args.force_fire_roi_threshold}")
 
     cfg = Config()
     cfg.env.num_players = args.num_players
@@ -1901,7 +2261,22 @@ if __name__ == "__main__":
         defensive_reinforce_beta=(args.decisive_mass_beta if args.defensive_reinforce_beta is None
                                   else args.defensive_reinforce_beta),
         defensive_reinforce_max_targets=args.defensive_reinforce_max_targets,
+        defensive_reinforce_value_margin=args.defensive_reinforce_value_margin,
+        defensive_reinforce_overfill=args.defensive_reinforce_overfill,
         natural_head_audit=args.natural_head_audit,
         natural_head_audit_beta=(args.decisive_mass_beta if args.natural_head_audit_beta is None
                                  else args.natural_head_audit_beta),
     )
+    if args.retarget_top_roi:
+        rt = _RETARGET
+        funnel = rt["uniq_sum"] / max(rt["turns"], 1)
+        print(f"SELECTION ISOLATION: retargeted {rt['retargeted']}/{rt['attacks']} attacks "
+              f"({rt['retargeted']/max(rt['attacks'],1):.0%}) to top-holdable-ROI target; "
+              f"resize={'ON' if rt['resize'] else 'OFF'}; target-distinctness {funnel:.2f} "
+              f"(1.0=all distinct, low=funneling to same targets)")
+    if args.force_fire_high_roi:
+        st = _FORCE_FIRE
+        per_state = st["forced"] / max(st["states"], 1)
+        print(f"FIRE-HEAD ISOLATION: forced {st['forced']} fires over {st['states']} states "
+              f"({per_state:.2f}/state; {st['to_head_tgt']} to head's own target, "
+              f"{st['forced'] - st['to_head_tgt']} to fallback top-ROI)")

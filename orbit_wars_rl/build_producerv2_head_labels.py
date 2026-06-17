@@ -199,6 +199,29 @@ def _mask_target_logits(logits: torch.Tensor, obs: dict[str, Any], masks: dict[s
     return out
 
 
+def _target_legal_mask(obs: dict[str, Any], masks: dict[str, Any],
+                       allow_reinforce: bool, gate_min: int) -> torch.Tensor:
+    planets = obs["planets"]
+    player = int(obs["player"])
+    max_owned = int(masks["slot_valid"].shape[-1])
+    max_planets = 48
+    out = torch.zeros((max_owned, max_planets), dtype=torch.bool)
+    owned_indices = masks["owned_indices"].cpu().numpy()
+    owned_count = int(masks["owned_count"])
+    gate_block = allow_reinforce and gate_min > 0 and owned_count < gate_min
+    for slot in range(min(owned_count, max_owned)):
+        pidx = int(owned_indices[slot])
+        if pidx >= len(planets):
+            continue
+        src_id = int(planets[pidx][0])
+        for tidx, tgt in enumerate(planets[:max_planets]):
+            is_source = int(tgt[0]) == src_id
+            is_own = int(tgt[1]) == player
+            illegal = is_source or (is_own and (not allow_reinforce or gate_block))
+            out[slot, tidx] = not illegal
+    return out
+
+
 def _audit_label(prefix: str, label: dict[str, torch.Tensor], outputs: dict, obs: dict[str, Any],
                  masks: dict[str, Any], ship_bin_mode: str, allow_reinforce: bool, gate_min: int,
                  stats: dict[str, float]) -> None:
@@ -273,7 +296,8 @@ def _collect_states(model, cfg, args) -> list[dict[str, Any]]:
 
 
 def _make_sample(obs: dict[str, Any], candidate_label: dict[str, torch.Tensor],
-                 selected_label: dict[str, torch.Tensor]) -> dict[str, Any]:
+                 selected_label: dict[str, torch.Tensor],
+                 allow_reinforce: bool, gate_min: int) -> dict[str, Any]:
     player = int(obs["player"])
     features = extract_features(obs, player, num_players=2)
     masks = compute_action_masks(obs, player)
@@ -288,6 +312,7 @@ def _make_sample(obs: dict[str, Any], candidate_label: dict[str, torch.Tensor],
         "slot_valid": masks["slot_valid"][0],
         "owned_indices": masks["owned_indices"],
         "owned_count": torch.tensor(int(masks["owned_count"]), dtype=torch.long),
+        "target_legal_mask": _target_legal_mask(obs, masks, allow_reinforce, gate_min),
     }
     if "pairwise_features" in features:
         sample["pairwise_features"] = features["pairwise_features"]
@@ -396,7 +421,13 @@ def main() -> None:
         for d in (candidate_stats, selected_stats):
             for k, v in d.items():
                 label_stats[k] = label_stats.get(k, 0.0) + float(v)
-        samples.append(_make_sample(obs, candidate_label, selected_label))
+        samples.append(_make_sample(
+            obs,
+            candidate_label,
+            selected_label,
+            bool(getattr(model, "allow_reinforce", False)),
+            int(getattr(model, "reinforce_gate_min_planets", 0)),
+        ))
         outputs, infer_masks = _infer_outputs(model, device, obs)
         _audit_label(
             "candidate", candidate_label, outputs, obs, infer_masks, cfg.model.ship_bin_mode,

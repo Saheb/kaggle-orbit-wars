@@ -53,6 +53,25 @@ def set_game_phase_features(on: bool) -> None:
     _GAME_PHASE_FEATURES = bool(on)
 
 
+# Diagnostic: permute the precomputed ROI channels (roi_20/roi_50) across targets per source slot,
+# so the target↔roi correspondence is destroyed while the value distribution is preserved. If
+# target selection is unchanged under this, the net is NOT using the precomputed ROI channel.
+# Eval-only ablation (set via --ablate-roi); never on in training/export.
+_ABLATE_CHANNELS: tuple = ()
+
+
+def set_ablate_roi(on: bool) -> None:
+    """Permute the precomputed ROI channels (roi_20=12, roi_50=13) across targets per slot."""
+    global _ABLATE_CHANNELS
+    _ABLATE_CHANNELS = (12, 13) if on else ()
+
+
+def set_ablate_channels(channels) -> None:
+    """Placebo/generic: permute arbitrary pairwise channels across targets per slot (e.g. sun_safe=4)."""
+    global _ABLATE_CHANNELS
+    _ABLATE_CHANNELS = tuple(int(c) for c in channels)
+
+
 def game_phase_channels(step):
     """The 4 game-phase global channels from the integer game step:
     [phase_early (step<50), phase_mid (50<=step<100), phase_late (step>=100),
@@ -587,5 +606,9 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         out[slot, :n_p, 13] = roi_50                          # ROI at horizon 50
         if enemy_contest is not None:
             out[slot, :n_p, 14] = np.minimum(enemy_contest[:n_p], 500.0) / 100.0  # contested ships
+        if _ABLATE_CHANNELS:                                  # diagnostic: scramble channel↔target mapping
+            _perm = np.random.permutation(n_p)
+            for _ch in _ABLATE_CHANNELS:
+                out[slot, :n_p, _ch] = out[slot, :n_p, _ch][_perm]
 
     return out

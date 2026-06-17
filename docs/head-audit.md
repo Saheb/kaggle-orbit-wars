@@ -205,6 +205,119 @@ This does not mean prior work was useless. It ruled out important downstream sto
 action grammar presence, simple reward proxies, reverse-edge ping-pong, and raw ship
 under-sizing. The audit now points upstream.
 
+## Defensive overlay value gate
+
+Correction: the first defensive-reinforce overlay was not blind "defend everything."
+It already skipped already-safe targets, skipped hopeless targets, and respected
+reinforce cooldown/masks. The missing condition was not "is this saveable?" but "is this
+worth saving after accounting for the attack opportunity we are giving up?"
+
+Added an opt-in value/opportunity gate:
+
+```bash
+--defensive-reinforce-value-margin <margin>
+```
+
+Unset preserves the original overlay. With `0`, the overlay only forces a save when:
+
+```text
+save_value - foregone_attack_value >= 0
+```
+
+Current approximation:
+
+- `save_value`: target production over the defensive horizon, plus a small preserved
+  garrison/inbound term, minus deficit and urgency cost.
+- `foregone_attack_value`: sum of positive same-source attack-candidate scores for the
+  nearest-k sources the overlay would consume.
+
+This is still a heuristic, not a learned value model. Its purpose is to test whether
+the missing concept is "net worthwhile save" rather than just "fillable save."
+
+Full-panel Ajay comparison on revedge1 4.72M:
+
+```text
+control, no overlay:                  61/256 = 23.8%
+ungated k=3 defensive overlay:        43/256 = 16.8%
+value-gated k=3 overlay, margin 0:    59/256 = 23.0%
+```
+
+Value-gated overlay summary:
+
+```text
+threatened 35916 · fillable 2581 · forced targets 2581 moves 3349 ships 75556
+hopeless 25339 · blocked cooldown/mask 2469
+value gate: checked 5121 · skipped 2309 (45%) · avg save/opportunity/net 15.4/11.7/3.7
+original policy on forced sources: no-fire 80% · same-target 7% · other-own 4% · enemy 8%
+```
+
+Ungated comparison:
+
+```text
+threatened 36130 · fillable 3753 · forced targets 3753 moves 5203 ships 165184
+original policy on forced sources: no-fire 79% · same-target 6% · other-own 4% · enemy 10%
+```
+
+Read:
+
+- The value gate cut forced targets by ~31% and forced ships by ~54% versus ungated.
+- The value gate removed nearly all of the hard-overlay regression (`16.8% -> 23.0%`),
+  but it did not clearly beat the no-overlay control (`23.8%`).
+- The key label is not binary `saveable`; hopeless-skipping was already tested and was
+  insufficient. The better target is `worth_saving_net_of_attack`.
+- This is strong evidence that a save value/ROI concept is the right diagnostic target,
+  but still weak evidence for an eval-time hard override. The safer use is a PPO
+  auxiliary/regularizer so reward can reject bad saves instead of forcing them.
+
+### Sufficiency-arm follow-up
+
+The value-gated overlay only tests selection plus a one-shot snapshot floor. It does not
+settle whether the remaining failure is:
+
+- aggregate arrival sufficiency: the save was right, but under-massed;
+- retention: the save arrived, but follow-up defense was not sustained;
+- saves are not the lever: the attack-bias was roughly correct.
+
+Added:
+
+```bash
+--defensive-reinforce-overfill <multiplier>
+```
+
+This leaves target selection and the value gate unchanged, then multiplies the forced
+deficit after selection. The eval summary logs realized fill:
+
+```text
+realized fill: forced/requested X/Y (Zx) · full targets A/B
+```
+
+The null is valid only if requested overfill actually lands. If realized fill is much
+below the requested arm, increase `k` before interpreting WR.
+
+Pre-registered arms:
+
+```text
+k=3, value margin 0, overfill 1.25
+k=3, value margin 0, overfill 1.50
+k=5, value margin 0, overfill 2.00
+```
+
+Readout priority:
+
+1. realized fill ratio: did the arm actually overfill?
+2. reinforce mass to lost planets / forced-planet hold quality: did larger saves survive?
+3. WR versus control: at 256 games, treat only roughly `>=28-29%` as meaningful positive
+   signal over the `23-24%` control neighborhood.
+
+Interpretation:
+
+- mass-to-lost improves but WR ties: sufficiency is real, but too expensive; need cheaper
+  or more selective save-value training, not a hard override.
+- mass-to-lost stays flat: one-shot arrival mass is not enough; retention remains live.
+- mass-to-lost improves and WR clears the bar: aggregate hold-mass is a real lever.
+- mass-to-lost flat and WR regresses: defensive forcing is stealing tempo; shift back to
+  attack/opening selection.
+
 ## Next useful experiments
 
 ### 1. Broader natural-policy head audit
@@ -384,6 +497,246 @@ is less rosy than the lightweight audit made it look. Ship top1 is ~58-64% and t
 ~74-82%, still much healthier than fire readiness (~16-22%) and joint top1 (~3-9%).
 Target is particularly weak on selected Producer-v2 actions. This supports a narrow
 fire+target supervised/auxiliary objective, with ship loss optional and lower priority.
+
+## Producer-v2 supervised head-label probe
+
+Ran a narrow offline probe on the `selected_*` labels. This is not yet a proposed
+submission checkpoint; it asks whether the existing heads can be moved toward real
+Producer-v2 actions on our visited states.
+
+The probe freezes the trunk and trains only the action heads:
+
+```bash
+PYTHONPATH=. /Users/saheb/home/.venv/bin/python orbit_wars_rl/train_producerv2_head_labels.py \
+  --checkpoint gpu_run_artifacts/revedge1/checkpoints/torch_step_4718592_revedge1_20260616_095906.pt \
+  --samples gpu_run_artifacts/head_audit/producerv2_head_labels_8g.pkl \
+  --label-source selected --steps 400 --batch-size 32 --lr 0.0001 \
+  --fire-pos-weight 32 --fire-coef 2 --trainable heads \
+  --summary-out gpu_run_artifacts/head_audit/producerv2_head_ft_selected_heads_fire32_400.json
+```
+
+Comparison against selected Producer-v2 labels:
+
+| run | fire>=.5 | target top1 | target top3 | ship top1 | ship top3 | joint top1 | joint top3 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 18.5% | 18.1% | 32.2% | 62.2% | 80.1% | 4.6% | 10.1% |
+| heads 200, fire weight 8 | 20.1% | 32.7% | 55.2% | 62.2% | 80.1% | 6.6% | 11.0% |
+| heads 400, fire weight 32, fire coef 2 | 23.0% | 34.9% | 57.2% | 62.2% | 80.1% | 8.0% | 13.5% |
+
+Read:
+
+- Target ranking is very movable with a small supervised head-only objective.
+- Fire readiness moves, but much less than target, even with strong positive weighting.
+- Ship is unchanged because this probe did not train ship loss.
+- Joint readiness improves, but remains low because fire is still a bottleneck.
+
+This supports the new direction, but also warns against overselling the first probe.
+The immediate next test should save a conservative head-tuned checkpoint and run eval
+before deciding whether to involve the trunk, add ship loss, or convert this into an
+auxiliary objective during PPO.
+
+Saved-checkpoint evals, 64 games vs Ajay:
+
+```text
+control revedge1 4.72M:                 13/64 = 20.3%
+heads 200, fire weight 8 checkpoint:     7/64 = 10.9%
+heads 400, fire weight 32 checkpoint:    3/64 =  4.7%
+```
+
+The gameplay regression is visible in the diagnostics, not just the win count:
+
+| run | fire frac | cap/attack | reinf share | peel-rate | reinforce mass to lost planets | hopeless reinforce share |
+|---|---:|---:|---:|---:|---:|---:|
+| control | 0.25 | 0.548 | 0.31 | 0.80 | 31% | 12% |
+| heads 200 | 0.25 | 0.601 | 0.39 | 0.87 | 46% | 14% |
+| heads 400 | 0.27 | 0.628 | 0.46 | 0.94 | 68% | 19% |
+
+Read: direct selected-label head tuning improves offline overlap, but as a standalone
+checkpoint it makes the policy worse. It increases capture/attack conversion but
+destabilizes retention and sends far more reinforcement mass to planets that still die.
+That points away from "just fine-tune the action heads and submit it" and toward one
+of:
+
+- use Producer-v2 labels as a small auxiliary loss during PPO, so the value/reward loop
+  can reject bad imitations;
+- train a separate triage/value head instead of directly overwriting fire/target;
+- split selected labels by outcome/value, especially to distinguish useful save actions
+  from Producer-v2 actions that are locally reasonable but globally bad in our policy's
+  state distribution.
+
+## Rank1 replay winner-vs-loser head audit
+
+To remove the proxy-agent problem, added a replay-backed audit:
+
+```bash
+PYTHONPATH=. /Users/saheb/home/.venv/bin/python orbit_wars_rl/audit_replay_head_labels.py \
+  --checkpoint gpu_run_artifacts/revedge1/checkpoints/torch_step_4718592_revedge1_20260616_095906.pt \
+  --output-json gpu_run_artifacts/head_audit/replay_head_audit_rank1_1v1_revedge1_4718592.json \
+  --output-md gpu_run_artifacts/head_audit/replay_head_audit_rank1_1v1_revedge1_4718592.md
+```
+
+This reads rank1 1v1 replays, uses `steps[t-1][seat].observation` as the state
+for `steps[t][seat].action`, projects the replay action list into our current
+one-action-per-source/top-16 interface, then forwards our policy heads on the replay
+state. It compares winner moves against loser moves from the same replay corpus.
+
+Artifacts:
+
+- `gpu_run_artifacts/head_audit/replay_head_audit_rank1_1v1_revedge1_4718592.json`
+- `gpu_run_artifacts/head_audit/replay_head_audit_rank1_1v1_revedge1_4718592.md`
+
+Run quality:
+
+```text
+rank1 1v1 replays used: 116
+errors: 0
+```
+
+Head agreement:
+
+| side | labels | attack/save | fire>=.5 | target top1/3/5 | ship top1/3 | joint top1/3 | target rank avg |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| winner | 7282 | 5196/2086 | 24.0% | 15.8/32.4/42.7% | 81.0/94.3% | 4.6/9.5% | 10.5 |
+| loser | 11140 | 8457/2683 | 10.4% | 10.4/23.1/31.4% | 72.0/91.5% | 1.8/3.6% | 13.0 |
+
+This aggregate is between-distribution: winner states and loser states are different
+boards. The winner fire edge can partly mean "our policy fires more on ahead/easier
+boards," not necessarily "our policy prefers winner-quality moves." Treat the aggregate
+winner-vs-loser gap as consistent with representation, not a clean magnitude estimate.
+
+Opening slice:
+
+| side | labels | fire>=.5 | target top1/3/5 | joint top1/3 |
+|---|---:|---:|---:|---:|
+| winner <50 | 1536 | 38.5% | 24.0/44.4/54.6% | 9.9/19.3% |
+| loser <50 | 3417 | 15.3% | 13.0/29.5/39.5% | 3.1/6.2% |
+
+Attack/save split, all phases:
+
+| side | attack target top1/3 | save target top1/3 | attack fire>=.5 | save fire>=.5 |
+|---|---:|---:|---:|---:|
+| winner | 20.2/39.1% | 4.8/16.0% | 24.4% | 23.0% |
+| loser | 11.4/24.6% | 6.9/18.3% | 12.0% | 5.3% |
+
+Read: the winner preference is attack-led. On save targets, winner target top1/top3 is
+not better than loser. That matches the earlier overlay/Producer-v2 finding: defensive
+target selection is still the hard gap.
+
+Same-state target baseline:
+
+The audit also compares each replay move against a same-source baseline from the same
+state: keep the replay source and ship count, but replace the target with the nearest
+non-own target. This isolates target ranking from board/source/fire confounds. It does
+not control the fire head because fire readiness is source-level and therefore identical
+for the replay target and the same-source baseline.
+
+| side | phase | replay target top1/3 | baseline target top1/3 | replay rank | baseline rank |
+|---|---|---:|---:|---:|---:|
+| winner | all | 15.8/32.4% | 12.7/28.8% | 10.5 | 9.7 |
+| winner | open | 24.0/44.4% | 8.9/23.8% | 8.5 | 9.3 |
+| winner | mid | 12.5/27.3% | 12.2/25.9% | 11.7 | 10.7 |
+| winner | late | 16.4/33.7% | 17.4/40.3% | 9.6 | 7.6 |
+| loser | all | 10.4/23.1% | 9.5/20.4% | 13.0 | 13.0 |
+
+Same-state target baseline by move kind:
+
+For save labels, this is not an apples-to-apples "winner save target vs other save
+target" null. It is an opportunity-cost null: same source, same ships, winner's save
+target versus nearest non-own attack target.
+
+| side | phase | kind | labels | replay target top1/3 | baseline target top1/3 |
+|---|---|---|---:|---:|---:|
+| winner | all | attack | 5196 | 20.2/39.1% | 11.5/27.2% |
+| winner | all | save | 2086 | 4.8/16.0% | 15.9/32.9% |
+| winner | open | attack | 1425 | 25.3/46.2% | 9.3/24.5% |
+| winner | open | save | 111 | 8.1/21.6% | 3.6/14.4% |
+| winner | mid | attack | 2692 | 16.6/33.7% | 11.4/25.1% |
+| winner | mid | save | 1341 | 4.1/14.7% | 13.9/27.5% |
+| winner | late | attack | 1079 | 22.6/43.2% | 14.5/36.1% |
+| winner | late | save | 634 | 5.8/17.7% | 22.4/47.4% |
+
+Read: the within-state target signal is real for attacks, especially in the opening.
+For winner saves, the target head ranks the nearest attack baseline above the actual
+save target in aggregate, midgame, and late. The only positive save slice is tiny
+opening save count (`111` labels). This is the most defensible version of the save
+finding: on sources where rank1 winners saved, our target head strongly prefers the
+nearest attack alternative. This is an attack-bias/save-aversion read, not a test of
+"winner save target versus other legal save targets."
+
+Same-state fire source contrast:
+
+This compares fire readiness on replay-used source slots against unused owned source
+slots from the same replay state. It controls the board, but not winner-vs-loser board
+distribution.
+
+| side | phase | used/unused sources | used fire>=.5 | unused fire>=.5 | used fire_p | unused fire_p |
+|---|---|---:|---:|---:|---:|---:|
+| winner | all | 7282/47988 | 24.0% | 18.0% | 0.256 | 0.203 |
+| winner | open | 1536/6132 | 38.5% | 26.2% | 0.385 | 0.266 |
+| winner | mid | 4033/29046 | 19.8% | 15.7% | 0.222 | 0.186 |
+| winner | late | 1713/12810 | 20.8% | 19.4% | 0.221 | 0.212 |
+| loser | all | 11140/27756 | 10.4% | 5.4% | 0.117 | 0.060 |
+| loser | open | 3417/5618 | 15.3% | 7.6% | 0.170 | 0.082 |
+| loser | mid | 6051/16674 | 9.0% | 5.5% | 0.103 | 0.063 |
+| loser | late | 1672/5464 | 5.0% | 2.5% | 0.057 | 0.029 |
+
+Read: fire is not pure board state. Within the same board, the replay-used sources are
+more fire-ready than unused owned sources. Some unused sources are correctly held
+garrison, so this is a conservative baseline for the source-level fire signal. But the
+aggregate winner-vs-loser fire gap still remains partly board-confounded: winner boards
+are ahead/easier boards, and even unused winner sources fire much more readily than
+unused loser sources.
+
+Projection loss:
+
+| side | owned moves | projected | move keep | mass keep | source not top16 move/mass | same-source lost move/mass | >16-turn |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| winner | 8818 | 7282 | 82.6% | 94.8% | 14.7/3.9% | 1.0/0.6% | 0.0% |
+| loser | 12039 | 11140 | 92.5% | 97.0% | 0.3/0.0% | 6.4/2.5% | 0.0% |
+
+Phase detail for projection:
+
+| side | phase | move keep | mass keep | source not top16 move/mass | same-source lost move/mass |
+|---|---|---:|---:|---:|---:|
+| winner | open | 98.8% | 99.4% | 0.0/0.0% | 0.2/0.1% |
+| winner | mid | 81.7% | 95.8% | 15.3/2.8% | 1.2/0.6% |
+| winner | late | 73.6% | 92.0% | 23.2/6.7% | 1.0/0.7% |
+| loser | open | 92.6% | 98.4% | 0.0/0.0% | 6.8/1.1% |
+| loser | mid | 93.0% | 97.2% | 0.5/0.1% | 5.6/2.1% |
+| loser | late | 90.9% | 95.0% | 0.0/0.0% | 8.6/4.7% |
+
+Read:
+
+- The aggregate winner-vs-loser gap is real, but board-confounded. Phrase it as
+  "consistent with some representation" rather than a clean causal estimate.
+- The within-state target control says the target head prefers rank1 winner attack
+  targets, especially in the opening. Mid/late aggregate target preference is weak once
+  save labels are included.
+- Defensive/save target ranking is the sharpest negative result. Winner save targets
+  are usually ranked below the same-source nearest attack baseline, so the target head
+  is not naturally choosing defensive concentration.
+- The fire head has some source-level selectivity within a board, but the winner-loser
+  fire gap is still not a clean move-quality estimate.
+- The absolute joint rates are still low. Even where signal exists, the heads rarely
+  assemble the full action together.
+- Rank1 winners are more selective than losers: fewer replay moves overall, but our
+  heads score their attack/opening moves higher.
+- Same-source multi-move is not the winner ceiling in this corpus: only 1.0% of winner
+  owned moves, 0.6% of winner ship mass, is lost to same-source projection.
+- The top-16 source selector drops many winner moves by count, especially late, but much
+  less mass: 14.7% of moves and 3.9% of ship mass overall; late 23.2% of moves and 6.7%
+  of mass. This is a real source-selection issue, but not a huge mass ceiling.
+
+Conclusion from this audit:
+
+This points away from pure global representation failure, but only on the attack/opening
+side. The stronger conclusion is narrower:
+
+- attack/opening target concepts are partly present but weakly selected;
+- defensive/save target concepts are not present in a useful way;
+- direct action-head overwrite remains unsafe;
+- the better path is a phase- and intent-conditioned auxiliary/triage signal inside PPO,
+  with special focus on save target selection and hopeless/cheap-save discrimination.
 
 ### 2. Outcome-conditioned triage labels
 

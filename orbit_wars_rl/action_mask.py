@@ -550,6 +550,8 @@ def _apply_defensive_reinforce_overlay(
     beta: float,
     max_targets: int,
     reinforce_garrison_floor: float,
+    value_margin: float | None,
+    overfill: float,
     own_reinforce_illegal,
     stats: dict | None,
 ):
@@ -646,7 +648,31 @@ def _apply_defensive_reinforce_overlay(
             _def_stat(stats, "hopeless_targets")
             _def_stat(stats, "hopeless_deficit", deficit)
             continue
-        candidates.append((threat_eta, -deficit, tid, tgt, deficit, sources[:k_sources]))
+        selected_sources = sources[:k_sources]
+        save_value = (
+            float(tgt[6]) * _DEF_HORIZON
+            + 0.25 * float(tgt[5])
+            + 0.25 * float(ein)
+            - float(deficit)
+            - 0.5 * float(threat_eta if math.isfinite(threat_eta) else _DEF_HORIZON)
+        )
+        opportunity = 0.0
+        for _eta, _sid, src, spare in selected_sources:
+            attack = _head_best_attack_candidate(src, planets, player, int(spare))
+            if attack is not None:
+                opportunity += max(0.0, float(attack["score"]))
+        net_value = save_value - opportunity
+        if value_margin is not None:
+            _def_stat(stats, "value_gate_checked")
+            _def_stat(stats, "value_gate_save_value", save_value)
+            _def_stat(stats, "value_gate_opportunity", opportunity)
+            _def_stat(stats, "value_gate_net", net_value)
+            if net_value < float(value_margin):
+                _def_stat(stats, "value_gate_skipped_targets")
+                _def_stat(stats, "value_gate_skipped_deficit", deficit)
+                continue
+        sort_value = net_value if value_margin is not None else deficit
+        candidates.append((threat_eta, -sort_value, tid, tgt, deficit, selected_sources))
 
     if not candidates:
         return move_records
@@ -655,10 +681,15 @@ def _apply_defensive_reinforce_overlay(
     forced: dict[int, dict] = {}
     forced_targets = 0
     for _threat_eta, _neg_def, tid, tgt, deficit, sources in candidates[:max_targets]:
-        remaining = float(deficit)
+        requested = float(deficit) * max(1.0, float(overfill))
+        remaining = requested
         target_forced = 0
+        target_forced_ships = 0.0
         _def_stat(stats, "fillable_targets")
         _def_stat(stats, "deficit_before", deficit)
+        _def_stat(stats, "requested_deficit", requested)
+        if requested > deficit + 1e-6:
+            _def_stat(stats, "overfill_targets")
         for _eta, sid, src, spare in sources:
             if remaining <= 0:
                 break
@@ -675,6 +706,7 @@ def _apply_defensive_reinforce_overlay(
                 "forced": True,
             }
             remaining -= send
+            target_forced_ships += float(send)
             target_forced += 1
             _def_stat(stats, "forced_moves")
             _def_stat(stats, "forced_ships", send)
@@ -736,6 +768,10 @@ def _apply_defensive_reinforce_overlay(
             forced_targets += 1
             _def_stat(stats, "forced_targets")
             _def_stat(stats, "deficit_after", max(0.0, remaining))
+            _def_stat(stats, "realized_fill_requested_sum", requested)
+            _def_stat(stats, "realized_fill_forced_sum", target_forced_ships)
+            if target_forced_ships + 1e-6 >= requested:
+                _def_stat(stats, "realized_fill_full_targets")
 
     if not forced:
         return move_records
@@ -770,6 +806,8 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
                                defensive_reinforce_k: int = 0,
                                defensive_reinforce_beta: float = 2.2,
                                defensive_reinforce_max_targets: int = 1,
+                               defensive_reinforce_value_margin: float | None = None,
+                               defensive_reinforce_overfill: float = 1.0,
                                defensive_reinforce_stats: dict = None,
                                natural_head_audit_stats: dict = None,
                                natural_head_audit_beta: float = 2.2,
@@ -963,6 +1001,8 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
             float(defensive_reinforce_beta),
             int(defensive_reinforce_max_targets),
             float(reinforce_garrison_floor),
+            defensive_reinforce_value_margin,
+            float(defensive_reinforce_overfill),
             _own_reinforce_illegal,
             defensive_reinforce_stats,
         )
