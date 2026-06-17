@@ -133,21 +133,25 @@ def test_action_mask_eval_reinforce_toggle():
     ship_logits = torch.zeros(1, masks["owned_count"], 32)
     ship_logits[0, src_slot, 4] = 10.0  # bin 4 = a few ships
 
-    def chosen_angle(allow):
+    def chosen_angle(allow, reinforce_target_bias=0.0):
         tl = torch.full((1, masks["owned_count"], n_p), -5.0)
         tl[0, src_slot, 1] = 10.0   # strongly prefer OWN planet 1 (east)
         tl[0, src_slot, 2] = 8.0    # enemy planet 2 (north) second
         acts = actions_from_target_policy(
             fire_probs.clone(), tl, ship_logits, masks, obs, player=0,
-            ship_bin_mode="absolute", allow_reinforce=allow)
+            ship_bin_mode="absolute", allow_reinforce=allow,
+            reinforce_target_bias=reinforce_target_bias)
         mv = [m for m in acts if int(m[0]) == 0]
         assert mv, "source planet 0 should have launched"
         return float(mv[0][1])  # angle
 
     a_on = chosen_angle(True)    # reinforce ON  → aims EAST at own planet 1 (~0 rad)
     a_off = chosen_angle(False)  # reinforce OFF → own planet 1 masked → aims NORTH (~pi/2)
+    a_bias = chosen_angle(True, reinforce_target_bias=-3.0)  # own still legal, but lower logit
     assert abs(a_on) < 0.4, f"reinforce ON should aim east (~0), got {a_on}"
     assert abs(a_off - np.pi / 2) < 0.4, f"reinforce OFF should aim north (~pi/2), got {a_off}"
+    assert abs(a_bias - np.pi / 2) < 0.4, (
+        f"negative reinforce_target_bias should prefer enemy north (~pi/2), got {a_bias}")
 
 
 def test_garrison_floor_vetoes_drain_but_spares_attacks():

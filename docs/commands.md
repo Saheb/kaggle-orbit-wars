@@ -190,11 +190,1931 @@ source /Users/saheb/home/.venv/bin/activate
 python orbit_wars_rl/bc.py \
   --samples /tmp/producer_target_bc.pkl \
   --init-checkpoint seed_checkpoints/rev31_31M_resume.pt \
+  --allow-rl-init \
   --trainable-param tgt_q \
   --trainable-param tgt_k \
   --trainable-param target_scorer \
   --steps 300 \
   --save orbit_wars_rl/checkpoints/bc_producer_target_smoke.pt
+```
+
+### Replay-supervised standalone BC track
+
+Parallel non-RL path: score strong replay winners for measurable good play,
+downsample idle frames, then train/eval a standalone BC checkpoint. Full workflow:
+[`docs/supervised_bc.md`](supervised_bc.md).
+
+Rule for this section: omit `--init-checkpoint` for the first model. Later
+curriculum stages may initialize from an earlier supervised BC checkpoint, but
+`bc.py` now refuses PPO/RL checkpoints unless `--allow-rl-init` is passed for an
+explicit diagnostic outside this track.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --scores-out /tmp/supervised_bc/good_play_scores.json \
+  --samples-out /tmp/supervised_bc/good_play_balanced.pkl \
+  --require-known-winner \
+  --noop-keep-prob 0.05 \
+  --fire-repeat 2
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_balanced.pkl \
+  --steps 300 \
+  --lr 1e-4 \
+  --fire-pos-weight 1.0 \
+  --save seed_checkpoints/supervised_top_winners_bc.pt
+```
+
+Opening-only scratch curriculum, which is the first pure supervised variant that
+produced playable behavior without an RL init:
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --scores-out /tmp/supervised_bc/good_play_known_opening50_scores.json \
+  --samples-out /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --require-known-winner \
+  --steps-max 50 \
+  --noop-keep-prob 0.02 \
+  --fire-repeat 4
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --steps 1000 \
+  --lr 1e-4 \
+  --fire-pos-weight 1.0 \
+  --save /tmp/supervised_bc/supervised_opening50_scratch_1000_firew1.pt
+```
+
+Mixed opening + retention curriculum, still supervised-only:
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --scores-out /tmp/supervised_bc/good_play_known_retention50_r3_scores.json \
+  --samples-out /tmp/supervised_bc/good_play_known_retention50_r3.pkl \
+  --require-known-winner \
+  --steps-min 50 \
+  --noop-keep-prob 0.02 \
+  --fire-repeat 2 \
+  --reinforce-repeat 3
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/good_play_known_retention50_r3.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_scratch_1000_firew1.pt \
+  --steps 700 \
+  --lr 7e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --save /tmp/supervised_bc/supervised_curriculum_mix_opening_retention50_r3_700_reinf.pt
+
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_curriculum_mix_opening_retention50_r3_700_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 16 --target-decode --fire-threshold 0.35 \
+  --reinforce-gate-min-planets 3 --reinforce-forward-only --reinforce-garrison-floor 10
+```
+
+Contest-window curriculum for the Ajay recapture failure:
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --scores-out /tmp/supervised_bc/good_play_known_contest16_140_w30_scores.json \
+  --samples-out /tmp/supervised_bc/good_play_known_contest16_140_w30.pkl \
+  --require-known-winner \
+  --steps-min 16 \
+  --steps-max 140 \
+  --contest-window 30 \
+  --noop-keep-prob 0.02 \
+  --fire-repeat 3 \
+  --reinforce-repeat 4
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/good_play_known_contest16_140_w30.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_scratch_1000_firew1.pt \
+  --steps 700 \
+  --lr 7e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --save /tmp/supervised_bc/supervised_curriculum_opening_contest16_140_w30_700_reinf.pt
+```
+
+Soft answer-inbound weighting. Unlike `--answer-inbound-only`, this repeats
+enemy-inbound answer frames while preserving all concurrent teacher moves:
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --scores-out /tmp/supervised_bc/good_play_known_answer_weighted16_140_scores.json \
+  --samples-out /tmp/supervised_bc/good_play_known_answer_weighted16_140.pkl \
+  --require-known-winner \
+  --steps-min 16 \
+  --steps-max 140 \
+  --contest-window 30 \
+  --noop-keep-prob 0.02 \
+  --fire-repeat 3 \
+  --reinforce-repeat 4 \
+  --answer-inbound-repeat 6
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/good_play_known_answer_weighted16_140.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_scratch_1000_firew1.pt \
+  --steps 700 \
+  --lr 7e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --save /tmp/supervised_bc/supervised_curriculum_opening_answer_weighted16_140_700_reinf.pt
+```
+
+Low-lost-cap soft answer-inbound weighting. Current quick result: random `8/8`,
+Zach `6/16`, Ajay `0/16` with disciplined reinforcement decode.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --scores-out /tmp/supervised_bc/good_play_known_lowlost045_answer_weighted16_140_scores.json \
+  --samples-out /tmp/supervised_bc/good_play_known_lowlost045_answer_weighted16_140.pkl \
+  --require-known-winner \
+  --max-lost-cap 0.45 \
+  --steps-min 16 \
+  --steps-max 140 \
+  --contest-window 30 \
+  --noop-keep-prob 0.02 \
+  --fire-repeat 3 \
+  --reinforce-repeat 4 \
+  --answer-inbound-repeat 6
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/good_play_known_lowlost045_answer_weighted16_140.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_scratch_1000_firew1.pt \
+  --steps 600 \
+  --lr 7e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --save /tmp/supervised_bc/supervised_curriculum_opening_lowlost045_answer_weighted16_140_600_reinf.pt
+```
+
+Synthetic defensive reinforce labels. Uncapped baseline: random `8/8`, Zach
+`7/16`, Ajay `0/16` with disciplined reinforcement decode.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --scores-out /tmp/supervised_bc/good_play_known_lowlost045_synthdef_mild16_140_scores.json \
+  --samples-out /tmp/supervised_bc/good_play_known_lowlost045_synthdef_mild16_140.pkl \
+  --require-known-winner \
+  --max-lost-cap 0.45 \
+  --steps-min 16 \
+  --steps-max 140 \
+  --contest-window 30 \
+  --noop-keep-prob 0.02 \
+  --fire-repeat 3 \
+  --reinforce-repeat 4 \
+  --answer-inbound-repeat 4 \
+  --synthetic-defense-repeat 4
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/good_play_known_lowlost045_synthdef_mild16_140.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_curriculum_opening_lowlost045_answer_weighted16_140_600_reinf.pt \
+  --steps 300 \
+  --lr 3e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --save /tmp/supervised_bc/supervised_ft_lowlost045_synthdef_mild16_140_300_reinf.pt
+
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_ft_lowlost045_synthdef_mild16_140_300_reinf.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --games 16 --target-decode --fire-threshold 0.35 \
+  --reinforce-gate-min-planets 3 --reinforce-forward-only --reinforce-garrison-floor 10
+```
+
+Soft subject-cap ablation. Current best supervised Zach quick result: offline
+target gate still failed (`target_red +0.30`, top1 `0.28`, top3 `0.50`), Zach
+`8/16`, Ajay `0/16`. Useful for Zach/retention exploration, not a promotion
+candidate.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --scores-out /tmp/supervised_bc/good_play_known_lowlost045_synthdef_mild16_140_softcap20_scores.json \
+  --samples-out /tmp/supervised_bc/good_play_known_lowlost045_synthdef_mild16_140_softcap20.pkl \
+  --require-known-winner \
+  --max-lost-cap 0.45 \
+  --max-accepted-per-subject 20 \
+  --steps-min 16 \
+  --steps-max 140 \
+  --contest-window 30 \
+  --noop-keep-prob 0.02 \
+  --fire-repeat 3 \
+  --reinforce-repeat 4 \
+  --answer-inbound-repeat 4 \
+  --synthetic-defense-repeat 4
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/good_play_known_lowlost045_synthdef_mild16_140_softcap20.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_curriculum_opening_lowlost045_answer_weighted16_140_600_reinf.pt \
+  --steps 300 \
+  --lr 3e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --save /tmp/supervised_bc/supervised_ft_lowlost045_synthdef_mild16_140_softcap20_300_reinf.pt
+
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_ft_lowlost045_synthdef_mild16_140_softcap20_300_reinf.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --games 16 --target-decode --fire-threshold 0.35 \
+  --reinforce-gate-min-planets 3 --reinforce-forward-only --reinforce-garrison-floor 10
+```
+
+Hard balanced-subject ablation. Result: offline target gate failed (`target_red
++0.29`, top1 `0.27`, top3 `0.49`), Zach `2/16`, Ajay `0/16`; keep for
+reproducibility, not as the current best recipe.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --scores-out /tmp/supervised_bc/good_play_known_lowlost045_synthdef_mild16_140_balanced_scores.json \
+  --samples-out /tmp/supervised_bc/good_play_known_lowlost045_synthdef_mild16_140_balanced.pkl \
+  --require-known-winner \
+  --max-lost-cap 0.45 \
+  --max-accepted-per-subject 12 \
+  --max-samples-per-subject 3000 \
+  --steps-min 16 \
+  --steps-max 140 \
+  --contest-window 30 \
+  --noop-keep-prob 0.02 \
+  --fire-repeat 3 \
+  --reinforce-repeat 4 \
+  --answer-inbound-repeat 4 \
+  --synthetic-defense-repeat 4
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/good_play_known_lowlost045_synthdef_mild16_140_balanced.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_curriculum_opening_lowlost045_answer_weighted16_140_600_reinf.pt \
+  --steps 300 \
+  --lr 3e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --save /tmp/supervised_bc/supervised_ft_lowlost045_synthdef_mild16_140_balanced_300_reinf.pt
+```
+
+Threat-head auxiliary ablation. Current result: threat label learns
+(`val_threat_acc 0.75`) but gameplay regressed; Zach `4/16` no bias, `6/16`
+with `--threat-target-bias 1.0`, Ajay `0/16`.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --scores-out /tmp/supervised_bc/good_play_known_lowlost045_synthdef_mild_threat24_scores.json \
+  --samples-out /tmp/supervised_bc/good_play_known_lowlost045_synthdef_mild_threat24.pkl \
+  --require-known-winner \
+  --max-lost-cap 0.45 \
+  --steps-min 16 \
+  --steps-max 140 \
+  --contest-window 30 \
+  --noop-keep-prob 0.02 \
+  --fire-repeat 3 \
+  --reinforce-repeat 4 \
+  --answer-inbound-repeat 4 \
+  --synthetic-defense-repeat 4 \
+  --threat-horizon 24
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/good_play_known_lowlost045_synthdef_mild_threat24.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_ft_lowlost045_synthdef_mild16_140_300_reinf.pt \
+  --steps 300 \
+  --lr 2e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --threat-loss-weight 0.2 \
+  --threat-pos-weight 8.0 \
+  --save /tmp/supervised_bc/supervised_ft_lowlost045_synthdef_threat24_300_reinf.pt
+
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_ft_lowlost045_synthdef_threat24_300_reinf.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --games 16 --target-decode --fire-threshold 0.35 \
+  --reinforce-gate-min-planets 3 --reinforce-forward-only --reinforce-garrison-floor 10 \
+  --threat-target-bias 1.0
+```
+
+Frozen threat-head-only variant. This preserves the mild synthetic-defense
+action policy (`7/16` Zach with no bias) but `--threat-target-bias 0.5` still
+regressed Zach to `6/16` and Ajay stayed `0/16`.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_lowlost045_synthdef_mild_threat24.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_ft_lowlost045_synthdef_mild16_140_300_reinf.pt \
+  --trainable-param threat_head \
+  --steps 1000 \
+  --lr 1e-3 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --threat-loss-weight 1.0 \
+  --threat-pos-weight 8.0 \
+  --save /tmp/supervised_bc/supervised_threathead_only_lowlost045_h24_1000_reinf.pt
+
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_threathead_only_lowlost045_h24_1000_reinf.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --games 16 --target-decode --fire-threshold 0.35 \
+  --reinforce-gate-min-planets 3 --reinforce-forward-only --reinforce-garrison-floor 10 \
+  --threat-target-bias 0.5
+```
+
+Narrow answer-inbound ablation. This regressed in quick eval, but keep the
+command for reproducibility:
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --scores-out /tmp/supervised_bc/good_play_known_answer_inbound16_140_scores.json \
+  --samples-out /tmp/supervised_bc/good_play_known_answer_inbound16_140.pkl \
+  --require-known-winner \
+  --steps-min 16 \
+  --steps-max 140 \
+  --answer-inbound-only \
+  --noop-keep-prob 0.0 \
+  --fire-repeat 4 \
+  --reinforce-repeat 4
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/good_play_known_answer_inbound16_140.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_scratch_1000_firew1.pt \
+  --steps 600 \
+  --lr 7e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --save /tmp/supervised_bc/supervised_curriculum_opening_answer_inbound16_140_600_reinf.pt
+```
+
+Policy-teacher BC path. This asks a deterministic teacher policy for fresh
+actions on replay observations, instead of cloning the replay action. The
+10-replay Ajay-teacher smoke below produced `1,246` samples but failed the
+offline target gate after fine-tune (`target_red +0.22`, top1 `0.17`, top3
+`0.39`), so treat it as pipeline validation before scaling/curating.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/build_policy_teacher_bc.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 10 \
+  --teacher-agent opponents/candidate_ajay_1200.py \
+  --seat-mode winner \
+  --steps-max 100 \
+  --noop-keep-prob 0.0 \
+  --action-repeat 1 \
+  --reinforce-repeat 2 \
+  --samples-out /tmp/supervised_bc/ajay_teacher_winner10_s100.pkl \
+  --summary-out /tmp/supervised_bc/ajay_teacher_winner10_s100_summary.json
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/ajay_teacher_winner10_s100.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_scratch_1000_firew1.pt \
+  --steps 300 \
+  --lr 5e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --save /tmp/supervised_bc/supervised_opening50_ajay_teacher10_s100_300_reinf.pt
+```
+
+All-seat scale-up also failed the target gate (`target_red +0.22`, top1 `0.19`,
+top3 `0.38`) despite `9,329` samples. This suggests direct full-action teacher
+imitation needs filtered target-only or factorized labels before gameplay eval.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/build_policy_teacher_bc.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 30 \
+  --teacher-agent opponents/candidate_ajay_1200.py \
+  --seat-mode all \
+  --steps-max 120 \
+  --noop-keep-prob 0.0 \
+  --action-repeat 1 \
+  --reinforce-repeat 2 \
+  --samples-out /tmp/supervised_bc/ajay_teacher_all30_s120.pkl \
+  --summary-out /tmp/supervised_bc/ajay_teacher_all30_s120_summary.json
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/ajay_teacher_all30_s120.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_scratch_1000_firew1.pt \
+  --steps 600 \
+  --lr 5e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --save /tmp/supervised_bc/supervised_opening50_ajay_teacher_all30_s120_600_reinf.pt
+```
+
+Split-move target-only ablation. This decomposes each teacher frame into one
+single-launch sample and trains only the target-ranking parameters. It improved
+top3 over full-action labels but still failed the gate (`target_red +0.23`,
+top1 `0.20`, top3 `0.43`), so keep as evidence for the next filtered/ranking
+variant.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/build_policy_teacher_bc.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 30 \
+  --teacher-agent opponents/candidate_ajay_1200.py \
+  --seat-mode all \
+  --steps-max 120 \
+  --noop-keep-prob 0.0 \
+  --action-repeat 1 \
+  --reinforce-repeat 2 \
+  --split-moves \
+  --samples-out /tmp/supervised_bc/ajay_teacher_all30_s120_splitmoves.pkl \
+  --summary-out /tmp/supervised_bc/ajay_teacher_all30_s120_splitmoves_summary.json
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/ajay_teacher_all30_s120_splitmoves.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_scratch_1000_firew1.pt \
+  --trainable-param tgt_q \
+  --trainable-param tgt_k \
+  --trainable-param target_scorer \
+  --steps 600 \
+  --lr 1e-4 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --save /tmp/supervised_bc/supervised_opening50_ajay_teacher_all30_s120_splitmoves_targetonly_600_reinf.pt
+```
+
+Filtered split-move ablation. The single-move-only filter produced just `897`
+samples, so the more useful run keeps frames with at most two teacher moves and
+filters out own-target labels. Selecting by total BC loss still failed the final
+target gate (`target_red +0.34`, top1 `0.30`, top3 `0.47`). Selecting by
+`val_target_top3` plus a one-move-per-source filter passed the offline gate
+(`target_red +0.32`, top1 `0.32`, top3 `0.55`) but still failed live Ajay
+quick eval (`0/16`, `lost-cap 0.97`, `reinf_share 0.03`).
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/build_policy_teacher_bc.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 30 \
+  --teacher-agent opponents/candidate_ajay_1200.py \
+  --seat-mode all \
+  --steps-max 120 \
+  --noop-keep-prob 0.0 \
+  --action-repeat 1 \
+  --reinforce-repeat 2 \
+  --split-moves \
+  --max-teacher-moves-per-frame 2 \
+  --max-teacher-moves-per-source 1 \
+  --target-owner not-own \
+  --samples-out /tmp/supervised_bc/ajay_teacher_all30_s120_max2_source1_notown.pkl \
+  --summary-out /tmp/supervised_bc/ajay_teacher_all30_s120_max2_source1_notown_summary.json
+
+/Users/saheb/home/.venv/bin/python -u orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/ajay_teacher_all30_s120_max2_source1_notown.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_scratch_1000_firew1.pt \
+  --trainable-param tgt_q \
+  --trainable-param tgt_k \
+  --trainable-param target_scorer \
+  --steps 600 \
+  --lr 1e-4 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --save /tmp/supervised_bc/supervised_opening50_ajay_teacher_all30_s120_max2_source1_notown_targettop3_600_reinf.pt
+```
+
+Own-target policy-teacher retention ablation. These labels are learnable but
+not promotion candidates: both repeated and no-repeat mixes suppress attack
+tempo. The no-repeat mix is the less extreme version and still scored Zach
+`1/16`, Ajay `0/16`; `--reinforce-gate-min-planets 7` only improved Zach to
+`2/16`.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/build_policy_teacher_bc.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 30 \
+  --teacher-agent opponents/candidate_ajay_1200.py \
+  --seat-mode all \
+  --steps-min 16 \
+  --steps-max 140 \
+  --noop-keep-prob 0.0 \
+  --action-repeat 1 \
+  --reinforce-repeat 1 \
+  --split-moves \
+  --target-owner own \
+  --samples-out /tmp/supervised_bc/ajay_teacher_all30_s16_140_own_r1.pkl \
+  --summary-out /tmp/supervised_bc/ajay_teacher_all30_s16_140_own_r1_summary.json
+
+/Users/saheb/home/.venv/bin/python -u orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/ajay_teacher_all30_s16_140_own_r1.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_ajay_teacher_all30_s120_max2_source1_notown_targettop3_600_reinf.pt \
+  --steps 600 \
+  --lr 5e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --save /tmp/supervised_bc/supervised_opening50_targettop3_ajay_own30_s16_140_r1_600_reinf.pt
+
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_ajay_own30_s16_140_r1_600_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-gate-min-planets 7
+```
+
+Low-ratio target-only retention plus decode bias. This preserved attack volume
+better than full-head retention, but still did not improve Ajay. Best quick
+bias tested was `--reinforce-target-bias -1.0`: Zach `3/16`, Ajay `0/16`.
+
+```bash
+/Users/saheb/home/.venv/bin/python -c "import pickle, random; src='/tmp/supervised_bc/ajay_teacher_all30_s16_140_own_r1.pkl'; dst='/tmp/supervised_bc/ajay_teacher_all30_s16_140_own_r1_sub2k.pkl'; rng=random.Random(17); samples=pickle.load(open(src,'rb')); pickle.dump(rng.sample(samples, min(2000, len(samples))), open(dst,'wb'))"
+
+/Users/saheb/home/.venv/bin/python -u orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/ajay_teacher_all30_s16_140_own_r1_sub2k.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_ajay_teacher_all30_s120_max2_source1_notown_targettop3_600_reinf.pt \
+  --trainable-param tgt_q \
+  --trainable-param tgt_k \
+  --trainable-param target_scorer \
+  --steps 500 \
+  --lr 5e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --save /tmp/supervised_bc/supervised_opening50_targettop3_ajay_own30_s16_140_r1_sub2k_targetonly_500_reinf.pt
+
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_ajay_own30_s16_140_r1_sub2k_targetonly_500_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-target-bias -1.0
+```
+
+Threat-conditioned own-target retention. This keeps only teacher own-target
+labels where the target has enemy inbound within 30 steps. It is better
+calibrated than generic own-target labels but still not Ajay-capable: best quick
+decode tested was `--reinforce-target-bias -1.0`, scoring Zach `4/16`, Ajay
+`0/16`.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/build_policy_teacher_bc.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 30 \
+  --teacher-agent opponents/candidate_ajay_1200.py \
+  --seat-mode all \
+  --steps-min 16 \
+  --steps-max 160 \
+  --noop-keep-prob 0.0 \
+  --action-repeat 1 \
+  --reinforce-repeat 1 \
+  --split-moves \
+  --target-owner own \
+  --inbound-threat-horizon 30 \
+  --samples-out /tmp/supervised_bc/ajay_teacher_all30_s16_160_own_threat30.pkl \
+  --summary-out /tmp/supervised_bc/ajay_teacher_all30_s16_160_own_threat30_summary.json
+
+/Users/saheb/home/.venv/bin/python -u orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/ajay_teacher_all30_s16_160_own_threat30.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_ajay_teacher_all30_s120_max2_source1_notown_targettop3_600_reinf.pt \
+  --trainable-param tgt_q \
+  --trainable-param tgt_k \
+  --trainable-param target_scorer \
+  --steps 500 \
+  --lr 5e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --save /tmp/supervised_bc/supervised_opening50_targettop3_ajay_own_threat30_targetonly_500_reinf.pt
+
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_ajay_own_threat30_targetonly_500_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-target-bias -1.0
+```
+
+Synthetic source/ship defense labels. This directly labels rear-source support
+and ship count for threatened planets. First run is not a promotion candidate:
+ungated Zach `3/16`, Ajay `0/16`; with `--reinforce-target-bias -1.0`, Zach
+`4/16`, Ajay `0/16`.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/build_synthetic_defense_bc.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 30 \
+  --seat-mode all \
+  --steps-min 16 \
+  --steps-max 180 \
+  --action-repeat 1 \
+  --garrison-floor 10 \
+  --min-need 5 \
+  --max-samples 4000 \
+  --samples-out /tmp/supervised_bc/synthetic_defense_all30_s16_180_g10_need5_4k.pkl \
+  --summary-out /tmp/supervised_bc/synthetic_defense_all30_s16_180_g10_need5_4k_summary.json
+
+/Users/saheb/home/.venv/bin/python -u orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/synthetic_defense_all30_s16_180_g10_need5_4k.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_ajay_teacher_all30_s120_max2_source1_notown_targettop3_600_reinf.pt \
+  --trainable-param fire_head \
+  --trainable-param ship_head \
+  --trainable-param tgt_q \
+  --trainable-param tgt_k \
+  --trainable-param target_scorer \
+  --steps 600 \
+  --lr 5e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --save /tmp/supervised_bc/supervised_opening50_targettop3_synthdef4k_heads_600_reinf.pt
+
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef4k_heads_600_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-target-bias -1.0
+```
+
+Small-ratio synthetic defense. This preserves the fire head and trains only ship
+and target parameters on a 500-sample synthetic-defense dose. Best decode tested:
+`--reinforce-target-bias -1.0`, Zach `6/16`, Ajay `0/16`.
+
+```bash
+/Users/saheb/home/.venv/bin/python -c "import pickle, random; src='/tmp/supervised_bc/synthetic_defense_all30_s16_180_g10_need5_4k.pkl'; dst='/tmp/supervised_bc/synthetic_defense_all30_s16_180_g10_need5_sub500.pkl'; rng=random.Random(23); samples=pickle.load(open(src,'rb')); pickle.dump(rng.sample(samples, min(500, len(samples))), open(dst,'wb'))"
+
+/Users/saheb/home/.venv/bin/python -u orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/synthetic_defense_all30_s16_180_g10_need5_sub500.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_ajay_teacher_all30_s120_max2_source1_notown_targettop3_600_reinf.pt \
+  --trainable-param ship_head \
+  --trainable-param tgt_q \
+  --trainable-param tgt_k \
+  --trainable-param target_scorer \
+  --steps 500 \
+  --lr 5e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --save /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt
+
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-target-bias -1.0
+```
+
+Outcome-aware hold-success synthetic defense. This is a stricter variant of the
+same synthetic source/ship idea: only label targets that were recently captured
+and are not lost in the next 30 steps. First tested run produced only `362`
+samples and matched, but did not beat, the 500-sample synthetic result: Zach
+`6/16`, Ajay `0/16` with `--reinforce-target-bias -1.0`.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/build_synthetic_defense_bc.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 30 \
+  --seat-mode all \
+  --steps-min 16 \
+  --steps-max 180 \
+  --garrison-floor 10 \
+  --min-need 5 \
+  --recent-capture-window 40 \
+  --hold-success-horizon 30 \
+  --max-samples 1000 \
+  --samples-out /tmp/supervised_bc/synthetic_defense_holdsuccess_all30_s16_180_w40_h30_1k.pkl \
+  --summary-out /tmp/supervised_bc/synthetic_defense_holdsuccess_all30_s16_180_w40_h30_1k_summary.json
+
+/Users/saheb/home/.venv/bin/python -u orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/synthetic_defense_holdsuccess_all30_s16_180_w40_h30_1k.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_ajay_teacher_all30_s120_max2_source1_notown_targettop3_600_reinf.pt \
+  --trainable-param fire_head \
+  --trainable-param ship_head \
+  --trainable-param tgt_q \
+  --trainable-param tgt_k \
+  --trainable-param target_scorer \
+  --steps 500 \
+  --lr 5e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --save /tmp/supervised_bc/supervised_opening50_targettop3_holdsuccess_synthdef362_heads_500_reinf.pt
+
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_holdsuccess_synthdef362_heads_500_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-target-bias -1.0
+```
+
+Defense-overlay inference ablation. Disabled by default. This appends
+post-decode synthetic rear-source support moves to recently captured threatened
+owned planets. It is diagnostic, not a promotion recipe: `window=20`,
+`floor=30`, `min_need=10` restored Zach to `6/16` but Ajay stayed `0/16`
+(`lost-cap 0.96`).
+
+```bash
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-target-bias -1.0 \
+  --defense-overlay \
+  --defense-overlay-recent-capture-window 20 \
+  --defense-overlay-garrison-floor 30 \
+  --defense-overlay-min-need 10 \
+  --defense-overlay-max-moves 1
+```
+
+Defense-overlay selector. This trains a small supervised survival selector for
+overlay candidates from replay outcomes. Full local corpus result:
+`7,806` candidates, validation AUC `0.886`. Best quick Zach setting so far:
+threshold `0.5`, Zach `7/16`; Ajay remains `0/16`.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/build_defense_selector.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --seat-mode all \
+  --steps-min 16 \
+  --steps-max 180 \
+  --hold-horizon 30 \
+  --garrison-floor 10 \
+  --min-need 5 \
+  --max-target-age 40 \
+  --train-steps 3000 \
+  --lr 0.03 \
+  --records-out /tmp/supervised_bc/defense_selector_all_s16_180_h30_g10_need5_age40.pkl \
+  --selector-out /tmp/supervised_bc/defense_selector_all_s16_180_h30_g10_need5_age40.pt \
+  --summary-out /tmp/supervised_bc/defense_selector_all_s16_180_h30_g10_need5_age40_summary.json
+
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-target-bias -1.0 \
+  --defense-overlay \
+  --defense-overlay-recent-capture-window 40 \
+  --defense-overlay-garrison-floor 10 \
+  --defense-overlay-min-need 5 \
+  --defense-overlay-max-moves 1 \
+  --defense-overlay-selector-checkpoint /tmp/supervised_bc/defense_selector_all_s16_180_h30_g10_need5_age40.pt \
+  --defense-overlay-selector-threshold 0.5
+```
+
+Risk-mode selector check. This inverts the survival selector and fires on low
+predicted survival. It regressed Zach (`4/16` at threshold `0.5`, `5/16` at
+threshold `0.3`), so do not use this as the current best setting.
+
+```bash
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-target-bias -1.0 \
+  --defense-overlay \
+  --defense-overlay-recent-capture-window 40 \
+  --defense-overlay-garrison-floor 10 \
+  --defense-overlay-min-need 5 \
+  --defense-overlay-max-moves 1 \
+  --defense-overlay-selector-checkpoint /tmp/supervised_bc/defense_selector_all_s16_180_h30_g10_need5_age40.pt \
+  --defense-overlay-selector-threshold 0.3 \
+  --defense-overlay-selector-mode risk
+```
+
+Paired intervention selector. This collects labels by branching live eval states:
+baseline action versus baseline plus one defense-overlay support move. It is
+still supervised learning, but the label is intervention outcome instead of
+replay survival. Current 200-record Ajay slice has validation AUC `0.829`, Zach
+`7/16`, Ajay `0/16`, so this is a diagnostic track, not a promotion candidate.
+
+```bash
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/collect_defense_interventions.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 64 \
+  --seed-start 0 \
+  --horizon 30 \
+  --recent-capture-window 40 \
+  --garrison-floor 10 \
+  --min-need 5 \
+  --max-records 200 \
+  --reinforce-target-bias -1.0 \
+  --records-out /tmp/supervised_bc/intervention_ajay_s0_64_h30_200.pkl \
+  --summary-out /tmp/supervised_bc/intervention_ajay_s0_64_h30_200_summary.json
+
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/train_intervention_selector.py \
+  --records /tmp/supervised_bc/intervention_ajay_s0_64_h30_200.pkl \
+  --steps 2000 \
+  --lr 0.03 \
+  --selector-out /tmp/supervised_bc/intervention_selector_ajay_s0_64_h30_200.pt \
+  --summary-out /tmp/supervised_bc/intervention_selector_ajay_s0_64_h30_200_summary.json
+
+CUDA_VISIBLE_DEVICES="" /Users/saheb/home/.venv/bin/python orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-target-bias -1.0 \
+  --defense-overlay \
+  --defense-overlay-recent-capture-window 40 \
+  --defense-overlay-garrison-floor 10 \
+  --defense-overlay-min-need 5 \
+  --defense-overlay-max-moves 1 \
+  --defense-overlay-selector-checkpoint /tmp/supervised_bc/intervention_selector_ajay_s0_64_h30_200.pt \
+  --defense-overlay-selector-threshold 0.5 \
+  --defense-overlay-selector-mode survive
+```
+
+Top-two supervised replay scaling. Use this as the main pure-BC data path now:
+fetch broad daily score slices, retain only Jake Will / Isaiah games, write
+compact frame shards for their winning-seat labels, then stream shards into
+`bc.py`.
+
+```bash
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/fetch_best_player_replays.py \
+  --last-days 30 \
+  --n-per-day 2000 \
+  --player-name "Jake Will" \
+  --player-name "Isaiah @ Tufa Labs" \
+  --out-dir /tmp/orbit_top2_replays \
+  --cache-dir /tmp/ow_manifests \
+  --max-kept 5000 \
+  --retry-attempts 3 \
+  --cache-flush-every 100
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_best_player_bc_shards.py \
+  --replay-dir /tmp/orbit_top2_replays \
+  --player-name "Jake Will" \
+  --player-name "Isaiah @ Tufa Labs" \
+  --require-win \
+  --noop-keep-prob 0.02 \
+  --samples-per-shard 50000 \
+  --format frame \
+  --out-dir /tmp/supervised_bc/top2_win_frame_shards
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/top2_win_frame_shards/manifest.json \
+  --stream-shards \
+  --steps 50000 \
+  --eval-every 1000 \
+  --max-val-samples 8192 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --save seed_checkpoints/supervised_top2_win_bc.pt
+```
+
+Smoke result on the old 200-replay local archive:
+`/tmp/supervised_bc/top2_smoke_shards/manifest.json` contains `1900` samples
+from `45` Jake/Isaiah winning games. `bc.py --stream-shards` loaded the manifest
+and saved `/tmp/supervised_bc/top2_stream_smoke.pt` in a 5-step infrastructure
+check. Live Kaggle smoke on `2026-06-13`: scanning the top `50` score-sorted 2p
+episodes kept `5/5` Jake Will games; `--require-win` sharding selected `4`
+winning seats and wrote `184` samples to
+`/tmp/supervised_bc/top2_live_smoke_shards/manifest.json`. The compact
+`--format frame` shard for the same records was `815K` versus `11M` for the
+tensor shard, and `bc.py --stream-shards` trained from it in a 5-step smoke,
+saving `/tmp/supervised_bc/top2_frame_stream_smoke.pt`.
+
+Scale-1 live data/checkpoint:
+
+```bash
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/fetch_best_player_replays.py \
+  --last-days 7 \
+  --n-per-day 300 \
+  --player-name "Jake Will" \
+  --player-name "Isaiah @ Tufa Labs" \
+  --out-dir /tmp/orbit_top2_replays_scale1 \
+  --cache-dir /tmp/ow_manifests \
+  --max-kept 100 \
+  --retry-attempts 3 \
+  --retry-sleep 0.5 \
+  --cache-flush-every 25
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_best_player_bc_shards.py \
+  --replay-dir /tmp/orbit_top2_replays_scale1 \
+  --player-name "Jake Will" \
+  --player-name "Isaiah @ Tufa Labs" \
+  --require-win \
+  --noop-keep-prob 0.02 \
+  --samples-per-shard 5000 \
+  --format frame \
+  --out-dir /tmp/supervised_bc/top2_scale1_frame_shards
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/top2_scale1_frame_shards/manifest.json \
+  --stream-shards \
+  --steps 400 \
+  --eval-every 100 \
+  --max-val-samples 1024 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --save /tmp/supervised_bc/top2_scale1_frame_400.pt
+```
+
+Scale-1 result: fetch kept `100` top-player replays from `106` considered
+episodes on `2026-06-13`, all `Jake Will`. Strict-win compact sharding selected
+`86` seats and `6738` samples. The `400`-step scratch checkpoint reached
+validation `target_top1=0.269`, `target_top3=0.507`, `fire_red=0.590`,
+`ship_red=0.444`. Gameplay: default threshold `0.5` random `8/8`, Zach `2/8`,
+Ajay `0/8`; `--fire-threshold 0.4` improved Zach to `4/8` but Ajay stayed
+`0/8` with `lost-cap=0.98`.
+
+Isaiah acquisition from the archived player index. Use this when broad recent
+score scanning is too slow or yields only Jake games:
+
+```bash
+mkdir -p /tmp/orbit_parquet
+/Users/saheb/home/.venv/bin/kaggle datasets download \
+  nbridelancetb/orbit-wars-replay-parquet \
+  -f player_episodes.parquet \
+  -p /tmp/orbit_parquet \
+  --force
+
+/Users/saheb/home/.venv/bin/python archive/bc_pipeline/fetch_top_replays.py \
+  --parquet /tmp/orbit_parquet/player_episodes.parquet \
+  --agents "Isaiah @ Tufa Labs" \
+  --n-episodes 100 \
+  --replay-dir /tmp/orbit_isaiah_parquet_wins \
+  --download-only \
+  --delay 0.1
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_best_player_bc_shards.py \
+  --replay-dir /tmp/orbit_isaiah_parquet_wins \
+  --player-name "Isaiah @ Tufa Labs" \
+  --require-win \
+  --noop-keep-prob 0.02 \
+  --samples-per-shard 5000 \
+  --format frame \
+  --out-dir /tmp/supervised_bc/isaiah_parquet_win_frame_shards
+```
+
+Current top-two ablation results:
+
+- Outcome-weighted Jake all-seat run:
+  `/tmp/supervised_bc/top2_scale1_allseats_win2_frame_400.pt`, Zach `3/8`,
+  Ajay `0/8`.
+- Mixed strict Jake+Isaiah:
+  `/tmp/supervised_bc/top2_jake_isaiah_win_frame_500.pt`, random `8/8`, Zach
+  `2/8`, Ajay `0/8` at `--fire-threshold 0.4`.
+- Fixed-validation mixed strict Jake+Isaiah:
+  `/tmp/supervised_bc/top2_jake_isaiah_win_frame_fixedval_700.pt`, random
+  `8/8`, Zach `3/8`, Ajay `0/8` at `--fire-threshold 0.4`.
+- Isaiah-only:
+  `/tmp/supervised_bc/isaiah_parquet_win_frame_500.pt`, random `8/8`, Zach
+  `1/8`, Ajay `0/8` at `--fire-threshold 0.4`.
+
+Larger strict-Jake scale-up from the same parquet index:
+
+```bash
+/Users/saheb/home/.venv/bin/python archive/bc_pipeline/fetch_top_replays.py \
+  --parquet /tmp/orbit_parquet/player_episodes.parquet \
+  --agents "Jake Will" \
+  --n-episodes 200 \
+  --replay-dir /tmp/orbit_jake_parquet_wins_200 \
+  --download-only \
+  --delay 0.05
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_best_player_bc_shards.py \
+  --replay-dir /tmp/orbit_jake_parquet_wins_200 \
+  --player-name "Jake Will" \
+  --require-win \
+  --noop-keep-prob 0.02 \
+  --samples-per-shard 5000 \
+  --format frame \
+  --out-dir /tmp/supervised_bc/jake_parquet_win200_frame_shards
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/top2_scale1_frame_shards/manifest.json \
+  --samples /tmp/supervised_bc/jake_parquet_win200_frame_shards/manifest.json \
+  --stream-shards \
+  --steps 1000 \
+  --eval-every 100 \
+  --max-val-samples 4096 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --save /tmp/supervised_bc/jake_live_parquet_win_frame_1000.pt
+```
+
+Result:
+`/tmp/supervised_bc/jake_parquet_win200_frame_shards/manifest.json` has
+`17,950` compact samples from `200` Jake wins. Combined with the live strict
+Jake manifest, `/tmp/supervised_bc/jake_live_parquet_win_frame_1000.pt` reached
+`val_target_top3=0.561`, random `8/8`, Zach `4/8` and `7/16`, Ajay `0/8` at
+`--fire-threshold 0.4`. Thresholds `0.3`, `0.35`, `0.45`, and `0.5` were worse
+on Zach.
+
+Full available Jake winner slice from the same parquet index. The directory
+name is historical; it now contains all `322` Jake wins from the `2026-05-20`
+index:
+
+```bash
+/Users/saheb/home/.venv/bin/python archive/bc_pipeline/fetch_top_replays.py \
+  --parquet /tmp/orbit_parquet/player_episodes.parquet \
+  --agents "Jake Will" \
+  --n-episodes 400 \
+  --replay-dir /tmp/orbit_jake_parquet_wins_200 \
+  --download-only \
+  --delay 0.02
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_best_player_bc_shards.py \
+  --replay-dir /tmp/orbit_jake_parquet_wins_200 \
+  --player-name "Jake Will" \
+  --require-win \
+  --noop-keep-prob 0.02 \
+  --samples-per-shard 5000 \
+  --format frame \
+  --out-dir /tmp/supervised_bc/jake_parquet_win322_frame_shards
+
+PYTHONUNBUFFERED=1 PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/top2_scale1_frame_shards/manifest.json \
+  --samples /tmp/supervised_bc/jake_parquet_win322_frame_shards/manifest.json \
+  --stream-shards \
+  --init-checkpoint /tmp/supervised_bc/jake_live_parquet_win_frame_1000.pt \
+  --steps 800 \
+  --lr 5e-5 \
+  --eval-every 100 \
+  --max-val-samples 4096 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --save /tmp/supervised_bc/jake_live_parquet_win322_frame_ft800.pt
+```
+
+Result:
+`/tmp/supervised_bc/jake_parquet_win322_frame_shards/manifest.json` has
+`27,952` compact samples from all `322` Jake wins, with
+`decision_sample_share=0.977` and `fire_slot_rate=0.128`. Fine-tuning from the
+200-win supervised checkpoint improved offline target fit to
+`val_target_top3=0.5686`, but gameplay did not improve: random `8/8`, Zach
+`3/8`, Ajay `0/8` at threshold `0.4`.
+
+Replay-only contest/hold fine-tune from strong Jake games. This keeps real
+replay actions and only reweights the state distribution around recent captures
+or enemy inbound threats:
+
+```bash
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/orbit_jake_parquet_wins_200 \
+  --winner-name "Jake Will" \
+  --strong-name "Jake Will" \
+  --require-known-winner \
+  --min-score 0 \
+  --max-lost-cap 0.80 \
+  --steps-min 16 \
+  --steps-max 160 \
+  --contest-window 40 \
+  --noop-keep-prob 0.02 \
+  --fire-repeat 1 \
+  --reinforce-repeat 2 \
+  --scores-out /tmp/supervised_bc/jake_parquet_win200_contest16_160_w40_scores.json \
+  --samples-out /tmp/supervised_bc/jake_parquet_win200_contest16_160_w40.pkl
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/top2_scale1_frame_shards/manifest.json \
+  --samples /tmp/supervised_bc/jake_parquet_win200_frame_shards/manifest.json \
+  --samples /tmp/supervised_bc/jake_parquet_win200_contest16_160_w40.pkl \
+  --stream-shards \
+  --init-checkpoint /tmp/supervised_bc/jake_live_parquet_win_frame_1000.pt \
+  --steps 600 \
+  --lr 5e-5 \
+  --eval-every 100 \
+  --max-val-samples 4096 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --trainable-param fire_head \
+  --trainable-param ship_head \
+  --trainable-param tgt_q \
+  --trainable-param tgt_k \
+  --trainable-param target_scorer \
+  --save /tmp/supervised_bc/jake_live_parquet_contest_w40_heads_600.pt
+```
+
+Result:
+`/tmp/supervised_bc/jake_parquet_win200_contest16_160_w40.pkl` has `16,130`
+samples from `159` accepted Jake seats, with `15,384` enemy-inbound contest
+frames and `5,170` reinforcement frames. The heads-only fine-tune reached
+`val_target_top3=0.586`, random `8/8`, Zach `6/8` and `10/16`, Ajay `0/8` at
+`--fire-threshold 0.4`. Ajay threshold checks at `0.35` and `0.45` were also
+`0/8`. This is the current best supervised-only Zach checkpoint, not an Ajay
+promotion candidate.
+
+Expanded Jake contest fine-tune over all `322` Jake wins:
+
+```bash
+PYTHONUNBUFFERED=1 PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/orbit_jake_parquet_wins_200 \
+  --winner-name "Jake Will" \
+  --strong-name "Jake Will" \
+  --require-known-winner \
+  --min-score 0 \
+  --max-lost-cap 0.80 \
+  --steps-min 16 \
+  --steps-max 160 \
+  --contest-window 40 \
+  --noop-keep-prob 0.02 \
+  --fire-repeat 1 \
+  --reinforce-repeat 2 \
+  --scores-out /tmp/supervised_bc/jake_parquet_win322_contest16_160_w40_scores.json \
+  --samples-out /tmp/supervised_bc/jake_parquet_win322_contest16_160_w40.pkl
+
+PYTHONUNBUFFERED=1 PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/top2_scale1_frame_shards/manifest.json \
+  --samples /tmp/supervised_bc/jake_parquet_win322_frame_shards/manifest.json \
+  --samples /tmp/supervised_bc/jake_parquet_win322_contest16_160_w40.pkl \
+  --stream-shards \
+  --init-checkpoint /tmp/supervised_bc/jake_live_parquet_win322_frame_ft800.pt \
+  --steps 600 \
+  --lr 5e-5 \
+  --eval-every 100 \
+  --max-val-samples 4096 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --trainable-param fire_head \
+  --trainable-param ship_head \
+  --trainable-param tgt_q \
+  --trainable-param tgt_k \
+  --trainable-param target_scorer \
+  --save /tmp/supervised_bc/jake_live_parquet_win322_contest_w40_heads_600.pt
+```
+
+Result:
+The expanded contest slice accepted `255` Jake seats and wrote `25,523`
+samples, including `23,796` enemy-inbound contest frames. Heads-only fine-tune
+reached `val_target_top3=0.5833`, below the `200`-win contest checkpoint's
+`0.586`. Gameplay: random `8/8`, Zach `5/8`, Ajay `0/8` at threshold `0.4`;
+Zach threshold sweep was `3/8` at `0.35`, `5/8` at `0.45`, and `3/8` at `0.5`.
+Readout: adding the older same-day Jake wins improves offline fit but does not
+beat the smaller/cleaner contest checkpoint in gameplay.
+
+Fraction ship-head experiment, matching vkhydras's per-planet
+`launch (P), target (P,P), frac (P,K)` comment more closely. The model was
+already per-owned-planet for launch/target/ship; this adds `--ship-bin-mode
+fraction`, relabels compact frame samples as 10%..100% of source ships, and
+saves checkpoint metadata so eval decodes fraction bins.
+
+```bash
+PYTHONUNBUFFERED=1 PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/top2_scale1_frame_shards/manifest.json \
+  --samples /tmp/supervised_bc/jake_parquet_win322_frame_shards/manifest.json \
+  --stream-shards \
+  --ship-bin-mode fraction \
+  --steps 1000 \
+  --lr 1e-4 \
+  --eval-every 100 \
+  --max-val-samples 4096 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --save /tmp/supervised_bc/jake_live_parquet_win322_fraction_scratch_1000.pt
+```
+
+Result:
+Fraction scratch learned ship sizing easily (`val_ship_red=0.870`) but target fit
+lagged absolute buckets (`val_target_top3=0.527` vs `0.569` for strict
+Jake-322 absolute). Gameplay was playable but not better: random `8/8`, Zach
+`4/8`, Ajay `0/8` at threshold `0.4`.
+
+Compatible-init fraction ship-head transfer. This keeps the best absolute
+contest checkpoint's trunk/fire/target weights, skips only the shape-mismatched
+`ship_head`, and trains the new 10-bin fraction ship head:
+
+```bash
+PYTHONUNBUFFERED=1 PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/top2_scale1_frame_shards/manifest.json \
+  --samples /tmp/supervised_bc/jake_parquet_win322_frame_shards/manifest.json \
+  --stream-shards \
+  --ship-bin-mode fraction \
+  --partial-init-compatible \
+  --init-checkpoint /tmp/supervised_bc/jake_live_parquet_contest_w40_heads_600.pt \
+  --steps 500 \
+  --lr 1e-4 \
+  --eval-every 100 \
+  --max-val-samples 4096 \
+  --allow-reinforce \
+  --select-metric val_ship_red \
+  --trainable-param ship_head \
+  --save /tmp/supervised_bc/jake_contest_abs_target_fraction_ship_head_500.pt
+```
+
+Result:
+Partial init loaded `68` tensors and skipped only `ship_head.weight/bias`.
+Final validation preserved target fit (`val_target_top3=0.565`) and trained the
+fraction ship head to `val_ship_red=0.412`, but gameplay regressed: random
+`8/8`, Zach `3/8`, Ajay `0/8` at threshold `0.4`. Readout: the output shape is
+now aligned with the top-player comment, but fraction ship buckets alone do not
+fix Ajay retention or beat the absolute-bucket contest checkpoint.
+
+Held-capture outcome-aware replay weighting. This stays replay-only: identify
+recently captured owned planets that are not lost within a future horizon, then
+repeat or filter frames where Jake's real replay action sources from or targets
+those held captures.
+
+```bash
+PYTHONUNBUFFERED=1 PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/orbit_jake_parquet_wins_200 \
+  --winner-name "Jake Will" \
+  --strong-name "Jake Will" \
+  --require-known-winner \
+  --min-score 0 \
+  --max-lost-cap 0.80 \
+  --steps-min 16 \
+  --steps-max 160 \
+  --contest-window 40 \
+  --noop-keep-prob 0.02 \
+  --fire-repeat 1 \
+  --reinforce-repeat 2 \
+  --held-capture-window 40 \
+  --hold-success-horizon 30 \
+  --held-capture-repeat 6 \
+  --scores-out /tmp/supervised_bc/jake_parquet_win322_heldcap_w40_h30_r6_scores.json \
+  --samples-out /tmp/supervised_bc/jake_parquet_win322_heldcap_w40_h30_r6.pkl
+
+PYTHONUNBUFFERED=1 PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/top2_scale1_frame_shards/manifest.json \
+  --samples /tmp/supervised_bc/jake_parquet_win322_frame_shards/manifest.json \
+  --samples /tmp/supervised_bc/jake_parquet_win322_heldcap_w40_h30_r6.pkl \
+  --stream-shards \
+  --init-checkpoint /tmp/supervised_bc/jake_live_parquet_contest_w40_heads_600.pt \
+  --steps 500 \
+  --lr 3e-5 \
+  --eval-every 100 \
+  --max-val-samples 4096 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --trainable-param fire_head \
+  --trainable-param ship_head \
+  --trainable-param tgt_q \
+  --trainable-param tgt_k \
+  --trainable-param target_scorer \
+  --save /tmp/supervised_bc/jake_contest_heldcap_w40_h30_r6_heads_500.pt
+```
+
+Result:
+The broad repeat slice wrote `48,458` samples from `255` Jake wins, with
+`5,100` held-capture-weighted frames and only `100` future-loss rejections.
+Offline validation regressed versus the best contest checkpoint
+(`val_target_top3=0.574` vs `0.586`). Gameplay also regressed: Zach `3/8`,
+Ajay `0/8`, Ajay `lost-cap=1.00`, `reinf_share=0.41`.
+
+Hard held-capture filter. This keeps only the moves involving held captures and
+trains only ship/target heads, leaving the best checkpoint's fire head intact:
+
+```bash
+PYTHONUNBUFFERED=1 PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/score_good_play_replays.py \
+  --replay-dir /tmp/orbit_jake_parquet_wins_200 \
+  --winner-name "Jake Will" \
+  --strong-name "Jake Will" \
+  --require-known-winner \
+  --min-score 0 \
+  --max-lost-cap 0.80 \
+  --steps-min 16 \
+  --steps-max 160 \
+  --contest-window 40 \
+  --noop-keep-prob 0.0 \
+  --fire-repeat 2 \
+  --reinforce-repeat 2 \
+  --held-capture-window 40 \
+  --hold-success-horizon 30 \
+  --held-capture-only \
+  --scores-out /tmp/supervised_bc/jake_parquet_win322_heldcap_only_w40_h30_scores.json \
+  --samples-out /tmp/supervised_bc/jake_parquet_win322_heldcap_only_w40_h30.pkl
+
+PYTHONUNBUFFERED=1 PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/top2_scale1_frame_shards/manifest.json \
+  --samples /tmp/supervised_bc/jake_parquet_win322_frame_shards/manifest.json \
+  --samples /tmp/supervised_bc/jake_parquet_win322_heldcap_only_w40_h30.pkl \
+  --stream-shards \
+  --init-checkpoint /tmp/supervised_bc/jake_live_parquet_contest_w40_heads_600.pt \
+  --steps 400 \
+  --lr 3e-5 \
+  --eval-every 100 \
+  --max-val-samples 4096 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --trainable-param ship_head \
+  --trainable-param tgt_q \
+  --trainable-param tgt_k \
+  --trainable-param target_scorer \
+  --save /tmp/supervised_bc/jake_contest_heldcap_only_w40_h30_shiptarget_400.pt
+```
+
+Result:
+The hard slice wrote `10,200` samples from `5,100` held-capture frames, dropping
+`9,316` recent-capture frames whose action did not involve the held planet. It
+still did not beat the best checkpoint: `val_target_top3=0.574`, Zach `4/8`,
+Ajay `0/8`, Ajay `lost-cap=1.00`, `reinf_share=0.42`. Adding
+`--reinforce-target-bias -1.0` reduced Ajay reinforcement to `0.20` but stayed
+Ajay `0/8` and hurt Zach to `3/8`. Readout: future-held capture filtering is a
+better trust proxy than raw contest weighting, but cross-entropy on those frames
+still shifts the own-target prior without teaching enough timing/source sizing
+to survive Ajay.
+
+Replay-action candidate reranker. This changes the objective: positives are
+Jake's decoded replay launches, negatives are plausible same-source candidate
+alternatives from the same target-owner mode. It saves the same lightweight
+reranker checkpoint format consumed by `eval.py --producer-reranker-checkpoint`.
+Runtime candidate enumeration is still Producer-style, so this is an overlay
+diagnostic/bridge rather than a pure submitted policy.
+
+```bash
+PYTHONUNBUFFERED=1 PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_replay_reranker.py \
+  --replay-dir /tmp/orbit_jake_parquet_wins_200 \
+  --max-replays 80 \
+  --seat-mode winner \
+  --winner-name-filter "Jake Will" \
+  --steps-min 16 \
+  --steps-max 120 \
+  --target-owner not-own \
+  --negatives-per-positive 8 \
+  --score-slack 10 \
+  --max-records 2000 \
+  --train-steps 2000 \
+  --records-out /tmp/supervised_bc/replay_reranker_jake_notown_s16_120_2k_v2_records.pkl \
+  --reranker-out /tmp/supervised_bc/replay_reranker_jake_notown_s16_120_2k_v2.pt \
+  --summary-out /tmp/supervised_bc/replay_reranker_jake_notown_s16_120_2k_v2_summary.json
+
+CUDA_VISIBLE_DEVICES="" PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/jake_live_parquet_contest_w40_heads_600.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --games 8 \
+  --target-decode \
+  --fire-threshold 0.4 \
+  --producer-overlay \
+  --producer-overlay-max-moves 1 \
+  --producer-overlay-score-min 1.5 \
+  --producer-overlay-target-owner not-own \
+  --producer-reranker-checkpoint /tmp/supervised_bc/replay_reranker_jake_notown_s16_120_2k_v2.pt
+```
+
+Result:
+The corrected not-own replay ranker built `1,952` records over `663`
+replay-positive groups from `80` Jake wins. Offline validation: AUC `0.703`,
+group top1 `0.629`, top3 `0.985`. One-move overlay on the best contest
+checkpoint scored Zach `8/8` with `cap/atk-launch 0.572`, `lost-cap 0.37`, and
+planets@100 `16`. Ajay remained `0/8`; the overlay improved capture volume
+(`caps/game 19.9`) but every capture was still stripped (`lost-cap 1.00`,
+median hold `9st`). Two not-own overlay moves preserved Zach `8/8` but still
+left Ajay `0/8`.
+
+Own-target recent-capture reranker, corrected to use own-target negatives too:
+
+```bash
+PYTHONUNBUFFERED=1 PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_replay_reranker.py \
+  --replay-dir /tmp/orbit_jake_parquet_wins_200 \
+  --max-replays 160 \
+  --seat-mode winner \
+  --winner-name-filter "Jake Will" \
+  --steps-min 16 \
+  --steps-max 160 \
+  --target-owner own \
+  --candidate-recent-capture-window 40 \
+  --negatives-per-positive 8 \
+  --score-slack 10 \
+  --max-records 2000 \
+  --train-steps 2000 \
+  --records-out /tmp/supervised_bc/replay_reranker_jake_own_recent40_s16_160_2k_v2_records.pkl \
+  --reranker-out /tmp/supervised_bc/replay_reranker_jake_own_recent40_s16_160_2k_v2.pt \
+  --summary-out /tmp/supervised_bc/replay_reranker_jake_own_recent40_s16_160_2k_v2_summary.json
+```
+
+Result:
+The corrected own-target recent-capture slice was sparse: `135` records over
+`67` groups from `160` Jake wins. As an own-target overlay it scored Zach `6/8`
+and Ajay `0/8`; Ajay reinforcement rose to `0.44` but lost-cap stayed `0.99`.
+Readout: replay-derived candidate ranking is promising for expansion/pressure,
+but the retention side needs a stronger intervention/hold objective, not just
+own-target replay imitation.
+
+Readout: strict Jake wins plus replay-only contest weighting is the best new
+replay-cloning path (`10/16` Zach, Ajay `0/8`). `bc.py --stream-shards` now
+samples validation records across shards and skips those records during
+training; older mixed-manifest validation metrics used a file-level split and
+can be noisy.
+
+Contest-checkpoint intervention selector diagnostic. This starts from the best
+pure replay checkpoint instead of the older synthetic-defense checkpoint. It is
+useful as a negative control: the counterfactual label exists offline, but the
+live overlay over-defends and regresses Zach.
+
+```bash
+PYTHONUNBUFFERED=1 PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/collect_defense_interventions.py \
+  --checkpoint /tmp/supervised_bc/jake_live_parquet_contest_w40_heads_600.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 24 \
+  --seed-start 0 \
+  --horizon 20 \
+  --recent-capture-window 40 \
+  --garrison-floor 10 \
+  --min-need 5 \
+  --support-max-moves 2 \
+  --multi-source-per-target \
+  --max-records 40 \
+  --reinforce-target-bias 0.0 \
+  --flush-every 10 \
+  --records-out /tmp/supervised_bc/intervention_ajay_contestbc_s0_24_h20_40_multisource.pkl \
+  --summary-out /tmp/supervised_bc/intervention_ajay_contestbc_s0_24_h20_40_multisource_summary.json
+
+PYTHONUNBUFFERED=1 PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/train_intervention_selector.py \
+  --records /tmp/supervised_bc/intervention_ajay_contestbc_s0_24_h20_40_multisource.pkl \
+  --label hold_advantage \
+  --steps 2000 \
+  --lr 0.03 \
+  --selector-out /tmp/supervised_bc/intervention_selector_ajay_contestbc_s0_24_h20_40_multisource_holdadv.pt \
+  --summary-out /tmp/supervised_bc/intervention_selector_ajay_contestbc_s0_24_h20_40_multisource_holdadv_summary.json
+```
+
+Observed result: collection wrote `40` records with `5/40` final helped,
+`1/40` hurt, and `9/40` hold-advantage. The selector showed noisy offline
+signal (`val_auc 0.917` on only eight validation records), but inference
+regressed Zach to `3/8` at thresholds `0.5` and `0.7`, and Ajay stayed `0/8`
+with `lost-cap 0.97`. Do not promote this overlay; use it only as evidence that
+larger counterfactual data needs tighter action/risk labels before live gating.
+
+Hold-advantage intervention labels. The collector also records owner traces and
+`hold_delta`; train with `--label hold_advantage` to predict whether support
+buys more owned ticks during the horizon. This improves label density
+(`20/120` positives vs `3/120` final-horizon helped on the first traced slice),
+but the first selector regressed Zach to `5/16` at thresholds `0.5` and `0.7`,
+so treat it as data evidence, not the current best inference gate.
+
+```bash
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/collect_defense_interventions.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 48 \
+  --seed-start 200 \
+  --horizon 30 \
+  --recent-capture-window 40 \
+  --garrison-floor 10 \
+  --min-need 5 \
+  --max-records 120 \
+  --reinforce-target-bias -1.0 \
+  --records-out /tmp/supervised_bc/intervention_ajay_s200_48_h30_120_trace.pkl \
+  --summary-out /tmp/supervised_bc/intervention_ajay_s200_48_h30_120_trace_summary.json
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/train_intervention_selector.py \
+  --records /tmp/supervised_bc/intervention_ajay_s200_48_h30_120_trace.pkl \
+  --label hold_advantage \
+  --steps 2000 \
+  --lr 0.03 \
+  --selector-out /tmp/supervised_bc/intervention_selector_ajay_s200_48_h30_120_holdadv.pt \
+  --summary-out /tmp/supervised_bc/intervention_selector_ajay_s200_48_h30_120_holdadv_summary.json
+
+CUDA_VISIBLE_DEVICES="" PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-target-bias -1.0 \
+  --defense-overlay \
+  --defense-overlay-recent-capture-window 40 \
+  --defense-overlay-garrison-floor 10 \
+  --defense-overlay-min-need 5 \
+  --defense-overlay-max-moves 1 \
+  --defense-overlay-selector-checkpoint /tmp/supervised_bc/intervention_selector_ajay_s200_48_h30_120_holdadv.pt \
+  --defense-overlay-selector-threshold 0.7 \
+  --defense-overlay-selector-mode survive
+```
+
+ETA-aware hold-advantage selector. Current best diagnostic version adds
+`support_eta`, `eta_margin`, and `support_arrives_before` to the selector
+features. Offline AUC improved to `0.926`; quick Zach recovered to `7/16` at
+threshold `0.7`, but Ajay remained `0/16`, so this is not a promotion candidate.
+
+```bash
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/collect_defense_interventions.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 48 \
+  --seed-start 300 \
+  --horizon 30 \
+  --recent-capture-window 40 \
+  --garrison-floor 10 \
+  --min-need 5 \
+  --max-records 120 \
+  --reinforce-target-bias -1.0 \
+  --records-out /tmp/supervised_bc/intervention_ajay_s300_48_h30_120_trace_eta.pkl \
+  --summary-out /tmp/supervised_bc/intervention_ajay_s300_48_h30_120_trace_eta_summary.json
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/train_intervention_selector.py \
+  --records /tmp/supervised_bc/intervention_ajay_s300_48_h30_120_trace_eta.pkl \
+  --label hold_advantage \
+  --steps 3000 \
+  --lr 0.03 \
+  --selector-out /tmp/supervised_bc/intervention_selector_ajay_s300_48_h30_120_eta_holdadv.pt \
+  --summary-out /tmp/supervised_bc/intervention_selector_ajay_s300_48_h30_120_eta_holdadv_summary.json
+
+CUDA_VISIBLE_DEVICES="" PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-target-bias -1.0 \
+  --defense-overlay \
+  --defense-overlay-recent-capture-window 40 \
+  --defense-overlay-garrison-floor 10 \
+  --defense-overlay-min-need 5 \
+  --defense-overlay-max-moves 1 \
+  --defense-overlay-selector-checkpoint /tmp/supervised_bc/intervention_selector_ajay_s300_48_h30_120_eta_holdadv.pt \
+  --defense-overlay-selector-threshold 0.7 \
+  --defense-overlay-selector-mode survive
+```
+
+Multi-source intervention selector. This allows up to two rear sources to defend
+the same recently captured target. It is the strongest supervised intervention
+result so far against Zach: `9/16`, `lost-cap 0.57`, end planets `12.6`. Ajay
+still stays `0/16`, so treat it as a real supervised improvement but not a
+leaderboard candidate.
+
+```bash
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/collect_defense_interventions.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 32 \
+  --seed-start 400 \
+  --horizon 30 \
+  --recent-capture-window 40 \
+  --garrison-floor 10 \
+  --min-need 5 \
+  --support-max-moves 2 \
+  --multi-source-per-target \
+  --max-records 80 \
+  --reinforce-target-bias -1.0 \
+  --records-out /tmp/supervised_bc/intervention_ajay_s400_32_h30_80_multisource.pkl \
+  --summary-out /tmp/supervised_bc/intervention_ajay_s400_32_h30_80_multisource_summary.json
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/train_intervention_selector.py \
+  --records /tmp/supervised_bc/intervention_ajay_s400_32_h30_80_multisource.pkl \
+  --label hold_advantage \
+  --steps 3000 \
+  --lr 0.03 \
+  --selector-out /tmp/supervised_bc/intervention_selector_ajay_s400_32_h30_80_multisource_holdadv.pt \
+  --summary-out /tmp/supervised_bc/intervention_selector_ajay_s400_32_h30_80_multisource_holdadv_summary.json
+
+CUDA_VISIBLE_DEVICES="" PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-target-bias -1.0 \
+  --defense-overlay \
+  --defense-overlay-recent-capture-window 40 \
+  --defense-overlay-garrison-floor 10 \
+  --defense-overlay-min-need 5 \
+  --defense-overlay-max-moves 2 \
+  --defense-overlay-multi-source-per-target \
+  --defense-overlay-selector-checkpoint /tmp/supervised_bc/intervention_selector_ajay_s400_32_h30_80_multisource_holdadv.pt \
+  --defense-overlay-selector-threshold 0.5 \
+  --defense-overlay-selector-mode survive
+```
+
+Producer planner-candidate BC. This builds labels from Producer/Ajay planner
+candidate rankings instead of cloning emitted replay/teacher actions. First
+300-sample top-1 smoke decoded cleanly but only scored Zach `6/16` after a
+small heads-only fine-tune, so scale/curate before treating it as a candidate.
+
+```bash
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_producer_planner_bc.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 10 \
+  --seat-mode all \
+  --steps-min 1 \
+  --steps-max 80 \
+  --top-k 1 \
+  --score-min 1.5 \
+  --target-owner any \
+  --max-samples 300 \
+  --samples-out /tmp/supervised_bc/producer_planner_top1_s1_80_300.pkl \
+  --summary-out /tmp/supervised_bc/producer_planner_top1_s1_80_300_summary.json
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python -u \
+  orbit_wars_rl/bc.py \
+  --samples /tmp/supervised_bc/good_play_known_opening50.pkl \
+  --samples /tmp/supervised_bc/producer_planner_top1_s1_80_300.pkl \
+  --init-checkpoint /tmp/supervised_bc/supervised_opening50_ajay_teacher_all30_s120_max2_source1_notown_targettop3_600_reinf.pt \
+  --trainable-param ship_head \
+  --trainable-param tgt_q \
+  --trainable-param tgt_k \
+  --trainable-param target_scorer \
+  --steps 250 \
+  --lr 5e-5 \
+  --fire-pos-weight 1.0 \
+  --allow-reinforce \
+  --select-metric val_target_top3 \
+  --save /tmp/supervised_bc/supervised_opening50_targettop3_producer_planner_top1_300_shiptarget_250_reinf.pt
+
+CUDA_VISIBLE_DEVICES="" PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_producer_planner_top1_300_shiptarget_250_reinf.pt \
+  --opponent opponents/candidate_zach_public.py \
+  --games 16 \
+  --target-decode \
+  --reinforce-target-bias -1.0
+```
+
+Defensive Producer planner labels. These isolate own-target planner candidates,
+optionally requiring the target to be a recent capture and inbound-threatened.
+The broad own-target slice passed offline but regressed Zach (`1/8`), while the
+strict recent+threat slice failed the generic target gate. Use these commands as
+builder recipes; the next step should be a ranking/postprocessor objective, not
+more CE on the main target head.
+
+```bash
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_producer_planner_bc.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 40 \
+  --seat-mode all \
+  --steps-min 16 \
+  --steps-max 160 \
+  --top-k 4 \
+  --score-min 1.5 \
+  --target-owner own \
+  --reinforce-repeat 2 \
+  --max-samples 800 \
+  --samples-out /tmp/supervised_bc/producer_planner_own_top4_s16_160_800.pkl \
+  --summary-out /tmp/supervised_bc/producer_planner_own_top4_s16_160_800_summary.json
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_producer_planner_bc.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 80 \
+  --seat-mode all \
+  --steps-min 16 \
+  --steps-max 180 \
+  --top-k 4 \
+  --score-min 1.5 \
+  --target-owner own \
+  --recent-capture-window 40 \
+  --inbound-threat-horizon 30 \
+  --reinforce-repeat 2 \
+  --max-samples 500 \
+  --samples-out /tmp/supervised_bc/producer_planner_own_recent40_threat30_top4_500.pkl \
+  --summary-out /tmp/supervised_bc/producer_planner_own_recent40_threat30_top4_500_summary.json
+```
+
+Producer candidate reranker. This is the current planner-supervised path: train
+a separate lightweight scorer over Producer candidate features, then use it only
+to order `--producer-overlay` candidates. It avoids writing Producer labels into
+the main BC heads. The four-replay smoke checkpoint was the first supervised
+variant to win an Ajay gate game (`1/8`); larger all-seat and Isaiah-winner
+rerankers kept Zach `8/8` but were Ajay `0/8`.
+
+```bash
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_producer_reranker.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 4 \
+  --seat-mode all \
+  --steps-min 1 \
+  --steps-max 60 \
+  --max-candidates-per-state 12 \
+  --positive-top-k 1 \
+  --score-min 1.5 \
+  --max-records 600 \
+  --train-steps 800 \
+  --records-out /tmp/supervised_bc/producer_reranker_smoke_records.pkl \
+  --reranker-out /tmp/supervised_bc/producer_reranker_smoke.pt \
+  --summary-out /tmp/supervised_bc/producer_reranker_smoke_summary.json
+
+CUDA_VISIBLE_DEVICES="" PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 8 \
+  --target-decode \
+  --reinforce-target-bias -1.0 \
+  --producer-overlay \
+  --producer-overlay-max-moves 1 \
+  --producer-overlay-score-min 1.5 \
+  --producer-overlay-target-owner any \
+  --producer-reranker-checkpoint /tmp/supervised_bc/producer_reranker_smoke.pt
+```
+
+Trace and scheduled-filter diagnostic. The smoke reranker win on Ajay seed `2`
+depends on permissive neutral expansion early and high-confidence pressure later.
+Use `--producer-overlay-trace-json` to inspect selected candidates. The scheduled
+filter below preserves the seed-2 win and keeps Zach `8/8`, but the 8-game Ajay
+gate is still only `1/8`, so this is a next anchor, not a competent agent.
+
+```bash
+CUDA_VISIBLE_DEVICES="" PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 1 \
+  --seed-start 2 \
+  --target-decode \
+  --reinforce-target-bias -1.0 \
+  --producer-overlay \
+  --producer-overlay-max-moves 2 \
+  --producer-overlay-score-min 1.5 \
+  --producer-overlay-target-owner any \
+  --producer-overlay-late-step 44 \
+  --producer-overlay-late-score-min 20 \
+  --producer-reranker-checkpoint /tmp/supervised_bc/producer_reranker_smoke.pt \
+  --producer-overlay-trace-json /tmp/supervised_bc/trace_smoke_sched44_ajay_seed2.json \
+  --producer-overlay-trace-top-k 6
+
+CUDA_VISIBLE_DEVICES="" PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 8 \
+  --target-decode \
+  --reinforce-target-bias -1.0 \
+  --producer-overlay \
+  --producer-overlay-max-moves 2 \
+  --producer-overlay-score-min 1.5 \
+  --producer-overlay-target-owner any \
+  --producer-overlay-late-step 44 \
+  --producer-overlay-late-score-min 20 \
+  --producer-reranker-checkpoint /tmp/supervised_bc/producer_reranker_smoke.pt
+```
+
+Scaled reranker ablations:
+
+```bash
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_producer_reranker.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 30 \
+  --seat-mode all \
+  --steps-min 1 \
+  --steps-max 160 \
+  --max-candidates-per-state 16 \
+  --positive-top-k 1 \
+  --score-min 1.5 \
+  --max-records 8000 \
+  --train-steps 3000 \
+  --records-out /tmp/supervised_bc/producer_reranker_s30_8k_records.pkl \
+  --reranker-out /tmp/supervised_bc/producer_reranker_s30_8k.pt \
+  --summary-out /tmp/supervised_bc/producer_reranker_s30_8k_summary.json
+
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_producer_reranker.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 80 \
+  --seat-mode winner \
+  --winner-name-filter Isaiah \
+  --steps-min 1 \
+  --steps-max 160 \
+  --max-candidates-per-state 16 \
+  --positive-top-k 1 \
+  --score-min 1.5 \
+  --max-records 8000 \
+  --train-steps 3000 \
+  --records-out /tmp/supervised_bc/producer_reranker_isaiah_winner_s80_8k_records.pkl \
+  --reranker-out /tmp/supervised_bc/producer_reranker_isaiah_winner_s80_8k.pt \
+  --summary-out /tmp/supervised_bc/producer_reranker_isaiah_winner_s80_8k_summary.json
+```
+
+Retention-quality reranker slice. This uses the same good-play replay metrics as
+the replay BC filter, then emits Producer-candidate ranking records only from
+recent-capture states in low-lost-cap winning seats. Result: strong offline
+ranking and Zach `7/8`, but Ajay stayed `0/8`, so this is a diagnostic data path
+rather than a promotion candidate.
+
+```bash
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_producer_reranker.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 120 \
+  --seat-mode winner \
+  --min-replay-score 7.0 \
+  --max-lost-cap 0.45 \
+  --min-median-hold 20 \
+  --min-cap-attack 0.30 \
+  --min-planets50 5 \
+  --steps-min 16 \
+  --steps-max 180 \
+  --state-recent-capture-window 40 \
+  --max-candidates-per-state 12 \
+  --positive-top-k 1 \
+  --score-min 1.5 \
+  --max-records 3000 \
+  --train-steps 1500 \
+  --records-out /tmp/supervised_bc/producer_reranker_retention_winner_s120_3k_records.pkl \
+  --reranker-out /tmp/supervised_bc/producer_reranker_retention_winner_s120_3k.pt \
+  --summary-out /tmp/supervised_bc/producer_reranker_retention_winner_s120_3k_summary.json
+
+CUDA_VISIBLE_DEVICES="" PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/eval.py \
+  --checkpoint /tmp/supervised_bc/supervised_opening50_targettop3_synthdef500_shiptarget_500_reinf.pt \
+  --opponent opponents/candidate_ajay_1200.py \
+  --games 8 \
+  --target-decode \
+  --reinforce-target-bias -1.0 \
+  --producer-overlay \
+  --producer-overlay-max-moves 2 \
+  --producer-overlay-score-min 1.5 \
+  --producer-overlay-target-owner any \
+  --producer-reranker-checkpoint /tmp/supervised_bc/producer_reranker_retention_winner_s120_3k.pt
+```
+
+Score-feature ablation. `producer_score_tanh` is now appended to new reranker
+feature vectors, while eval truncates/pads features so older reranker
+checkpoints remain loadable. This ablation did not help Ajay, but keep the
+feature for future candidate-ranking experiments.
+
+```bash
+PYTHONPATH=.:orbit_wars_rl /Users/saheb/home/.venv/bin/python \
+  orbit_wars_rl/build_producer_reranker.py \
+  --replay-dir /tmp/fresh_validate \
+  --replay-dir /tmp/snowball \
+  --max-replays 120 \
+  --seat-mode winner \
+  --min-replay-score 7.0 \
+  --max-lost-cap 0.45 \
+  --min-median-hold 20 \
+  --min-cap-attack 0.30 \
+  --min-planets50 5 \
+  --steps-min 16 \
+  --steps-max 180 \
+  --state-recent-capture-window 40 \
+  --max-candidates-per-state 12 \
+  --positive-top-k 1 \
+  --score-min 1.5 \
+  --max-records 3000 \
+  --train-steps 1500 \
+  --records-out /tmp/supervised_bc/producer_reranker_retention_scorefeat_s120_3k_records.pkl \
+  --reranker-out /tmp/supervised_bc/producer_reranker_retention_scorefeat_s120_3k.pt \
+  --summary-out /tmp/supervised_bc/producer_reranker_retention_scorefeat_s120_3k_summary.json
 ```
 
 ### Full panel eval (legacy — 256 games, ~40 min/opponent on EC2; much slower on Mac CPU)

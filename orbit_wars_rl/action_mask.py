@@ -201,6 +201,169 @@ def _target_intercept_angle(src_planet, target_planet, ships: int, obs) -> float
     return float(math.atan2(py - sy, px - sx))
 
 
+def _fleet_eta_to_planet(fleet, planet) -> int | None:
+    tx, ty, tr = float(planet[2]), float(planet[3]), float(planet[4])
+    fx, fy, angle = float(fleet[2]), float(fleet[3]), float(fleet[4])
+    c, s = math.cos(angle), math.sin(angle)
+    vx, vy = tx - fx, ty - fy
+    along = vx * c + vy * s
+    perp = abs(vx * s - vy * c)
+    if along <= 0 or perp >= tr + 1.5:
+        return None
+    speed = _fleet_speed(int(fleet[6]) if len(fleet) > 6 else 1)
+    return max(1, int(math.ceil(max(0.0, along - tr) / speed)))
+
+
+def _nearest_enemy_dist_global(planet, planets, player: int) -> float:
+    enemies = [p for p in planets if int(p[1]) >= 0 and int(p[1]) != player]
+    if not enemies:
+        return float("inf")
+    px, py = float(planet[2]), float(planet[3])
+    return min(math.hypot(px - float(e[2]), py - float(e[3])) for e in enemies)
+
+
+def defensive_overlay_moves(obs: dict, player: int, existing_moves: list,
+                            garrison_floor: int = 10,
+                            min_need: int = 5,
+                            max_moves: int = 1,
+                            eligible_target_pids: set[int] | None = None,
+                            target_ages: dict[int, int] | None = None,
+                            selector: dict | None = None,
+                            selector_threshold: float = 0.5,
+                            selector_mode: str = "survive",
+                            multi_source_per_target: bool = False) -> list:
+    """Generate post-policy rear-source support moves for threatened own planets.
+
+    This mirrors the supervised synthetic-defense label rule, but keeps it
+    isolated from the learned action heads. It is intentionally conservative:
+    only rear sources may support more-forward owned targets, and already-used
+    launch sources are not reused.
+    """
+    if max_moves <= 0:
+        return []
+
+    planets = obs.get("planets") or []
+    own_planets = [p for p in planets if int(p[1]) == player]
+    if len(own_planets) < 2:
+        return []
+
+    used_sources = {int(m[0]) for m in existing_moves if isinstance(m, list) and len(m) >= 1}
+    overlay: list[list] = []
+    for target in own_planets:
+        if len(overlay) >= max_moves:
+            break
+        target_pid = int(target[0])
+        if target_pid in used_sources:
+            continue
+        if eligible_target_pids is not None and target_pid not in eligible_target_pids:
+            continue
+
+        inbound_ships = 0
+        min_eta: int | None = None
+        for fleet in obs.get("fleets") or []:
+            if int(fleet[1]) == player:
+                continue
+            eta = _fleet_eta_to_planet(fleet, target)
+            if eta is None:
+                continue
+            inbound_ships += int(fleet[6]) if len(fleet) > 6 else 0
+            min_eta = eta if min_eta is None else min(min_eta, eta)
+        if inbound_ships <= 0 or min_eta is None:
+            continue
+
+        projected_garrison = float(target[5]) + float(target[6]) * min_eta
+        need = int(math.ceil(inbound_ships + min_need - projected_garrison))
+        if need < min_need:
+            continue
+
+        target_enemy_dist = _nearest_enemy_dist_global(target, planets, player)
+        candidates = []
+        for src in own_planets:
+            src_pid = int(src[0])
+            if src_pid == target_pid or src_pid in used_sources:
+                continue
+            sendable = int(src[5]) - int(garrison_floor)
+            if sendable < min_need:
+                continue
+            source_enemy_dist = _nearest_enemy_dist_global(src, planets, player)
+            if source_enemy_dist <= target_enemy_dist:
+                continue
+            source_target_dist = math.hypot(float(src[2]) - float(target[2]), float(src[3]) - float(target[3]))
+            candidate_ships = min(sendable, max(need, min_need))
+            support_gap = float(src[4]) + _LAUNCH_OFFSET + float(target[4])
+            support_eta = max(1, int(math.ceil(
+                max(0.0, source_target_dist - support_gap) / max(_fleet_speed(candidate_ships), 1e-6)
+            )))
+            candidates.append((sendable, source_enemy_dist, source_target_dist, support_eta, src))
+
+        if not candidates:
+            continue
+
+        if multi_source_per_target:
+            candidates.sort(key=lambda x: (x[3] > min_eta, x[3], -x[0]))
+        else:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+
+        remaining_need = max(need, min_need)
+        for sendable, source_enemy_dist, source_target_dist, support_eta, src in candidates:
+            if len(overlay) >= max_moves:
+                break
+            ships = min(sendable, max(remaining_need, min_need))
+            if selector is not None:
+                target_age = 0.0 if target_ages is None else float(target_ages.get(target_pid, 0))
+                eta_margin = float(min_eta - support_eta)
+                features = torch.tensor([
+                    float(obs.get("step", 0)),
+                    float(len(own_planets)),
+                    target_age,
+                    float(target[5]),
+                    float(target[6]),
+                    float(inbound_ships),
+                    float(min_eta),
+                    float(projected_garrison),
+                    float(need),
+                    float(src[5]),
+                    float(sendable),
+                    float(need) / max(float(sendable), 1.0),
+                    float(target_enemy_dist),
+                    float(source_enemy_dist),
+                    float(source_enemy_dist - target_enemy_dist),
+                    float(source_target_dist),
+                    float(support_eta),
+                    eta_margin,
+                    float(support_eta <= min_eta),
+                ], dtype=torch.float32)
+                mean = selector["mean"].float()
+                std = selector["std"].float().clamp(min=1e-6)
+                weights = selector["weights"].float()
+                bias = selector["bias"].float()
+                if features.numel() > mean.numel():
+                    features = features[:mean.numel()]
+                elif features.numel() < mean.numel():
+                    pad = torch.zeros(mean.numel() - features.numel(), dtype=features.dtype)
+                    features = torch.cat([features, pad])
+                raw_score = ((features - mean) / std * weights).sum() + bias
+                if selector.get("activation", "sigmoid") == "linear":
+                    score = raw_score.item()
+                else:
+                    score = torch.sigmoid(raw_score).item()
+                if selector_mode == "risk":
+                    if score > selector_threshold:
+                        continue
+                elif score < selector_threshold:
+                    continue
+            angle = _target_intercept_angle(src, target, ships, obs)
+            overlay.append([int(src[0]), angle, int(ships)])
+            used_sources.add(int(src[0]))
+            remaining_need -= ships
+            if not multi_source_per_target or remaining_need <= 0:
+                break
+        if len(overlay) >= max_moves:
+            break
+
+    return overlay
+
+
 def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, obs, player,
                                fire_threshold=0.5, sample: bool = False,
                                ship_bin_mode: str = "absolute",
@@ -210,6 +373,19 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
                                reinforce_gate_min_planets: int = 0,
                                reinforce_forward_only: bool = False,
                                reinforce_garrison_floor: float = 0.0,
+                               threat_logits=None,
+                               threat_target_bias: float = 0.0,
+                               reinforce_target_bias: float = 0.0,
+                               defense_overlay: bool = False,
+                               defense_overlay_garrison_floor: int = 10,
+                               defense_overlay_min_need: int = 5,
+                               defense_overlay_max_moves: int = 1,
+                               defense_overlay_eligible_target_pids: set[int] | None = None,
+                               defense_overlay_target_ages: dict[int, int] | None = None,
+                               defense_overlay_selector: dict | None = None,
+                               defense_overlay_selector_threshold: float = 0.5,
+                               defense_overlay_selector_mode: str = "survive",
+                               defense_overlay_multi_source_per_target: bool = False,
                                veto_stats: dict = None):
     """Convert policy outputs to actions using target planet logits for aiming.
 
@@ -227,6 +403,20 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
     owned_indices = masks["owned_indices"].cpu().numpy()
     max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
     target_logits = target_logits.clone()
+    if allow_reinforce and reinforce_target_bias != 0.0:
+        for tidx, tgt in enumerate(planets[:target_logits.shape[-1]]):
+            if int(tgt[1]) == player:
+                target_logits[:, :, tidx] += float(reinforce_target_bias)
+    if allow_reinforce and threat_logits is not None and threat_target_bias != 0.0:
+        threat = torch.sigmoid(threat_logits).detach().cpu().squeeze(0)
+        planet_idx_to_threat = {}
+        for slot in range(min(masks["owned_count"], len(threat))):
+            pidx = int(owned_indices[slot])
+            if pidx < len(planets) and int(planets[pidx][1]) == player:
+                planet_idx_to_threat[pidx] = float(threat[slot])
+        for tidx, risk in planet_idx_to_threat.items():
+            if tidx < target_logits.shape[-1]:
+                target_logits[:, :, tidx] += float(threat_target_bias) * risk
     # Pre-discipline-mask copy: lets veto_stats see what the policy WANTS (unmasked argmax)
     # vs what the masks allow — i.e. which mask is actually binding on intended reinforces.
     _pre_mask_logits = target_logits.detach().clone() if veto_stats is not None else None
@@ -367,6 +557,22 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
                     veto_stats["blocked_floor"] = veto_stats.get("blocked_floor", 0) + 1
                 else:
                     veto_stats["reinforce_allowed"] = veto_stats.get("reinforce_allowed", 0) + 1
+
+    if defense_overlay and len(moves) < max_moves:
+        moves.extend(defensive_overlay_moves(
+            obs,
+            player,
+            moves,
+            garrison_floor=defense_overlay_garrison_floor,
+            min_need=defense_overlay_min_need,
+            max_moves=min(defense_overlay_max_moves, max_moves - len(moves)),
+            eligible_target_pids=defense_overlay_eligible_target_pids,
+            target_ages=defense_overlay_target_ages,
+            selector=defense_overlay_selector,
+            selector_threshold=defense_overlay_selector_threshold,
+            selector_mode=defense_overlay_selector_mode,
+            multi_source_per_target=defense_overlay_multi_source_per_target,
+        ))
 
     return moves
 

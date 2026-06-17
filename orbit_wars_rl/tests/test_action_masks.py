@@ -18,6 +18,7 @@ from action_mask import (
     compute_action_masks,
     _apply_target_sanity_penalty_from_candidates,
     actions_from_target_policy,
+    defensive_overlay_moves,
     NUM_ANGLE_BINS,
     ANGLE_BIN_WIDTH,
     CENTER,
@@ -211,6 +212,216 @@ def test_target_sanity_penalty_demotes_dominated_same_source_target():
     print("test_target_sanity_penalty_demotes_dominated_same_source_target: PASS")
 
 
+def test_defensive_overlay_emits_rear_support_for_eligible_threat():
+    planets = [
+        [0, 0, 20.0, 20.0, 1.5, 60, 2],   # rear source
+        [1, 0, 50.0, 20.0, 1.5, 4, 2],    # threatened target
+        [2, 1, 80.0, 20.0, 1.5, 20, 2],   # enemy
+    ]
+    fleets = [[9, 1, 40.0, 20.0, 0.0, 2, 30]]
+    obs = _make_obs(planets, fleets)
+
+    moves = defensive_overlay_moves(
+        obs,
+        player=0,
+        existing_moves=[],
+        garrison_floor=10,
+        min_need=5,
+        max_moves=1,
+        eligible_target_pids={1},
+    )
+
+    assert len(moves) == 1
+    assert int(moves[0][0]) == 0
+    assert int(moves[0][2]) >= 5
+    blocked = defensive_overlay_moves(
+        obs,
+        player=0,
+        existing_moves=[],
+        garrison_floor=10,
+        min_need=5,
+        max_moves=1,
+        eligible_target_pids={0},
+    )
+    assert blocked == []
+    print("test_defensive_overlay_emits_rear_support_for_eligible_threat: PASS")
+
+
+def test_defensive_overlay_multi_source_same_target():
+    planets = [
+        [0, 0, 15.0, 20.0, 1.5, 40, 2],
+        [1, 0, 30.0, 20.0, 1.5, 40, 2],
+        [2, 0, 50.0, 20.0, 1.5, 4, 2],
+        [3, 1, 80.0, 20.0, 1.5, 20, 2],
+    ]
+    fleets = [[9, 1, 40.0, 20.0, 0.0, 3, 60]]
+    obs = _make_obs(planets, fleets)
+
+    one_source = defensive_overlay_moves(
+        obs,
+        player=0,
+        existing_moves=[],
+        garrison_floor=10,
+        min_need=5,
+        max_moves=2,
+        eligible_target_pids={2},
+    )
+    multi_source = defensive_overlay_moves(
+        obs,
+        player=0,
+        existing_moves=[],
+        garrison_floor=10,
+        min_need=5,
+        max_moves=2,
+        eligible_target_pids={2},
+        multi_source_per_target=True,
+    )
+
+    assert len(one_source) == 1
+    assert len(multi_source) == 2
+    assert {int(m[0]) for m in multi_source} == {0, 1}
+    print("test_defensive_overlay_multi_source_same_target: PASS")
+
+
+def test_defensive_overlay_selector_filters_candidate():
+    planets = [
+        [0, 0, 20.0, 20.0, 1.5, 60, 2],
+        [1, 0, 50.0, 20.0, 1.5, 4, 2],
+        [2, 1, 80.0, 20.0, 1.5, 20, 2],
+    ]
+    fleets = [[9, 1, 40.0, 20.0, 0.0, 2, 30]]
+    obs = _make_obs(planets, fleets)
+    selector = {
+        "mean": torch.zeros(16),
+        "std": torch.ones(16),
+        "weights": torch.zeros(16),
+        "bias": torch.tensor(-10.0),
+    }
+    blocked = defensive_overlay_moves(
+        obs,
+        player=0,
+        existing_moves=[],
+        garrison_floor=10,
+        min_need=5,
+        max_moves=1,
+        eligible_target_pids={1},
+        target_ages={1: 3},
+        selector=selector,
+        selector_threshold=0.5,
+    )
+    selector["bias"] = torch.tensor(10.0)
+    allowed = defensive_overlay_moves(
+        obs,
+        player=0,
+        existing_moves=[],
+        garrison_floor=10,
+        min_need=5,
+        max_moves=1,
+        eligible_target_pids={1},
+        target_ages={1: 3},
+        selector=selector,
+        selector_threshold=0.5,
+    )
+
+    assert blocked == []
+    assert len(allowed) == 1
+    print("test_defensive_overlay_selector_filters_candidate: PASS")
+
+
+def test_defensive_overlay_selector_risk_mode_inverts_gate():
+    planets = [
+        [0, 0, 20.0, 20.0, 1.5, 60, 2],
+        [1, 0, 50.0, 20.0, 1.5, 4, 2],
+        [2, 1, 80.0, 20.0, 1.5, 20, 2],
+    ]
+    fleets = [[9, 1, 40.0, 20.0, 0.0, 2, 30]]
+    obs = _make_obs(planets, fleets)
+    selector = {
+        "mean": torch.zeros(16),
+        "std": torch.ones(16),
+        "weights": torch.zeros(16),
+        "bias": torch.tensor(-10.0),
+    }
+
+    risk_allowed = defensive_overlay_moves(
+        obs,
+        player=0,
+        existing_moves=[],
+        garrison_floor=10,
+        min_need=5,
+        max_moves=1,
+        eligible_target_pids={1},
+        target_ages={1: 3},
+        selector=selector,
+        selector_threshold=0.5,
+        selector_mode="risk",
+    )
+    selector["bias"] = torch.tensor(10.0)
+    risk_blocked = defensive_overlay_moves(
+        obs,
+        player=0,
+        existing_moves=[],
+        garrison_floor=10,
+        min_need=5,
+        max_moves=1,
+        eligible_target_pids={1},
+        target_ages={1: 3},
+        selector=selector,
+        selector_threshold=0.5,
+        selector_mode="risk",
+    )
+
+    assert len(risk_allowed) == 1
+    assert risk_blocked == []
+    print("test_defensive_overlay_selector_risk_mode_inverts_gate: PASS")
+
+
+def test_defensive_overlay_linear_selector_threshold():
+    planets = [
+        [0, 0, 20.0, 20.0, 1.5, 60, 2],
+        [1, 0, 50.0, 20.0, 1.5, 4, 2],
+        [2, 1, 80.0, 20.0, 1.5, 20, 2],
+    ]
+    fleets = [[9, 1, 40.0, 20.0, 0.0, 2, 30]]
+    obs = _make_obs(planets, fleets)
+    selector = {
+        "mean": torch.zeros(16),
+        "std": torch.ones(16),
+        "weights": torch.zeros(16),
+        "bias": torch.tensor(2.0),
+        "activation": "linear",
+    }
+
+    blocked = defensive_overlay_moves(
+        obs,
+        player=0,
+        existing_moves=[],
+        garrison_floor=10,
+        min_need=5,
+        max_moves=1,
+        eligible_target_pids={1},
+        target_ages={1: 3},
+        selector=selector,
+        selector_threshold=3.0,
+    )
+    allowed = defensive_overlay_moves(
+        obs,
+        player=0,
+        existing_moves=[],
+        garrison_floor=10,
+        min_need=5,
+        max_moves=1,
+        eligible_target_pids={1},
+        target_ages={1: 3},
+        selector=selector,
+        selector_threshold=1.0,
+    )
+
+    assert blocked == []
+    assert len(allowed) == 1
+    print("test_defensive_overlay_linear_selector_threshold: PASS")
+
+
 if __name__ == "__main__":
     print("Running action mask tests...\n")
     test_fire_mask_requires_ships()
@@ -222,4 +433,9 @@ if __name__ == "__main__":
     test_interior_planet_all_angles_legal()
     test_target_decode_masks_own_planet_before_argmax()
     test_target_sanity_penalty_demotes_dominated_same_source_target()
+    test_defensive_overlay_emits_rear_support_for_eligible_threat()
+    test_defensive_overlay_multi_source_same_target()
+    test_defensive_overlay_selector_filters_candidate()
+    test_defensive_overlay_selector_risk_mode_inverts_gate()
+    test_defensive_overlay_linear_selector_threshold()
     print("\nAll action mask tests passed!")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 from statistics import mean
@@ -14,6 +15,133 @@ from config import Config
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH
 from features import extract_features, _ETA_PROBE_SPEED
 from action_mask import compute_action_masks, actions_from_policy, actions_from_target_policy
+
+
+def _producer_candidate_overlay_moves(
+    obs: dict,
+    player: int,
+    existing_moves: list,
+    *,
+    max_moves: int,
+    score_min: float,
+    target_owner: str,
+    reranker: dict | None = None,
+    trace: list | None = None,
+    trace_top_k: int = 5,
+) -> list:
+    if max_moves <= 0:
+        return []
+    try:
+        from orbit_wars_rl.analyze_producer_action_ranking import _enumerate_attack_candidates
+        from orbit_wars_rl.action_mask import _target_intercept_angle
+        from orbit_wars_rl.build_producer_reranker import _candidate_features
+    except Exception:
+        return []
+
+    def owner_ok(candidate) -> bool:
+        if target_owner == "any":
+            return True
+        if target_owner == "own":
+            return bool(candidate.target_is_mine)
+        if target_owner == "not-own":
+            return not bool(candidate.target_is_mine)
+        if target_owner == "neutral":
+            return bool(candidate.target_is_neutral)
+        if target_owner == "enemy":
+            return (not bool(candidate.target_is_mine)) and (not bool(candidate.target_is_neutral))
+        return False
+
+    used_sources = {int(m[0]) for m in existing_moves if isinstance(m, list) and len(m) >= 1}
+    planets = obs.get("planets") or []
+    out = []
+    try:
+        candidates = _enumerate_attack_candidates(obs)["candidates"]
+    except Exception:
+        return []
+
+    ranked = []
+    filter_stats = {
+        "raw_candidates": len(candidates),
+        "kept": 0,
+        "invalid": 0,
+        "below_score": 0,
+        "used_source": 0,
+        "owner": 0,
+        "bad_index": 0,
+        "zero_ships": 0,
+        "reranker_error": 0,
+    }
+    for raw_rank, candidate in enumerate(candidates):
+        if not candidate.valid or candidate.score < score_min:
+            if not candidate.valid:
+                filter_stats["invalid"] += 1
+            else:
+                filter_stats["below_score"] += 1
+            continue
+        if int(candidate.source_id) in used_sources:
+            filter_stats["used_source"] += 1
+            continue
+        if not owner_ok(candidate):
+            filter_stats["owner"] += 1
+            continue
+        if int(candidate.source_idx) >= len(planets) or int(candidate.target_idx) >= len(planets):
+            filter_stats["bad_index"] += 1
+            continue
+        if int(candidate.ships) <= 0:
+            filter_stats["zero_ships"] += 1
+            continue
+        score = float(candidate.score)
+        if reranker is not None:
+            try:
+                x = torch.tensor(_candidate_features(obs, candidate), dtype=torch.float32)
+                n = int(reranker["weights"].numel())
+                if x.numel() < n:
+                    x = torch.cat([x, torch.zeros(n - x.numel(), dtype=x.dtype)])
+                elif x.numel() > n:
+                    x = x[:n]
+                x = (x - reranker["mean"][:n]) / reranker["std"][:n].clamp(min=1e-6)
+                score = float(torch.sigmoid((x * reranker["weights"]).sum() + reranker["bias"]).item())
+            except Exception:
+                filter_stats["reranker_error"] += 1
+                continue
+        ranked.append((score, raw_rank, candidate))
+        filter_stats["kept"] += 1
+    ranked.sort(key=lambda item: item[0], reverse=True)
+
+    selected = []
+    for score, raw_rank, candidate in ranked:
+        if len(out) >= max_moves:
+            break
+        ships = int(candidate.ships)
+        src = planets[int(candidate.source_idx)]
+        target = planets[int(candidate.target_idx)]
+        angle = _target_intercept_angle(src, target, ships, obs)
+        move = [int(candidate.source_id), float(angle), ships]
+        out.append(move)
+        used_sources.add(int(candidate.source_id))
+        selected.append({
+            "rerank_score": score,
+            "producer_rank": raw_rank,
+            "move": move,
+            "candidate": candidate.to_dict(),
+        })
+    if trace is not None and ranked:
+        trace.append({
+            "step": int(obs.get("step", 0)),
+            "player": int(player),
+            "existing_moves": existing_moves,
+            "filter_stats": filter_stats,
+            "selected": selected,
+            "top": [
+                {
+                    "rerank_score": float(score),
+                    "producer_rank": int(raw_rank),
+                    "candidate": candidate.to_dict(),
+                }
+                for score, raw_rank, candidate in ranked[:max(0, trace_top_k)]
+            ],
+        })
+    return out
 
 
 def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
@@ -64,6 +192,7 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     # Detect value head version from fc1 input width (old=D, new=2D).
     if "value_fc1.weight" in sd:
         cfg.model.value_head_in = int(sd["value_fc1.weight"].shape[1])
+    cfg.model.use_threat_head = "threat_head.weight" in sd
 
     action_decode = str(ckpt_cfg.get("action_decode", "angle"))
     # Reinforcement: eval must mask targets the SAME way the checkpoint was trained.
@@ -78,6 +207,28 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                    target_sanity_penalty: float = 0.0,
                    reserve_frac: float = 0.0,
                    allow_reinforce: bool = False,
+                   threat_target_bias: float = 0.0,
+                   reinforce_target_bias: float = 0.0,
+                   defense_overlay: bool = False,
+                   defense_overlay_recent_capture_window: int = 0,
+                   defense_overlay_garrison_floor: int = 10,
+                   defense_overlay_min_need: int = 5,
+                   defense_overlay_max_moves: int = 1,
+                   defense_overlay_selector: dict | None = None,
+                   defense_overlay_selector_threshold: float = 0.5,
+                   defense_overlay_selector_mode: str = "survive",
+                   defense_overlay_multi_source_per_target: bool = False,
+                   producer_overlay: bool = False,
+                   producer_overlay_max_moves: int = 1,
+                   producer_overlay_score_min: float = 1.5,
+                   producer_overlay_target_owner: str = "any",
+                   producer_overlay_late_step: int = 0,
+                   producer_overlay_late_score_min: float | None = None,
+                   producer_overlay_late_target_owner: str = "",
+                   producer_reranker: dict | None = None,
+                   producer_overlay_trace: list | None = None,
+                   producer_overlay_trace_top_k: int = 5,
+                   trace_context: dict | None = None,
                    veto_stats: dict = None):
     """Return a kaggle_environments-compatible agent function wrapping the model.
 
@@ -86,8 +237,13 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
     degenerate (e.g. 1-ship-fleet trap).
     """
     model.eval()
+    prev_owners: dict[int, int] = {}
+    capture_steps: dict[int, int] = {}
+    last_step = -1
+    last_player = None
 
     def agent_fn(obs):
+        nonlocal prev_owners, capture_steps, last_step, last_player
         # obs may be a dict or an Observation namedtuple depending on caller
         if not isinstance(obs, dict):
             obs = {
@@ -104,6 +260,32 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
             }
 
         player = obs["player"]
+        step = int(obs.get("step", 0))
+        if step <= last_step or last_player != player:
+            prev_owners = {}
+            capture_steps = {}
+        for p in obs.get("planets") or []:
+            pid = int(p[0])
+            owner = int(p[1])
+            was = prev_owners.get(pid)
+            if was is not None and was != player and owner == player:
+                capture_steps[pid] = step
+            prev_owners[pid] = owner
+        last_step = step
+        last_player = player
+
+        eligible_defense_targets = None
+        defense_target_ages = None
+        if defense_overlay and defense_overlay_recent_capture_window > 0:
+            eligible_defense_targets = {
+                pid for pid, cap_step in capture_steps.items()
+                if 0 <= step - cap_step <= defense_overlay_recent_capture_window
+            }
+            defense_target_ages = {
+                pid: step - cap_step
+                for pid, cap_step in capture_steps.items()
+                if 0 <= step - cap_step <= defense_overlay_recent_capture_window
+            }
         features = extract_features(obs, player, num_players=2)
         masks = compute_action_masks(obs, player)
 
@@ -125,7 +307,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
 
         action_fn = actions_from_target_policy if target_decode else actions_from_policy
         if target_decode:
-            return action_fn(
+            moves = action_fn(
                 outputs["fire_logits"].cpu(),
                 outputs["target_logits"].cpu(),
                 outputs["ship_logits"].cpu(),
@@ -140,8 +322,54 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 reinforce_gate_min_planets=getattr(model, "reinforce_gate_min_planets", 0),
                 reinforce_forward_only=getattr(model, "reinforce_forward_only", False),
                 reinforce_garrison_floor=getattr(model, "reinforce_garrison_floor", 0.0),
+                threat_logits=outputs.get("threat_logits"),
+                threat_target_bias=threat_target_bias,
+                reinforce_target_bias=reinforce_target_bias,
+                defense_overlay=defense_overlay,
+                defense_overlay_garrison_floor=defense_overlay_garrison_floor,
+                defense_overlay_min_need=defense_overlay_min_need,
+                defense_overlay_max_moves=defense_overlay_max_moves,
+                defense_overlay_eligible_target_pids=eligible_defense_targets,
+                defense_overlay_target_ages=defense_target_ages,
+                defense_overlay_selector=defense_overlay_selector,
+                defense_overlay_selector_threshold=defense_overlay_selector_threshold,
+                defense_overlay_selector_mode=defense_overlay_selector_mode,
+                defense_overlay_multi_source_per_target=defense_overlay_multi_source_per_target,
                 veto_stats=veto_stats,
             )
+            if producer_overlay:
+                before_overlay = [list(m) for m in moves]
+                overlay_trace = [] if producer_overlay_trace is not None else None
+                step_score_min = producer_overlay_score_min
+                step_target_owner = producer_overlay_target_owner
+                if producer_overlay_late_step > 0 and step >= producer_overlay_late_step:
+                    if producer_overlay_late_score_min is not None:
+                        step_score_min = producer_overlay_late_score_min
+                    if producer_overlay_late_target_owner:
+                        step_target_owner = producer_overlay_late_target_owner
+                extra_moves = _producer_candidate_overlay_moves(
+                    obs,
+                    player,
+                    moves,
+                    max_moves=min(producer_overlay_max_moves, max(0, 8 - len(moves))),
+                    score_min=step_score_min,
+                    target_owner=step_target_owner,
+                    reranker=producer_reranker,
+                    trace=overlay_trace,
+                    trace_top_k=producer_overlay_trace_top_k,
+                )
+                moves.extend(extra_moves)
+                if producer_overlay_trace is not None and overlay_trace:
+                    ctx = dict(trace_context or {})
+                    for entry in overlay_trace:
+                        entry.update(ctx)
+                        entry["model_moves_before_overlay"] = before_overlay
+                        entry["overlay_moves"] = extra_moves
+                        entry["final_moves"] = [list(m) for m in moves]
+                        entry["effective_score_min"] = step_score_min
+                        entry["effective_target_owner"] = step_target_owner
+                        producer_overlay_trace.append(entry)
+            return moves
 
         raise NotImplementedError(
             "angle-decode path removed (angle head deleted); Phase 1 checkpoints "
@@ -462,6 +690,27 @@ def evaluate_against_baseline(
     ship_bin_mode: str = "absolute",
     target_decode: bool = False,
     target_sanity_penalty: float = 0.0,
+    threat_target_bias: float = 0.0,
+    reinforce_target_bias: float = 0.0,
+    defense_overlay: bool = False,
+    defense_overlay_recent_capture_window: int = 0,
+    defense_overlay_garrison_floor: int = 10,
+    defense_overlay_min_need: int = 5,
+    defense_overlay_max_moves: int = 1,
+    defense_overlay_selector: dict | None = None,
+    defense_overlay_selector_threshold: float = 0.5,
+    defense_overlay_selector_mode: str = "survive",
+    defense_overlay_multi_source_per_target: bool = False,
+    producer_overlay: bool = False,
+    producer_overlay_max_moves: int = 1,
+    producer_overlay_score_min: float = 1.5,
+    producer_overlay_target_owner: str = "any",
+    producer_overlay_late_step: int = 0,
+    producer_overlay_late_score_min: float | None = None,
+    producer_overlay_late_target_owner: str = "",
+    producer_reranker: dict | None = None,
+    producer_overlay_trace: list | None = None,
+    producer_overlay_trace_top_k: int = 5,
 ) -> dict:
     """Evaluate trained policy against a baseline using kaggle_environments.
 
@@ -471,9 +720,32 @@ def evaluate_against_baseline(
     """
     from kaggle_environments import make
 
+    trace_context = {}
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
                               ship_bin_mode=ship_bin_mode, target_decode=target_decode,
-                              target_sanity_penalty=target_sanity_penalty)
+                              target_sanity_penalty=target_sanity_penalty,
+                              threat_target_bias=threat_target_bias,
+                              reinforce_target_bias=reinforce_target_bias,
+                              defense_overlay=defense_overlay,
+                              defense_overlay_recent_capture_window=defense_overlay_recent_capture_window,
+                              defense_overlay_garrison_floor=defense_overlay_garrison_floor,
+                              defense_overlay_min_need=defense_overlay_min_need,
+                              defense_overlay_max_moves=defense_overlay_max_moves,
+                              defense_overlay_selector=defense_overlay_selector,
+                              defense_overlay_selector_threshold=defense_overlay_selector_threshold,
+                              defense_overlay_selector_mode=defense_overlay_selector_mode,
+                              defense_overlay_multi_source_per_target=defense_overlay_multi_source_per_target,
+                              producer_overlay=producer_overlay,
+                              producer_overlay_max_moves=producer_overlay_max_moves,
+                              producer_overlay_score_min=producer_overlay_score_min,
+                              producer_overlay_target_owner=producer_overlay_target_owner,
+                              producer_overlay_late_step=producer_overlay_late_step,
+                              producer_overlay_late_score_min=producer_overlay_late_score_min,
+                              producer_overlay_late_target_owner=producer_overlay_late_target_owner,
+                              producer_reranker=producer_reranker,
+                              producer_overlay_trace=producer_overlay_trace,
+                              producer_overlay_trace_top_k=producer_overlay_trace_top_k,
+                              trace_context=trace_context)
     opponents = [opponent] * (num_players - 1)
     agents = [agent_fn] + opponents
 
@@ -483,6 +755,8 @@ def evaluate_against_baseline(
     results = []
 
     for seed in range(seed_start, seed_start + num_games):
+        trace_context.clear()
+        trace_context.update({"seed": seed, "mode": "quick"})
         env = make("orbit_wars", configuration={"seed": seed}, debug=False)
         env.run(agents)
         final = env.steps[-1]
@@ -527,6 +801,27 @@ def evaluate_panel(
     ship_bin_mode: str = "absolute",
     target_decode: bool = False,
     target_sanity_penalty: float = 0.0,
+    threat_target_bias: float = 0.0,
+    reinforce_target_bias: float = 0.0,
+    defense_overlay: bool = False,
+    defense_overlay_recent_capture_window: int = 0,
+    defense_overlay_garrison_floor: int = 10,
+    defense_overlay_min_need: int = 5,
+    defense_overlay_max_moves: int = 1,
+    defense_overlay_selector: dict | None = None,
+    defense_overlay_selector_threshold: float = 0.5,
+    defense_overlay_selector_mode: str = "survive",
+    defense_overlay_multi_source_per_target: bool = False,
+    producer_overlay: bool = False,
+    producer_overlay_max_moves: int = 1,
+    producer_overlay_score_min: float = 1.5,
+    producer_overlay_target_owner: str = "any",
+    producer_overlay_late_step: int = 0,
+    producer_overlay_late_score_min: float | None = None,
+    producer_overlay_late_target_owner: str = "",
+    producer_reranker: dict | None = None,
+    producer_overlay_trace: list | None = None,
+    producer_overlay_trace_top_k: int = 5,
 ) -> dict:
     """Stratified eval over the 128-seed community panel, playing both seats.
 
@@ -538,9 +833,32 @@ def evaluate_panel(
     from kaggle_environments import make
     from eval_panel import BY_ARCHETYPE
 
+    trace_context = {}
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
                               ship_bin_mode=ship_bin_mode, target_decode=target_decode,
-                              target_sanity_penalty=target_sanity_penalty)
+                              target_sanity_penalty=target_sanity_penalty,
+                              threat_target_bias=threat_target_bias,
+                              reinforce_target_bias=reinforce_target_bias,
+                              defense_overlay=defense_overlay,
+                              defense_overlay_recent_capture_window=defense_overlay_recent_capture_window,
+                              defense_overlay_garrison_floor=defense_overlay_garrison_floor,
+                              defense_overlay_min_need=defense_overlay_min_need,
+                              defense_overlay_max_moves=defense_overlay_max_moves,
+                              defense_overlay_selector=defense_overlay_selector,
+                              defense_overlay_selector_threshold=defense_overlay_selector_threshold,
+                              defense_overlay_selector_mode=defense_overlay_selector_mode,
+                              defense_overlay_multi_source_per_target=defense_overlay_multi_source_per_target,
+                              producer_overlay=producer_overlay,
+                              producer_overlay_max_moves=producer_overlay_max_moves,
+                              producer_overlay_score_min=producer_overlay_score_min,
+                              producer_overlay_target_owner=producer_overlay_target_owner,
+                              producer_overlay_late_step=producer_overlay_late_step,
+                              producer_overlay_late_score_min=producer_overlay_late_score_min,
+                              producer_overlay_late_target_owner=producer_overlay_late_target_owner,
+                              producer_reranker=producer_reranker,
+                              producer_overlay_trace=producer_overlay_trace,
+                              producer_overlay_trace_top_k=producer_overlay_trace_top_k,
+                              trace_context=trace_context)
 
     per_arch: dict[str, dict] = {arch: {"wins": 0, "total": 0,
                                         "wins_seat0": 0, "wins_seat1": 0,
@@ -556,6 +874,13 @@ def evaluate_panel(
     for archetype, seeds in BY_ARCHETYPE.items():
         for seed in seeds:
             for my_seat in (0, 1):
+                trace_context.clear()
+                trace_context.update({
+                    "seed": seed,
+                    "my_seat": my_seat,
+                    "archetype": archetype,
+                    "mode": "panel",
+                })
                 agents = [agent_fn, opponent] if my_seat == 0 else [opponent, agent_fn]
                 env = make("orbit_wars", configuration={"seed": seed}, debug=False)
                 env.run(agents)
@@ -633,9 +958,30 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         panel: bool = False, sample: bool = False,
                         target_decode: bool = False,
                         target_sanity_penalty: float = 0.0,
+                        threat_target_bias: float = 0.0,
+                        reinforce_target_bias: float = 0.0,
                         reinforce_gate_min_planets: int = 0,
                         reinforce_forward_only: bool = False,
-                        reinforce_garrison_floor: float = 0.0):
+                        reinforce_garrison_floor: float = 0.0,
+                        defense_overlay: bool = False,
+                        defense_overlay_recent_capture_window: int = 0,
+                        defense_overlay_garrison_floor: int = 10,
+                        defense_overlay_min_need: int = 5,
+                        defense_overlay_max_moves: int = 1,
+                        defense_overlay_selector_checkpoint: str = "",
+                        defense_overlay_selector_threshold: float = 0.5,
+                        defense_overlay_selector_mode: str = "survive",
+                        defense_overlay_multi_source_per_target: bool = False,
+                        producer_overlay: bool = False,
+                        producer_overlay_max_moves: int = 1,
+                        producer_overlay_score_min: float = 1.5,
+                        producer_overlay_target_owner: str = "any",
+                        producer_overlay_late_step: int = 0,
+                        producer_overlay_late_score_min: float | None = None,
+                        producer_overlay_late_target_owner: str = "",
+                        producer_reranker_checkpoint: str = "",
+                        producer_overlay_trace_json: str = "",
+                        producer_overlay_trace_top_k: int = 5):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
 
@@ -671,13 +1017,48 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     if bad_missing or bad_unexpected:
         raise RuntimeError(f"Checkpoint/model mismatch: missing={bad_missing}, unexpected={bad_unexpected}")
     model.eval()
+    defense_overlay_selector = None
+    if defense_overlay_selector_checkpoint:
+        defense_overlay_selector = torch.load(defense_overlay_selector_checkpoint, map_location="cpu")
+        print(f"Loaded defense overlay selector: {defense_overlay_selector_checkpoint}")
+    producer_reranker = None
+    if producer_reranker_checkpoint:
+        producer_reranker = torch.load(producer_reranker_checkpoint, map_location="cpu")
+        print(f"Loaded Producer reranker: {producer_reranker_checkpoint}")
+    producer_overlay_trace = [] if producer_overlay_trace_json else None
 
     if panel:
         results = evaluate_panel(model, device, opponent=opponent,
                                  fire_threshold=fire_threshold, sample=sample,
                                  ship_bin_mode=cfg.model.ship_bin_mode,
                                  target_decode=target_decode,
-                                 target_sanity_penalty=target_sanity_penalty)
+                                 target_sanity_penalty=target_sanity_penalty,
+                                 threat_target_bias=threat_target_bias,
+                                 reinforce_target_bias=reinforce_target_bias,
+                                 defense_overlay=defense_overlay,
+                                 defense_overlay_recent_capture_window=defense_overlay_recent_capture_window,
+                                 defense_overlay_garrison_floor=defense_overlay_garrison_floor,
+                                 defense_overlay_min_need=defense_overlay_min_need,
+                                 defense_overlay_max_moves=defense_overlay_max_moves,
+                                 defense_overlay_selector=defense_overlay_selector,
+                                 defense_overlay_selector_threshold=defense_overlay_selector_threshold,
+                                 defense_overlay_selector_mode=defense_overlay_selector_mode,
+                                 defense_overlay_multi_source_per_target=defense_overlay_multi_source_per_target,
+                                 producer_overlay=producer_overlay,
+                                 producer_overlay_max_moves=producer_overlay_max_moves,
+                                 producer_overlay_score_min=producer_overlay_score_min,
+                                 producer_overlay_target_owner=producer_overlay_target_owner,
+                                 producer_overlay_late_step=producer_overlay_late_step,
+                                 producer_overlay_late_score_min=producer_overlay_late_score_min,
+                                 producer_overlay_late_target_owner=producer_overlay_late_target_owner,
+                                 producer_reranker=producer_reranker,
+                                 producer_overlay_trace=producer_overlay_trace,
+                                 producer_overlay_trace_top_k=producer_overlay_trace_top_k)
+        if producer_overlay_trace_json and producer_overlay_trace is not None:
+            os.makedirs(os.path.dirname(producer_overlay_trace_json) or ".", exist_ok=True)
+            with open(producer_overlay_trace_json, "w") as f:
+                json.dump(producer_overlay_trace, f, indent=2)
+            print(f"Producer overlay trace: {producer_overlay_trace_json} ({len(producer_overlay_trace)} entries)")
         print_panel_report(results, opponent)
         return results
 
@@ -692,13 +1073,60 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         fire_threshold=fire_threshold,
         sample=sample,
         target_sanity_penalty=target_sanity_penalty,
+        threat_target_bias=threat_target_bias,
+        reinforce_target_bias=reinforce_target_bias,
+        defense_overlay=defense_overlay,
+        defense_overlay_recent_capture_window=defense_overlay_recent_capture_window,
+        defense_overlay_garrison_floor=defense_overlay_garrison_floor,
+        defense_overlay_min_need=defense_overlay_min_need,
+        defense_overlay_max_moves=defense_overlay_max_moves,
+        defense_overlay_selector=defense_overlay_selector,
+        defense_overlay_selector_threshold=defense_overlay_selector_threshold,
+        defense_overlay_selector_mode=defense_overlay_selector_mode,
+        defense_overlay_multi_source_per_target=defense_overlay_multi_source_per_target,
+        producer_overlay=producer_overlay,
+        producer_overlay_max_moves=producer_overlay_max_moves,
+        producer_overlay_score_min=producer_overlay_score_min,
+        producer_overlay_target_owner=producer_overlay_target_owner,
+        producer_overlay_late_step=producer_overlay_late_step,
+        producer_overlay_late_score_min=producer_overlay_late_score_min,
+        producer_overlay_late_target_owner=producer_overlay_late_target_owner,
+        producer_reranker=producer_reranker,
+        producer_overlay_trace=producer_overlay_trace,
+        producer_overlay_trace_top_k=producer_overlay_trace_top_k,
     )
+    if producer_overlay_trace_json and producer_overlay_trace is not None:
+        os.makedirs(os.path.dirname(producer_overlay_trace_json) or ".", exist_ok=True)
+        with open(producer_overlay_trace_json, "w") as f:
+            json.dump(producer_overlay_trace, f, indent=2)
+        print(f"Producer overlay trace: {producer_overlay_trace_json} ({len(producer_overlay_trace)} entries)")
 
     print(f"Win rate vs {opponent}: {results['win_rate']:.2%}  "
           f"({results['wins']}/{results['total_games']})")
     print(f"Fire threshold: {fire_threshold}")
     print(f"Target decode: {target_decode}")
     print(f"Target sanity penalty: {target_sanity_penalty}")
+    if threat_target_bias:
+        print(f"Threat target bias: {threat_target_bias}")
+    if reinforce_target_bias:
+        print(f"Reinforce target bias: {reinforce_target_bias}")
+    if defense_overlay:
+        print(f"Defense overlay: ON recent_capture_window={defense_overlay_recent_capture_window} "
+              f"garrison_floor={defense_overlay_garrison_floor} "
+              f"min_need={defense_overlay_min_need} max_moves={defense_overlay_max_moves} "
+              f"multi_source_per_target={defense_overlay_multi_source_per_target}")
+        if defense_overlay_selector is not None:
+            print(f"Defense overlay selector threshold: {defense_overlay_selector_threshold} "
+                  f"mode={defense_overlay_selector_mode}")
+    if producer_overlay:
+        print(f"Producer overlay: ON max_moves={producer_overlay_max_moves} "
+              f"score_min={producer_overlay_score_min} target_owner={producer_overlay_target_owner}")
+        if producer_overlay_late_step > 0:
+            late_score = producer_overlay_late_score_min
+            late_owner = producer_overlay_late_target_owner or producer_overlay_target_owner
+            print(f"Producer overlay late schedule: step>={producer_overlay_late_step} "
+                  f"score_min={late_score if late_score is not None else producer_overlay_score_min} "
+                  f"target_owner={late_owner}")
     print(f"Avg material: {results['avg_material']:.1f}")
     print(_fmt_conversion(results["conversion"]))
     for r in results["results"][:5]:
@@ -731,6 +1159,14 @@ if __name__ == "__main__":
     parser.add_argument("--target-sanity-penalty", type=float, default=0.0,
                         help="Subtract this from dominated same-source target logits "
                              "before target decode.")
+    parser.add_argument("--threat-target-bias", type=float, default=0.0,
+                        help="If checkpoint has a threat head, add this times predicted "
+                             "P(owned target lost soon) to own-target logits before "
+                             "target decode.")
+    parser.add_argument("--reinforce-target-bias", type=float, default=0.0,
+                        help="Add this fixed bias to all own-target logits before "
+                             "target decode. Negative values suppress reinforcement "
+                             "without making own targets illegal.")
     parser.add_argument("--reinforce-gate-min-planets", type=int, default=0,
                         help="Reinforce-discipline parity: own targets legal only at "
                              ">= this many owned planets. MUST match training (p2rev1=3).")
@@ -740,6 +1176,52 @@ if __name__ == "__main__":
     parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0,
                         help="Reinforce-discipline parity: veto a reinforce that drains the "
                              "source below this. MUST match training (p2rev1=10).")
+    parser.add_argument("--defense-overlay", action="store_true",
+                        help="After target decode, append conservative rear-source support "
+                             "moves to threatened owned planets. This is an isolated "
+                             "supervised/synthetic-defense inference ablation.")
+    parser.add_argument("--defense-overlay-recent-capture-window", type=int, default=0,
+                        help="If >0, defense overlay only targets planets captured by "
+                             "the model within this many observed steps.")
+    parser.add_argument("--defense-overlay-garrison-floor", type=int, default=10,
+                        help="Minimum ships to leave on overlay support sources.")
+    parser.add_argument("--defense-overlay-min-need", type=int, default=5,
+                        help="Minimum projected defensive surplus for overlay support.")
+    parser.add_argument("--defense-overlay-max-moves", type=int, default=1,
+                        help="Maximum extra support moves appended per step.")
+    parser.add_argument("--defense-overlay-multi-source-per-target", action="store_true",
+                        help="Allow defense overlay to use multiple rear sources for the "
+                             "same threatened target when max_moves permits.")
+    parser.add_argument("--defense-overlay-selector-checkpoint", default="",
+                        help="Optional selector checkpoint from build_defense_selector.py; "
+                             "when set, overlay candidates below threshold are skipped.")
+    parser.add_argument("--defense-overlay-selector-threshold", type=float, default=0.5,
+                        help="Minimum selector survival score required to fire an overlay move.")
+    parser.add_argument("--defense-overlay-selector-mode", choices=["survive", "risk"],
+                        default="survive",
+                        help="'survive': fire when predicted survival >= threshold. "
+                             "'risk': fire when predicted survival <= threshold.")
+    parser.add_argument("--producer-overlay", action="store_true",
+                        help="Append high-confidence Producer planner candidates after model decode. "
+                             "Diagnostic upper bound for supervised distillation.")
+    parser.add_argument("--producer-overlay-max-moves", type=int, default=1)
+    parser.add_argument("--producer-overlay-score-min", type=float, default=1.5)
+    parser.add_argument("--producer-overlay-target-owner",
+                        choices=["any", "own", "not-own", "neutral", "enemy"], default="any")
+    parser.add_argument("--producer-overlay-late-step", type=int, default=0,
+                        help="If >0, switch Producer overlay filters at this step.")
+    parser.add_argument("--producer-overlay-late-score-min", type=float, default=None,
+                        help="Optional score_min after --producer-overlay-late-step.")
+    parser.add_argument("--producer-overlay-late-target-owner",
+                        choices=["", "any", "own", "not-own", "neutral", "enemy"], default="",
+                        help="Optional target-owner filter after --producer-overlay-late-step.")
+    parser.add_argument("--producer-reranker-checkpoint", default="",
+                        help="Optional supervised reranker checkpoint from build_producer_reranker.py. "
+                             "When set, Producer overlay candidates are ordered by reranker score.")
+    parser.add_argument("--producer-overlay-trace-json", default="",
+                        help="If set, write per-step Producer overlay candidate choices to this JSON file.")
+    parser.add_argument("--producer-overlay-trace-top-k", type=int, default=5,
+                        help="Number of reranked candidates to keep per trace entry.")
     args = parser.parse_args()
 
     cfg = Config()
@@ -755,7 +1237,28 @@ if __name__ == "__main__":
         sample=args.sample,
         target_decode=args.target_decode,
         target_sanity_penalty=args.target_sanity_penalty,
+        threat_target_bias=args.threat_target_bias,
+        reinforce_target_bias=args.reinforce_target_bias,
         reinforce_gate_min_planets=args.reinforce_gate_min_planets,
         reinforce_forward_only=args.reinforce_forward_only,
         reinforce_garrison_floor=args.reinforce_garrison_floor,
+        defense_overlay=args.defense_overlay,
+        defense_overlay_recent_capture_window=args.defense_overlay_recent_capture_window,
+        defense_overlay_garrison_floor=args.defense_overlay_garrison_floor,
+        defense_overlay_min_need=args.defense_overlay_min_need,
+        defense_overlay_max_moves=args.defense_overlay_max_moves,
+        defense_overlay_selector_checkpoint=args.defense_overlay_selector_checkpoint,
+        defense_overlay_selector_threshold=args.defense_overlay_selector_threshold,
+        defense_overlay_selector_mode=args.defense_overlay_selector_mode,
+        defense_overlay_multi_source_per_target=args.defense_overlay_multi_source_per_target,
+        producer_overlay=args.producer_overlay,
+        producer_overlay_max_moves=args.producer_overlay_max_moves,
+        producer_overlay_score_min=args.producer_overlay_score_min,
+        producer_overlay_target_owner=args.producer_overlay_target_owner,
+        producer_overlay_late_step=args.producer_overlay_late_step,
+        producer_overlay_late_score_min=args.producer_overlay_late_score_min,
+        producer_overlay_late_target_owner=args.producer_overlay_late_target_owner,
+        producer_reranker_checkpoint=args.producer_reranker_checkpoint,
+        producer_overlay_trace_json=args.producer_overlay_trace_json,
+        producer_overlay_trace_top_k=args.producer_overlay_trace_top_k,
     )

@@ -89,6 +89,9 @@ class EntityTransformer(nn.Module):
         # can swap to 10 fraction bins. Default 32 = legacy absolute counts.
         self.num_ship_bins = getattr(cfg, "num_ship_bins", NUM_SHIP_BINS)
         self.ship_head = nn.Linear(D, self.num_ship_bins)
+        self.use_threat_head = bool(getattr(cfg, "use_threat_head", False))
+        if self.use_threat_head:
+            self.threat_head = nn.Linear(D, 1)
         # Target-index head. When pairwise features are available we score each
         # (slot, target) pair from per-target inputs — see docs/bugs.md (target-head
         # collapse). When pairwise is disabled we fall back to a slot-only Linear.
@@ -267,6 +270,7 @@ class EntityTransformer(nn.Module):
         # Action heads
         fire_logits = self.fire_head(owned_enriched).squeeze(-1)  # (B, max_owned)
         ship_logits = self.ship_head(owned_enriched)  # (B, max_owned, num_ship_bins)
+        threat_logits = self.threat_head(owned_enriched).squeeze(-1) if self.use_threat_head else None
         # min_ship_bin: bins below this are masked to -inf so they're never
         # sampled / argmaxed. For the fraction head (10 bins on [0.1, 1.0]),
         # setting min_ship_bin=1 removes the "10%-of-source" trap that PPO
@@ -297,6 +301,8 @@ class EntityTransformer(nn.Module):
             fire_logits = fire_logits.masked_fill(~slot_valid, -100.0)
             ship_logits = ship_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
             target_logits = target_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
+            if threat_logits is not None:
+                threat_logits = threat_logits.masked_fill(~slot_valid, -100.0)
 
         # Value head: new=concat(global_token, owned_pool) [2D], old=mean-pool all [D].
         if self.value_fc1.in_features == D:
@@ -314,12 +320,15 @@ class EntityTransformer(nn.Module):
             value_input = torch.cat([global_token, owned_pool], dim=-1)  # (B, 2D)
         value = self.value_out(F.gelu(self.value_fc2(F.gelu(self.value_fc1(value_input))))).squeeze(-1)
 
-        return {
+        out = {
             "fire_logits": fire_logits,
             "ship_logits": ship_logits,
             "target_logits": target_logits,
             "value": value,
         }
+        if threat_logits is not None:
+            out["threat_logits"] = threat_logits
+        return out
 
     def load_state_dict(self, state_dict, strict=True):
         # Legacy checkpoints carry a now-removed angle head; drop those keys so
@@ -327,6 +336,16 @@ class EntityTransformer(nn.Module):
         if any(k.startswith("angle_head.") for k in state_dict):
             state_dict = {k: v for k, v in state_dict.items()
                           if not k.startswith("angle_head.")}
+        if strict and self.use_threat_head and "threat_head.weight" not in state_dict:
+            missing, unexpected = super().load_state_dict(state_dict, strict=False)
+            allowed_missing = {"threat_head.weight", "threat_head.bias"}
+            bad_missing = [k for k in missing if k not in allowed_missing]
+            if bad_missing or unexpected:
+                raise RuntimeError(
+                    f"Error(s) in loading state_dict for {self.__class__.__name__}: "
+                    f"missing={bad_missing}, unexpected={unexpected}"
+                )
+            return torch.nn.modules.module._IncompatibleKeys(missing, unexpected)
         return super().load_state_dict(state_dict, strict=strict)
 
 

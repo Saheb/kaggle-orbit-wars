@@ -47,6 +47,8 @@ class ModelConfig:
     # Value head input width. 0 = auto (2*entity_dim, new concat head).
     # Set to entity_dim when loading pre-Phase-1 checkpoints (old mean-pool head).
     value_head_in: int = 0
+    # Optional supervised auxiliary head: per owned planet P(lost within K steps).
+    use_threat_head: bool = False
 
 
 @dataclass

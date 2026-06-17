@@ -11,6 +11,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import glob
+import json
 import math
 import os
 import sys
@@ -89,7 +91,21 @@ def _find_angle_bin(angle_rad: float) -> int:
     return int(angle_rad / ANGLE_BIN_WIDTH) % NUM_ANGLE_BINS
 
 
-def _find_ship_bin(ships: int, max_ships: int = 10000) -> int:
+FRACTION_BIN_VALUES = [(i + 1) / 10 for i in range(10)]
+
+
+def _find_ship_bin(ships: int, max_ships: int = 10000, mode: str = "absolute") -> int:
+    if mode == "fraction":
+        max_ships = max(1, int(max_ships))
+        frac = max(0.0, min(float(ships) / max_ships, 1.0))
+        best_bin, best_diff = 0, float("inf")
+        for b, value in enumerate(FRACTION_BIN_VALUES):
+            diff = abs(value - frac)
+            if diff < best_diff:
+                best_diff, best_bin = diff, b
+        return best_bin
+    if mode != "absolute":
+        raise ValueError(f"unknown ship bin mode: {mode}")
     best_bin, best_diff = 0, float("inf")
     for b in range(NUM_SHIP_BINS):
         count = SHIP_COUNTS[b]
@@ -187,7 +203,12 @@ def _find_target_planet_index(src_xy, emitted_angle, ship_count, planets, initia
     return best_pid_idx
 
 
-def trajectory_to_training_sample(traj: dict, max_owned: int = MAX_OWNED_PLANETS, max_planets: int = 48) -> dict | None:
+def trajectory_to_training_sample(
+    traj: dict,
+    max_owned: int = MAX_OWNED_PLANETS,
+    max_planets: int = 48,
+    ship_bin_mode: str = "absolute",
+) -> dict | None:
     """Convert a (obs, action) trajectory dict to model-ready tensors.
 
     Returns None if the observation has no owned planets.
@@ -229,13 +250,14 @@ def trajectory_to_training_sample(traj: dict, max_owned: int = MAX_OWNED_PLANETS
         slot = pid_to_slot.get(from_pid)
         if slot is None:
             continue
+        src_idx = pid_to_slot_src_idx(planets, from_pid)
         fire_target[slot] = 1
-        ship_target[slot] = _find_ship_bin(ship_count)
+        src_planet_ships = int(planets[src_idx][5]) if src_idx is not None else ship_count
+        ship_target[slot] = _find_ship_bin(ship_count, max_ships=src_planet_ships, mode=ship_bin_mode)
 
         # Target-index label: which planet did the teacher MEAN by this angle?
         # Uses ETA-iterated predicted position so orbital intercepts are decoded
         # correctly (teacher aims at where target WILL be, not where it is now).
-        src_idx = pid_to_slot_src_idx(planets, from_pid)
         if src_idx is not None:
             src_p = planets[src_idx]
             tgt_idx = _find_target_planet_index(
@@ -281,10 +303,55 @@ def _collate(samples: list[dict], device) -> dict:
     batch = {}
     for k in keys_to_stack:
         batch[k] = torch.stack([s[k] for s in samples]).to(device)
+    if any("threat_target" in s for s in samples):
+        threat_targets = []
+        threat_masks = []
+        for s in samples:
+            if "threat_target" in s:
+                threat_targets.append(s["threat_target"])
+                threat_masks.append(s["threat_mask"])
+            else:
+                threat_targets.append(torch.zeros_like(s["fire_target"], dtype=torch.float32))
+                threat_masks.append(torch.zeros_like(s["slot_valid"], dtype=torch.bool))
+        batch["threat_target"] = torch.stack(threat_targets).to(device)
+        batch["threat_mask"] = torch.stack(threat_masks).to(device)
     return batch
 
 
-def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
+def _is_training_sample(record: dict) -> bool:
+    return isinstance(record, dict) and "planet_features" in record
+
+
+def _records_to_training_samples(records: list[dict], ship_bin_mode: str = "absolute") -> list[dict]:
+    """Accept tensor samples or compact obs/action records."""
+    samples = []
+    for record in records:
+        if _is_training_sample(record):
+            record_mode = str(record.get("ship_bin_mode", "absolute"))
+            if ship_bin_mode != "absolute" and record_mode != ship_bin_mode:
+                raise ValueError(
+                    f"Cannot use pre-materialized {record_mode!r} ship labels "
+                    f"for requested ship_bin_mode={ship_bin_mode!r}; use compact "
+                    "frame shards or regenerate samples with matching metadata."
+                )
+            samples.append(record)
+            continue
+        sample = trajectory_to_training_sample(record, ship_bin_mode=ship_bin_mode)
+        if sample is not None:
+            samples.append(sample)
+    return samples
+
+
+def _collate_records(records: list[dict], device, ship_bin_mode: str = "absolute") -> dict:
+    samples = _records_to_training_samples(records, ship_bin_mode=ship_bin_mode)
+    if not samples:
+        raise ValueError("Batch contained no usable training samples")
+    return _collate(samples, device)
+
+
+def bc_loss(outputs: dict, batch: dict, fire_pos_weight: float = 1.0,
+            threat_loss_weight: float = 0.0,
+            threat_pos_weight: float = 1.0) -> tuple[torch.Tensor, dict]:
     """Cross-entropy BC loss across all owned-planet slots (target-decode).
 
     Trains fire, ship, and target heads. Angle head is dead weight in
@@ -299,10 +366,11 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
 
     # Fire loss (binary cross-entropy per slot, masked)
     # Clamp logits to ±30 to avoid MPS float16 overflow from -1e9 mask values
-    fire_loss = F.binary_cross_entropy_with_logits(
+    fire_loss_raw = F.binary_cross_entropy_with_logits(
         fire_logits.clamp(-30, 30), fire_target.float(), reduction="none"
-    ) * slot_valid
-    fire_loss = fire_loss.sum() / slot_valid.sum().clamp(min=1)
+    )
+    fire_weight = slot_valid * (1.0 + (float(fire_pos_weight) - 1.0) * fire_target.float())
+    fire_loss = (fire_loss_raw * fire_weight).sum() / fire_weight.sum().clamp(min=1)
 
     # Ship loss: only on slots where heuristic actually fired
     B, max_owned = fire_logits.shape
@@ -330,7 +398,17 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
     n_valid_tgt = valid_tgt.sum().clamp(min=1)
     target_loss = (target_loss_raw * valid_tgt).sum() / n_valid_tgt
 
-    total = fire_loss + ship_loss + target_loss
+    threat_loss = fire_logits.new_tensor(0.0)
+    if threat_loss_weight > 0 and "threat_logits" in outputs and "threat_target" in batch:
+        threat_mask = batch["threat_mask"].float() * slot_valid
+        threat_target = batch["threat_target"].float()
+        threat_raw = F.binary_cross_entropy_with_logits(
+            outputs["threat_logits"].clamp(-30, 30), threat_target, reduction="none"
+        )
+        threat_weight = threat_mask * (1.0 + (float(threat_pos_weight) - 1.0) * threat_target)
+        threat_loss = (threat_raw * threat_weight).sum() / threat_weight.sum().clamp(min=1)
+
+    total = fire_loss + ship_loss + target_loss + float(threat_loss_weight) * threat_loss
 
     # Top-k accuracy on target prediction (only on valid slots)
     with torch.no_grad():
@@ -359,7 +437,21 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
         "target_red":  target_red,
         "target_top1": top1_acc,
         "target_top3": top3_acc,
+        "fire_pos_weight": float(fire_pos_weight),
     }
+    if threat_loss_weight > 0 and "threat_logits" in outputs and "threat_target" in batch:
+        with torch.no_grad():
+            threat_mask = batch["threat_mask"].float() * slot_valid
+            threat_pred = (torch.sigmoid(outputs["threat_logits"]) > 0.5).float()
+            threat_target = batch["threat_target"].float()
+            n_threat = threat_mask.sum().clamp(min=1)
+            threat_acc = ((threat_pred == threat_target).float() * threat_mask).sum() / n_threat
+            threat_pos_rate = (threat_target * threat_mask).sum() / n_threat
+        metrics["threat_loss"] = threat_loss.item()
+        metrics["threat_acc"] = threat_acc.item()
+        metrics["threat_pos_rate"] = threat_pos_rate.item()
+        metrics["threat_loss_weight"] = float(threat_loss_weight)
+        metrics["threat_pos_weight"] = float(threat_pos_weight)
     return total, metrics
 
 
@@ -373,9 +465,122 @@ def _save_bc_checkpoint(model: EntityTransformer, cfg, save_path: str):
             "ship_bin_mode":  cfg.model.ship_bin_mode,
             "num_ship_bins":  cfg.model.num_ship_bins,
             "min_ship_bin":   cfg.model.min_ship_bin,
+            "allow_reinforce": bool(getattr(cfg.model, "allow_reinforce", False)),
+            "use_threat_head": bool(getattr(cfg.model, "use_threat_head", False)),
+            "trainer": "supervised_bc",
+            "supervised_only": True,
         },
     }, save_path)
     print(f"BC model saved → {save_path}")
+
+
+def _expand_sample_paths(sample_args: list[str]) -> list[str]:
+    """Expand direct pkls, shard dirs, globs, txt lists, and manifest JSON files."""
+    paths: list[str] = []
+    for arg in sample_args:
+        if any(ch in arg for ch in "*?["):
+            paths.extend(sorted(glob.glob(arg)))
+            continue
+        if os.path.isdir(arg):
+            paths.extend(sorted(glob.glob(os.path.join(arg, "*.pkl"))))
+            continue
+        if arg.endswith(".txt"):
+            with open(arg) as f:
+                paths.extend(line.strip() for line in f if line.strip() and not line.startswith("#"))
+            continue
+        if arg.endswith(".json"):
+            with open(arg) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                if "sample_paths" in data:
+                    paths.extend(str(p) for p in data["sample_paths"])
+                    continue
+                if "shards" in data:
+                    for shard in data["shards"]:
+                        paths.append(str(shard["path"] if isinstance(shard, dict) else shard))
+                    continue
+            if isinstance(data, list):
+                paths.extend(str(p) for p in data)
+                continue
+        paths.append(arg)
+    # Preserve first occurrence order after expansion.
+    out: list[str] = []
+    seen = set()
+    for path in paths:
+        if path and path not in seen:
+            out.append(path)
+            seen.add(path)
+    return out
+
+
+def _checkpoint_looks_like_rl_training(ckpt) -> bool:
+    """Return True for PPO learner checkpoints, False for plain model/BC saves."""
+    return (
+        isinstance(ckpt, dict)
+        and "model" in ckpt
+        and (
+            "optimizer" in ckpt
+            or "total_steps" in ckpt
+            or "update_count" in ckpt
+        )
+    )
+
+
+def _assert_supervised_init_checkpoint(init_checkpoint: str, allow_rl_init: bool) -> None:
+    if not init_checkpoint or allow_rl_init:
+        return
+    ckpt = torch.load(init_checkpoint, map_location="cpu")
+    if _checkpoint_looks_like_rl_training(ckpt):
+        raise SystemExit(
+            f"{init_checkpoint} looks like a PPO/RL training checkpoint. "
+            "This replay-supervised trainer refuses RL init by default; pass "
+            "--allow-rl-init only for an explicit diagnostic."
+        )
+
+
+def _checkpoint_state_dict(path: str) -> dict:
+    try:
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    return ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+
+
+def _load_compatible_init(model: EntityTransformer, init_checkpoint: str) -> dict:
+    src = _checkpoint_state_dict(init_checkpoint)
+    dst = model.state_dict()
+    loaded = []
+    skipped_shape = []
+    skipped_missing = []
+    for name, tensor in src.items():
+        if name not in dst:
+            skipped_missing.append(name)
+            continue
+        if tuple(dst[name].shape) != tuple(tensor.shape):
+            skipped_shape.append((name, tuple(tensor.shape), tuple(dst[name].shape)))
+            continue
+        dst[name] = tensor
+        loaded.append(name)
+    model.load_state_dict(dst)
+    return {
+        "loaded": loaded,
+        "skipped_shape": skipped_shape,
+        "skipped_missing": skipped_missing,
+    }
+
+
+def _base_metric_name(metric_name: str) -> str:
+    return metric_name[4:] if metric_name.startswith("val_") else metric_name
+
+
+def _metric_lower_is_better(metric_name: str) -> bool:
+    return _base_metric_name(metric_name).endswith("loss")
+
+
+def _metric_improved(metric_name: str, new_value: float, best_value: float) -> bool:
+    if _metric_lower_is_better(metric_name):
+        return new_value < best_value - 0.01
+    return new_value > best_value + 0.001
 
 
 def train_bc(
@@ -385,6 +590,10 @@ def train_bc(
     device: torch.device,
     val_frac: float = 0.1,
     trainable_param_patterns: list[str] | None = None,
+    fire_pos_weight: float = 1.0,
+    threat_loss_weight: float = 0.0,
+    threat_pos_weight: float = 1.0,
+    select_metric: str = "val_loss",
 ) -> dict:
     """Train model via BC for cfg_bc.num_steps gradient steps.
 
@@ -430,7 +639,8 @@ def train_bc(
     print(f"Steps: {cfg_bc.num_steps}, batch: {cfg_bc.batch_size}, "
           f"~{steps_per_epoch} steps/epoch, ~{num_epochs} epochs")
 
-    best_val_loss = float("inf")
+    metric_key = _base_metric_name(select_metric)
+    best_metric_value = float("inf") if _metric_lower_is_better(select_metric) else -float("inf")
     best_state = None
     patience = max(5, num_epochs // 4)  # stop if no improvement for 25% of epochs
     epochs_no_improve = 0
@@ -457,7 +667,12 @@ def train_bc(
                 pairwise_features=batch["pairwise_features"],
             )
 
-            loss, metrics = bc_loss(outputs, batch)
+            loss, metrics = bc_loss(
+                outputs, batch,
+                fire_pos_weight=fire_pos_weight,
+                threat_loss_weight=threat_loss_weight,
+                threat_pos_weight=threat_pos_weight,
+            )
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
@@ -477,7 +692,7 @@ def train_bc(
 
         # End-of-epoch validation for early stopping
         model.eval()
-        ep_val_loss = 0.0
+        ep_val_metrics = {}
         ep_val_batches = 0
         with torch.no_grad():
             for bs in range(0, len(val_samples), cfg_bc.batch_size):
@@ -489,13 +704,28 @@ def train_bc(
                     slot_valid=vbatch["slot_valid"], owned_indices=vbatch["owned_indices"],
                     pairwise_features=vbatch["pairwise_features"],
                 )
-                _, vm = bc_loss(vout, vbatch)
-                ep_val_loss += vm["loss"]
+                _, vm = bc_loss(
+                    vout, vbatch,
+                    fire_pos_weight=fire_pos_weight,
+                    threat_loss_weight=threat_loss_weight,
+                    threat_pos_weight=threat_pos_weight,
+                )
+                for k, v in vm.items():
+                    ep_val_metrics[k] = ep_val_metrics.get(k, 0.0) + v
                 ep_val_batches += 1
-        ep_val_loss /= max(ep_val_batches, 1)
+        ep_val_metrics = {
+            k: v / max(ep_val_batches, 1)
+            for k, v in ep_val_metrics.items()
+        }
+        if metric_key not in ep_val_metrics:
+            raise ValueError(
+                f"--select-metric {select_metric!r} not available. "
+                f"Available validation metrics: {', '.join('val_' + k for k in sorted(ep_val_metrics))}"
+            )
+        ep_metric_value = ep_val_metrics[metric_key]
 
-        if ep_val_loss < best_val_loss - 0.01:
-            best_val_loss = ep_val_loss
+        if _metric_improved(select_metric, ep_metric_value, best_metric_value):
+            best_metric_value = ep_metric_value
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             epochs_no_improve = 0
         else:
@@ -509,7 +739,7 @@ def train_bc(
     # Restore best weights
     if best_state is not None:
         model.load_state_dict(best_state)
-        print(f"  Restored best weights (val_loss={best_val_loss:.4f})")
+        print(f"  Restored best weights ({select_metric}={best_metric_value:.4f})")
 
     # Validation
     model.eval()
@@ -527,7 +757,12 @@ def train_bc(
                 owned_indices=batch["owned_indices"],
                 pairwise_features=batch["pairwise_features"],
             )
-            _, m = bc_loss(outputs, batch)
+            _, m = bc_loss(
+                outputs, batch,
+                fire_pos_weight=fire_pos_weight,
+                threat_loss_weight=threat_loss_weight,
+                threat_pos_weight=threat_pos_weight,
+            )
             for k, v in m.items():
                 val_metrics_sum[k] = val_metrics_sum.get(k, 0.0) + v
             n_val_batches += 1
@@ -565,7 +800,7 @@ def validate_bc(cfg: Config, agent_path: str, save_path: str = "", verbose: bool
     print("Converting to training samples...")
     samples = []
     for traj in raw_trajectories:
-        s = trajectory_to_training_sample(traj)
+        s = trajectory_to_training_sample(traj, ship_bin_mode=cfg.model.ship_bin_mode)
         if s is not None:
             samples.append(s)
     print(f"Usable samples: {len(samples)}")
@@ -588,7 +823,13 @@ def validate_bc(cfg: Config, agent_path: str, save_path: str = "", verbose: bool
 def validate_bc_from_samples(cfg: Config, sample_pkls: list[str],
                              save_path: str = "",
                              init_checkpoint: str = "",
-                             trainable_param_patterns: list[str] | None = None) -> dict:
+                             allow_rl_init: bool = False,
+                             partial_init_compatible: bool = False,
+                             trainable_param_patterns: list[str] | None = None,
+                             fire_pos_weight: float = 1.0,
+                             threat_loss_weight: float = 0.0,
+                             threat_pos_weight: float = 1.0,
+                             select_metric: str = "val_loss") -> dict:
     """BC training from one or more pre-extracted sample .pkl files.
 
     Used by the replay-mining pipeline (replay_bc_v2.py emits these pkls).
@@ -597,24 +838,60 @@ def validate_bc_from_samples(cfg: Config, sample_pkls: list[str],
     import pickle
     device = torch.device(cfg.device)
     samples = []
-    for path in sample_pkls:
+    expanded_paths = _expand_sample_paths(sample_pkls)
+    for path in expanded_paths:
         with open(path, "rb") as f:
             chunk = pickle.load(f)
-        print(f"Loaded {len(chunk)} samples from {path}")
-        samples.extend(chunk)
+        converted = _records_to_training_samples(chunk, ship_bin_mode=cfg.model.ship_bin_mode)
+        print(f"Loaded {len(chunk)} records / {len(converted)} samples from {path}")
+        samples.extend(converted)
     print(f"Total samples: {len(samples)}")
     if not samples:
         print("ERROR: No samples loaded.")
         return {}
+    rng = np.random.default_rng(cfg.seed)
+    rng.shuffle(samples)
 
-    model = EntityTransformer(cfg.model)
-    if init_checkpoint:
+    if init_checkpoint and partial_init_compatible:
+        _assert_supervised_init_checkpoint(init_checkpoint, allow_rl_init)
+        model = EntityTransformer(cfg.model)
+        report = _load_compatible_init(model, init_checkpoint)
+        print(
+            f"Partially loaded compatible init checkpoint: {init_checkpoint} "
+            f"({len(report['loaded'])} tensors loaded, "
+            f"{len(report['skipped_shape'])} shape-skipped, "
+            f"{len(report['skipped_missing'])} missing-skipped)"
+        )
+        for name, src_shape, dst_shape in report["skipped_shape"][:8]:
+            print(f"  shape-skip {name}: {src_shape} -> {dst_shape}")
+    elif init_checkpoint:
+        _assert_supervised_init_checkpoint(init_checkpoint, allow_rl_init)
         from eval import load_checkpoint
+        force_allow_reinforce = bool(getattr(cfg.model, "allow_reinforce", False))
+        force_threat_head = bool(getattr(cfg.model, "use_threat_head", False))
+        requested_ship_bin_mode = str(getattr(cfg.model, "ship_bin_mode", "absolute"))
         sd, _ = load_checkpoint(init_checkpoint, cfg)
+        if str(getattr(cfg.model, "ship_bin_mode", "absolute")) != requested_ship_bin_mode:
+            raise SystemExit(
+                f"--init-checkpoint uses ship_bin_mode={cfg.model.ship_bin_mode!r}, "
+                f"but this run requested {requested_ship_bin_mode!r}. Train from scratch "
+                "or initialize from a checkpoint with the same ship label space."
+            )
+        if force_allow_reinforce:
+            cfg.model.allow_reinforce = True
+        if force_threat_head:
+            cfg.model.use_threat_head = True
+        model = EntityTransformer(cfg.model)
         model.load_state_dict(sd)
         print(f"Loaded init checkpoint: {init_checkpoint}")
+    else:
+        model = EntityTransformer(cfg.model)
     val_metrics = train_bc(model, samples, cfg.bc, device,
-                           trainable_param_patterns=trainable_param_patterns)
+                           trainable_param_patterns=trainable_param_patterns,
+                           fire_pos_weight=fire_pos_weight,
+                           threat_loss_weight=threat_loss_weight,
+                           threat_pos_weight=threat_pos_weight,
+                           select_metric=select_metric)
 
     if save_path:
         _save_bc_checkpoint(model, cfg, save_path)
@@ -624,13 +901,288 @@ def validate_bc_from_samples(cfg: Config, sample_pkls: list[str],
     return val_metrics
 
 
+def _validate_on_samples(
+    model: EntityTransformer,
+    val_samples: list[dict],
+    cfg_bc: BCConfig,
+    device: torch.device,
+    fire_pos_weight: float,
+    threat_loss_weight: float,
+    threat_pos_weight: float,
+    ship_bin_mode: str = "absolute",
+) -> dict:
+    model.eval()
+    val_metrics_sum = {}
+    n_val_batches = 0
+    with torch.no_grad():
+        for bs in range(0, len(val_samples), cfg_bc.batch_size):
+            vbatch = _collate_records(
+                val_samples[bs: bs + cfg_bc.batch_size],
+                device,
+                ship_bin_mode=ship_bin_mode,
+            )
+            vout = model(
+                vbatch["planet_features"], vbatch["fleet_features"], vbatch["global_features"],
+                vbatch["planet_mask"], vbatch["fleet_mask"],
+                fire_mask=vbatch["fire_mask"], angle_mask=vbatch["angle_mask"],
+                slot_valid=vbatch["slot_valid"], owned_indices=vbatch["owned_indices"],
+                pairwise_features=vbatch["pairwise_features"],
+            )
+            _, vm = bc_loss(
+                vout, vbatch,
+                fire_pos_weight=fire_pos_weight,
+                threat_loss_weight=threat_loss_weight,
+                threat_pos_weight=threat_pos_weight,
+            )
+            for k, v in vm.items():
+                val_metrics_sum[k] = val_metrics_sum.get(k, 0.0) + v
+            n_val_batches += 1
+    return {k: v / max(n_val_batches, 1) for k, v in val_metrics_sum.items()}
+
+
+def _sample_streaming_validation_records(
+    paths: list[str],
+    val_frac: float,
+    max_val_samples: int,
+    rng: np.random.Generator,
+    pickle_module=None,
+) -> tuple[list[dict], dict[str, set[int]], int]:
+    """Sample validation records inside each shard without concatenating all shards."""
+    if pickle_module is None:
+        import pickle as pickle_module
+
+    val_indices_by_path: dict[str, set[int]] = {}
+    val_samples = []
+    val_path_count = 0
+    for path in paths:
+        if len(val_samples) >= max_val_samples:
+            break
+        with open(path, "rb") as f:
+            chunk = pickle_module.load(f)
+        if not chunk:
+            continue
+        want = int(round(len(chunk) * val_frac))
+        if val_frac > 0.0:
+            want = max(1, want)
+        want = min(want, len(chunk), max_val_samples - len(val_samples))
+        if want <= 0:
+            continue
+        idx = rng.choice(len(chunk), size=want, replace=False)
+        val_idx = {int(i) for i in idx}
+        val_indices_by_path[path] = val_idx
+        val_samples.extend(chunk[i] for i in val_idx)
+        val_path_count += 1
+    rng.shuffle(val_samples)
+    return val_samples, val_indices_by_path, val_path_count
+
+
+def validate_bc_from_sample_shards(cfg: Config, sample_pkls: list[str],
+                                   save_path: str = "",
+                                   init_checkpoint: str = "",
+                                   allow_rl_init: bool = False,
+                                   partial_init_compatible: bool = False,
+                                   trainable_param_patterns: list[str] | None = None,
+                                   fire_pos_weight: float = 1.0,
+                                   threat_loss_weight: float = 0.0,
+                                   threat_pos_weight: float = 1.0,
+                                   select_metric: str = "val_loss",
+                                   val_frac: float = 0.1,
+                                   max_val_samples: int = 8192,
+                                   eval_every: int = 1000) -> dict:
+    """BC training that streams pickle shards instead of concatenating all samples."""
+    import pickle
+    device = torch.device(cfg.device)
+    paths = _expand_sample_paths(sample_pkls)
+    if not paths:
+        print("ERROR: No sample shards found.")
+        return {}
+
+    rng = np.random.default_rng(cfg.seed)
+    paths = list(paths)
+    rng.shuffle(paths)
+    val_samples, val_indices_by_path, val_path_count = _sample_streaming_validation_records(
+        paths, val_frac, max_val_samples, rng, pickle
+    )
+    if not val_samples:
+        print("ERROR: No validation samples loaded.")
+        return {}
+
+    if init_checkpoint and partial_init_compatible:
+        _assert_supervised_init_checkpoint(init_checkpoint, allow_rl_init)
+        model = EntityTransformer(cfg.model)
+        report = _load_compatible_init(model, init_checkpoint)
+        print(
+            f"Partially loaded compatible init checkpoint: {init_checkpoint} "
+            f"({len(report['loaded'])} tensors loaded, "
+            f"{len(report['skipped_shape'])} shape-skipped, "
+            f"{len(report['skipped_missing'])} missing-skipped)"
+        )
+        for name, src_shape, dst_shape in report["skipped_shape"][:8]:
+            print(f"  shape-skip {name}: {src_shape} -> {dst_shape}")
+    elif init_checkpoint:
+        _assert_supervised_init_checkpoint(init_checkpoint, allow_rl_init)
+        from eval import load_checkpoint
+        force_allow_reinforce = bool(getattr(cfg.model, "allow_reinforce", False))
+        force_threat_head = bool(getattr(cfg.model, "use_threat_head", False))
+        requested_ship_bin_mode = str(getattr(cfg.model, "ship_bin_mode", "absolute"))
+        sd, _ = load_checkpoint(init_checkpoint, cfg)
+        if str(getattr(cfg.model, "ship_bin_mode", "absolute")) != requested_ship_bin_mode:
+            raise SystemExit(
+                f"--init-checkpoint uses ship_bin_mode={cfg.model.ship_bin_mode!r}, "
+                f"but this run requested {requested_ship_bin_mode!r}. Train from scratch "
+                "or initialize from a checkpoint with the same ship label space."
+            )
+        if force_allow_reinforce:
+            cfg.model.allow_reinforce = True
+        if force_threat_head:
+            cfg.model.use_threat_head = True
+        model = EntityTransformer(cfg.model)
+        model.load_state_dict(sd)
+        print(f"Loaded init checkpoint: {init_checkpoint}")
+    else:
+        model = EntityTransformer(cfg.model)
+    model = model.to(device)
+
+    if trainable_param_patterns:
+        for p in model.parameters():
+            p.requires_grad = False
+        trainable = []
+        for name, p in model.named_parameters():
+            if any(pattern in name for pattern in trainable_param_patterns):
+                p.requires_grad = True
+                trainable.append((name, p))
+        if not trainable:
+            raise ValueError(f"No trainable params matched patterns: {trainable_param_patterns}")
+        optimizer_params = [p for _, p in trainable]
+        print("BC trainable params:")
+        for name, _ in trainable:
+            print(f"  - {name}")
+    else:
+        optimizer_params = list(model.parameters())
+    optimizer = torch.optim.Adam(optimizer_params, lr=cfg.bc.learning_rate, eps=1e-5)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=cfg.bc.num_steps, eta_min=cfg.bc.learning_rate / 10
+    )
+
+    metric_key = _base_metric_name(select_metric)
+    best_metric_value = float("inf") if _metric_lower_is_better(select_metric) else -float("inf")
+    best_state = None
+    step = 0
+    epoch = 0
+    eval_every = max(1, eval_every)
+    train_paths = paths
+    print(f"BC streaming training: {len(train_paths)} train shards / {val_path_count} val-sampled shards")
+    print(f"Validation samples: {len(val_samples)}; steps: {cfg.bc.num_steps}; batch: {cfg.bc.batch_size}")
+
+    while step < cfg.bc.num_steps:
+        epoch += 1
+        rng.shuffle(train_paths)
+        for path in train_paths:
+            with open(path, "rb") as f:
+                chunk = pickle.load(f)
+            if not chunk:
+                continue
+            val_idx = val_indices_by_path.get(path, set())
+            train_idx = [i for i in range(len(chunk)) if i not in val_idx]
+            if not train_idx:
+                continue
+            rng.shuffle(train_idx)
+            for batch_start in range(0, len(train_idx), cfg.bc.batch_size):
+                if step >= cfg.bc.num_steps:
+                    break
+                batch_indices = train_idx[batch_start: batch_start + cfg.bc.batch_size]
+                batch_samples = [chunk[i] for i in batch_indices]
+                try:
+                    batch = _collate_records(batch_samples, device, ship_bin_mode=cfg.model.ship_bin_mode)
+                except ValueError:
+                    continue
+                model.train()
+                outputs = model(
+                    batch["planet_features"], batch["fleet_features"], batch["global_features"],
+                    batch["planet_mask"], batch["fleet_mask"],
+                    fire_mask=batch["fire_mask"],
+                    angle_mask=batch["angle_mask"],
+                    slot_valid=batch["slot_valid"],
+                    owned_indices=batch["owned_indices"],
+                    pairwise_features=batch["pairwise_features"],
+                )
+                loss, metrics = bc_loss(
+                    outputs, batch,
+                    fire_pos_weight=fire_pos_weight,
+                    threat_loss_weight=threat_loss_weight,
+                    threat_pos_weight=threat_pos_weight,
+                )
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                optimizer.step()
+                scheduler.step()
+                step += 1
+
+                if step % 100 == 0:
+                    lr_now = optimizer.param_groups[0]["lr"]
+                    print(f"  step {step:5d} | loss {metrics['loss']:.4f} | "
+                          f"tgt top1 {metrics['target_top1']:.2f} top3 {metrics['target_top3']:.2f} | "
+                          f"lr {lr_now:.2e}")
+                if step % eval_every == 0 or step >= cfg.bc.num_steps:
+                    ep_val_metrics = _validate_on_samples(
+                        model, val_samples, cfg.bc, device,
+                        fire_pos_weight=fire_pos_weight,
+                        threat_loss_weight=threat_loss_weight,
+                        threat_pos_weight=threat_pos_weight,
+                        ship_bin_mode=cfg.model.ship_bin_mode,
+                    )
+                    if metric_key not in ep_val_metrics:
+                        raise ValueError(
+                            f"--select-metric {select_metric!r} not available. "
+                            f"Available validation metrics: {', '.join('val_' + k for k in sorted(ep_val_metrics))}"
+                        )
+                    ep_metric_value = ep_val_metrics[metric_key]
+                    improved = _metric_improved(select_metric, ep_metric_value, best_metric_value)
+                    if improved:
+                        best_metric_value = ep_metric_value
+                        best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                        if save_path:
+                            _save_bc_checkpoint(model, cfg, save_path)
+                    print(f"  eval step {step:5d} | "
+                          f"{select_metric}={ep_metric_value:.4f} | "
+                          f"target_top1={ep_val_metrics.get('target_top1', 0.0):.2f} "
+                          f"target_top3={ep_val_metrics.get('target_top3', 0.0):.2f}"
+                          f"{' *' if improved else ''}")
+            if step >= cfg.bc.num_steps:
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        print(f"  Restored best weights ({select_metric}={best_metric_value:.4f})")
+    final_metrics_raw = _validate_on_samples(
+        model, val_samples, cfg.bc, device,
+        fire_pos_weight=fire_pos_weight,
+        threat_loss_weight=threat_loss_weight,
+        threat_pos_weight=threat_pos_weight,
+        ship_bin_mode=cfg.model.ship_bin_mode,
+    )
+    val_metrics = {f"val_{k}": v for k, v in final_metrics_raw.items()}
+    print(f"\nBC streaming validation: {val_metrics}")
+
+    if save_path:
+        _save_bc_checkpoint(model, cfg, save_path)
+    return val_metrics
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent", default="",
                         help="Path to heuristic agent file (collect trajectories on-the-fly)")
     parser.add_argument("--samples", action="append", default=[],
-                        help="Path to pre-extracted samples .pkl. Repeatable: "
-                             "--samples teacher.pkl --samples replays.pkl to mix.")
+                        help="Path to pre-extracted samples .pkl, shard dir, glob, "
+                             "txt list, or manifest JSON. Repeatable.")
+    parser.add_argument("--stream-shards", action="store_true",
+                        help="Stream sample shards from disk instead of loading all samples.")
+    parser.add_argument("--max-val-samples", type=int, default=8192,
+                        help="Validation sample cap for --stream-shards.")
+    parser.add_argument("--eval-every", type=int, default=1000,
+                        help="Validation interval in gradient steps for --stream-shards.")
     parser.add_argument("--num-games", type=int, default=100)
     parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=42)
@@ -638,7 +1190,16 @@ if __name__ == "__main__":
                         help="Where to save the BC-pretrained model")
     parser.add_argument("--init-checkpoint", type=str, default="",
                         help="Optional checkpoint to load before BC training. "
-                             "Useful for targeted BC fine-tuning from an existing warmstart.")
+                             "By default this must be a supervised/model-only checkpoint, "
+                             "not a PPO learner checkpoint.")
+    parser.add_argument("--allow-rl-init", action="store_true",
+                        help="Allow --init-checkpoint to load a PPO/RL learner checkpoint. "
+                             "Use only for explicit diagnostics, not the standalone "
+                             "replay-supervised track.")
+    parser.add_argument("--partial-init-compatible", action="store_true",
+                        help="Load only same-name/same-shape tensors from --init-checkpoint. "
+                             "Useful for transplanting an absolute ship-head checkpoint "
+                             "into a fraction ship-head model; mismatched heads are skipped.")
     parser.add_argument("--trainable-param", action="append", default=[],
                         help="Optional substring filter for trainable params. Repeatable. "
                              "If set, only parameters whose names contain one of these "
@@ -646,6 +1207,24 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=0.0,
                         help="Learning rate override (default: use BCConfig.learning_rate=3e-4). "
                              "For fine-tuning from a strong checkpoint, use 1e-4.")
+    parser.add_argument("--fire-pos-weight", type=float, default=1.0,
+                        help="Positive fire-label weight in BCE. Use >1 when no-fire slots "
+                             "dominate replay-supervised data.")
+    parser.add_argument("--ship-bin-mode", choices=["absolute", "fraction"], default="absolute",
+                        help="Ship label/decode space. 'absolute' uses legacy SHIP_COUNTS; "
+                             "'fraction' uses 10 buckets for 10%..100% of source ships.")
+    parser.add_argument("--min-ship-bin", type=int, default=0,
+                        help="Mask ship bins below this index in the model forward pass.")
+    parser.add_argument("--allow-reinforce", action="store_true",
+                        help="Save BC checkpoint with own-planet target decode enabled.")
+    parser.add_argument("--threat-loss-weight", type=float, default=0.0,
+                        help="Auxiliary BCE weight for per-owned-planet threat labels.")
+    parser.add_argument("--threat-pos-weight", type=float, default=1.0,
+                        help="Positive-label weight for threat BCE.")
+    parser.add_argument("--select-metric", type=str, default="val_loss",
+                        help="Validation metric used to restore best weights. "
+                             "Loss metrics are minimized; all other metrics are maximized. "
+                             "Examples: val_loss, val_target_top3, val_target_red.")
     args = parser.parse_args()
 
     cfg = Config()
@@ -654,11 +1233,35 @@ if __name__ == "__main__":
     cfg.bc.num_steps = args.steps
     if args.lr > 0:
         cfg.bc.learning_rate = args.lr
+    cfg.model.allow_reinforce = bool(args.allow_reinforce)
+    cfg.model.use_threat_head = args.threat_loss_weight > 0
+    cfg.model.ship_bin_mode = args.ship_bin_mode
+    cfg.model.num_ship_bins = len(FRACTION_BIN_VALUES) if args.ship_bin_mode == "fraction" else NUM_SHIP_BINS
+    cfg.model.min_ship_bin = int(args.min_ship_bin)
 
     if args.samples:
-        validate_bc_from_samples(cfg, args.samples, save_path=args.save,
-                                 init_checkpoint=args.init_checkpoint,
-                                 trainable_param_patterns=args.trainable_param or None)
+        if args.stream_shards:
+            validate_bc_from_sample_shards(cfg, args.samples, save_path=args.save,
+                                           init_checkpoint=args.init_checkpoint,
+                                           allow_rl_init=args.allow_rl_init,
+                                           partial_init_compatible=args.partial_init_compatible,
+                                           trainable_param_patterns=args.trainable_param or None,
+                                           fire_pos_weight=args.fire_pos_weight,
+                                           threat_loss_weight=args.threat_loss_weight,
+                                           threat_pos_weight=args.threat_pos_weight,
+                                           select_metric=args.select_metric,
+                                           max_val_samples=args.max_val_samples,
+                                           eval_every=args.eval_every)
+        else:
+            validate_bc_from_samples(cfg, args.samples, save_path=args.save,
+                                     init_checkpoint=args.init_checkpoint,
+                                     allow_rl_init=args.allow_rl_init,
+                                     partial_init_compatible=args.partial_init_compatible,
+                                     trainable_param_patterns=args.trainable_param or None,
+                                     fire_pos_weight=args.fire_pos_weight,
+                                     threat_loss_weight=args.threat_loss_weight,
+                                     threat_pos_weight=args.threat_pos_weight,
+                                     select_metric=args.select_metric)
     else:
         if not args.agent:
             raise SystemExit("--agent or --samples required")

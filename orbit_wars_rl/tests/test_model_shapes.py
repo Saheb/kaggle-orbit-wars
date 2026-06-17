@@ -115,14 +115,14 @@ def test_model_forward_shapes():
         out = model(planet_features, fleet_features, global_features, planet_mask, fleet_mask)
 
     assert out["fire_logits"].shape == (B, cfg.max_owned_planets), out["fire_logits"].shape
-    assert out["angle_logits"].shape == (B, cfg.max_owned_planets, NUM_ANGLE_BINS), out["angle_logits"].shape
     assert out["ship_logits"].shape == (B, cfg.max_owned_planets, NUM_SHIP_BINS), out["ship_logits"].shape
+    assert out["target_logits"].shape == (B, cfg.max_owned_planets, cfg.max_planets), out["target_logits"].shape
     assert out["value"].shape == (B,), out["value"].shape
     print("test_model_forward_shapes: PASS")
 
 
 def test_model_with_masks():
-    """Model forward correctly applies fire/angle/slot masks."""
+    """Model forward correctly applies fire/slot/target masks."""
     cfg = ModelConfig()
     model = EntityTransformer(cfg)
     model.eval()
@@ -156,10 +156,30 @@ def test_model_with_masks():
 
     # Masked-out slots should have fire_logit << 0
     assert out["fire_logits"][0, 1].item() <= -100.0, "Slot 1 should be masked (slot_valid=False)"
-    # Masked angles should be << 0
-    assert out["angle_logits"][0, 0, 36].item() <= -100.0, "Angle 36 should be masked"
-    assert out["angle_logits"][0, 0, 0].item() > -100.0, "Angle 0 should be legal"
+    # Invalid slots should also have target logits masked.
+    assert out["target_logits"][0, 1, 0].item() <= -100.0, "Slot 1 target should be masked"
     print("test_model_with_masks: PASS")
+
+
+def test_model_forward_with_threat_head():
+    """Optional threat head should expose one logit per owned slot."""
+    cfg = ModelConfig()
+    cfg.use_threat_head = True
+    model = EntityTransformer(cfg)
+    model.eval()
+
+    B, N_p, N_f = 1, 20, 5
+    planet_features = torch.randn(B, N_p, cfg.planet_feature_dim)
+    fleet_features = torch.randn(B, N_f, cfg.fleet_feature_dim)
+    global_features = torch.randn(B, cfg.global_feature_dim)
+    planet_mask = torch.ones(B, N_p, dtype=torch.bool)
+    fleet_mask = torch.ones(B, N_f, dtype=torch.bool)
+
+    with torch.no_grad():
+        out = model(planet_features, fleet_features, global_features, planet_mask, fleet_mask)
+
+    assert out["threat_logits"].shape == (B, cfg.max_owned_planets), out["threat_logits"].shape
+    print("test_model_forward_with_threat_head: PASS")
 
 
 def test_model_forward_with_pairwise_target_head():
@@ -220,9 +240,9 @@ def test_end_to_end_obs_to_actions():
             owned_indices=masks["owned_indices"].unsqueeze(0),
         )
 
-    from action_mask import actions_from_policy
-    actions = actions_from_policy(
-        out["fire_logits"], out["angle_logits"], out["ship_logits"],
+    from action_mask import actions_from_target_policy
+    actions = actions_from_target_policy(
+        out["fire_logits"], out["target_logits"], out["ship_logits"],
         {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()},
         obs, 0,
     )
@@ -240,6 +260,7 @@ if __name__ == "__main__":
     test_feature_normalization()
     test_model_forward_shapes()
     test_model_with_masks()
+    test_model_forward_with_threat_head()
     test_model_forward_with_pairwise_target_head()
     test_end_to_end_obs_to_actions()
     print("\nAll model shape tests passed!")
