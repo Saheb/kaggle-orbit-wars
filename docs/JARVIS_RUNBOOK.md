@@ -201,30 +201,59 @@ Log files land at `/home/train_gpu_phase1_*.log` — sync from there.
 
 ## Push code and seed checkpoints
 
-Use rsync directly (faster than `jl upload` for large trees, supports excludes):
+Use the tracked sync helper by default. It uses bash arrays for `ssh` calls and
+avoids the zsh word-splitting footgun where `SSH="ssh -i ..."; $SSH root@$IP`
+tries to execute a literal command named `ssh -i ...`.
+
+```bash
+scripts/jarvis_sync_training_payload.sh <public_ip> <local_checkpoint.pt> <remote_checkpoint_name> [extra_file ...]
+```
+
+Example:
+
+```bash
+scripts/jarvis_sync_training_payload.sh 217.18.55.112 \
+  gpu_run_artifacts/revedge1/checkpoints/torch_step_4718592_revedge1_20260616_095906.pt \
+  revedge1_4718592.pt \
+  gpu_run_artifacts/peeler_c1/run_remote_peeler_c1_t1_jarvis.sh
+```
+
+The helper uploads:
+
+```text
+orbit_wars_rl/ -> /home/orbit_wars_rl/
+opponents/     -> /home/opponents/
+setup/         -> /home/setup/
+checkpoint     -> /home/orbit_wars_rl/seed_checkpoints/<remote_checkpoint_name>
+extra files    -> /home/orbit_wars_rl/<same relative path>
+```
+
+Manual rsync fallback (only if the helper does not fit):
 
 ```bash
 KEY=~/.ssh/jarvis-labs-key
 IP=<public_ip>
 ROOT=/Users/saheb/home/kaggle-orbit-wars
+SSH=(ssh -i "$KEY" -o StrictHostKeyChecking=no)
+RSYNC_RSH="ssh -i $KEY -o StrictHostKeyChecking=no"
 
 # Upload package (exclude large local artifacts)
 rsync -az \
   --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pkl' \
   --exclude='episode_data' --exclude='replays' --exclude='replays_4p_heuristic' \
   --exclude='episode_index' --exclude='checkpoints' \
-  -e "ssh -i $KEY -o StrictHostKeyChecking=no" \
+  -e "$RSYNC_RSH" \
   "$ROOT/orbit_wars_rl/" root@$IP:/home/orbit_wars_rl/
 
-rsync -az -e "ssh -i $KEY -o StrictHostKeyChecking=no" \
+rsync -az -e "$RSYNC_RSH" \
   "$ROOT/opponents/" root@$IP:/home/opponents/
-rsync -az -e "ssh -i $KEY -o StrictHostKeyChecking=no" \
+rsync -az -e "$RSYNC_RSH" \
   "$ROOT/setup/" root@$IP:/home/setup/
 
 # Upload resume checkpoint
-ssh -i $KEY -o StrictHostKeyChecking=no root@$IP \
+"${SSH[@]}" root@$IP \
   "mkdir -p /home/orbit_wars_rl/seed_checkpoints /home/orbit_wars_rl/checkpoints /home/orbit_wars_rl/panels"
-scp -i $KEY -o StrictHostKeyChecking=no \
+rsync -azL -e "$RSYNC_RSH" \
   <local_checkpoint.pt> root@$IP:/home/orbit_wars_rl/seed_checkpoints/phase1_resume.pt
 ```
 

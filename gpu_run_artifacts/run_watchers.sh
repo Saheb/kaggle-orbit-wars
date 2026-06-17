@@ -51,9 +51,21 @@ _still_active() {
   fi
 }
 
+eval_safe_masks() {
+  # train_torch.py supports some discipline flags that eval.py intentionally
+  # does not parse. Keep watcher envs easy to reuse from training commands by
+  # dropping train-only flags before launching eval.
+  echo "$1" | sed -E 's/(^|[[:space:]])--reverse-edge-cooldown([= ][^[:space:]]+)?//g' | awk '{$1=$1; print}'
+}
+
 stop_all() {
   : > "$MARKER"
   find "$ROOT/gpu_run_artifacts" -maxdepth 2 -name .watch_active -exec sh -c ': > "$1"' sh {} \; 2>/dev/null
+  if command -v tmux >/dev/null 2>&1; then
+    tmux list-sessions -F '#S' 2>/dev/null | awk '/^watch_/ {print}' | while IFS= read -r s; do
+      tmux kill-session -t "$s" 2>/dev/null || true
+    done
+  fi
   pkill -f "run_watchers.sh _" 2>/dev/null && echo "stopped managed watchers" || echo "no managed watchers running"
   # also catch legacy ad-hoc per-run watchers from before this controller existed
   pkill -f "gpu_run_artifacts/.*sync_watcher.sh" 2>/dev/null && echo "stopped legacy sync_watcher" || true
@@ -68,6 +80,10 @@ stop_run() {
   if [ "$(head -1 "$MARKER" 2>/dev/null | awk '{print $1}')" = "$RUN" ]; then
     : > "$MARKER"
   fi
+  if command -v tmux >/dev/null 2>&1; then
+    tmux kill-session -t "watch_${RUN}_sync" 2>/dev/null || true
+    tmux kill-session -t "watch_${RUN}_eval" 2>/dev/null || true
+  fi
   pkill -f "run_watchers.sh _sync $RUN" 2>/dev/null || true
   pkill -f "run_watchers.sh _eval $RUN" 2>/dev/null || true
   echo "stopped watchers for run=$RUN"
@@ -75,14 +91,23 @@ stop_run() {
 
 start_loops() {
   local RUN="$1" PLAT="$2" TGT="$3" OPP="$4" MODE="$5"
+  local LOGDIR="$ROOT/gpu_run_artifacts/$RUN"
+  mkdir -p "$LOGDIR"
   if [ "$MODE" = "parallel" ]; then
     echo "$RUN $PLAT $TGT" > "$(run_marker "$RUN")"
   else
     echo "$RUN $PLAT $TGT" > "$MARKER"
     rm -f "$(run_marker "$RUN")"
   fi
-  nohup bash "$SCRIPT_PATH" _sync "$RUN" >/dev/null 2>&1 &
-  nohup bash "$SCRIPT_PATH" _eval "$RUN" >/dev/null 2>&1 &
+  if command -v tmux >/dev/null 2>&1; then
+    tmux kill-session -t "watch_${RUN}_sync" 2>/dev/null || true
+    tmux kill-session -t "watch_${RUN}_eval" 2>/dev/null || true
+    tmux new-session -d -s "watch_${RUN}_sync" "bash '$SCRIPT_PATH' _sync '$RUN'"
+    tmux new-session -d -s "watch_${RUN}_eval" "bash '$SCRIPT_PATH' _eval '$RUN'"
+  else
+    nohup bash "$SCRIPT_PATH" _sync "$RUN" >>"$LOGDIR/watcher_sync.log" 2>&1 &
+    nohup bash "$SCRIPT_PATH" _eval "$RUN" >>"$LOGDIR/watcher_eval.log" 2>&1 &
+  fi
 }
 
 sync_once() {
@@ -135,6 +160,8 @@ EOF
 _sync() {  # _sync <run>
   local RUN="$1"; . "$ROOT/gpu_run_artifacts/$1/.watch_env"
   local DST="$ROOT/gpu_run_artifacts/$1"; mkdir -p "$DST/logs" "$DST/checkpoints"
+  echo "[$(date -u +%FT%TZ)] sync start run=$RUN match=$MATCH host=$HOST" >> "$DST/watcher_sync.log"
+  trap 'rc=$?; echo "[$(date -u +%FT%TZ)] sync exit rc=$rc run=$RUN" >> "$DST/watcher_sync.log"' EXIT
   while _still_active "$RUN"; do
     rsync -az -e "$RSYNC_SSH" --include="train_gpu_phase1_${MATCH}*.log" --exclude='*' \
       "$HOST:$REMOTE_LOG_DIR" "$DST/logs/" 2>/dev/null
@@ -155,6 +182,8 @@ _eval() {  # _eval <run> [opp_override]   (platform-independent — local files 
   local DIR="$ROOT/gpu_run_artifacts/$1/checkpoints" LOGDIR="$ROOT/gpu_run_artifacts/$1/eval_logs"
   local OUT="$ROOT/gpu_run_artifacts/$1/eval_$(basename "${OPP%.py}" | sed 's/candidate_//').csv"
   mkdir -p "$LOGDIR"; cd "$ROOT"
+  echo "[$(date -u +%FT%TZ)] eval start run=$RUN match=$MATCH opp=$OPP" >> "$ROOT/gpu_run_artifacts/$RUN/watcher_eval.log"
+  trap 'rc=$?; echo "[$(date -u +%FT%TZ)] eval exit rc=$rc run=$RUN opp=$OPP" >> "$ROOT/gpu_run_artifacts/$RUN/watcher_eval.log"' EXIT
   [ -f "$OUT" ] || echo "utc_time,step,win_rate,seat0_wr,seat1_wr,outmassed_pct,open_capatk_WON,mid_capatk_WON,peelrate_WON,planets100_WON,reinf_step_early,reinf_step_mid,reinf_dir_fwd,games,checkpoint" > "$OUT"
   while _still_active "$RUN"; do
     while IFS= read -r ckpt; do
@@ -172,6 +201,7 @@ _eval() {  # _eval <run> [opp_override]   (platform-independent — local files 
       if [ -n "$EVAL_GATE_FROM_RUNNAME" ] && [[ "$base" =~ ${MATCH}([0-9]+) ]]; then
         masks=$(echo "$REINFORCE_MASKS" | sed -E "s/--reinforce-gate-min-planets [0-9]+/--reinforce-gate-min-planets ${BASH_REMATCH[1]}/")
       fi
+      masks="$(eval_safe_masks "$masks")"
       $PY orbit_wars_rl/eval.py --checkpoint "$ckpt" --opponent "$OPP" \
           --panel --target-decode $masks > "$elog" 2>&1 || true
       wr=$(grep -E "^Overall:"  "$elog" | tail -1 | sed -E 's/.*\(([0-9.]+)%\).*/\1/')
@@ -257,7 +287,12 @@ case "${1:-}" in
       found=1
     done < <(find "$ROOT/gpu_run_artifacts" -maxdepth 2 -name .watch_active 2>/dev/null | sort)
     [ "$found" = 1 ] || echo "  (none)"
-    echo "live watcher procs:"; pgrep -af "run_watchers.sh _" 2>/dev/null || echo "  (none)"
+    echo "live watcher procs:"
+    ps -ef | awk '/run_watchers[.]sh _/ && !/awk/ {print "  "$0; found=1} END {if (!found) print "  (none)"}'
+    if command -v tmux >/dev/null 2>&1; then
+      echo "watcher tmux sessions:"
+      tmux list-sessions -F '  #S' 2>/dev/null | awk '/  watch_/ {print; found=1} END {if (!found) print "  (none)"}'
+    fi
     ;;
   _sync)  _sync "$2" ;;
   _eval)  _eval "$2" "${3:-}" ;;
