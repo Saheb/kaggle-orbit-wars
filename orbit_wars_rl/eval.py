@@ -350,6 +350,7 @@ _REINF_BINS = [(1, 1, "1"), (2, 2, "2"), (3, 3, "3"), (4, 6, "4-6"),
                (7, 9, "7-9"), (10, 12, "10-12"), (13, 10**9, "13+")]
 _REINF_RAMP_REF = "@1:0.01 @2:0.10 @3:0.19 @9-12:0.30 @13+:0.34-0.61"
 _REINF_STEP_REF = "<50:0.29 · 50-100:0.41 · >100:0.31"   # snowball winners; peaks mid-game
+_ATK_FAIL_LABELS = ("single", "wrong-src", "aggregate", "unafford", "sufficient", "redundant")
 
 
 def _reinf_bin_idx(owned):
@@ -413,6 +414,110 @@ def _holdable_roi(src, tgt, planets, fleets, seat, beta=_DM_BETA):
     rho = min(max((eta - _DM_ETA_FREE) / _DM_ETA_SCALE, 0.0), 1.0)
     floor = tgt[5] + tgt[6] * eta + inbound + beta * rho * enemy_mass + _DM_OVERHEAD
     return (tgt[6] * 20.0 - floor) / max(floor, 1.0)
+
+
+def _attack_capture_floor(src, tgt, planets, fleets, seat, beta=None):
+    """Decision-time floor for a launched attack.
+
+    Neutral targets use the static garrison floor from the neutral decisive-mass
+    diagnostic. Enemy targets use the reactive decisive-mass floor, including
+    production during ETA, enemy inbound, and reachable enemy planet mass.
+    """
+    if beta is None:
+        beta = _DM_BETA_EVAL
+    owner = int(tgt[1])
+    if owner == seat:
+        return 0.0
+    dist = math.hypot(tgt[2] - src[2], tgt[3] - src[3])
+    eta = min(max(1.0, math.ceil(dist / _ETA_PROBE_SPEED)), _DM_HORIZON)
+    if owner < 0:
+        return max(tgt[5] + _DM_OVERHEAD, 1e-6)
+    inbound = _friendly_inbound(fleets, tgt, 1 - seat)
+    enemy_mass = 0.0
+    for ep in planets:
+        eo = int(ep[1])
+        if eo < 0 or eo == seat or int(ep[0]) == int(tgt[0]):
+            continue
+        reach = max(_fleet_speed(int(ep[5])) * _DM_HORIZON, 1e-6)
+        d = math.hypot(ep[2] - tgt[2], ep[3] - tgt[3])
+        enemy_mass += ep[5] * max(1.0 - d / reach, 0.0)
+    rho = min(max((eta - _DM_ETA_FREE) / _DM_ETA_SCALE, 0.0), 1.0)
+    return max(tgt[5] + tgt[6] * eta + inbound + beta * rho * enemy_mass + _DM_OVERHEAD, 1e-6)
+
+
+def _attack_failure_bucket(planets, fleets, src, tgt, seat, sent, captured_soon):
+    """Classify a failed attack launch into the fix it implies.
+
+    Returns None for successful non-redundant attacks. For failures, the key split is:
+    did the chosen source have enough and undersend, or did the target require
+    cross-source aggregation that the factored action cannot express in one move?
+    """
+    floor = _attack_capture_floor(src, tgt, planets, fleets, seat)
+    if floor <= 0:
+        return None
+    inbound_before = _friendly_inbound(fleets, tgt, seat)
+    if inbound_before >= floor:
+        return "redundant"
+    if captured_soon:
+        return None
+    need = max(0.0, floor - inbound_before)
+    if inbound_before + float(sent) >= floor:
+        return "sufficient"
+    owned_garrisons = [
+        float(p[5])
+        for p in planets
+        if int(p[1]) == seat and int(p[0]) != int(tgt[0]) and float(p[5]) > 0
+    ]
+    max_single = max(owned_garrisons, default=0.0)
+    total_owned = sum(owned_garrisons)
+    if float(src[5]) >= need:
+        return "single"
+    if max_single >= need:
+        return "wrong-src"
+    if total_owned >= need:
+        return "aggregate"
+    return "unafford"
+
+
+def _reachable_drainable_attack_mass(planets, fleets, tgt, seat, window, beta=None):
+    """Reachable, drainable owned garrison for a same-turn aggregate attack on `tgt`.
+
+    This is a stricter follow-up to the raw `aggregate` bucket. Raw aggregate only says total
+    owned garrison can cover the missing floor; this asks whether mass is plausibly usable:
+    source spare must be drainable under its own inbound threat, and it must arrive by `window`
+    steps. It intentionally stays diagnostic-only; it is an estimate, not an action generator.
+    """
+    if beta is None:
+        beta = _DM_BETA_EVAL
+    enemy_in_src: dict = {}
+    for f in (fleets or []):
+        o = int(f[1])
+        if o < 0 or o == seat:
+            continue
+        r = _dm_fleet_target(planets, f)
+        if r is not None:
+            enemy_in_src[r[0]] = enemy_in_src.get(r[0], 0.0) + f[6]
+    avail = 0.0
+    source_count = 0
+    for src in planets:
+        if int(src[1]) != seat or int(src[0]) == int(tgt[0]) or src[5] <= 0:
+            continue
+        g = float(src[5])
+        own_threat = enemy_in_src.get(src[0], 0.0)
+        if own_threat >= g:
+            spare = g                                            # doomed source: recycle fully
+        elif own_threat > 0:
+            hold_floor = own_threat + beta * _reachable_enemy_mass(planets, src, seat) + _DM_OVERHEAD
+            spare = max(0.0, g - hold_floor)
+        else:
+            spare = g                                            # no active inbound threat → all garrison is drainable
+        if spare <= 0:
+            continue
+        dist = math.hypot(tgt[2] - src[2], tgt[3] - src[3])
+        if dist / max(_ship_speed_py(spare), 1e-6) <= window:
+            avail += spare
+            source_count += 1
+    return avail, source_count
 
 
 def _friendly_inbound(fleets, tgt, seat):
@@ -803,6 +908,13 @@ def game_conversion(steps, seat):
     atkh_n_ph = [0, 0, 0]
     atkh_best_ph = [0, 0, 0]
     atkh_top3_ph = [0, 0, 0]
+    # Failed-attack decomposition: if an attack launch does not lead to ownership soon after ETA,
+    # classify the implied fix. This separates per-source sizing from wrong-source, aggregate
+    # coordination, unaffordable target, and "sent enough but still failed" cases.
+    atk_n_ph = [0, 0, 0]
+    atkfail_n_ph = [0, 0, 0]
+    atkfail_bucket_ph = [[0, 0, 0] for _ in _ATK_FAIL_LABELS]
+    atkagg_reach_ph = [0, 0, 0]
     planets_at = {ms: None for ms in _CONV_MILESTONES}
     garrison_at = {ms: None for ms in _CONV_MILESTONES}   # ships parked on owned planets
     inflight_at = {ms: None for ms in _CONV_MILESTONES}   # ships in owned fleets (deployed)
@@ -1007,6 +1119,7 @@ def game_conversion(steps, seat):
                 atk += 1
                 atk_ships += sent
                 atk_bin[bidx] += 1
+                atk_n_ph[_ph] += 1
                 # near-vs-far: nearest legal attack target (any non-seat planet) from this source
                 _cand = [q for q in p0 if int(q[1]) != seat]
                 if _cand:
@@ -1055,15 +1168,26 @@ def game_conversion(steps, seat):
                 #   (neither = an effective launch.)
                 fin = _friendly_inbound(f0, tgt, seat)
                 capcost = _cap_cost_at_arrival(src, tgt, seat)
+                eta = max(1, int(math.ceil(
+                    math.hypot(tgt[2] - src[2], tgt[3] - src[3]) / _ETA_PROBE_SPEED)))
+                pid = tgt[0]
+                captured_soon = any(pid in us_pids_at[s] for s in range(t + 1, min(t + eta + 11, T)))
+                fail_bucket = _attack_failure_bucket(p0, f0, src, tgt, seat, sent, captured_soon)
+                if fail_bucket is not None:
+                    atkfail_n_ph[_ph] += 1
+                    atkfail_bucket_ph[_ATK_FAIL_LABELS.index(fail_bucket)][_ph] += 1
+                    if fail_bucket == "aggregate":
+                        floor = _attack_capture_floor(src, tgt, p0, f0, seat)
+                        need = max(0.0, floor - _friendly_inbound(f0, tgt, seat))
+                        avail, _ = _reachable_drainable_attack_mass(p0, f0, tgt, seat, eta + 10)
+                        if avail >= need:
+                            atkagg_reach_ph[_ph] += 1
                 if fin >= capcost > 0:
                     redundant += 1
                     if early:
                         redundant_early += 1
                 else:
-                    eta = max(1, int(math.ceil(
-                        math.hypot(tgt[2] - src[2], tgt[3] - src[3]) / _ETA_PROBE_SPEED)))
-                    pid = tgt[0]
-                    if not any(pid in us_pids_at[s] for s in range(t + 1, min(t + eta + 11, T))):
+                    if not captured_soon:
                         underkill += 1
                         if early:
                             underkill_early += 1
@@ -1126,6 +1250,8 @@ def game_conversion(steps, seat):
            "atkfar_n_ph": atkfar_n_ph, "atkfar_nearest_ph": atkfar_nearest_ph,
            "atkfar_ratio_sum_ph": atkfar_ratio_sum_ph, "atkdom_ph": atkdom_ph,
            "atkh_n_ph": atkh_n_ph, "atkh_best_ph": atkh_best_ph, "atkh_top3_ph": atkh_top3_ph,
+           "atk_n_ph": atk_n_ph, "atkfail_n_ph": atkfail_n_ph,
+           "atkfail_bucket_ph": atkfail_bucket_ph, "atkagg_reach_ph": atkagg_reach_ph,
            "dm_ratios_ph": dm_ratios_ph, "dm_neutral_ratios_ph": dm_neutral_ratios_ph,
            "hold_ph": hold_ph, "hold_age": hold_age,
            "reinf_class_ships": reinf_class_ships, "reinf_to_lost": reinf_to_lost,
@@ -1168,6 +1294,16 @@ def new_conversion_acc():
            "atkh_n_ph": [0, 0, 0], "atkh_best_ph": [0, 0, 0], "atkh_top3_ph": [0, 0, 0],
            "atkh_n_ph_won": [0, 0, 0], "atkh_best_ph_won": [0, 0, 0], "atkh_top3_ph_won": [0, 0, 0],
            "atkh_n_ph_lost": [0, 0, 0], "atkh_best_ph_lost": [0, 0, 0], "atkh_top3_ph_lost": [0, 0, 0],
+           # failed-attack decomposition by phase × outcome. Buckets are _ATK_FAIL_LABELS.
+           "atk_n_ph": [0, 0, 0], "atkfail_n_ph": [0, 0, 0],
+           "atkfail_bucket_ph": [[0, 0, 0] for _ in _ATK_FAIL_LABELS],
+           "atkagg_reach_ph": [0, 0, 0],
+           "atk_n_ph_won": [0, 0, 0], "atkfail_n_ph_won": [0, 0, 0],
+           "atkfail_bucket_ph_won": [[0, 0, 0] for _ in _ATK_FAIL_LABELS],
+           "atkagg_reach_ph_won": [0, 0, 0],
+           "atk_n_ph_lost": [0, 0, 0], "atkfail_n_ph_lost": [0, 0, 0],
+           "atkfail_bucket_ph_lost": [[0, 0, 0] for _ in _ATK_FAIL_LABELS],
+           "atkagg_reach_ph_lost": [0, 0, 0],
            # retention split by outcome — lost-cap → 1 on elimination (lose every planet because you
            # LOST the game), so the won-game value is the honest "can we hold mid-game?" read.
            "captures_won": 0, "captures_lost": 0, "lost_caps_won": 0, "lost_caps_lost": 0,
@@ -1301,6 +1437,11 @@ def add_conversion(acc, conv, won=None):
         acc["atkh_n_ph"][i] += conv["atkh_n_ph"][i]
         acc["atkh_best_ph"][i] += conv["atkh_best_ph"][i]
         acc["atkh_top3_ph"][i] += conv["atkh_top3_ph"][i]
+        acc["atk_n_ph"][i] += conv["atk_n_ph"][i]
+        acc["atkfail_n_ph"][i] += conv["atkfail_n_ph"][i]
+        acc["atkagg_reach_ph"][i] += conv["atkagg_reach_ph"][i]
+        for j in range(len(_ATK_FAIL_LABELS)):
+            acc["atkfail_bucket_ph"][j][i] += conv["atkfail_bucket_ph"][j][i]
         if won is not None:
             suf = "won" if won else "lost"
             acc[f"launches_ph_{suf}"][i] += conv["launches_ph"][i]
@@ -1313,6 +1454,11 @@ def add_conversion(acc, conv, won=None):
             acc[f"atkh_n_ph_{suf}"][i] += conv["atkh_n_ph"][i]
             acc[f"atkh_best_ph_{suf}"][i] += conv["atkh_best_ph"][i]
             acc[f"atkh_top3_ph_{suf}"][i] += conv["atkh_top3_ph"][i]
+            acc[f"atk_n_ph_{suf}"][i] += conv["atk_n_ph"][i]
+            acc[f"atkfail_n_ph_{suf}"][i] += conv["atkfail_n_ph"][i]
+            acc[f"atkagg_reach_ph_{suf}"][i] += conv["atkagg_reach_ph"][i]
+            for j in range(len(_ATK_FAIL_LABELS)):
+                acc[f"atkfail_bucket_ph_{suf}"][j][i] += conv["atkfail_bucket_ph"][j][i]
     acc["games"] += 1
     for ms in _CONV_MILESTONES:
         v = conv[f"p{ms}"]
@@ -1454,6 +1600,38 @@ def _fmt_conversion(acc):
             (f"{nm} best {100*bst[i]/n[i]:.0f}% top3 {100*t3[i]/n[i]:.0f}%(n{n[i]})" if n[i] else f"{nm} —(n0)")
             for i, nm in enumerate(("early<50", "mid50-100", "late>=100")))
     hrwl = (f"\n     WON  {_hr('_won')}\n     LOST {_hr('_lost')}" if (gw + gl) > 0 else "")
+    def _af(suf):
+        an = acc[f"atk_n_ph{suf}"]
+        fn = acc[f"atkfail_n_ph{suf}"]
+        buckets = acc[f"atkfail_bucket_ph{suf}"]
+        names = ("single", "wsrc", "agg", "unaff", "suff", "red")
+        out = []
+        for i, nm in enumerate(("early<50", "mid50-100", "late>=100")):
+            if an[i] == 0:
+                out.append(f"{nm} —(n0)")
+                continue
+            if fn[i] == 0:
+                out.append(f"{nm} fail 0%(n{an[i]})")
+                continue
+            mix = "/".join(f"{names[j]} {100*buckets[j][i]/fn[i]:.0f}%" for j in range(len(names)))
+            out.append(f"{nm} fail {100*fn[i]/an[i]:.0f}%({fn[i]}/{an[i]}) [{mix}]")
+        return "  ".join(out)
+    afwl = (f"\n     WON  {_af('_won')}\n     LOST {_af('_lost')}" if (gw + gl) > 0 else "")
+    def _agg2(suf):
+        fn = acc[f"atkfail_n_ph{suf}"]
+        raw = acc[f"atkfail_bucket_ph{suf}"][_ATK_FAIL_LABELS.index("aggregate")]
+        reach = acc[f"atkagg_reach_ph{suf}"]
+        out = []
+        for i, nm in enumerate(("early<50", "mid50-100", "late>=100")):
+            if raw[i] == 0:
+                out.append(f"{nm} —(raw0)")
+                continue
+            out.append(
+                f"{nm} {100*reach[i]/raw[i]:.0f}% raw-agg ({reach[i]}/{raw[i]}), "
+                f"{100*reach[i]/max(fn[i],1):.0f}% failures"
+            )
+        return "  ".join(out)
+    agg2wl = (f"\n     WON  {_agg2('_won')}\n     LOST {_agg2('_lost')}" if (gw + gl) > 0 else "")
     # decisive-mass GAP (force concentration toward producer_v2's capture floor; same floor as the
     # training reward). Per phase: gap = mean max(0,1-mass/floor) (DOWN=concentrating), cross =
     # mean(mass>=floor) (UP), p50 = median ratio. overkill = mean ratio on crossed (catch 3x dumb-
@@ -1575,6 +1753,14 @@ def _fmt_conversion(acc):
                        f"     by phase <50/50-100/>=100 (gap/cross/p50)  "
                        f"{_dm_ph(_dmn[0])}  {_dm_ph(_dmn[1])}  {_dm_ph(_dmn[2])}"
                        f"   [cross = sent enough to TAKE the neutral; low <50 cross = undercommit in the land-grab]\n")
+    failed_attack_line = (
+        f"  failed-attack decomposition  {_af('')}{afwl}\n"
+        f"     [single=chosen source had enough but undersent; wsrc=another source had enough; "
+        f"agg=needed multiple sources; unaff=owned mass below floor; suff=sent enough but still failed; "
+        f"red=already covered before launch]\n"
+        f"  failed-attack agg2 reachable-drainable  {_agg2('')}{agg2wl}\n"
+        f"     [agg2 narrows raw agg: drainable owned-source spare that can arrive by attack eta+10; "
+        f"still an estimate, but closer to the AR-actionable coordination ceiling]\n")
     return (f"Conversion: caps/game {c/n:.1f}  atk-launch/game {al/n:.1f}  "
             f"cap/atk-launch {c/max(al,1):.3f} (open<50 {cap_open:.3f}  mid50-100 {cap_mid:.3f})  ships/cap {acc['attack_ships']/max(c,1):.0f}  "
             f"reinf_share {rl/max(al+rl,1):.2f}\n"
@@ -1593,6 +1779,7 @@ def _fmt_conversion(acc):
             f"{om32_line}"
             f"{dm_line}"
             f"{dm_neutral_line}"
+            f"{failed_attack_line}"
             f"  launch-waste<50  redundant {redf:.2f} (WG {redf_wg:.2f})  underkill {undf:.2f} (WG {undf_wg:.2f})"
             f"   [⚠ underkill NON-discriminating: winners also ~0.40. THE signal = open<50 cap/atk above]\n"
             f"   [ref:winner  cap/atk whole 0.53 · open<50 0.51 · mid50-100 0.47 · planets 2/6/9/10 · reinf 0.30]\n"
