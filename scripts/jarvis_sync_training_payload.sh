@@ -49,6 +49,7 @@ rsync -az --delete \
   --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pkl' \
   --exclude='episode_data' --exclude='replays' --exclude='replays_4p_heuristic' \
   --exclude='episode_index' --exclude='checkpoints' --exclude='panels' \
+  --exclude='seed_checkpoints' \
   -e "$RSYNC_RSH" \
   "$ROOT/orbit_wars_rl/" "root@$IP:/home/orbit_wars_rl/"
 

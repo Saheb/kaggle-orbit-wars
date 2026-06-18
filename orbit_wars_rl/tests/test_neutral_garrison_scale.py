@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
+import torch
 from torch_env import VecTorchEnv
 
 
@@ -117,8 +118,25 @@ def test_symmetry_preserved():
     print(f"PASS symmetry: {num_groups} groups, 4-fold neutral ships identical")
 
 
+def test_auto_reset_preserves_scaling():
+    """Auto-reset must apply the same reset-time board curriculum as initial reset."""
+    env = VecTorchEnv(num_envs=1, num_players=2, device="cpu",
+                      action_decode="target", neutral_garrison_scale=3.0)
+    env.reset(seeds=[5])
+    env._auto_reset(torch.tensor([True]))
+
+    p = env.planets[0].cpu().numpy()
+    alive = env.planet_alive[0].cpu().numpy()
+    neutral_ships = [float(p[i, 5]) for i in range(len(p)) if alive[i] and p[i, 1] == -1]
+    assert neutral_ships, "auto-reset board should have neutrals"
+    assert all(float(int(s / 3.0) * 3.0) == s for s in neutral_ships), \
+        "auto-reset neutrals should still be integer-scaled by ×3"
+    print(f"PASS auto-reset ×3: {len(neutral_ships)} neutrals remain scaled")
+
+
 if __name__ == "__main__":
     test_scale_1x_noop()
     test_scale_3x_neutrals_scaled_home_unchanged()
     test_symmetry_preserved()
+    test_auto_reset_preserves_scaling()
     print("\nAll tests passed.")

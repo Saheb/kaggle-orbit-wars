@@ -34,7 +34,7 @@
 # Only _sync is platform-specific; _eval operates on local synced files and is platform-independent.
 set -uo pipefail
 ROOT=/Users/saheb/home/kaggle-orbit-wars
-PY="$ROOT/orbit_wars_rl/.venv/bin/python"
+PY="${PY:-/Users/saheb/home/.venv/bin/python}"
 SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 MARKER="$ROOT/gpu_run_artifacts/.active_run"
 POLL="${POLL:-120}"

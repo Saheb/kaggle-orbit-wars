@@ -14,6 +14,7 @@ __pycache__/
 *.pkl
 *.zip
 *.csv
+*.pyc
 
 # Training artifacts (gitignored — use rsync watcher to sync locally)
 gpu_run_artifacts/
@@ -44,5 +45,8 @@ opponents/*
 candidate_tests/
 submission*
 opponents/ourbest/
+opponents/*
 candidate_tests/*
 docs/logs/
+
+*__pycache__

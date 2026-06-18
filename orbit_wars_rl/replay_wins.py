@@ -88,7 +88,8 @@ def plot_planet_lead(trajectory, label, output_path, is_win):
         return False
 
 
-def run_replay(checkpoint, opponent_path, seeds, output_dir, target_decode=False):
+def run_replay(checkpoint, opponent_path, seeds, output_dir, target_decode=False,
+               sufficient_commit_factor=None):
     from kaggle_environments import make
 
     os.makedirs(output_dir, exist_ok=True)
@@ -97,6 +98,24 @@ def run_replay(checkpoint, opponent_path, seeds, output_dir, target_decode=False
     sd, _ = load_checkpoint(checkpoint, cfg)
     model = EntityTransformer(cfg.model)
     model.load_state_dict(sd)
+    # Carry the checkpoint's reinforcement / discipline settings onto the model so the
+    # replay's target masking matches the panel eval (build_agent_fn reads these off the
+    # model). load_checkpoint already parsed them from the ckpt onto cfg.model; without
+    # this the replays would silently drop reinforce + reverse-edge cooldown.
+    model.allow_reinforce = bool(getattr(cfg.model, "allow_reinforce", False))
+    model.reinforce_gate_min_planets = int(getattr(cfg.model, "reinforce_gate_min_planets", 0))
+    model.reinforce_forward_only = bool(getattr(cfg.model, "reinforce_forward_only", False))
+    model.reverse_edge_cooldown = int(getattr(cfg.model, "reverse_edge_cooldown", 0))
+    model.reinforce_garrison_floor = float(getattr(cfg.model, "reinforce_garrison_floor", 0.0))
+    # sufficient-commit: None = use ckpt value; a float overrides (eval-style A/B). factor=1.0
+    # vetoes sent<=garrison = the +1 capture rule for neutrals (need strictly more to flip).
+    if sufficient_commit_factor is None:
+        sufficient_commit_factor = float(getattr(cfg.model, "sufficient_commit_factor", 0.0))
+    model.sufficient_commit_factor = float(sufficient_commit_factor)
+    if model.allow_reinforce:
+        print(f"  Reinforcement: ON | gate>={model.reinforce_gate_min_planets} "
+              f"forward_only={model.reinforce_forward_only} floor={model.reinforce_garrison_floor} "
+              f"reverse_edge_cooldown={model.reverse_edge_cooldown}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device).eval()
     agent_fn = build_agent_fn(model, device,
@@ -179,7 +198,11 @@ if __name__ == "__main__":
                         default=[417, 451, 2663, 8782])
     parser.add_argument("--output-dir", default="/tmp/orbit_replays")
     parser.add_argument("--target-decode", action="store_true")
+    parser.add_argument("--sufficient-commit-factor", type=float, default=None,
+                        help="Override the ckpt's veto factor. 1.0 = the neutral +1 rule "
+                             "(veto sent<=garrison). None = use ckpt value.")
     args = parser.parse_args()
 
     run_replay(args.checkpoint, args.opponent,
-               args.seeds, args.output_dir, args.target_decode)
+               args.seeds, args.output_dir, args.target_decode,
+               sufficient_commit_factor=args.sufficient_commit_factor)

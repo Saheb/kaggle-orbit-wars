@@ -404,6 +404,10 @@ def train(args):
     if args.neutral_garrison_scale > 1.0:
         print(f"Neutral garrison scale: {args.neutral_garrison_scale:.1f}x (board-curriculum: "
               f"expensive neutrals force multi-source concentration; symmetric, both players)")
+    if args.scenario_curriculum != "off" and args.scenario_fraction > 0.0:
+        print(f"Scenario curriculum: {args.scenario_curriculum} "
+              f"on {args.scenario_fraction*100:.1f}% of resets, "
+              f"deadline={args.scenario_deadline}")
     if args.srcs_multi_penalty > 0.0:
         print(f"srcs_multi penalty: coef={args.srcs_multi_penalty}, threshold={args.srcs_multi_threshold}, "
               f"decay_frac={args.srcs_multi_penalty_decay_frac} "
@@ -494,7 +498,10 @@ def train(args):
                       handicap_ships=args.handicap_ships,
                       ssdr_frac=args.ssdr_frac,
                       ssdr_max_steps=args.ssdr_max_steps,
-                      neutral_garrison_scale=args.neutral_garrison_scale)
+                      neutral_garrison_scale=args.neutral_garrison_scale,
+                      scenario_curriculum=args.scenario_curriculum,
+                      scenario_fraction=args.scenario_fraction,
+                      scenario_deadline=args.scenario_deadline)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
 
     model = EntityTransformer(cfg.model).to(device)
@@ -1065,6 +1072,8 @@ def train(args):
         ms_infl = {m: torch.zeros((), device=env.device) for m in _MS}
         ms_plan = {m: torch.zeros((), device=env.device) for m in _MS}
         ms_n    = {m: torch.zeros((), device=env.device) for m in _MS}
+        scenario_done_count = 0.0
+        scenario_success_count = 0.0
 
         # --- Rollout collection (no grad) -----------------------------------
         # Per-rollout wall-time breakdown (SPS patch A): attributes main-thread time to
@@ -1148,6 +1157,11 @@ def train(args):
             _t_es = time.perf_counter()
             state, rewards, done = env.step(actions_per_player, angle_overrides=angle_overrides)
             _t_acc["estep"] += time.perf_counter() - _t_es
+            if getattr(env, "_last_scenario_id", None) is not None:
+                scen_done = done & (env._last_scenario_id != 0)
+                if scen_done.any():
+                    scenario_done_count += float(scen_done.sum().item())
+                    scenario_success_count += float(env._last_scenario_success[scen_done].float().sum().item())
             # Hoard milestones: when an env is at episode-step 16/32/50/100, accumulate
             # player-0 garrison (parked), in-flight, and owned-planet counts for that env.
             ownp = env.planets[:, :, 1].long()                            # (N, P) owner
@@ -1364,6 +1378,9 @@ def train(args):
                                      bc_batch=bc_batch)
         _t_acc["upd"] += time.perf_counter() - _t_upd
         metrics.update(ms_metrics)
+        if scenario_done_count > 0:
+            metrics["scenario_count"] = scenario_done_count
+            metrics["scenario_success_rate"] = scenario_success_count / scenario_done_count
         # train_mask time-fraction per (env,player): under per-episode assignment a slot's
         # learning-ness can flip mid-rollout (env resets pool<->self / seat), so the env's
         # rollout-SUMMED diagnostic accumulators below are weighted by the FRACTION of steps
@@ -1570,6 +1587,8 @@ def train(args):
                     f"Vμ {metrics.get('old_value_mean', 0):+.2f} Rμ {metrics.get('return_mean', 0):+.2f} "
                     f"Rσ {metrics.get('return_std', 0):.2f} Aσ {metrics.get('adv_std', 0):.2f} | "
                     f"rewμ {metrics.get('reward_mean', 0):+.4f} rewNZ {metrics.get('reward_nonzero', 0):.3f} | "
+                    f"scen {metrics.get('scenario_success_rate', 0):.2f}/"
+                    f"{metrics.get('scenario_count', 0):.0f} | "
                     f"featσ p/f/g/pw {metrics.get('planet_feat_std', 0):.2f}/"
                     f"{metrics.get('fleet_feat_std', 0):.2f}/"
                     f"{metrics.get('global_feat_std', 0):.2f}/"
@@ -1644,6 +1663,8 @@ def train(args):
                     # Reward stats
                     "reward/mean": metrics.get("reward_mean", 0),
                     "reward/nonzero_frac": metrics.get("reward_nonzero", 0),
+                    "scenario/success_rate": metrics.get("scenario_success_rate", 0),
+                    "scenario/count": metrics.get("scenario_count", 0),
                     # IL (zero when not active)
                     "il/kl": metrics.get("il_kl", 0),
                     "il/coef": metrics.get("il_coef", 0),
@@ -2003,6 +2024,21 @@ if __name__ == "__main__":
                              "captures expensive → single-source can't capture early → must "
                              "aggregate multiple sources (concentration). Training-only; eval/LB "
                              "use default boards (1.0). 1.0 = off. Suggested: 3.0.")
+    parser.add_argument("--scenario-curriculum",
+                        choices=["off", "mixed", "agg_attack", "stage_attack", "hold_under_peel"],
+                        default="off",
+                        help="Tiny reset-state curriculum where the focal tactic is required for "
+                             "a short terminal win. agg_attack requires multi-source capture of a "
+                             "neutral; stage_attack requires topping up an existing friendly inbound; "
+                             "hold_under_peel requires reinforcing a thin owned planet under inbound "
+                             "enemy peel. mixed samples all three. Off by default.")
+    parser.add_argument("--scenario-fraction", type=float, default=0.0,
+                        help="Fraction of resets replaced by --scenario-curriculum boards. Keep this "
+                             "small (e.g. 0.05-0.20) when mixing into normal self-play; 0 = off.")
+    parser.add_argument("--scenario-deadline", type=int, default=20,
+                        help="Scenario terminal deadline in env steps. Attack/stage scenarios must "
+                             "capture the focal target before this step; hold scenarios must retain "
+                             "the focal planet through this step.")
     parser.add_argument("--self-boost-planets", type=int, default=0,
                         help="Handicapped-real-planner curriculum: grant OUR seat this many extra "
                              "starting planets in POOL envs at step 0, tapering to 0 over "

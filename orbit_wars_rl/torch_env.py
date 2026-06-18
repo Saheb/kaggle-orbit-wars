@@ -49,6 +49,18 @@ _DM_OVERHEAD = 1.0      # capture_overhead
 # reinforce_cooldown.NEVER so the train mask and the eval/export canonical rule agree.
 _REINF_CD_NEVER = -(1 << 30)
 
+_SCENARIO_OFF = 0
+_SCENARIO_AGG_ATTACK = 1
+_SCENARIO_STAGE_ATTACK = 2
+_SCENARIO_HOLD_UNDER_PEEL = 3
+_SCENARIO_NAME_TO_ID = {
+    "off": _SCENARIO_OFF,
+    "agg_attack": _SCENARIO_AGG_ATTACK,
+    "stage_attack": _SCENARIO_STAGE_ATTACK,
+    "hold_under_peel": _SCENARIO_HOLD_UNDER_PEEL,
+}
+_SCENARIO_MIXED = "mixed"
+
 # Tensor sizes (worst-case bounds from kaggle env)
 MAX_PLANETS = 48
 MAX_FLEETS = 256
@@ -236,6 +248,9 @@ class VecTorchEnv:
         ssdr_frac: float = 0.0,
         ssdr_max_steps: int = 20,
         neutral_garrison_scale: float = 1.0,
+        scenario_curriculum: str = "off",
+        scenario_fraction: float = 0.0,
+        scenario_deadline: int = 20,
         allow_reinforce: bool = False,
         reinforce_garrison_floor: float = 0.0,
         reinforce_cost: float = 0.0,
@@ -318,6 +333,8 @@ class VecTorchEnv:
         self._emitted_step = None      # (N, num_players, 3) launches that created a fleet (emitted)
         self._slotstarve_step = None   # (N, num_players, 3) can_fire dropped: fleet storage full
         self._last_wins = None         # (N, num_players) bool: raw winner mask from the last _check_done
+        self._last_scenario_id = None  # (N,) long: scenario that just terminated, 0 otherwise
+        self._last_scenario_success = None  # (N,) bool: advantaged player won the scenario terminal
         self._obs_trunc = None         # (num_players,) get_features calls with live fleets > obs cap
         self._obs_calls = None         # (num_players,) get_features calls total (denom)
         # richer truncation severity (how much mass is hidden, not just whether any is):
@@ -440,6 +457,15 @@ class VecTorchEnv:
         # use default boards (scale 1.0) — the transfer test is whether the
         # concentration habit carries to normal-garrison boards.
         self.neutral_garrison_scale = float(neutral_garrison_scale)
+        if scenario_curriculum not in _SCENARIO_NAME_TO_ID and scenario_curriculum != _SCENARIO_MIXED:
+            raise ValueError(f"unknown scenario_curriculum={scenario_curriculum!r}")
+        self.scenario_curriculum = scenario_curriculum
+        self.scenario_fraction = float(scenario_fraction)
+        self.scenario_deadline = int(scenario_deadline)
+        self.scenario_id = None          # (N,) long; 0 = normal generated board
+        self.scenario_adv_player = None  # (N,) long; player whose tactic is being tested
+        self.scenario_target = None      # (N,) long; focal target planet index
+        self.scenario_done_step = None   # (N,) long; scenario deadline
         # Asymmetric Planet SSDR: with probability ssdr_frac, grant opponent 1..ssdr_max_steps
         # extra neutral planets at reset. No random play, no fleet explosion.
         # Breaks symmetric-start Nash cleanly.
@@ -521,6 +547,138 @@ class VecTorchEnv:
             return True  # no mask set → apply to all
         return bool(self._ssdr_self_mask[env_i].item())
 
+    def _scale_neutrals(self, pad: np.ndarray, n: int) -> None:
+        if self.neutral_garrison_scale <= 1.0:
+            return
+        for i in range(n):
+            if pad[i, 1] == -1:
+                pad[i, 5] = float(int(pad[i, 5] * self.neutral_garrison_scale))
+
+    def _choose_scenario(self, rng: random.Random) -> int:
+        if self.scenario_fraction <= 0.0 or rng.random() >= self.scenario_fraction:
+            return _SCENARIO_OFF
+        if self.scenario_curriculum == _SCENARIO_MIXED:
+            # Attack-side lessons are the main intended pressure; defensive peel
+            # remains in the mix, but at lower weight.
+            return rng.choice([
+                _SCENARIO_AGG_ATTACK,
+                _SCENARIO_STAGE_ATTACK,
+                _SCENARIO_AGG_ATTACK,
+                _SCENARIO_STAGE_ATTACK,
+                _SCENARIO_HOLD_UNDER_PEEL,
+            ])
+        return _SCENARIO_NAME_TO_ID[self.scenario_curriculum]
+
+    def _apply_scenario(
+        self,
+        pad: np.ndarray,
+        alive: np.ndarray,
+        rng: random.Random,
+    ) -> tuple[int, int, int, int]:
+        """Install a tiny concentration scenario in one env.
+
+        The scenarios are deliberately small. They are not meant to mimic full games;
+        they create a short terminal lesson where the advantaged player wins only by
+        concentrating or staging enough mass on the focal target.
+        """
+        scenario_id = self._choose_scenario(rng)
+        if scenario_id == _SCENARIO_OFF:
+            return _SCENARIO_OFF, 0, -1, 0
+
+        adv = rng.randint(0, 1)
+        opp = 1 - adv
+        mirror = adv == 1
+
+        def mx(x: float) -> float:
+            return 100.0 - x if mirror else x
+
+        pad[:, :] = 0.0
+        pad[:, 1] = -1.0
+        alive[:] = False
+
+        def planet(idx: int, owner: int, x: float, y: float,
+                   ships: float, prod: float, radius: float = 2.2) -> None:
+            pad[idx] = [idx, owner, mx(x), y, radius, ships, prod]
+            alive[idx] = True
+
+        target = 2
+        deadline = self.scenario_deadline if self.scenario_deadline > 0 else 20
+
+        if scenario_id == _SCENARIO_AGG_ATTACK:
+            # No single advantaged source can take the neutral target; two sources can.
+            # If the target is not taken by the deadline, the larger opponent economy wins.
+            planet(0, adv, 28.0, 63.0, 55.0, 2.0)
+            planet(1, adv, 28.0, 77.0, 55.0, 2.0)
+            planet(target, -1, 50.0, 70.0, 80.0, 5.0)
+            planet(3, opp, 84.0, 70.0, 130.0, 4.0)
+            planet(4, opp, 76.0, 84.0, 35.0, 1.0)
+            planet(5, adv, 16.0, 70.0, 25.0, 1.0)
+        elif scenario_id == _SCENARIO_STAGE_ATTACK:
+            # A prior friendly fleet is already committed but stops short. The winning
+            # move is to add one more source to the same target before the deadline.
+            planet(0, adv, 30.0, 70.0, 45.0, 2.0)
+            planet(1, adv, 31.0, 82.0, 42.0, 2.0)
+            planet(target, -1, 50.0, 70.0, 75.0, 5.0)
+            planet(3, opp, 84.0, 70.0, 125.0, 4.0)
+            planet(4, opp, 76.0, 84.0, 35.0, 1.0)
+            planet(5, adv, 17.0, 70.0, 25.0, 1.0)
+        elif scenario_id == _SCENARIO_HOLD_UNDER_PEEL:
+            # The focal planet starts ours but thin; an enemy peel is inbound. The
+            # winning move is defensive concentration from both nearby sources.
+            planet(0, adv, 38.0, 64.0, 45.0, 2.0)
+            planet(1, adv, 38.0, 76.0, 45.0, 2.0)
+            planet(target, adv, 50.0, 70.0, 15.0, 5.0)
+            planet(3, opp, 84.0, 70.0, 125.0, 4.0)
+            planet(4, opp, 75.0, 84.0, 40.0, 1.0)
+            planet(5, adv, 28.0, 70.0, 20.0, 1.0)
+        else:
+            raise AssertionError(f"unhandled scenario id {scenario_id}")
+
+        return scenario_id, adv, target, deadline
+
+    def _scenario_fleet_seed(self, env_i: int) -> None:
+        """Seed existing inbound fleets for scenarios that test staged/defensive follow-up."""
+        sid = int(self.scenario_id[env_i].item()) if self.scenario_id is not None else _SCENARIO_OFF
+        if sid not in (_SCENARIO_STAGE_ATTACK, _SCENARIO_HOLD_UNDER_PEEL):
+            return
+        adv = int(self.scenario_adv_player[env_i].item())
+        opp = 1 - adv
+        target = int(self.scenario_target[env_i].item())
+        if sid == _SCENARIO_STAGE_ATTACK:
+            owner, ships, src_pid = adv, 45.0, 0
+            x = 30.0 if adv == 0 else 70.0
+            y = 70.0
+        else:
+            owner, ships, src_pid = opp, 130.0, 3
+            # Keep the peel already committed, but not so close that an immediate
+            # correct reinforce cannot arrive first.
+            x = 84.0 if adv == 0 else 16.0
+            y = 70.0
+
+        # Seeded scenario fleets must use the same intercept aimer as normal
+        # launches. Straight current-position aim can harmlessly miss an orbiting
+        # target and invalidate the lesson.
+        src_x = torch.tensor([[x]], dtype=torch.float32, device=self.device)
+        src_y = torch.tensor([[y]], dtype=torch.float32, device=self.device)
+        src_r = torch.zeros((1, 1), dtype=torch.float32, device=self.device)
+        ship_count = torch.tensor([[ships]], dtype=torch.float32, device=self.device)
+        target_idx = torch.tensor([[target]], dtype=torch.long, device=self.device)
+        angle = float(self._target_intercept_angle(src_x, src_y, src_r, ship_count, target_idx)[0, 0].item())
+        src_px = float(self.planets[env_i, src_pid, 2].item())
+        src_py = float(self.planets[env_i, src_pid, 3].item())
+        src_pr = float(self.planets[env_i, src_pid, 4].item())
+        start_x = src_px + math.cos(angle) * (src_pr + 0.1)
+        start_y = src_py + math.sin(angle) * (src_pr + 0.1)
+        self.fleets[env_i, 0, 0] = 0.0
+        self.fleets[env_i, 0, 1] = float(owner)
+        self.fleets[env_i, 0, 2] = start_x
+        self.fleets[env_i, 0, 3] = start_y
+        self.fleets[env_i, 0, 4] = angle
+        self.fleets[env_i, 0, 5] = float(src_pid)
+        self.fleets[env_i, 0, 6] = ships
+        self.fleet_alive[env_i, 0] = True
+        self.next_fleet_id[env_i] = 1
+
     # ---------------------------------------------------------------------
     # Reset — generates N games using the kaggle env's seed-based generator,
     # then stacks into batched tensors. This is the only non-vectorized op,
@@ -538,6 +696,10 @@ class VecTorchEnv:
         planets_list = []
         planet_alive_list = []
         angular_velocities = []
+        scenario_ids = []
+        scenario_adv = []
+        scenario_targets = []
+        scenario_deadlines = []
 
         for seed_idx, seed in enumerate(seeds):
             init_rng = random.Random(seed)
@@ -552,10 +714,7 @@ class VecTorchEnv:
             # Board-curriculum: scale neutral garrison symmetrically. Applied BEFORE
             # home assignment (next block overwrites home planets' ships to 10), so
             # only the neutrals that REMAIN neutral after assignment are scaled.
-            if self.neutral_garrison_scale > 1.0:
-                for i in range(n):
-                    if pad[i, 1] == -1:  # neutral (all are at this point)
-                        pad[i, 5] = float(int(pad[i, 5] * self.neutral_garrison_scale))
+            self._scale_neutrals(pad, n)
             planets_list.append(pad)
 
             alive = np.zeros(MAX_PLANETS, dtype=bool)
@@ -594,6 +753,13 @@ class VecTorchEnv:
 
             # Mark unused slots as neutral (-1)
             pad[n:, 1] = -1
+            sid, adv, tgt, deadline = self._apply_scenario(
+                pad, alive, random.Random(f"orbit-wars-scenario-{seed}")
+            )
+            scenario_ids.append(sid)
+            scenario_adv.append(adv)
+            scenario_targets.append(tgt)
+            scenario_deadlines.append(deadline)
             planet_alive_list.append(alive)
 
         planets_np = np.stack(planets_list, axis=0)
@@ -610,9 +776,17 @@ class VecTorchEnv:
         self.done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.rewards = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         self.seeds = list(seeds)
+        self.scenario_id = torch.tensor(scenario_ids, dtype=torch.long, device=self.device)
+        self.scenario_adv_player = torch.tensor(scenario_adv, dtype=torch.long, device=self.device)
+        self.scenario_target = torch.tensor(scenario_targets, dtype=torch.long, device=self.device)
+        self.scenario_done_step = torch.tensor(scenario_deadlines, dtype=torch.long, device=self.device)
+        self._last_scenario_id = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._last_scenario_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         self._precompute_orbital_params()
         self._init_comets()
+        for env_i in range(self.num_envs):
+            self._scenario_fleet_seed(env_i)
         self.prev_material = self._compute_material()
         self.prev_production = self._compute_production()
         owner_p = self.planets[:, :, 1].long()
@@ -2302,7 +2476,34 @@ class VecTorchEnv:
 
         time_up = self.step_count >= (self.episode_steps - 1)
         few_left = n_alive <= 1
-        newly_done = (time_up | few_left) & ~self.done
+        scenario_success = torch.zeros(N, dtype=torch.bool, device=self.device)
+        scenario_failure = torch.zeros(N, dtype=torch.bool, device=self.device)
+        if self.scenario_id is not None:
+            scenario_active = self.scenario_id != _SCENARIO_OFF
+            target_idx = self.scenario_target.clamp(0, self.planets.shape[1] - 1)
+            target_owner = owner_p.gather(1, target_idx.view(-1, 1)).squeeze(1)
+            adv = self.scenario_adv_player
+            deadline = self.step_count >= self.scenario_done_step.clamp(min=1)
+            attack_scenario = (
+                (self.scenario_id == _SCENARIO_AGG_ATTACK)
+                | (self.scenario_id == _SCENARIO_STAGE_ATTACK)
+            )
+            hold_scenario = self.scenario_id == _SCENARIO_HOLD_UNDER_PEEL
+            scenario_success = scenario_active & (
+                (attack_scenario & (target_owner == adv))
+                | (hold_scenario & deadline & (target_owner == adv))
+            )
+            scenario_failure = scenario_active & (
+                (attack_scenario & deadline & (target_owner != adv))
+                | (hold_scenario & (target_owner != adv))
+            )
+        scenario_done = (scenario_success | scenario_failure) & ~self.done
+        newly_done = (time_up | few_left | scenario_done) & ~self.done
+        if self._last_scenario_id is not None:
+            self._last_scenario_id.zero_()
+            self._last_scenario_success.zero_()
+            self._last_scenario_id[scenario_done] = self.scenario_id[scenario_done]
+            self._last_scenario_success[scenario_done] = scenario_success[scenario_done]
 
         # Scores: ships on owned planets + ships in fleets, per player.
         scores = torch.zeros(N, P_, dtype=torch.float32, device=self.device)
@@ -2336,6 +2537,21 @@ class VecTorchEnv:
             velocity = (self.episode_steps - t) / self.episode_steps  # (N,) in [0, 1]
             speed_bonus = self.speed_coef * velocity.unsqueeze(1)     # (N, 1)
             rewards = torch.where(wins, rewards + speed_bonus, rewards)
+        if scenario_done.any():
+            env_idx = torch.where(scenario_done)[0]
+            rewards[env_idx] = -1.0
+            adv_idx = self.scenario_adv_player[env_idx]
+            opp_idx = 1 - adv_idx
+            succ = scenario_success[env_idx]
+            rewards[env_idx, adv_idx] = torch.where(
+                succ, torch.ones_like(rewards[env_idx, adv_idx]), -torch.ones_like(rewards[env_idx, adv_idx])
+            )
+            rewards[env_idx, opp_idx] = torch.where(
+                succ, -torch.ones_like(rewards[env_idx, opp_idx]), torch.ones_like(rewards[env_idx, opp_idx])
+            )
+            self._last_wins[env_idx] = False
+            self._last_wins[env_idx, adv_idx] = succ
+            self._last_wins[env_idx, opp_idx] = ~succ
         # Only return rewards for newly-done envs; zero otherwise
         rewards = rewards * newly_done.unsqueeze(1).float()
         self.rewards = torch.where(newly_done.unsqueeze(1), rewards, self.rewards)
@@ -2423,6 +2639,7 @@ class VecTorchEnv:
             pad = np.zeros((MAX_PLANETS, 7), dtype=np.float32)
             for i, p in enumerate(raw_planets):
                 pad[i] = p
+            self._scale_neutrals(pad, n)
             alive = np.zeros(MAX_PLANETS, dtype=bool)
             alive[:n] = True
             num_groups = n // 4
@@ -2447,12 +2664,19 @@ class VecTorchEnv:
                     for j in range(4):
                         pad[base + j, 1] = j; pad[base + j, 5] = 10
             pad[n:, 1] = -1
+            sid, adv, tgt, deadline = self._apply_scenario(
+                pad, alive, random.Random(f"orbit-wars-scenario-{seed}")
+            )
 
             self.planets[env_i] = torch.from_numpy(pad).to(self.device)
             self.init_planets[env_i] = self.planets[env_i].clone()
             self.planet_alive[env_i] = torch.from_numpy(alive).to(self.device)
             self.fleets[env_i] = 0
             self.fleet_alive[env_i] = False
+            self.scenario_id[env_i] = sid
+            self.scenario_adv_player[env_i] = adv
+            self.scenario_target[env_i] = tgt
+            self.scenario_done_step[env_i] = deadline
             self.step_count[env_i] = 0
             self.angular_velocity[env_i] = ang_vel
             self.next_fleet_id[env_i] = 0
@@ -2463,6 +2687,8 @@ class VecTorchEnv:
         # Reset the comet schedule for the reset envs (new seeds → recomputed lazily).
         if done_idx:
             self._init_comets(done_idx)
+            for env_i in done_idx:
+                self._scenario_fleet_seed(env_i)
         self.prev_material[done_mask] = self._compute_material()[done_mask]
 
 
