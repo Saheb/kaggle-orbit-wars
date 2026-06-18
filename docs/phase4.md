@@ -57,9 +57,11 @@ below the gradient's notice.
   carpet-bomb Nash (the Rev41-45 graveyard). **Fire stays as a Bernoulli gate** — it's
   the selectivity that makes Isaiah-like play (3.6% launch rate) possible. We just make
   it per-target so it's no longer blind.
-- **Not a reward/mask delta.** No new shaping term, no new veto beyond the
-  `sufficient_commit_factor=1.0` mask already shipped (which stays as a training mask on
-  top, to enforce the +1 floor while the ship head learns to size correctly).
+- **Not a reward/mask delta.** No new shaping term. The `sufficient_commit_factor=1.0`
+  veto mask already shipped as an eval/training mask (panel +11.4pp on revedge1, LB
+  submission pending 2026-06-18 — *panel-validated, NOT LB-validated*); it stays
+  available as a training mask on top of the arch change, but Stage B isolates the arch
+  without it (§7) so the veto gain cannot mask an architecture regression.
 - **Not top-k target retry.** Decode stays top-1: argmax target, fire gate at that
   target, ship bin at that target. If fire vetoes the top target, the slot no-fires
   (same as today). Top-k retry changes the log-prob factorization to ordered sampling;
@@ -69,26 +71,46 @@ below the gradient's notice.
 
 ## 3. The design — Option 1 (per-target fire, top-1 decode)
 
+### Explicit shape names (avoid silent bugs from reusing `fire_logits`/`ship_logits`)
+
+```
+fire_logits_slot:    (B, MO)              # OLD, kept as residual prior (broadcast to all targets)
+fire_logits_target:  (B, MO, N_p)        # NEW, per-(slot,target) — what forward returns
+ship_logits_slot:    (B, MO, bins)       # OLD, kept as residual prior (broadcast)
+ship_logits_target:  (B, MO, N_p, bins)  # NEW, per-(slot,target) — what forward returns
+target_logits:       (B, MO, N_p)        # UNCHANGED
+```
+
+`forward` returns `fire_logits_target` and `ship_logits_target` (the per-target tensors).
+The old slot-level `fire_logits_slot` / `ship_logits_slot` are internal to the residual
+computation (§5) — they are NOT in the output dict, to force consumers to use the
+per-target tensors. Any consumer that still indexes `outputs["fire_logits"]` as
+`(B, MO)` will fail loudly on the shape change, which is the desired behavior (silent
+bugs from ambiguous reuse are the failure mode to avoid).
+
 ### Model (`model.py`)
 
 Two new per-(slot, target) heads, mirroring `target_scorer`'s input pattern:
 
 ```python
-# Fire: (B, MO, N_p) — "should this slot fire AT this target?"
+# fire_logits_target: (B, MO, N_p) — "should this slot fire AT this target?"
 q_fire = self.fire_q(owned_enriched).unsqueeze(2).expand(-1, -1, N_p, -1)   # (B, MO, N_p, D)
 k_fire = self.fire_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
 fire_in = torch.cat([q_fire, k_fire, pairwise_features], dim=-1)            # (B, MO, N_p, D+D+F)
-fire_scores = self.fire_scorer(fire_in).squeeze(-1)                         # (B, MO, N_p)
+fire_logits_target = self.fire_scorer(fire_in).squeeze(-1)                  # (B, MO, N_p)
 
-# Ship: (B, MO, N_p, num_ship_bins) — "what size if this slot fires at this target?"
-# (reuse fire's q/k or add dedicated ship_q/ship_k; dedicated is cleaner for attribution)
+# ship_logits_target: (B, MO, N_p, bins) — "what size if this slot fires at this target?"
+q_ship = self.ship_q(owned_enriched).unsqueeze(2).expand(-1, -1, N_p, -1)
+k_ship = self.ship_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
 ship_in = torch.cat([q_ship, k_ship, pairwise_features], dim=-1)
-ship_scores = self.ship_scorer(ship_in)                                     # (B, MO, N_p, bins)
+ship_logits_target = self.ship_scorer(ship_in)                             # (B, MO, N_p, bins)
 ```
 
 Six new parameter blocks: `fire_q/fire_k/fire_scorer`, `ship_q/ship_k/ship_scorer`.
-Same shape pattern as the existing `tgt_q/tgt_k/target_scorer`. The old slot-level
-`fire_head` and `ship_head` are retired (or kept as a residual-init prior — see §5).
+Same shape pattern as the existing `tgt_q/tgt_k/target_scorer`. Dedicated `ship_q/ship_k`
+(not reused from fire) for clean attribution. The old slot-level `fire_head` and
+`ship_head` are kept as residual-init priors (see §5), not retired — they hold the
+step-0 behavior.
 
 `target_logits` unchanged (already per-target, already has pairwise).
 
@@ -96,10 +118,10 @@ Same shape pattern as the existing `tgt_q/tgt_k/target_scorer`. The old slot-lev
 
 ```python
 for slot in range(owned_count):
-    tidx = target_logits[slot].argmax()                    # pick the objective (target already sees pairwise)
-    if sigmoid(fire_scores[slot, tidx]) < fire_threshold:  # fire gate, now seeing the CHOSEN target
-        continue                                           # no fire from this slot (selectivity preserved)
-    bin = ship_scores[slot, tidx].argmax()                 # size for THIS target (sees its garrison+1)
+    tidx = target_logits[slot].argmax()                              # pick the objective (target already sees pairwise)
+    if sigmoid(fire_logits_target[slot, tidx]) < fire_threshold:     # fire gate, now seeing the CHOSEN target
+        continue                                                     # no fire from this slot (selectivity preserved)
+    bin = ship_logits_target[slot, tidx].argmax()                    # size for THIS target (sees its garrison+1)
     ships = _ship_bin_to_count(bin, max_ships[slot], mode)
     moves.append([src_id, intercept_angle(...), ships])
 ```
@@ -110,18 +132,43 @@ to the target's garrison, so `garrison+1` is expressible and the +1 trap dies.
 
 ### PPO log-prob (`ppo.py` + `train_torch.py`) — chain rule factorization
 
+**Probabilistic contract (the part that must be precise):** the decode samples a target
+for every valid slot, then fire conditioned on that target, then ship conditioned on
+target only if fired. The joint distribution per slot is:
+
 ```
-log_prob = Σ_slots [ log p(target_slot) · 1[fired] + log p(fire_slot | target_slot) + log p(ship_slot | target_slot) · 1[fired] ]
+p(target=t, fire, ship | fired) = p(target=t) · p(fire | t) · p(ship | t)
+p(target=t, fire=0)             = p(target=t) · p(fire=0 | t)        # no ship on no-fire
+```
+
+The target is a *latent* on no-fire slots (the environment never sees it), but it is
+sampled, so it is part of the joint action PPO evaluates. **Target log-prob is included
+for EVERY valid slot, not just fired slots.** This is a change from the current contract
+(`ppo.py:182-184` gates target log-prob with `fired_slots`); that gating was harmless
+under the old independent-fire head (fire didn't depend on target, so dropping target
+log-prob on no-fire slots was a no-op for the ratio), but with per-target fire the
+marginal `p(no_fire) = Σ_t p(t)·p(fire=0|t)` involves target probabilities — dropping
+them makes the PPO ratio wrong. Including target log-prob everywhere is the simpler
+contract (no marginalization); the alternative (marginalize no-fire over targets) is
+more expensive and changes the gradient. Use the simple one.
+
+```
+log_prob_slot = log p(target_slot)                            # every valid slot (was: only fired)
+             + log p(fire_slot | target_slot)                # every valid slot (Bernoulli at chosen target)
+             + 1[fired] · log p(ship_slot | target_slot)     # only fired (no ship action on no-fire)
+log_prob = Σ_slots log_prob_slot
 ```
 
 Per slot: `Categorical(target)` over planets (unchanged), `Bernoulli(fire | target)` at
 the chosen target's fire_logit, `Categorical(ship | target)` at the chosen target's
 ship_logits. Clean chain rule `p(target, fire, ship) = p(target)·p(fire|target)·p(ship|target)`.
-PPO ratio unchanged; entropy is the joint entropy. `old_log_probs` storage shape
-unchanged (fire/ship log-probs are scalars per slot, evaluated at the chosen target).
+PPO ratio is the ratio of joint probabilities — correct under this contract. Entropy is
+the joint entropy. `old_log_probs` storage shape unchanged (fire/ship log-probs are
+scalars per slot, evaluated at the chosen target; target log-prob was already stored per
+slot, it just now contributes on no-fire slots too).
 
 The IL-KL (`ppo.py:97-114`) needs the same per-target conditioning: fire KL at the
-chosen target, ship KL at the chosen target. Target KL unchanged.
+chosen target, ship KL at the chosen target. Target KL unchanged (already per-slot).
 
 ---
 
@@ -156,7 +203,7 @@ Rejected:
 
 ---
 
-## 5. Warmstart — residual-init so step-0 == old behavior
+## 5. Warmstart — residual-init so step-0 == old behavior (broadcast parity, not byte-identical)
 
 New params (`fire_q/k/scorer`, `ship_q/k/scorer`) are uninitialized. Cold-start risk is
 real (the docs' BC-warmstart lesson #9: frozen policy from partial ckpt). Three options,
@@ -165,14 +212,28 @@ ordered by safety:
 **(b) Residual — RECOMMENDED.** Keep the old slot-level `fire_head(owned_enriched)` as a
 prior; the new per-target head is a *residual*:
 ```python
-slot_fire_logit = self.fire_head(owned_enriched)                  # old, broadcast to all targets
-fire_scores = slot_fire_logit.unsqueeze(-1) + fire_scorer(...)    # residual starts at 0
+fire_logits_slot   = self.fire_head(owned_enriched)                       # OLD (B, MO)
+fire_logits_target = fire_logits_slot.unsqueeze(-1) + fire_scorer(...)    # (B, MO, N_p), residual starts at 0
+# same for ship: ship_logits_slot broadcast + ship_scorer residual
 ```
-Initialize `fire_scorer`'s last layer to zeros → `fire_scores[slot, target] == old
-fire_logit[slot]` for all targets at step 0. Same for ship. Step-0 behavior is
-byte-identical to the old model; PPO gradient flows into the residual and learns
+Initialize `fire_scorer`'s (and `ship_scorer`'s) last layer to zeros →
+`fire_logits_target[slot, target] == old fire_logits_slot[slot]` for ALL targets at
+step 0. Same for ship. **Parity is "old slot logits broadcast identically across the
+target dimension," NOT "byte-identical forward"** (the output shapes change from
+`(B,MO)` → `(B,MO,N_p)` and `(B,MO,bins)` → `(B,MO,N_p,bins)`; raw forward-dict equality
+is impossible and the wrong gate). The parity gate is: residual=0 ⇒ the *decode* and
+*log-prob* match the old model on the same input (greedy actions identical, log-probs
+identical under the §3 contract). PPO gradient flows into the residual and learns
 per-target differentiation only where it pays. Cleanest attribution (the residual's
 magnitude shows exactly when per-target signal activates).
+
+**Zero-init caveat (P1 from review):** zeroing the residual's final layer means earlier
+residual layers (`fire_q/fire_k`, the first layer of `fire_scorer`) get *zero gradient*
+until the last layer moves off zero. This is usually acceptable (the last layer moves on
+the first update, then earlier layers get gradient), but Stage B must explicitly track
+whether `fire_q/k` and `ship_q/k` norms and per-target variance become nonzero. If they
+stay at zero past ~50k steps, switch to small-norm init (e.g. last layer ~0.01) — a
+tiny step-0 deviation in exchange for breaking the zero-gradient freeze.
 
 **(a) Init from old heads** — `fire_scorer`'s last layer initialized so the per-target
 logit approximates the old slot-level logit (broadcast). Same step-0 behavior as (b)
@@ -184,59 +245,86 @@ but without the explicit residual structure; harder to attribute.
 **Checkpoint compatibility:** old ckpts lack the new params. Two paths:
 - **Strict:** from-scratch Stage B run (BC warmstart, new feature set) — cleanest but
   discards the revedge1 lineage.
-- **Compat shim + residual (b):** `load_state_dict(strict=False)`; init new params from
-  old heads (zeros for the residual). Lets us resume revedge1 4.72M + veto + per-target
-  heads in one run. Step-0 == old model (residual=0), so the arch-change shock is
-  bounded. This is the pragmatic path — the docs' "don't resume across arch changes"
-  warning is about shape changes that alter step-0 behavior; residual-init (b) doesn't.
+- **Compat shim + residual (b):** `load_state_dict(strict=False)`; init new params with
+  zeros for the residual. Lets us resume revedge1 4.72M + per-target heads in one run.
+  Step-0 decode == old model (residual=0), so the arch-change shock is bounded. This is
+  the pragmatic path — the docs' "don't resume across arch changes" warning is about
+  shape changes that alter step-0 behavior; residual-init (b) doesn't.
 
 ---
 
-## 6. Scope
+## 6. Scope — every consumer of `fire_logits` / `ship_logits` must be updated
 
-| File | Change |
-|---|---|
-| `model.py` | +6 Linear layers (fire/ship q/k/scorer), `forward` produces `(B,MO,N_p)` fire + `(B,MO,N_p,bins)` ship; old `fire_head`/`ship_head` kept as residual priors |
-| `action_mask.py` | `actions_from_target_policy` decode → top-1 with per-target fire gate + per-target ship bin |
-| `torch_env.py` | same decode change for training-time action sampling |
-| `ppo.py` | log-prob factorization: `p(target)·p(fire\|target)·p(ship\|target)`; IL-KL same conditioning |
-| `train_torch.py` | rollout log-prob uses per-target fire/ship at the chosen target; `old_log_probs` storage unchanged (scalars per slot) |
-| `bc.py` | (if BC warmstart) fire/ship loss becomes per-target at the teacher's chosen target |
-| `export_agent.py` | exported `forward` mirrors the new heads + top-1 decode |
-| tests | new parity: per-target fire/ship shapes; **residual-init == old behavior** (byte-identical forward with residual=0); joint decode matches old decode when residual=0 |
+The shape change from `(B,MO)` / `(B,MO,bins)` to `(B,MO,N_p)` / `(B,MO,N_p,bins)`
+touches every site that indexes these tensors. Returning only the per-target tensors
+from `forward` (§3) forces each consumer to either index the chosen target or fail
+loudly on the shape mismatch — no silent `(B,MO)`-shaped bugs.
+
+| File | Site | Change |
+|---|---|---|
+| `model.py` | `EntityTransformer.__init__` + `forward` | +6 Linear layers (`fire_q/k/scorer`, `ship_q/k/scorer`); `forward` returns `fire_logits_target` `(B,MO,N_p)` + `ship_logits_target` `(B,MO,N_p,bins)`; old `fire_head`/`ship_head` kept as residual priors (broadcast) |
+| `train_torch.py` | `sample_action_batched` (lines ~79-100) | sample target (unchanged), sample fire from `fire_logits_target[:, slot, sampled_target]`, sample ship from `ship_logits_target[:, slot, sampled_target, :]`; `old_log_probs` stores target log-prob for ALL valid slots (was: only fired), fire/ship log-probs at the chosen target |
+| `ppo.py` | `compute_loss` (lines ~161-193) + `_il_kl_penalty` (lines ~97-114) | log-prob per §3 contract: `log p(target)` for every valid slot + `log p(fire\|target)` for every valid slot + `1[fired]·log p(ship\|target)`; IL-KL: fire KL at chosen target, ship KL at chosen target, target KL unchanged |
+| `torch_env.py` | action decode in `step` (lines ~1840-1962) | top-1 decode: argmax target → fire gate at that target → ship bin at that target; `sufficient_commit_factor` veto now checks `ship_count` vs the chosen target's garrison (already per-target via `target_ships`) |
+| `action_mask.py` | `actions_from_target_policy` (lines ~793-1013) | same top-1 decode as torch_env; `sufficient_commit_factor` veto at the chosen target |
+| `eval.py` | `build_agent_fn` (lines ~212-323) + all probe/diagnostic sites that read `outputs["fire_logits"]` / `outputs["ship_logits"]` | index `fire_logits_target[:, slot, chosen_target]` / `ship_logits_target[:, slot, chosen_target, :]`; per-target `fire_p` diagnostic (richer — shows fire_p per target, not one slot-level number) |
+| `export_agent.py` | embedded `EntityTransformer` + decode | mirrors the new `forward` (per-target heads + residual) and top-1 decode; export must produce byte-identical behavior to eval |
+| `bc.py` | `train` (lines ~297-353) | (only if BC warmstart) fire/ship loss evaluated at the teacher's chosen target per sample; target loss unchanged |
+| tests | new + existing | new parity: per-target fire/ship shapes; **residual=0 ⇒ decode + log-prob parity** (NOT byte-identical forward — shapes change); greedy actions identical when residual=0; existing `test_sufficient_commit`, `test_decisive_mass`, `test_source_selection_parity` must still pass |
+
+**Files that should NOT need changes** (verify, don't assume): `features.py`
+(feature computation is upstream of the heads), `opponent_pool.py` (uses `forward` outputs
+via the same interface), `reinforce_cooldown.py` (operates on decoded moves, not logits).
 
 ---
 
-## 7. Staged plan — one falsifiable gate per stage
+## 7. Staged plan — separate architecture parity from veto value
 
-### Stage A — parity + warmstart (cheap, local)
-Build the new heads with residual-init (b). Prove:
+**Discipline (from review):** prove the per-target heads with residual=0 reproduce old
+behavior WITHOUT the veto, then add the veto for training/eval. Do NOT bundle the veto
+into the architecture-parity run — the veto's +11.4pp panel gain could mask an
+architecture regression. The veto is panel-validated, not LB-validated (the
+revedge1+veto submission is pending as of 2026-06-18); do not treat it as a known-safe
+floor to build on.
+
+### Stage A — architecture parity, NO veto (cheap, local)
+Build the new heads with residual-init (b). Prove, with `sufficient_commit_factor=0.0`:
 1. `load_state_dict(strict=False)` on revedge1 4.72M loads cleanly (new params zeros).
-2. With residual=0, `forward` is byte-identical to the old model (same fire_logits
-   broadcast, same ship_logits, same target_logits) — parity test.
-3. With residual=0, the eval panel matches the baseline (no-veto) panel within noise.
-   → verify: parity test PASS + 16-game panel ≈ baseline.
+2. With residual=0, greedy decode matches the old model on a fixed seed panel: same
+   target picks, same fire decisions, same ship bins, same moves. (Parity = decode +
+   log-prob equality, NOT raw forward-dict equality — shapes change, §5.)
+3. With residual=0, a 16-game Ajay panel matches the baseline 23.8% within noise (no
+   regression from the shape change alone).
+   → verify: parity test PASS + 16-game panel ≈ 23.8% baseline (no veto).
 
-Gate: if parity fails, the residual design is wrong — fix before any training.
+Gate: if parity fails, the residual design is wrong — fix before any training. If the
+no-veto panel regresses, the shape change broke something the residual isn't capturing.
 
-### Stage B — short PPO smoke (cheap, GPU)
-Resume revedge1 4.72M + `--sufficient-commit-factor 1.0` (the veto stays as a training
-mask) + the new per-target heads (residual-init) for ~500k steps. Read:
+### Stage B — short PPO smoke, NO veto (cheap, GPU)
+Resume revedge1 4.72M + the new per-target heads (residual-init), `sufficient_commit_factor=0.0`,
+for ~500k steps. **Isolate the architecture's effect with no mask confound.** Read:
 1. `clip_frac` ≠ 0 and entropy not floored (not a frozen policy — lesson #9).
-2. The fire/ship residuals' norms climb from zero (per-target signal is activating).
+2. `fire_q/fire_k` and `ship_q/ship_k` norms climb from zero; per-target variance in
+   `fire_logits_target` and `ship_logits_target` becomes nonzero (per-target signal is
+   activating — the zero-init caveat from §5).
 3. `dm NEUTRAL cross` rises (ship sizing to `garrison+1`), `cap/atk open<50` rises
    (fire gate opening at low-margin uncontested neutrals).
 4. Held-out Ajay WR holds ≈ 23.8% baseline (no collapse from the arch change).
 
 Gate: if clip_frac=0 / entropy floored → warmstart failed, revert to Stage A fix. If
+residual norms stay at zero past ~50k steps → switch to small-norm init (§5 caveat). If
 Ajay collapses → the arch change shocked the policy despite residual-init → reconsider
 the compat-shim path (from-scratch Stage B instead of resume).
 
-### Stage C — full run (GPU, ~6M)
-If Stage B passes: full run with the same config. Judge by the Phase 4 promotion
-metrics (§8). One delta vs the revedge1 baseline: the per-target heads. The veto mask
-is a co-delta but it's already LB-validated (+11.4pp panel) and is a mask (no learning
-semantics) — acceptable to bundle, per the docs' "masks are safe to bundle" pattern.
+### Stage C — full run WITH veto (GPU, ~6M)
+If Stage B passes (arch is sound without the mask): full run with
+`--sufficient-commit-factor 1.0` + the new per-target heads. The veto is now a co-delta,
+but Stage B already proved the arch alone doesn't regress — so any Stage C gain over
+Stage B's end-state is attributable to the veto, and any gain over the revedge1+veto
+panel (35.2%) is attributable to the per-target heads. Two deltas, but the attribution
+is clean because Stage B isolated the arch.
+
+Judge by the Phase 4 promotion metrics (§8). LB submission at the end.
 
 ---
 
@@ -248,12 +336,14 @@ failed-attack decomposition: single 0% stays, but the +1 trap (sent==garrison) -
 dm NEUTRAL cross up (ship sizing to garrison+1)
 cap/atk open<50 up (fire gate opening at low-margin uncontested neutrals)
 fire_p responds to enemy_contest (re-run the pressure probe — fire_p should MOVE)
+residual norms: fire_q/k, ship_q/k, fire_scorer, ship_scorer nonzero + climbing (the
+  per-target signal is activating — the zero-init caveat from §5; DEAD → warmstart failed)
 ```
 
 Secondary (the wall, unchanged by this fix but must not regress):
 ```
 hold-loss out-massed% flat-or-down (concentration wall; this fix doesn't target it)
-Ajay WR up (the veto gave +11.4pp; per-target heads should add on top or hold)
+Ajay WR up (Stage B no-veto should hold ≈ 23.8%; Stage C with veto should beat 35.2%)
 Zach WR holds (~88-89% saturated)
 ```
 
@@ -266,46 +356,56 @@ fire_rate in isolation (could rise or fall — read it WITH cap/atk launch effic
 
 Panel-to-LB humility: Ajay panel ≠ LB-predictive (rev53b 10.9% Ajay → 933 LB < rev38
 2.7% → 994). LB submission remains the promotion test for leaderboard claims. The
-revedge1 4.72M + veto submission (2026-06-18, pending) is the first LB data point for
-the veto alone; Phase 4's LB read comes after Stage C.
+revedge1 4.72M + veto submission (2026-06-18, **pending** — panel-validated, NOT
+LB-validated) is the first LB data point for the veto alone; Phase 4's LB read comes
+after Stage C. Do not claim LB validation until the submission scores.
 
 ---
 
 ## 9. Risks / open questions
 
-- **PPO factorization change:** `p(target)·p(fire|target)·p(ship|target)` vs the old
-  `p(fire)·p(ship)·p(target)` (independent). The chain rule is mathematically clean but
-  the *gradient* flows differently — fire/ship now get gradient through the target
-  choice. Watch clip_frac / entropy in Stage B for signs the policy can't adapt.
-- **Residual-init scale:** if the residual starts at exactly 0, the first PPO updates
-  may push it slowly (vanishing gradient through the zero-init last layer). Mitigation:
-  small-norm init (e.g. 0.01) instead of exact zero, accept a tiny step-0 deviation.
-  Test in Stage A.
+- **PPO factorization change:** `p(target)·p(fire|target)·p(ship|target)` with target
+  log-prob on ALL valid slots (§3), vs the old `p(fire)·p(ship)·p(target)` with target
+  log-prob only on fired slots. The chain rule is mathematically clean but (a) the
+  *gradient* flows differently — fire/ship now get gradient through the target choice,
+  and (b) the target head now gets gradient from no-fire slots (where the target was a
+  latent). Watch clip_frac / entropy in Stage B for signs the policy can't adapt.
+- **Residual-init scale (zero-gradient freeze):** zeroing the residual's final layer
+  means earlier residual layers (`fire_q/fire_k`, `ship_q/ship_k`, `fire_scorer`'s
+  first layer) get *zero gradient* until the last layer moves off zero. Usually
+  acceptable (last layer moves on the first update, then earlier layers get gradient),
+  but if `fire_q/k` norms stay at zero past ~50k steps, switch to small-norm init
+  (last layer ~0.01) — a tiny step-0 deviation in exchange for breaking the freeze.
+  Track residual norms explicitly in Stage B (§8).
 - **Fire-veto waste at top-1:** if the target head picks a target the fire head vetoes,
   the slot no-fires. If this is frequent, the policy is wasting slots. Measure
-  `veto_rate` in Stage B; revisit top-k if it's high.
-- **Per-target compute cost:** fire/ship are now `(B, MO, N_p)` not `(B, MO)` — a
-  ~24× compute increase for those heads (small vs the transformer). Measure SPS in
-  Stage B; the AR doc's throughput tripwire (SPS < 150) doesn't apply (this is
-  one-shot, not sequential), but a >2× slowdown vs the factored baseline would hurt
-  iteration economics.
+  `veto_rate` (target picked but fire_p < 0.5) in Stage B; revisit top-k if it's high.
+- **Per-target compute cost:** fire/ship are now `(B, MO, N_p)` / `(B, MO, N_p, bins)`
+  not `(B, MO)` / `(B, MO, bins)` — a ~24× compute increase for those heads (small vs
+  the transformer, but the ship scorer is `D+D+F → D → bins` so it's
+  `MO·N_p·bins·D²`-ish). Measure SPS in Stage B; the AR doc's throughput tripwire
+  (SPS < 150) doesn't apply (this is one-shot, not sequential), but a >2× slowdown vs
+  the factored baseline would hurt iteration economics.
 - **Interaction with the veto mask:** `sufficient_commit_factor=1.0` blocks
   `sent <= garrison`. Once the ship head learns to size to `garrison+1` via the
   per-target features, the mask should rarely fire (the policy self-censors). If the
   mask is still firing frequently at 6M, the per-target signal didn't take — diagnose
   the residual norms. The mask is a safety net, not a crutch; the goal is the ship head
-  learning the +1 rule natively.
+  learning the +1 rule natively. Stage B (no veto) tests whether the arch alone moves
+  the +1 metric; Stage C (with veto) tests whether the mask still adds value on top.
 
 ---
 
 ## 10. Sequencing / gate
 
-1. **GATE — parity (Stage A):** build, load revedge1 4.72M, prove residual=0 forward
-   is byte-identical. No training until parity PASS.
-2. **Stage B:** 500k PPO smoke, read clip_frac / residual norms / dm NEUTRAL cross /
-   Ajay holds.
-3. **Stage C:** full run to 6M, read promotion metrics + LB submission.
+1. **GATE — Stage A (parity, NO veto):** build, load revedge1 4.72M, prove residual=0
+   decode + log-prob match the old model (NOT byte-identical forward — shapes change,
+   §5). 16-game Ajay panel ≈ 23.8% baseline. No training until parity PASS.
+2. **Stage B (500k PPO, NO veto):** isolate the arch change. Read clip_frac / residual
+   norms / dm NEUTRAL cross / Ajay holds ≈ 23.8%.
+3. **Stage C (full run WITH veto):** add `--sufficient-commit-factor 1.0`. Read
+   promotion metrics + LB submission.
 
-One delta per stage. The veto mask is the only co-delta (already LB-validated, safe to
-bundle). Selection stays PURE: held-out Ajay WR + LB submission, never self-play WR or
-shaped reward.
+One delta per stage. Stage B isolates the architecture (no mask); Stage C adds the veto
+only after the arch is proven sound. Selection stays PURE: held-out Ajay WR + LB
+submission, never self-play WR or shaped reward.
