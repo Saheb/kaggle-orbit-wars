@@ -145,8 +145,8 @@ def test_target_decode_masks_own_planet_before_argmax():
     obs = _make_obs(planets)
     masks = compute_action_masks(obs, player=0)
 
-    fire_logits = torch.full((1, 16), -100.0)
-    fire_logits[0, 0] = 10.0
+    fire_logits = torch.full((1, 16, 48), -100.0)
+    fire_logits[0, 0, 2] = 10.0
 
     target_logits = torch.full((1, 16, 48), -100.0)
     # Highest raw logit is invalid self-target; second-highest is another owned planet.
@@ -156,8 +156,8 @@ def test_target_decode_masks_own_planet_before_argmax():
     target_logits[0, 0, 2] = 12.0
     target_logits[0, 0, 3] = 8.0
 
-    ship_logits = torch.full((1, 16, 32), -100.0)
-    ship_logits[0, 0, 4] = 10.0  # send 5 ships
+    ship_logits = torch.full((1, 16, 48, 32), -100.0)
+    ship_logits[0, 0, 2, 4] = 10.0  # send 5 ships to legal target
 
     moves = actions_from_target_policy(
         fire_logits, target_logits, ship_logits, masks, obs, player=0

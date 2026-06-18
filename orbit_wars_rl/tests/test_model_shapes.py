@@ -15,9 +15,9 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import ModelConfig, EnvConfig
-from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS
+from model import EntityTransformer, NUM_SHIP_BINS
 from features import extract_features
-from action_mask import compute_action_masks, ANGLE_BIN_WIDTH, NUM_ANGLE_BINS as _NAB
+from action_mask import compute_action_masks, ANGLE_BIN_WIDTH, NUM_ANGLE_BINS, actions_from_target_policy
 
 
 # ---------------------------------------------------------------------------
@@ -114,9 +114,9 @@ def test_model_forward_shapes():
     with torch.no_grad():
         out = model(planet_features, fleet_features, global_features, planet_mask, fleet_mask)
 
-    assert out["fire_logits"].shape == (B, cfg.max_owned_planets), out["fire_logits"].shape
-    assert out["angle_logits"].shape == (B, cfg.max_owned_planets, NUM_ANGLE_BINS), out["angle_logits"].shape
-    assert out["ship_logits"].shape == (B, cfg.max_owned_planets, NUM_SHIP_BINS), out["ship_logits"].shape
+    assert out["fire_logits"].shape == (B, cfg.max_owned_planets, cfg.max_planets), out["fire_logits"].shape
+    assert out["ship_logits"].shape == (B, cfg.max_owned_planets, cfg.max_planets, NUM_SHIP_BINS), out["ship_logits"].shape
+    assert out["target_logits"].shape == (B, cfg.max_owned_planets, cfg.max_planets), out["target_logits"].shape
     assert out["value"].shape == (B,), out["value"].shape
     print("test_model_forward_shapes: PASS")
 
@@ -139,9 +139,6 @@ def test_model_with_masks():
     fire_mask = torch.zeros(B, max_owned, dtype=torch.bool)
     fire_mask[0, 0] = True  # only slot 0 can fire
 
-    angle_mask = torch.zeros(B, max_owned, NUM_ANGLE_BINS, dtype=torch.bool)
-    angle_mask[0, 0, :36] = True  # slot 0: only first half of angles legal
-
     slot_valid = torch.zeros(B, max_owned, dtype=torch.bool)
     slot_valid[0, 0] = True  # only 1 owned planet
 
@@ -150,15 +147,13 @@ def test_model_with_masks():
     with torch.no_grad():
         out = model(
             planet_features, fleet_features, global_features, planet_mask, fleet_mask,
-            fire_mask=fire_mask, angle_mask=angle_mask, slot_valid=slot_valid,
+            fire_mask=fire_mask, slot_valid=slot_valid,
             owned_indices=owned_indices,
         )
 
     # Masked-out slots should have fire_logit << 0
-    assert out["fire_logits"][0, 1].item() <= -100.0, "Slot 1 should be masked (slot_valid=False)"
-    # Masked angles should be << 0
-    assert out["angle_logits"][0, 0, 36].item() <= -100.0, "Angle 36 should be masked"
-    assert out["angle_logits"][0, 0, 0].item() > -100.0, "Angle 0 should be legal"
+    assert out["fire_logits"][0, 1, 0].item() <= -100.0, "Slot 1 should be masked (slot_valid=False)"
+    assert out["ship_logits"][0, 1, 0, 0].item() <= -100.0, "Slot 1 ship logits should be masked"
     print("test_model_with_masks: PASS")
 
 
@@ -178,7 +173,6 @@ def test_model_forward_with_pairwise_target_head():
     fleet_mask = torch.ones(B, N_f, dtype=torch.bool)
     fire_mask = torch.zeros(B, max_owned, dtype=torch.bool)
     fire_mask[0, 0] = True
-    angle_mask = torch.ones(B, max_owned, NUM_ANGLE_BINS, dtype=torch.bool)
     slot_valid = torch.zeros(B, max_owned, dtype=torch.bool)
     slot_valid[0, 0] = True
     owned_indices = torch.zeros(B, max_owned, dtype=torch.long)
@@ -187,14 +181,98 @@ def test_model_forward_with_pairwise_target_head():
     with torch.no_grad():
         out = model(
             planet_features, fleet_features, global_features, planet_mask, fleet_mask,
-            fire_mask=fire_mask, angle_mask=angle_mask, slot_valid=slot_valid,
+            fire_mask=fire_mask, slot_valid=slot_valid,
             owned_indices=owned_indices, pairwise_features=pairwise_features,
         )
 
     assert out["target_logits"] is not None
     assert out["target_logits"].shape == (B, max_owned, cfg.max_planets), out["target_logits"].shape
+    assert out["fire_logits"].shape == (B, max_owned, cfg.max_planets), out["fire_logits"].shape
+    assert out["ship_logits"].shape == (B, max_owned, cfg.max_planets, NUM_SHIP_BINS), out["ship_logits"].shape
     assert out["value"].shape == (B,), out["value"].shape
     print("test_model_forward_with_pairwise_target_head: PASS")
+
+
+def test_residual_broadcast_parity():
+    """Zero-init residuals should broadcast legacy slot logits across targets."""
+    cfg = ModelConfig()
+    model = EntityTransformer(cfg)
+    model.eval()
+
+    B, N_p, N_f = 1, 8, 4
+    max_owned = cfg.max_owned_planets
+    planet_features = torch.randn(B, N_p, cfg.planet_feature_dim)
+    fleet_features = torch.randn(B, N_f, cfg.fleet_feature_dim)
+    global_features = torch.randn(B, cfg.global_feature_dim)
+    planet_mask = torch.ones(B, N_p, dtype=torch.bool)
+    fleet_mask = torch.ones(B, N_f, dtype=torch.bool)
+    fire_mask = torch.ones(B, max_owned, dtype=torch.bool)
+    slot_valid = torch.zeros(B, max_owned, dtype=torch.bool)
+    slot_valid[:, :2] = True
+    owned_indices = torch.zeros(B, max_owned, dtype=torch.long)
+    pairwise_features = torch.randn(B, max_owned, N_p, cfg.pairwise_feature_dim)
+
+    with torch.no_grad():
+        encoded = model.encode_state(
+            planet_features, fleet_features, global_features,
+            planet_mask, fleet_mask, slot_valid=slot_valid,
+            owned_indices=owned_indices, pairwise_features=pairwise_features,
+        )
+        old_fire = model.fire_head(encoded["owned_enriched"]).squeeze(-1)
+        old_ship = model.ship_head(encoded["owned_enriched"])
+        out = model(
+            planet_features, fleet_features, global_features, planet_mask, fleet_mask,
+            fire_mask=fire_mask, slot_valid=slot_valid,
+            owned_indices=owned_indices, pairwise_features=pairwise_features,
+        )
+
+    valid = slot_valid.unsqueeze(-1).expand(-1, -1, N_p)
+    assert torch.allclose(
+        out["fire_logits"][..., :N_p][valid],
+        old_fire.unsqueeze(-1).expand(-1, -1, N_p)[valid],
+    )
+    valid_ship = slot_valid.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, N_p, old_ship.shape[-1])
+    assert torch.allclose(
+        out["ship_logits"][..., :N_p, :][valid_ship],
+        old_ship.unsqueeze(2).expand(-1, -1, N_p, -1)[valid_ship],
+    )
+    print("test_residual_broadcast_parity: PASS")
+
+
+def test_residual_small_init_wakes_output_layer():
+    """Small nonzero residual init should keep the output layer off dead-zero."""
+    cfg = ModelConfig(phase4_residual_init_std=0.01)
+    model = EntityTransformer(cfg)
+
+    fire_norm = model.fire_scorer[-1].weight.norm().item()
+    ship_norm = model.ship_scorer[-1].weight.norm().item()
+
+    assert fire_norm > 0.0
+    assert ship_norm > 0.0
+    assert model.fire_scorer[-1].bias.abs().sum().item() == 0.0
+    assert model.ship_scorer[-1].bias.abs().sum().item() == 0.0
+    print("test_residual_small_init_wakes_output_layer: PASS")
+
+
+def test_non_pairwise_min_ship_bin_masks_without_expand_view_crash():
+    """Legacy non-pairwise path should tolerate min_ship_bin masking."""
+    cfg = ModelConfig(pairwise_feature_dim=0, min_ship_bin=2)
+    model = EntityTransformer(cfg)
+    model.eval()
+
+    B, N_p, N_f = 1, 6, 3
+    planet_features = torch.randn(B, N_p, cfg.planet_feature_dim)
+    fleet_features = torch.randn(B, N_f, cfg.fleet_feature_dim)
+    global_features = torch.randn(B, cfg.global_feature_dim)
+    planet_mask = torch.ones(B, N_p, dtype=torch.bool)
+    fleet_mask = torch.ones(B, N_f, dtype=torch.bool)
+
+    with torch.no_grad():
+        out = model(planet_features, fleet_features, global_features, planet_mask, fleet_mask)
+
+    assert out["ship_logits"].shape == (B, cfg.max_owned_planets, cfg.max_planets, NUM_SHIP_BINS)
+    assert torch.all(out["ship_logits"][..., :2] <= -100.0)
+    print("test_non_pairwise_min_ship_bin_masks_without_expand_view_crash: PASS")
 
 
 def test_end_to_end_obs_to_actions():
@@ -215,14 +293,13 @@ def test_end_to_end_obs_to_actions():
             feats["planet_mask"].unsqueeze(0),
             feats["fleet_mask"].unsqueeze(0),
             fire_mask=masks["fire_mask"],
-            angle_mask=masks["angle_mask"],
             slot_valid=masks["slot_valid"],
             owned_indices=masks["owned_indices"].unsqueeze(0),
+            pairwise_features=feats["pairwise_features"].unsqueeze(0),
         )
 
-    from action_mask import actions_from_policy
-    actions = actions_from_policy(
-        out["fire_logits"], out["angle_logits"], out["ship_logits"],
+    actions = actions_from_target_policy(
+        out["fire_logits"], out["target_logits"], out["ship_logits"],
         {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()},
         obs, 0,
     )
@@ -241,5 +318,7 @@ if __name__ == "__main__":
     test_model_forward_shapes()
     test_model_with_masks()
     test_model_forward_with_pairwise_target_head()
+    test_residual_broadcast_parity()
+    test_residual_small_init_wakes_output_layer()
     test_end_to_end_obs_to_actions()
     print("\nAll model shape tests passed!")

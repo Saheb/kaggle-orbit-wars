@@ -27,9 +27,10 @@ NBINS = len(SHIP_COUNTS)
 
 def _logits():
     # Only slot 1 (source B=id1) fires, aiming at slot-target index 0 (A) → a B->A reinforce.
-    fire = torch.tensor([[-10.0, 10.0]])
+    fire = torch.full((1, 2, 2), -10.0)
+    fire[0, 1, 0] = 10.0
     tl = torch.full((1, 2, 2), -10.0); tl[0, 1, 0] = 10.0       # slot1 (B) -> planet index 0 (A)
-    sl = torch.full((1, 2, NBINS), -10.0); sl[0, 1, 0] = 10.0   # ship bin 0 (small, valid)
+    sl = torch.full((1, 2, 2, NBINS), -10.0); sl[0, 1, 0, 0] = 10.0   # ship bin 0 (small, valid)
     masks = {"owned_indices": torch.tensor([0, 1]),
              "max_ships": torch.tensor([[20.0, 20.0]]),
              "owned_count": 2}

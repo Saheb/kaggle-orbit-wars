@@ -19,6 +19,16 @@ NUM_ANGLE_BINS = 144
 NUM_SHIP_BINS = 32
 ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
 SHIP_COUNTS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 19, 22, 26, 30, 35, 42, 50, 60, 72, 86, 102, 122, 145, 173, 206, 245, 290, 350, 420]
+PHASE4_COMPAT_MISSING_KEYS = {
+    "fire_q.weight", "fire_q.bias",
+    "fire_k.weight", "fire_k.bias",
+    "fire_scorer.0.weight", "fire_scorer.0.bias",
+    "fire_scorer.2.weight", "fire_scorer.2.bias",
+    "ship_q.weight", "ship_q.bias",
+    "ship_k.weight", "ship_k.bias",
+    "ship_scorer.0.weight", "ship_scorer.0.bias",
+    "ship_scorer.2.weight", "ship_scorer.2.bias",
+}
 
 
 class TransformerBlock(nn.Module):
@@ -103,6 +113,29 @@ class EntityTransformer(nn.Module):
                 nn.GELU(),
                 nn.Linear(tgt_hidden, 1),
             )
+            self.fire_q = nn.Linear(D, D)
+            self.fire_k = nn.Linear(D, D)
+            self.fire_scorer = nn.Sequential(
+                nn.Linear(tgt_in, tgt_hidden),
+                nn.GELU(),
+                nn.Linear(tgt_hidden, 1),
+            )
+            self.ship_q = nn.Linear(D, D)
+            self.ship_k = nn.Linear(D, D)
+            self.ship_scorer = nn.Sequential(
+                nn.Linear(tgt_in, tgt_hidden),
+                nn.GELU(),
+                nn.Linear(tgt_hidden, self.num_ship_bins),
+            )
+            resid_init_std = float(getattr(cfg, "phase4_residual_init_std", 0.0))
+            if resid_init_std > 0.0:
+                nn.init.normal_(self.fire_scorer[-1].weight, mean=0.0, std=resid_init_std)
+                nn.init.normal_(self.ship_scorer[-1].weight, mean=0.0, std=resid_init_std)
+            else:
+                nn.init.zeros_(self.fire_scorer[-1].weight)
+                nn.init.zeros_(self.ship_scorer[-1].weight)
+            nn.init.zeros_(self.fire_scorer[-1].bias)
+            nn.init.zeros_(self.ship_scorer[-1].bias)
         else:
             self.target_head = nn.Linear(D, self.max_planets)
 
@@ -212,7 +245,7 @@ class EntityTransformer(nn.Module):
             owned_indices: (B, max_owned) int, indices into planet array
             owned_count: (B,) int
 
-        Returns dict with fire_logits, ship_logits, target_logits, value.
+        Returns dict with per-target fire/ship logits, target_logits, value.
         """
         encoded = self.encode_state(
             planet_features, fleet_features, global_features,
@@ -264,9 +297,35 @@ class EntityTransformer(nn.Module):
                 device=owned_enriched.device, dtype=owned_enriched.dtype,
             )
 
-        # Action heads
-        fire_logits = self.fire_head(owned_enriched).squeeze(-1)  # (B, max_owned)
-        ship_logits = self.ship_head(owned_enriched)  # (B, max_owned, num_ship_bins)
+        # Action heads. Fire/ship now condition on the chosen target via the same
+        # per-(slot, target) pairwise path as target selection. The legacy slot-only
+        # heads remain as residual priors so old checkpoints keep step-0 behavior.
+        fire_logits_slot = self.fire_head(owned_enriched).squeeze(-1)  # (B, max_owned)
+        ship_logits_slot = self.ship_head(owned_enriched)  # (B, max_owned, num_ship_bins)
+        fire_prior = fire_logits_slot.unsqueeze(-1).expand(-1, -1, self.max_planets)
+        ship_prior = ship_logits_slot.unsqueeze(2).expand(-1, -1, self.max_planets, -1)
+        fire_residual = torch.zeros_like(fire_prior)
+        ship_residual = torch.zeros_like(ship_prior)
+        fire_logits = fire_prior
+        ship_logits = ship_prior
+        if self.use_pairwise and pairwise_features is not None:
+            N_p = planet_features.shape[1]
+            q_fire = self.fire_q(owned_enriched).unsqueeze(2).expand(-1, -1, N_p, -1)
+            k_fire = self.fire_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
+            fire_in = torch.cat([q_fire, k_fire, pairwise_features], dim=-1)
+            fire_resid_live = self.fire_scorer(fire_in).squeeze(-1)
+
+            q_ship = self.ship_q(owned_enriched).unsqueeze(2).expand(-1, -1, N_p, -1)
+            k_ship = self.ship_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
+            ship_in = torch.cat([q_ship, k_ship, pairwise_features], dim=-1)
+            ship_resid_live = self.ship_scorer(ship_in)
+
+            fire_logits = fire_logits.clone()
+            ship_logits = ship_logits.clone()
+            fire_residual[..., :N_p] = fire_resid_live
+            ship_residual[..., :N_p, :] = ship_resid_live
+            fire_logits[..., :N_p] = fire_logits[..., :N_p] + fire_resid_live
+            ship_logits[..., :N_p, :] = ship_logits[..., :N_p, :] + ship_resid_live
         # min_ship_bin: bins below this are masked to -inf so they're never
         # sampled / argmaxed. For the fraction head (10 bins on [0.1, 1.0]),
         # setting min_ship_bin=1 removes the "10%-of-source" trap that PPO
@@ -274,6 +333,7 @@ class EntityTransformer(nn.Module):
         # by iter 6-7 regardless of LR or IL/BC anchor strength).
         min_ship_bin = int(getattr(self.cfg, "min_ship_bin", 0))
         if min_ship_bin > 0:
+            ship_logits = ship_logits.clone()
             ship_logits[..., :min_ship_bin] = -100.0
         if target_logits is None:
             target_logits = self.target_head(owned_entities)  # (B, max_owned, max_planets)
@@ -292,10 +352,10 @@ class EntityTransformer(nn.Module):
 
         # Apply masks (-100 is safe in float16 on MPS; -1e9 overflows)
         if fire_mask is not None:
-            fire_logits = fire_logits.masked_fill(~fire_mask, -100.0)
+            fire_logits = fire_logits.masked_fill(~fire_mask.unsqueeze(-1), -100.0)
         if slot_valid is not None:
-            fire_logits = fire_logits.masked_fill(~slot_valid, -100.0)
-            ship_logits = ship_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
+            fire_logits = fire_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
+            ship_logits = ship_logits.masked_fill(~slot_valid.unsqueeze(-1).unsqueeze(-1), -100.0)
             target_logits = target_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
         # Value head: new=concat(global_token, owned_pool) [2D], old=mean-pool all [D].
@@ -319,6 +379,10 @@ class EntityTransformer(nn.Module):
             "ship_logits": ship_logits,
             "target_logits": target_logits,
             "value": value,
+            "_phase4_fire_prior": fire_prior,
+            "_phase4_ship_prior": ship_prior,
+            "_phase4_fire_residual": fire_residual,
+            "_phase4_ship_residual": ship_residual,
         }
 
     def load_state_dict(self, state_dict, strict=True):

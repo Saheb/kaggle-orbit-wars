@@ -11,7 +11,7 @@ import torch
 import numpy as np
 
 from config import Config
-from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH
+from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, PHASE4_COMPAT_MISSING_KEYS
 from features import extract_features, _ETA_PROBE_SPEED, set_game_phase_features, set_ablate_roi, set_ablate_channels
 from action_mask import (compute_action_masks, actions_from_policy, actions_from_target_policy, _fleet_speed,
                          _ship_bin_to_count, _target_intercept_angle, MAX_OWNED_PLANETS)
@@ -109,9 +109,16 @@ def set_force_fire_high_roi(on: bool, roi_threshold: float = 0.3) -> None:
 
 
 def _apply_force_fire(moves, outputs, masks, obs, player, fire_threshold, ship_bin_mode):
-    fire_p = torch.sigmoid(outputs["fire_logits"][0]).cpu().numpy()
     tgt_arg = torch.argmax(outputs["target_logits"][0], dim=-1).cpu().numpy()
-    ship_arg = torch.argmax(outputs["ship_logits"][0], dim=-1).cpu().numpy()
+    tgt_idx_t = torch.as_tensor(tgt_arg, device=outputs["target_logits"].device).unsqueeze(0)
+    fire_logits = torch.gather(outputs["fire_logits"], -1, tgt_idx_t.unsqueeze(-1)).squeeze(-1)
+    ship_logits = torch.gather(
+        outputs["ship_logits"],
+        2,
+        tgt_idx_t.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, outputs["ship_logits"].shape[-1]),
+    ).squeeze(2)
+    fire_p = torch.sigmoid(fire_logits[0]).cpu().numpy()
+    ship_arg = torch.argmax(ship_logits[0], dim=-1).cpu().numpy()
     owned_idx = masks["owned_indices"].cpu().numpy()
     max_ships = masks["max_ships"].cpu().numpy().reshape(-1)
     planets = obs["planets"]
@@ -2065,6 +2072,7 @@ def _fmt_natural_head_audit(stats: dict) -> str:
         slots = max(stats.get(f"{prefix}_slots", 0.0), 1.0)
         fire_mean = stats.get(f"{prefix}_fire_prob_sum", 0.0) / slots
         fired = stats.get(f"{prefix}_fired", 0.0) / slots
+        veto = 1.0 - fired
         chosen_own = stats.get(f"{prefix}_chosen_own", 0.0) / max(stats.get(f"{prefix}_fired", 0.0), 1.0)
         chosen_enemy = stats.get(f"{prefix}_chosen_enemy", 0.0) / max(stats.get(f"{prefix}_fired", 0.0), 1.0)
         chosen_neutral = stats.get(f"{prefix}_chosen_neutral", 0.0) / max(stats.get(f"{prefix}_fired", 0.0), 1.0)
@@ -2080,7 +2088,7 @@ def _fmt_natural_head_audit(stats: dict) -> str:
         save_ship = stats.get(f"{prefix}_save_ship_rank_sum", 0.0) / save_sr_n
         return (
             f"  {label:<5s} slots {slots:.0f} fire_p {fire_mean:.2f} fired {fired:.0%} "
-            f"(<0.5 {stats.get(f'{prefix}_fire_lt_05',0.0)/slots:.0%}; "
+            f"veto {veto:.0%} (<0.5 {stats.get(f'{prefix}_fire_lt_05',0.0)/slots:.0%}; "
             f"fired own/enemy/neutral {chosen_own:.0%}/{chosen_enemy:.0%}/{chosen_neutral:.0%})\n"
             f"        attack-cand {stats.get(f'{prefix}_attack_n',0.0):.0f}: "
             f"fire>=.5 {stats.get(f'{prefix}_attack_fire_ready',0.0)/atk_n:.0%} · "
@@ -2088,6 +2096,7 @@ def _fmt_natural_head_audit(stats: dict) -> str:
             f"{stats.get(f'{prefix}_attack_target_top1',0.0)/atk_tr_n:.0%}/"
             f"{stats.get(f'{prefix}_attack_target_top3',0.0)/atk_tr_n:.0%}/"
             f"{stats.get(f'{prefix}_attack_target_top5',0.0)/atk_tr_n:.0%} · "
+            f"top1-veto {stats.get(f'{prefix}_attack_target_top1_veto',0.0)/atk_tr_n:.0%} · "
             f"ship>=req avg {atk_ship:.1f} top1/3 "
             f"{stats.get(f'{prefix}_attack_ship_top1',0.0)/atk_sr_n:.0%}/"
             f"{stats.get(f'{prefix}_attack_ship_top3',0.0)/atk_sr_n:.0%} · "
@@ -2100,6 +2109,7 @@ def _fmt_natural_head_audit(stats: dict) -> str:
             f"{stats.get(f'{prefix}_save_target_top1',0.0)/save_tr_n:.0%}/"
             f"{stats.get(f'{prefix}_save_target_top3',0.0)/save_tr_n:.0%}/"
             f"{stats.get(f'{prefix}_save_target_top5',0.0)/save_tr_n:.0%} · "
+            f"top1-veto {stats.get(f'{prefix}_save_target_top1_veto',0.0)/save_tr_n:.0%} · "
             f"ship>=req avg {save_ship:.1f} top1/3 "
             f"{stats.get(f'{prefix}_save_ship_top1',0.0)/save_sr_n:.0%}/"
             f"{stats.get(f'{prefix}_save_ship_top3',0.0)/save_sr_n:.0%} · "
@@ -2260,7 +2270,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         print(f"Natural head audit: ON | beta={natural_head_audit_beta} "
               f"(passive logits/intent diagnostics; actions unchanged)")
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    allowed_missing = {"target_head.weight", "target_head.bias"}
+    allowed_missing = {"target_head.weight", "target_head.bias"} | PHASE4_COMPAT_MISSING_KEYS
     bad_missing = [k for k in missing if k not in allowed_missing]
     # VDN per-planet value head (Stage 2) is never used at eval — ignore it if the
     # checkpoint carries it but this (eval-time) model doesn't.

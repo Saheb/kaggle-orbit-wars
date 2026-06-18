@@ -3,7 +3,7 @@ source) when allow_reinforce=True, and stay illegal when False — in BOTH the t
 env (torch_env) and the eval/export path (action_mask.actions_from_target_policy).
 """
 import os, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import numpy as np
 import torch
 
@@ -128,17 +128,19 @@ def test_action_mask_eval_reinforce_toggle():
     n_p = len(planets)
     src_slot = [s for s in range(masks["owned_count"])
                 if int(masks["owned_indices"][s]) == 0][0]
-    fire_probs = torch.zeros(1, masks["owned_count"])
-    fire_probs[0, src_slot] = 1.0
-    ship_logits = torch.zeros(1, masks["owned_count"], 32)
-    ship_logits[0, src_slot, 4] = 10.0  # bin 4 = a few ships
+    fire_logits = torch.full((1, masks["owned_count"], n_p), -10.0)
+    fire_logits[0, src_slot, 1] = 10.0
+    fire_logits[0, src_slot, 2] = 10.0
+    ship_logits = torch.zeros(1, masks["owned_count"], n_p, 32)
+    ship_logits[0, src_slot, 1, 4] = 10.0  # bin 4 = a few ships
+    ship_logits[0, src_slot, 2, 4] = 10.0
 
     def chosen_angle(allow):
         tl = torch.full((1, masks["owned_count"], n_p), -5.0)
         tl[0, src_slot, 1] = 10.0   # strongly prefer OWN planet 1 (east)
         tl[0, src_slot, 2] = 8.0    # enemy planet 2 (north) second
         acts = actions_from_target_policy(
-            fire_probs.clone(), tl, ship_logits, masks, obs, player=0,
+            fire_logits.clone(), tl, ship_logits, masks, obs, player=0,
             ship_bin_mode="absolute", allow_reinforce=allow)
         mv = [m for m in acts if int(m[0]) == 0]
         assert mv, "source planet 0 should have launched"

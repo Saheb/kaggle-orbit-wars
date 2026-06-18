@@ -186,39 +186,48 @@ _eval() {  # _eval <run> [opp_override]   (platform-independent — local files 
   trap 'rc=$?; echo "[$(date -u +%FT%TZ)] eval exit rc=$rc run=$RUN opp=$OPP" >> "$ROOT/gpu_run_artifacts/$RUN/watcher_eval.log"' EXIT
   [ -f "$OUT" ] || echo "utc_time,step,win_rate,seat0_wr,seat1_wr,outmassed_pct,open_capatk_WON,mid_capatk_WON,peelrate_WON,planets100_WON,reinf_step_early,reinf_step_mid,reinf_dir_fwd,games,checkpoint" > "$OUT"
   while _still_active "$RUN"; do
-    while IFS= read -r ckpt; do
-      [ -n "$ckpt" ] || continue
-      _still_active "$RUN" || break
-      base=$(basename "$ckpt")
+    ckpt=""
+    # Re-scan after EVERY completed eval instead of consuming a stale candidate
+    # list. Effective policy: newest eligible unevaluated checkpoint wins.
+    while IFS= read -r cand; do
+      [ -n "$cand" ] || continue
+      base=$(basename "$cand")
       grep -q ",$base$" "$OUT" 2>/dev/null && continue
-      step=$(echo "$base" | sed -E 's/torch_step_([0-9]+)_.*/\1/')
-      # elog is OPPONENT-specific: with two eval loops (zach + ajay) sharing this LOGDIR, an
-      # opponent-agnostic name would collide/race on every checkpoint both loops eval.
-      elog="$LOGDIR/eval_${base%.pt}__$(basename "${OPP%.py}" | sed 's/candidate_//').log"
-      # Per-arm eval mask: for a gate A/B whose arms are named <MATCH><N> (gate2/gate3), eval each
-      # ckpt with its OWN gate-min-planets (eval must match training). Opt-in via EVAL_GATE_FROM_RUNNAME.
-      masks="$REINFORCE_MASKS"
-      if [ -n "$EVAL_GATE_FROM_RUNNAME" ] && [[ "$base" =~ ${MATCH}([0-9]+) ]]; then
-        masks=$(echo "$REINFORCE_MASKS" | sed -E "s/--reinforce-gate-min-planets [0-9]+/--reinforce-gate-min-planets ${BASH_REMATCH[1]}/")
-      fi
-      masks="$(eval_safe_masks "$masks")"
-      $PY orbit_wars_rl/eval.py --checkpoint "$ckpt" --opponent "$OPP" \
-          --panel --target-decode $masks > "$elog" 2>&1 || true
-      wr=$(grep -E "^Overall:"  "$elog" | tail -1 | sed -E 's/.*\(([0-9.]+)%\).*/\1/')
-      s0=$(grep -E "^  seat 0:" "$elog" | tail -1 | sed -E 's/.*\(([0-9.]+)%\).*/\1/')
-      s1=$(grep -E "^  seat 1:" "$elog" | tail -1 | sed -E 's/.*\(([0-9.]+)%\).*/\1/')
-      oc=$(grep -E "WON\(.*cap/atk open" "$elog" | tail -1 | sed -E 's#.*open<50 ([0-9.]+).*#\1#')
-      mc=$(grep -E "WON\(.*cap/atk open" "$elog" | tail -1 | sed -E 's#.*mid50-100 ([0-9.]+).*#\1#')
-      p100=$(grep -E "WON\(.*cap/atk open" "$elog" | tail -1 | sed -E 's#.*WON\([0-9]+g\) [0-9]+/[0-9]+/[0-9]+/([0-9]+).*#\1#')
-      pr=$(grep -E "WON\(.*peel-rate" "$elog" | tail -1 | sed -E 's#.*WON\([0-9]+g\) peel-rate ([0-9.]+).*#\1#')
-      rse=$(grep -E "reinf by step" "$elog" | tail -1 | sed -E 's#.*reinf by step +<50:([0-9.]+).*#\1#')
-      rsm=$(grep -E "reinf by step" "$elog" | tail -1 | sed -E 's#.*reinf by step +<50:[0-9.]+ +50-100:([0-9.]+).*#\1#')
-      rdf=$(grep -E "reinf direction" "$elog" | tail -1 | sed -E 's#.*fwd ([0-9]+)%.*#\1#')
-      # hold-loss out-massed%% — THE force-concentration verdict (enemy fleet > our garrison at loss).
-      om=$(grep -E "hold-loss" "$elog" | tail -1 | sed -E 's#.*out-massed ([0-9]+)%.*#\1#')
-      echo "$(date -u +%FT%TZ),${step},${wr:-ERR},${s0:-ERR},${s1:-ERR},${om:-NA},${oc:-NA},${mc:-NA},${pr:-NA},${p100:-NA},${rse:-NA},${rsm:-NA},${rdf:-NA},256,${base}" >> "$OUT"
+      ckpt="$cand"
+      break
     done < <(find "$DIR" -maxdepth 1 -name "torch_step_*${MATCH}*.pt" -mmin +2 2>/dev/null | sort -rV)
-    sleep "$POLL"
+    if [ -z "$ckpt" ]; then
+      sleep "$POLL"
+      continue
+    fi
+    _still_active "$RUN" || break
+    base=$(basename "$ckpt")
+    step=$(echo "$base" | sed -E 's/torch_step_([0-9]+)_.*/\1/')
+    # elog is OPPONENT-specific: with two eval loops (zach + ajay) sharing this LOGDIR, an
+    # opponent-agnostic name would collide/race on every checkpoint both loops eval.
+    elog="$LOGDIR/eval_${base%.pt}__$(basename "${OPP%.py}" | sed 's/candidate_//').log"
+    # Per-arm eval mask: for a gate A/B whose arms are named <MATCH><N> (gate2/gate3), eval each
+    # ckpt with its OWN gate-min-planets (eval must match training). Opt-in via EVAL_GATE_FROM_RUNNAME.
+    masks="$REINFORCE_MASKS"
+    if [ -n "$EVAL_GATE_FROM_RUNNAME" ] && [[ "$base" =~ ${MATCH}([0-9]+) ]]; then
+      masks=$(echo "$REINFORCE_MASKS" | sed -E "s/--reinforce-gate-min-planets [0-9]+/--reinforce-gate-min-planets ${BASH_REMATCH[1]}/")
+    fi
+    masks="$(eval_safe_masks "$masks")"
+    $PY orbit_wars_rl/eval.py --checkpoint "$ckpt" --opponent "$OPP" \
+        --panel --target-decode $masks > "$elog" 2>&1 || true
+    wr=$(grep -E "^Overall:"  "$elog" | tail -1 | sed -E 's/.*\(([0-9.]+)%\).*/\1/')
+    s0=$(grep -E "^  seat 0:" "$elog" | tail -1 | sed -E 's/.*\(([0-9.]+)%\).*/\1/')
+    s1=$(grep -E "^  seat 1:" "$elog" | tail -1 | sed -E 's/.*\(([0-9.]+)%\).*/\1/')
+    oc=$(grep -E "WON\(.*cap/atk open" "$elog" | tail -1 | sed -E 's#.*open<50 ([0-9.]+).*#\1#')
+    mc=$(grep -E "WON\(.*cap/atk open" "$elog" | tail -1 | sed -E 's#.*mid50-100 ([0-9.]+).*#\1#')
+    p100=$(grep -E "WON\(.*cap/atk open" "$elog" | tail -1 | sed -E 's#.*WON\([0-9]+g\) [0-9]+/[0-9]+/[0-9]+/([0-9]+).*#\1#')
+    pr=$(grep -E "WON\(.*peel-rate" "$elog" | tail -1 | sed -E 's#.*WON\([0-9]+g\) peel-rate ([0-9.]+).*#\1#')
+    rse=$(grep -E "reinf by step" "$elog" | tail -1 | sed -E 's#.*reinf by step +<50:([0-9.]+).*#\1#')
+    rsm=$(grep -E "reinf by step" "$elog" | tail -1 | sed -E 's#.*reinf by step +<50:[0-9.]+ +50-100:([0-9.]+).*#\1#')
+    rdf=$(grep -E "reinf direction" "$elog" | tail -1 | sed -E 's#.*fwd ([0-9]+)%.*#\1#')
+    # hold-loss out-massed%% — THE force-concentration verdict (enemy fleet > our garrison at loss).
+    om=$(grep -E "hold-loss" "$elog" | tail -1 | sed -E 's#.*out-massed ([0-9]+)%.*#\1#')
+    echo "$(date -u +%FT%TZ),${step},${wr:-ERR},${s0:-ERR},${s1:-ERR},${om:-NA},${oc:-NA},${mc:-NA},${pr:-NA},${p100:-NA},${rse:-NA},${rsm:-NA},${rdf:-NA},256,${base}" >> "$OUT"
   done
   echo "[eval] $RUN no longer active — exiting" >> "$ROOT/gpu_run_artifacts/$RUN/watchers.log"
 }

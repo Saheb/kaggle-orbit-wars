@@ -49,6 +49,10 @@ class ModelConfig:
     ship_bin_mode: str = "absolute"
     pairwise_feature_dim: int = 15   # see features.PAIRWISE_FEATURE_DIM
     max_planets: int = 48            # for target_head output size; matches EnvConfig
+    # Phase 4 residual output init scale. 0.0 = exact parity (legacy Stage A/B);
+    # small nonzero values preserve near-parity while letting the residual path
+    # influence behavior before PPO has to move a zeroed output layer off dead-zero.
+    phase4_residual_init_std: float = 0.0
     dropout: float = 0.0
     # Value head input width. 0 = auto (2*entity_dim, new concat head).
     # Set to entity_dim when loading pre-Phase-1 checkpoints (old mean-pool head).
@@ -58,6 +62,9 @@ class ModelConfig:
 @dataclass
 class PPOConfig:
     learning_rate: float = 3e-4
+    # Multiplier applied only to the Phase 4 residual path parameters
+    # (fire_q/k/scorer, ship_q/k/scorer). 1.0 = legacy single-LR behavior.
+    phase4_residual_lr_mult: float = 1.0
     lr_warmup_steps: int = 5000
     lr_decay: str = "cosine"
     total_env_steps: int = 500_000_000

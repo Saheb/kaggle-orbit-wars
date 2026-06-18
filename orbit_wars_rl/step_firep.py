@@ -109,11 +109,11 @@ def firep_from_obs(model, obs, player, device):
                     owned_count=owned_cnt,
                     pairwise_features=pw)
 
-    # model returns dict; fire_logits shape (B, max_owned) — Bernoulli logit per slot
-    fl = out["fire_logits"][0]    # (max_owned,)
+    target_idx = out["target_logits"].argmax(dim=-1)
+    fl = torch.gather(out["fire_logits"], -1, target_idx.unsqueeze(-1)).squeeze(-1)[0]
     sv = slot_valid[0]            # (max_owned,) bool
     if sv.any():
-        fire_prob = torch.sigmoid(fl[sv])   # P(fire) per valid slot
+        fire_prob = torch.sigmoid(fl[sv])   # P(fire | chosen target) per valid slot
         return fire_prob.max().item()
     return 0.0
 

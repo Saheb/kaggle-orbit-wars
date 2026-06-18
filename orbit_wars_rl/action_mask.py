@@ -440,6 +440,8 @@ def _record_natural_candidate(stats, prefix: str, kind: str, intent: dict, cand:
         _head_stat(stats, f"{prefix}_{kind}_target_rank_sum", float(target_rank))
         if target_rank <= 1:
             _head_stat(stats, f"{prefix}_{kind}_target_top1")
+            if fp is not None and fp < 0.5:
+                _head_stat(stats, f"{prefix}_{kind}_target_top1_veto")
         if target_rank <= 3:
             _head_stat(stats, f"{prefix}_{kind}_target_top3")
         if target_rank <= 5:
@@ -790,7 +792,7 @@ def _apply_defensive_reinforce_overlay(
     return final_records
 
 
-def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, obs, player,
+def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_target, masks, obs, player,
                                fire_threshold=0.5, sample: bool = False,
                                ship_bin_mode: str = "absolute",
                                target_sanity_penalty: float = 0.0,
@@ -888,17 +890,32 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
         )
 
     if sample:
-        fire_dist = torch.distributions.Bernoulli(logits=fire_probs)
         target_dist = torch.distributions.Categorical(logits=target_logits)
-        ship_dist = torch.distributions.Categorical(logits=ship_logits)
-        fire_decisions = (fire_dist.sample() > 0.5).cpu().numpy().squeeze(0)
         target_indices = target_dist.sample().cpu().numpy().squeeze(0)
+        target_idx_t = torch.as_tensor(target_indices, device=target_logits.device).unsqueeze(0)
+        chosen_fire_logits = torch.gather(fire_logits_target, -1, target_idx_t.unsqueeze(-1)).squeeze(-1)
+        chosen_ship_logits = torch.gather(
+            ship_logits_target,
+            2,
+            target_idx_t.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, ship_logits_target.shape[-1]),
+        ).squeeze(2)
+        fire_dist = torch.distributions.Bernoulli(logits=chosen_fire_logits)
+        ship_dist = torch.distributions.Categorical(logits=chosen_ship_logits)
+        fire_decisions = (fire_dist.sample() > 0.5).cpu().numpy().squeeze(0)
         ship_bins = ship_dist.sample().cpu().numpy().squeeze(0)
+        fire_prob_values = torch.sigmoid(chosen_fire_logits).cpu().numpy().squeeze(0)
     else:
-        fire_prob_values = torch.sigmoid(fire_probs).cpu().numpy().squeeze(0)
-        fire_decisions = (torch.sigmoid(fire_probs) > fire_threshold).cpu().numpy().squeeze(0)
         target_indices = torch.argmax(target_logits, dim=-1).cpu().numpy().squeeze(0)
-        ship_bins = torch.argmax(ship_logits, dim=-1).cpu().numpy().squeeze(0)
+        target_idx_t = torch.as_tensor(target_indices, device=target_logits.device).unsqueeze(0)
+        chosen_fire_logits = torch.gather(fire_logits_target, -1, target_idx_t.unsqueeze(-1)).squeeze(-1)
+        chosen_ship_logits = torch.gather(
+            ship_logits_target,
+            2,
+            target_idx_t.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, ship_logits_target.shape[-1]),
+        ).squeeze(2)
+        fire_prob_values = torch.sigmoid(chosen_fire_logits).cpu().numpy().squeeze(0)
+        fire_decisions = (torch.sigmoid(chosen_fire_logits) > fire_threshold).cpu().numpy().squeeze(0)
+        ship_bins = torch.argmax(chosen_ship_logits, dim=-1).cpu().numpy().squeeze(0)
 
     move_records = []
     slot_intents: dict[int, dict] = {}
@@ -922,7 +939,8 @@ def actions_from_target_policy(fire_probs, target_logits, ship_logits, masks, ob
             "ships": int(decoded_ships),
             "max_ships": int(max_ships[slot]),
             "target_scores": [float(x) for x in target_logits[0, slot, :len(planets)].detach().cpu().tolist()],
-            "ship_scores": [float(x) for x in ship_logits[0, slot].detach().cpu().tolist()],
+            "fire_scores_by_target": [float(x) for x in fire_logits_target[0, slot, :len(planets)].detach().cpu().tolist()],
+            "ship_scores": [float(x) for x in chosen_ship_logits[0, slot].detach().cpu().tolist()],
         }
         if not fire_decisions[slot]:
             continue

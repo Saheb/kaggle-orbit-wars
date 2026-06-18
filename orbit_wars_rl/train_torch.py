@@ -35,7 +35,7 @@ except ImportError:
     _wandb = None
 
 from config import Config
-from model import EntityTransformer, count_params
+from model import EntityTransformer, count_params, PHASE4_COMPAT_MISSING_KEYS
 from opponent_pool import OpponentPool, PoolMember
 from ppo import PPOLearner
 from torch_env import (
@@ -65,6 +65,15 @@ def atomic_torch_save(obj, path: str | os.PathLike) -> None:
             tmp_path.unlink()
 
 
+def _load_phase4_compatible(model: EntityTransformer, state_dict: dict, label: str) -> None:
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    bad_missing = [k for k in missing if k not in PHASE4_COMPAT_MISSING_KEYS]
+    if bad_missing or unexpected:
+        raise RuntimeError(
+            f"{label} checkpoint/model mismatch: missing={bad_missing}, unexpected={list(unexpected)}"
+        )
+
+
 def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
                           target_mask: torch.Tensor | None = None):
     """Sample fire/ship/target actions for a batch of envs (target-decode only).
@@ -76,28 +85,35 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
 
     Returns: (fire_a, angle_a, ship_a, target_a, lp_fire, lp_ship, lp_target)
     """
-    fire_logits   = outputs["fire_logits"].masked_fill(~fire_mask, -1e9)
-    ship_logits   = outputs["ship_logits"]
+    fire_logits_target = outputs["fire_logits"]
+    ship_logits_target = outputs["ship_logits"]
     target_logits = outputs["target_logits"]
     if target_mask is not None:
         target_logits = target_logits.masked_fill(~target_mask, -1e9)
-
-    fire_dist   = torch.distributions.Bernoulli(logits=fire_logits)
-    ship_dist   = torch.distributions.Categorical(logits=ship_logits)
     target_dist = torch.distributions.Categorical(logits=target_logits)
 
+    target_a = target_dist.sample()  # (N, MAX_OWNED)
+    gather_idx = target_a.unsqueeze(-1)
+    fire_logits = torch.gather(fire_logits_target, -1, gather_idx).squeeze(-1)
+    fire_logits = fire_logits.masked_fill(~fire_mask, -1e9)
+    ship_logits = torch.gather(
+        ship_logits_target,
+        2,
+        gather_idx.unsqueeze(-1).expand(-1, -1, 1, ship_logits_target.shape[-1]),
+    ).squeeze(2)
+    fire_dist = torch.distributions.Bernoulli(logits=fire_logits)
+    ship_dist = torch.distributions.Categorical(logits=ship_logits)
     fire_a   = fire_dist.sample()    # (N, MAX_OWNED)
     ship_a   = ship_dist.sample()    # (N, MAX_OWNED)
-    target_a = target_dist.sample()  # (N, MAX_OWNED)
     # Angle is unused in target-decode; zeros satisfy env.step's action shape.
     angle_a  = torch.zeros_like(fire_a)
 
-    # Log probs only for valid slots / fired actions.
+    # Target is part of the sampled joint action even when fire=0.
     slot_valid = fire_mask.float()
     fired      = (fire_a > 0.5).float() * slot_valid
     lp_fire   = fire_dist.log_prob(fire_a) * slot_valid
     lp_ship   = ship_dist.log_prob(ship_a)   * fired
-    lp_target = target_dist.log_prob(target_a) * fired
+    lp_target = target_dist.log_prob(target_a) * slot_valid
 
     return fire_a.long(), angle_a, ship_a, target_a, lp_fire, lp_ship, lp_target
 
@@ -324,6 +340,7 @@ def train(args):
     cfg.ppo.num_minibatches = args.num_minibatches
     if args.learning_rate is not None:
         cfg.ppo.learning_rate = args.learning_rate
+    cfg.ppo.phase4_residual_lr_mult = args.phase4_residual_lr_mult
     if args.ppo_epochs is not None:
         cfg.ppo.ppo_epochs = args.ppo_epochs
     if args.clip_eps is not None:
@@ -357,6 +374,8 @@ def train(args):
           f"num_minibatches={cfg.ppo.num_minibatches}, clip_eps={cfg.ppo.clip_eps}, "
           f"entropy_coef_fire={cfg.ppo.entropy_coef_fire}, gae_lambda={cfg.ppo.gae_lambda}, "
           f"kl_target={cfg.ppo.kl_target}")
+    if cfg.ppo.phase4_residual_lr_mult != 1.0:
+        print(f"Phase4 residual LR multiplier: x{cfg.ppo.phase4_residual_lr_mult:.3g}")
     print(f"Entropy coefs: fire={cfg.ppo.entropy_coef_fire}, target={cfg.ppo.entropy_coef_target}, "
           f"ships={cfg.ppo.entropy_coef_ships} | max_grad_norm={cfg.ppo.max_grad_norm}")
     print(f"Action decode: {args.action_decode}")
@@ -435,14 +454,32 @@ def train(args):
             print(f"Checkpoint declares ship_bin_mode={cfg.model.ship_bin_mode}")
         if "min_ship_bin" in ckpt_cfg:
             cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
+        if "phase4_residual_init_std" in ckpt_cfg:
+            cfg.model.phase4_residual_init_std = float(ckpt_cfg["phase4_residual_init_std"])
         if bool(ckpt_cfg.get("game_phase_features", False)):
             cfg.model.game_phase_features = True  # resumed weights are 15-global
+        # Resume-path discipline parity: if the CLI left these at defaults, inherit
+        # the checkpoint values so env/model wiring matches the source policy.
+        if not args.allow_reinforce and bool(ckpt_cfg.get("allow_reinforce", False)):
+            args.allow_reinforce = True
+        if args.reinforce_gate_min_planets == 0 and "reinforce_gate_min_planets" in ckpt_cfg:
+            args.reinforce_gate_min_planets = int(ckpt_cfg["reinforce_gate_min_planets"])
+        if not args.reinforce_forward_only and bool(ckpt_cfg.get("reinforce_forward_only", False)):
+            args.reinforce_forward_only = True
+        if args.reverse_edge_cooldown == 0 and "reverse_edge_cooldown" in ckpt_cfg:
+            args.reverse_edge_cooldown = int(ckpt_cfg["reverse_edge_cooldown"])
+        if args.reinforce_garrison_floor == 0.0 and "reinforce_garrison_floor" in ckpt_cfg:
+            args.reinforce_garrison_floor = float(ckpt_cfg["reinforce_garrison_floor"])
+        if args.sufficient_commit_factor == 0.0 and "sufficient_commit_factor" in ckpt_cfg:
+            args.sufficient_commit_factor = float(ckpt_cfg["sufficient_commit_factor"])
         del _ckpt_peek
 
     # CLI overrides checkpoint metadata. This lets a run deliberately mask bin
     # 0 when resuming from a BC checkpoint saved with min_ship_bin=0.
     if args.min_ship_bin is not None:
         cfg.model.min_ship_bin = args.min_ship_bin
+    if args.phase4_residual_init_std is not None:
+        cfg.model.phase4_residual_init_std = args.phase4_residual_init_std
     cfg.model.action_decode = args.action_decode
     cfg.model.allow_reinforce = args.allow_reinforce
     # Persist the reinforce/sufficient-commit DISCIPLINE on cfg.model so the checkpoint records
@@ -509,7 +546,7 @@ def train(args):
     if args.resume:
         sd = torch.load(args.resume, map_location="cpu", weights_only=False)
         if "model" in sd: sd = sd["model"]
-        model.load_state_dict(sd)
+        _load_phase4_compatible(model, sd, "--resume")
         print(f"Resumed from {Path(args.resume).resolve()}")
         if getattr(args, "reinit_critic", False):
             # CONTROL: re-initialise the value head to a fresh state while keeping
@@ -526,7 +563,7 @@ def train(args):
         frozen_il_model = EntityTransformer(cfg.model).to(device)
         sd = torch.load(args.il_ref, map_location="cpu", weights_only=False)
         if "model" in sd: sd = sd["model"]
-        frozen_il_model.load_state_dict(sd)
+        _load_phase4_compatible(frozen_il_model, sd, "--il-ref")
         frozen_il_model.eval()
         print(f"IL reference loaded from {args.il_ref}  (lambda={cfg.ppo.il_lambda}, "
               f"decay_frac={cfg.ppo.il_decay_frac})")
@@ -536,7 +573,7 @@ def train(args):
             frozen_il_model = EntityTransformer(cfg.model).to(device)
             sd = torch.load(args.resume, map_location="cpu", weights_only=False)
             if "model" in sd: sd = sd["model"]
-            frozen_il_model.load_state_dict(sd)
+            _load_phase4_compatible(frozen_il_model, sd, "--resume IL default")
             frozen_il_model.eval()
             print(f"IL reference defaulted to --resume checkpoint  (lambda={cfg.ppo.il_lambda})")
         else:
@@ -642,13 +679,20 @@ def train(args):
             preseed_dir = Path(args.preseed_pool)
             existing_self_steps = {m.step_saved for m in pool.members if m.kind == "self"}
             added = 0
-            for pt_file in sorted(preseed_dir.glob("*.pt")):
+            # Only preseed from model checkpoints. The same directory can also
+            # contain serialized opponent-pool payloads (`pool_step_*.pt`),
+            # which are not valid model state_dicts.
+            for pt_file in sorted(preseed_dir.glob("torch_step_*.pt")):
                 m = re.search(r"step_(\d+)", pt_file.stem)
                 if not m: continue
                 step = int(m.group(1))
                 if step in existing_self_steps: continue
                 sd = torch.load(pt_file, map_location="cpu", weights_only=False)
-                if "model" in sd: sd = sd["model"]
+                if isinstance(sd, dict) and "model" in sd:
+                    sd = sd["model"]
+                if not isinstance(sd, dict) or not sd or any(not hasattr(v, "detach") for v in sd.values()):
+                    print(f"  WARN: skipping non-model preseed payload {pt_file.name}")
+                    continue
                 pool.add_self_checkpoint(step, sd)
                 added += 1
             print(f"  pool preseeded: {added} self-checkpoints from {preseed_dir}")
@@ -1503,6 +1547,13 @@ def train(args):
                     metrics["wnorm_roi50"] = float(new_norms[1].item())
                     metrics["wnorm_enemy_contest"] = float(new_norms[2].item())
                     metrics["wnorm_pw_orig"] = float(feat_cols[:, :-3].norm(dim=0).mean().item())
+            if hasattr(model, "fire_q"):
+                metrics["phase4_fire_q_norm"] = float(model.fire_q.weight.norm().item())
+                metrics["phase4_fire_k_norm"] = float(model.fire_k.weight.norm().item())
+                metrics["phase4_ship_q_norm"] = float(model.ship_q.weight.norm().item())
+                metrics["phase4_ship_k_norm"] = float(model.ship_k.weight.norm().item())
+                metrics["phase4_fire_resid_out_norm"] = float(model.fire_scorer[2].weight.norm().item())
+                metrics["phase4_ship_resid_out_norm"] = float(model.ship_scorer[2].weight.norm().item())
 
         total_env_steps += rollout_T * N
         iter_count += 1
@@ -1542,7 +1593,10 @@ def train(args):
                 f"H_fire {metrics.get('fire_entropy', 0):.3f} | "
                 f"V_loss {metrics.get('value_loss', 0):.4f} | "
                 f"r_p0 {avg_r:+.3f} r_p1 {avg_r1:+.3f} | "
-                f"LR {metrics['learning_rate']:.6f} | estop {metrics.get('kl_early_stop', 0):.0f}"
+                f"LR {metrics['learning_rate']:.6f}"
+                + (f"/{metrics.get('phase4_residual_learning_rate', metrics['learning_rate']):.6f}"
+                   if args.phase4_residual_lr_mult != 1.0 else "")
+                + f" | estop {metrics.get('kl_early_stop', 0):.0f}"
                 + (f" | il_kl {metrics.get('il_kl', 0):.3f} il_coef {metrics.get('il_coef', 0):.3f}"
                    if metrics.get('il_coef', 0) > 0 else "")
             )
@@ -1599,6 +1653,26 @@ def train(args):
                     f"(orig~{metrics.get('wnorm_pw_orig', 0):.2f})"
                     + actcoef + pencoef
                 )
+                print(
+                    f"   p4   | fire/ship tgtσ {metrics.get('fire_target_std', 0):.3f}/"
+                    f"{metrics.get('ship_target_std', 0):.3f} | "
+                    f"prior_rms {metrics.get('phase4_fire_prior_rms', 0):.3f}/"
+                    f"{metrics.get('phase4_ship_prior_rms', 0):.3f} | "
+                    f"resid_rms {metrics.get('phase4_fire_resid_rms', 0):.3f}/"
+                    f"{metrics.get('phase4_ship_resid_rms', 0):.3f} | "
+                    f"ρ {metrics.get('phase4_fire_resid_ratio', 0):.3f}/"
+                    f"{metrics.get('phase4_ship_resid_ratio', 0):.3f} | "
+                    f"|resid|μ {metrics.get('phase4_fire_resid_abs_mean', 0):.3f}/"
+                    f"{metrics.get('phase4_ship_resid_abs_mean', 0):.3f} | "
+                    f"flip f/s {metrics.get('phase4_fire_decision_flip', 0):.3f}/"
+                    f"{metrics.get('phase4_ship_decision_flip', 0):.3f} | "
+                    f"qk f {metrics.get('phase4_fire_q_norm', 0):.2f}/"
+                    f"{metrics.get('phase4_fire_k_norm', 0):.2f} "
+                    f"s {metrics.get('phase4_ship_q_norm', 0):.2f}/"
+                    f"{metrics.get('phase4_ship_k_norm', 0):.2f} | "
+                    f"out {metrics.get('phase4_fire_resid_out_norm', 0):.3f}/"
+                    f"{metrics.get('phase4_ship_resid_out_norm', 0):.3f}"
+                )
                 # dm | decisive-mass GAP: are our inflight attacks reaching producer_v2's capture
                 # floor? gap DOWN + cross UP = concentrating force toward the decmass target.
                 if args.decisive_diag:
@@ -1611,15 +1685,16 @@ def train(args):
                         f"nearmiss {metrics.get('dm_nearmiss',0):.2f} "
                         f"tgt/step {metrics.get('dm_tgt',0):.2f}"
                     )
-                # SPS patch A: per-rollout wall-time breakdown (where the per-step tax is).
-                _tt = sum(_t_acc.values()) or 1.0
-                _ext = _t_acc['ext_obs'] + _t_acc['ext_wait'] + _t_acc['ext_conv']
-                print(
-                    f"   timing | pf {_t_acc['pf']:.1f} ext_obs {_t_acc['ext_obs']:.1f} "
-                    f"ext_wait {_t_acc['ext_wait']:.1f} ext_conv {_t_acc['ext_conv']:.1f} "
-                    f"estep {_t_acc['estep']:.1f} upd {_t_acc['upd']:.1f} "
-                    f"(sum {_tt:.1f}s, ext {_ext/_tt*100:.0f}%)"
-                )
+                if args.log_timing:
+                    # SPS patch A: per-rollout wall-time breakdown (where the per-step tax is).
+                    _tt = sum(_t_acc.values()) or 1.0
+                    _ext = _t_acc['ext_obs'] + _t_acc['ext_wait'] + _t_acc['ext_conv']
+                    print(
+                        f"   timing | pf {_t_acc['pf']:.1f} ext_obs {_t_acc['ext_obs']:.1f} "
+                        f"ext_wait {_t_acc['ext_wait']:.1f} ext_conv {_t_acc['ext_conv']:.1f} "
+                        f"estep {_t_acc['estep']:.1f} upd {_t_acc['upd']:.1f} "
+                        f"(sum {_tt:.1f}s, ext {_ext/_tt*100:.0f}%)"
+                    )
             # W&B logging
             if wb is not None:
                 wb.log({
@@ -1629,12 +1704,31 @@ def train(args):
                     "train/reward_p0": avg_r,
                     "train/reward_p1": avg_r1,
                     "train/lr": metrics["learning_rate"],
+                    "train/phase4_residual_lr": metrics.get("phase4_residual_learning_rate", metrics["learning_rate"]),
                     # PPO health
                     "ppo/explained_variance": metrics.get("explained_variance", 0),
                     "feat/wnorm_roi20": metrics.get("wnorm_roi20", 0),
                     "feat/wnorm_roi50": metrics.get("wnorm_roi50", 0),
                     "feat/wnorm_enemy_contest": metrics.get("wnorm_enemy_contest", 0),
                     "feat/wnorm_pw_orig": metrics.get("wnorm_pw_orig", 0),
+                    "phase4/fire_target_std": metrics.get("fire_target_std", 0),
+                    "phase4/ship_target_std": metrics.get("ship_target_std", 0),
+                    "phase4/fire_prior_rms": metrics.get("phase4_fire_prior_rms", 0),
+                    "phase4/ship_prior_rms": metrics.get("phase4_ship_prior_rms", 0),
+                    "phase4/fire_resid_rms": metrics.get("phase4_fire_resid_rms", 0),
+                    "phase4/ship_resid_rms": metrics.get("phase4_ship_resid_rms", 0),
+                    "phase4/fire_resid_ratio": metrics.get("phase4_fire_resid_ratio", 0),
+                    "phase4/ship_resid_ratio": metrics.get("phase4_ship_resid_ratio", 0),
+                    "phase4/fire_resid_abs_mean": metrics.get("phase4_fire_resid_abs_mean", 0),
+                    "phase4/ship_resid_abs_mean": metrics.get("phase4_ship_resid_abs_mean", 0),
+                    "phase4/fire_decision_flip": metrics.get("phase4_fire_decision_flip", 0),
+                    "phase4/ship_decision_flip": metrics.get("phase4_ship_decision_flip", 0),
+                    "phase4/fire_q_norm": metrics.get("phase4_fire_q_norm", 0),
+                    "phase4/fire_k_norm": metrics.get("phase4_fire_k_norm", 0),
+                    "phase4/ship_q_norm": metrics.get("phase4_ship_q_norm", 0),
+                    "phase4/ship_k_norm": metrics.get("phase4_ship_k_norm", 0),
+                    "phase4/fire_resid_out_norm": metrics.get("phase4_fire_resid_out_norm", 0),
+                    "phase4/ship_resid_out_norm": metrics.get("phase4_ship_resid_out_norm", 0),
                     "ppo/clip_frac": avg_cf,
                     "ppo/clip_frac_fire": metrics.get("clip_frac_fire", 0),
                     "ppo/approx_kl": metrics.get("approx_kl", 0),
@@ -1782,6 +1876,9 @@ if __name__ == "__main__":
                         help="Save a periodic checkpoint every N env steps")
     parser.add_argument("--learning-rate", type=float, default=None,
                         help="Override PPO learning rate (default: cfg.ppo.learning_rate=3e-4)")
+    parser.add_argument("--phase4-residual-lr-mult", type=float, default=1.0,
+                        help="Multiplier applied only to Phase 4 residual params "
+                             "(fire_q/k/scorer, ship_q/k/scorer). 1.0 = legacy single-LR behavior.")
     parser.add_argument("--ppo-epochs", type=int, default=None,
                         help="Override PPO epochs per rollout (default: 4)")
     parser.add_argument("--clip-eps", type=float, default=None,
@@ -1798,6 +1895,10 @@ if __name__ == "__main__":
     parser.add_argument("--entropy-coef-ships", type=float, default=None,
                         help="Override ships-head entropy coefficient "
                              "(default: cfg.ppo.entropy_coef_ships=0.01)")
+    parser.add_argument("--phase4-residual-init-std", type=float, default=None,
+                        help="Stddev for Phase 4 residual output-layer init. "
+                             "0.0 = exact parity; small nonzero values let the "
+                             "per-target residual path affect decisions sooner.")
     parser.add_argument("--max-grad-norm", type=float, default=None,
                         help="Override gradient-clipping max norm "
                              "(default: cfg.ppo.max_grad_norm=0.5)")
@@ -2164,6 +2265,9 @@ if __name__ == "__main__":
                              "this stops the instance to end billing.")
     parser.add_argument("--wandb", action="store_true",
                         help="Enable Weights & Biases logging.")
+    parser.add_argument("--log-timing", action="store_true",
+                        help="Print per-rollout timing breakdowns in the console log. "
+                             "Off by default; enable only for profiling.")
     parser.add_argument("--wandb-project", type=str, default="orbit-wars",
                         help="W&B project name (default: orbit-wars).")
     parser.add_argument("--run-name", type=str, default="",

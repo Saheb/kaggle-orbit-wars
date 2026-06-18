@@ -18,6 +18,18 @@ from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS
 from config import Config
 
 
+def _gather_target_logits(per_target_logits: torch.Tensor, target_idx: torch.Tensor) -> torch.Tensor:
+    return torch.gather(per_target_logits, -1, target_idx.unsqueeze(-1)).squeeze(-1)
+
+
+def _gather_target_ship_logits(per_target_logits: torch.Tensor, target_idx: torch.Tensor) -> torch.Tensor:
+    return torch.gather(
+        per_target_logits,
+        2,
+        target_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, per_target_logits.shape[-1]),
+    ).squeeze(2)
+
+
 class PPOLearner:
     def __init__(self, model, cfg, device="cpu", frozen_il_model=None,
                  roi_heads=None, aux_roi_coef=0.0):
@@ -45,16 +57,35 @@ class PPOLearner:
             for h in self.roi_heads.values():
                 h.to(device)
 
-        all_params = list(model.parameters())
+        self.phase4_residual_lr_mult = float(getattr(cfg.ppo, "phase4_residual_lr_mult", 1.0))
+        residual_prefixes = (
+            "fire_q.", "fire_k.", "fire_scorer.",
+            "ship_q.", "ship_k.", "ship_scorer.",
+        )
+        residual_param_ids = {
+            id(p) for name, p in model.named_parameters()
+            if any(name.startswith(prefix) for prefix in residual_prefixes)
+        }
+        base_params = []
+        residual_params = []
+        for p in model.parameters():
+            if not p.requires_grad:
+                continue
+            (residual_params if id(p) in residual_param_ids else base_params).append(p)
         if self.roi_heads is not None and self.aux_roi_coef > 0.0:
             for h in self.roi_heads.values():
-                all_params += list(h.parameters())
+                for p in h.parameters():
+                    if p.requires_grad:
+                        base_params.append(p)
 
-        self.optimizer = torch.optim.Adam(
-            all_params,
-            lr=cfg.ppo.learning_rate,
-            eps=1e-5,
-        )
+        param_groups = [{"params": base_params, "lr": cfg.ppo.learning_rate}]
+        if residual_params:
+            param_groups.append({
+                "params": residual_params,
+                "lr": cfg.ppo.learning_rate * self.phase4_residual_lr_mult,
+            })
+
+        self.optimizer = torch.optim.Adam(param_groups, eps=1e-5)
         self.total_steps = 0
         self.update_count = 0
 
@@ -94,10 +125,16 @@ class PPOLearner:
         slot_valid = to_dev(batch["slot_valid"]).float()    # (B, MO)
         sv_sum = slot_valid.sum().clamp(min=1)
 
-        # Fire: Bernoulli KL per slot, averaged over valid slots.
+        target_action = to_dev(batch["actions"]["target"])
+        curr_fire_logits = _gather_target_logits(current_outputs["fire_logits"], target_action)
+        froz_fire_logits = _gather_target_logits(frozen_out["fire_logits"], target_action)
+        curr_ship_logits = _gather_target_ship_logits(current_outputs["ship_logits"], target_action)
+        froz_ship_logits = _gather_target_ship_logits(frozen_out["ship_logits"], target_action)
+
+        # Fire: Bernoulli KL at the sampled target, averaged over valid slots.
         # KL(Bern(p) || Bern(q)) = p log(p/q) + (1-p) log((1-p)/(1-q))
-        p_curr = torch.sigmoid(current_outputs["fire_logits"]).clamp(1e-6, 1 - 1e-6)
-        p_froz = torch.sigmoid(frozen_out["fire_logits"]).clamp(1e-6, 1 - 1e-6)
+        p_curr = torch.sigmoid(curr_fire_logits).clamp(1e-6, 1 - 1e-6)
+        p_froz = torch.sigmoid(froz_fire_logits).clamp(1e-6, 1 - 1e-6)
         fire_kl = (p_curr * (p_curr / p_froz).log()
                    + (1 - p_curr) * ((1 - p_curr) / (1 - p_froz)).log())
         fire_kl = (fire_kl * slot_valid).sum() / sv_sum
@@ -110,7 +147,7 @@ class PPOLearner:
             kl_per = (p_curr_ * (log_curr - log_froz)).sum(dim=-1)  # (B, MO)
             return (kl_per * slot_mask).sum() / slot_mask.sum().clamp(min=1)
 
-        ship_kl = cat_kl(current_outputs["ship_logits"], frozen_out["ship_logits"], slot_valid)
+        ship_kl = cat_kl(curr_ship_logits, froz_ship_logits, slot_valid)
         target_kl = cat_kl(current_outputs["target_logits"], frozen_out["target_logits"], slot_valid)
 
         return fire_kl + ship_kl + target_kl
@@ -158,30 +195,32 @@ class PPOLearner:
             pairwise_features=pairwise,
         )
 
-        fire_logits = outputs["fire_logits"]
-        ship_logits = outputs["ship_logits"]
+        fire_logits_target = outputs["fire_logits"]
+        ship_logits_target = outputs["ship_logits"]
         target_logits = outputs["target_logits"]
         if target_mask is not None:
             target_logits = target_logits.masked_fill(~target_mask, -1e9)
         values = outputs["value"]
+
+        # Actions taken
+        fire_action   = to_dev(batch["actions"]["fire"])
+        ship_action   = to_dev(batch["actions"]["ship"])
+        target_action = to_dev(batch["actions"]["target"])
+        fire_logits = _gather_target_logits(fire_logits_target, target_action)
+        ship_logits = _gather_target_ship_logits(ship_logits_target, target_action)
 
         # Action distributions (target-decode: fire, ship, target only — no angle).
         fire_dist   = torch.distributions.Bernoulli(logits=fire_logits)
         ship_dist   = torch.distributions.Categorical(logits=ship_logits)
         target_dist = torch.distributions.Categorical(logits=target_logits)
 
-        # Actions taken
-        fire_action   = to_dev(batch["actions"]["fire"])
-        ship_action   = to_dev(batch["actions"]["ship"])
-        target_action = to_dev(batch["actions"]["target"])
-
-        # Log probs — ship/target only matter for slots that actually fired.
+        # Target is part of the sampled joint action even when fire=0.
         slot_valid  = slot_valid_2d.unsqueeze(-1)   # (B, max_owned, 1)
         fired_slots = fire_action.float() * slot_valid.squeeze(-1)
 
         new_log_prob_fire   = fire_dist.log_prob(fire_action.float()) * slot_valid.squeeze(-1)
         new_log_prob_ships  = ship_dist.log_prob(ship_action)  * fired_slots
-        new_log_prob_target = target_dist.log_prob(target_action) * fired_slots
+        new_log_prob_target = target_dist.log_prob(target_action) * slot_valid.squeeze(-1)
 
         # Sum across planet slots: (B, max_owned) -> (B,)
         new_log_prob = (new_log_prob_fire + new_log_prob_ships + new_log_prob_target).sum(dim=-1)
@@ -189,7 +228,7 @@ class PPOLearner:
         # Old log probs (stored at rollout time)
         old_fire   = to_dev(batch["old_log_probs"]["fire"])  * slot_valid.squeeze(-1)
         old_ships  = to_dev(batch["old_log_probs"]["ships"]) * fired_slots
-        old_target = to_dev(batch["old_log_probs"]["target"]) * fired_slots
+        old_target = to_dev(batch["old_log_probs"]["target"]) * slot_valid.squeeze(-1)
         old_log_prob = (old_fire + old_ships + old_target).sum(dim=-1)  # (B,)
 
         # Advantages
@@ -274,6 +313,57 @@ class PPOLearner:
                 weighted = (ship_argmax == 0).float() * fired_mask
                 ship_bin0_rate = weighted.sum() / fired_mask.sum().clamp(min=1)
                 mean_ship_bin = (ship_argmax.float() * fired_mask).sum() / fired_mask.sum().clamp(min=1)
+                target_valid = target_logits > -1e8
+                fire_target_mean = (fire_logits_target.masked_fill(~target_valid, 0.0).sum(dim=-1)
+                                    / target_valid.float().sum(dim=-1).clamp(min=1.0))
+                fire_target_var = (((fire_logits_target - fire_target_mean.unsqueeze(-1)).masked_fill(~target_valid, 0.0) ** 2).sum(dim=-1)
+                                   / target_valid.float().sum(dim=-1).clamp(min=1.0))
+                fire_target_std = ((fire_target_var * sv).sum() / sv_sum).sqrt()
+                ship_target_scores = ship_logits_target.amax(dim=-1)  # (B, MO, max_planets)
+                ship_target_mean = (ship_target_scores.masked_fill(~target_valid, 0.0).sum(dim=-1)
+                                    / target_valid.float().sum(dim=-1).clamp(min=1.0))
+                ship_target_var = (((ship_target_scores - ship_target_mean.unsqueeze(-1)).masked_fill(~target_valid, 0.0) ** 2).sum(dim=-1)
+                                   / target_valid.float().sum(dim=-1).clamp(min=1.0))
+                ship_target_std = ((ship_target_var * sv).sum() / sv_sum).sqrt()
+                fire_prior = outputs.get("_phase4_fire_prior")
+                fire_residual = outputs.get("_phase4_fire_residual")
+                ship_prior = outputs.get("_phase4_ship_prior")
+                ship_residual = outputs.get("_phase4_ship_residual")
+                fire_prior_rms = fire_resid_rms = fire_resid_ratio = fire_resid_abs_mean = 0.0
+                ship_prior_rms = ship_resid_rms = ship_resid_ratio = ship_resid_abs_mean = 0.0
+                fire_decision_flip = ship_decision_flip = 0.0
+                if fire_prior is not None and fire_residual is not None:
+                    valid_targets = target_valid & slot_valid_2d.unsqueeze(-1)
+                    valid_targets_f = valid_targets.float()
+                    vt_sum = valid_targets_f.sum().clamp(min=1.0)
+                    fire_prior_rms = (((fire_prior * valid_targets_f) ** 2).sum() / vt_sum).sqrt()
+                    fire_resid_rms = (((fire_residual * valid_targets_f) ** 2).sum() / vt_sum).sqrt()
+                    fire_resid_ratio = fire_resid_rms / fire_prior_rms.clamp(min=1e-6)
+                    fire_resid_abs_mean = (fire_residual.abs() * valid_targets_f).sum() / vt_sum
+                    fire_prior_logits = _gather_target_logits(fire_prior, target_action)
+                    fire_decision_flip = (
+                        (((fire_prior_logits > 0) != (fire_logits > 0)).float() * sv).sum()
+                        / sv_sum
+                    )
+                if ship_prior is not None and ship_residual is not None:
+                    valid_targets_bins = target_valid.unsqueeze(-1) & slot_valid_2d.unsqueeze(-1).unsqueeze(-1)
+                    min_ship_bin = int(getattr(self.model.cfg, "min_ship_bin", 0))
+                    if min_ship_bin > 0:
+                        valid_targets_bins = valid_targets_bins.clone()
+                        valid_targets_bins[..., :min_ship_bin] = False
+                    valid_targets_bins_f = valid_targets_bins.float()
+                    vtb_sum = valid_targets_bins_f.sum().clamp(min=1.0)
+                    ship_prior_rms = (((ship_prior * valid_targets_bins_f) ** 2).sum() / vtb_sum).sqrt()
+                    ship_resid_rms = (((ship_residual * valid_targets_bins_f) ** 2).sum() / vtb_sum).sqrt()
+                    ship_resid_ratio = ship_resid_rms / ship_prior_rms.clamp(min=1e-6)
+                    ship_resid_abs_mean = (ship_residual.abs() * valid_targets_bins_f).sum() / vtb_sum
+                    ship_prior_logits = _gather_target_ship_logits(ship_prior, target_action)
+                    ship_slots = (((fire_logits > 0) | (fire_prior_logits > 0)).float() * sv
+                                  if fire_prior is not None else sv)
+                    ship_decision_flip = (
+                        ((ship_prior_logits.argmax(dim=-1) != ship_logits.argmax(dim=-1)).float() * ship_slots).sum()
+                        / ship_slots.sum().clamp(min=1.0)
+                    )
 
             metrics = {
                 "loss": loss.item(),
@@ -293,6 +383,18 @@ class PPOLearner:
                 "fire_fraction": fire_fraction.item(),
                 "ship_bin0_rate": ship_bin0_rate.item(),
                 "mean_ship_bin": mean_ship_bin.item(),
+                "fire_target_std": fire_target_std.item(),
+                "ship_target_std": ship_target_std.item(),
+                "phase4_fire_prior_rms": float(fire_prior_rms),
+                "phase4_ship_prior_rms": float(ship_prior_rms),
+                "phase4_fire_resid_rms": float(fire_resid_rms),
+                "phase4_ship_resid_rms": float(ship_resid_rms),
+                "phase4_fire_resid_ratio": float(fire_resid_ratio),
+                "phase4_ship_resid_ratio": float(ship_resid_ratio),
+                "phase4_fire_resid_abs_mean": float(fire_resid_abs_mean),
+                "phase4_ship_resid_abs_mean": float(ship_resid_abs_mean),
+                "phase4_fire_decision_flip": float(fire_decision_flip),
+                "phase4_ship_decision_flip": float(ship_decision_flip),
                 "il_kl": il_kl.item() if isinstance(il_kl, torch.Tensor) else float(il_kl),
                 "il_coef": self.il_coef,
                 "per_slot_fire_probs": per_slot_fire.detach().cpu().tolist(),
@@ -404,6 +506,7 @@ class PPOLearner:
             for k, v in sum_metrics.items()
         }
         avg_metrics["learning_rate"] = self.optimizer.param_groups[0]["lr"]
+        avg_metrics["phase4_residual_learning_rate"] = self.get_phase4_residual_lr()
         avg_metrics["kl_early_stop"] = float(early_stopped)
         self.update_count += n_updates
         return avg_metrics
@@ -438,10 +541,16 @@ class PPOLearner:
         self.update_count += n
         return {"value_loss": sum_vl / max(n, 1),
                 "learning_rate": self.optimizer.param_groups[0]["lr"],
+                "phase4_residual_learning_rate": self.get_phase4_residual_lr(),
                 "kl_early_stop": 0.0, "critic_warmup": 1.0}
 
     def get_lr(self):
         return self.optimizer.param_groups[0]["lr"]
+
+    def get_phase4_residual_lr(self):
+        if len(self.optimizer.param_groups) < 2:
+            return self.optimizer.param_groups[0]["lr"]
+        return self.optimizer.param_groups[1]["lr"]
 
     def state_dict(self):
         # Save model-arch config alongside weights so loaders can rebuild the
@@ -470,6 +579,7 @@ class PPOLearner:
                 "capture_utility_coef": float(getattr(model_cfg, "capture_utility_coef", 0.0)),
                 "capture_utility_window": int(getattr(model_cfg, "capture_utility_window", 30)),
                 "capture_idle_penalty": float(getattr(model_cfg, "capture_idle_penalty", 0.0)),
+                "phase4_residual_init_std": float(getattr(model_cfg, "phase4_residual_init_std", 0.0)),
             }
         return {
             "model": self.model.state_dict(),

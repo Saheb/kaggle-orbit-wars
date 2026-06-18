@@ -26,6 +26,11 @@ from orbit_wars_rl.action_mask import compute_action_masks
 OUR_NAME = "Saheb"
 
 
+def _gather_chosen_fire_logits(outputs):
+    target_idx = outputs["target_logits"].argmax(dim=-1)
+    return torch.gather(outputs["fire_logits"], -1, target_idx.unsqueeze(-1)).squeeze(-1)
+
+
 def diagnose(checkpoint, episode_path, n_steps=30, target_decode=False):
     # Load model
     cfg = Config()
@@ -93,7 +98,7 @@ def diagnose(checkpoint, episode_path, n_steps=30, target_decode=False):
                     if features.get("pairwise_features") is not None else None,
             )
 
-        fire_logits = outputs["fire_logits"][0].cpu()  # (max_owned,)
+        fire_logits = _gather_chosen_fire_logits(outputs)[0].cpu()
         fire_probs = torch.sigmoid(fire_logits)
         slot_valid = masks["slot_valid"][0]  # squeeze batch dim → (max_owned,)
 

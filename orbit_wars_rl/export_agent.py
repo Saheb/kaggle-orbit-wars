@@ -18,7 +18,7 @@ import torch
 import numpy as np
 
 from config import Config, ModelConfig
-from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH
+from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, PHASE4_COMPAT_MISSING_KEYS
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +125,24 @@ class _Model(nn.Module):
                 nn.GELU(),
                 nn.Linear(D, 1),
             )
+            self.fire_q = nn.Linear(D, D)
+            self.fire_k = nn.Linear(D, D)
+            self.fire_scorer = nn.Sequential(
+                nn.Linear(D + D + _PAIRWISE_DIM, D),
+                nn.GELU(),
+                nn.Linear(D, 1),
+            )
+            self.ship_q = nn.Linear(D, D)
+            self.ship_k = nn.Linear(D, D)
+            self.ship_scorer = nn.Sequential(
+                nn.Linear(D + D + _PAIRWISE_DIM, D),
+                nn.GELU(),
+                nn.Linear(D, NUM_SHIP_BINS),
+            )
+            nn.init.zeros_(self.fire_scorer[-1].weight)
+            nn.init.zeros_(self.fire_scorer[-1].bias)
+            nn.init.zeros_(self.ship_scorer[-1].weight)
+            nn.init.zeros_(self.ship_scorer[-1].bias)
         else:
             self.target_head = nn.Linear(D, _MAX_PLANETS)
         self.value_fc1 = nn.Linear(2 * D, D)
@@ -191,9 +209,25 @@ class _Model(nn.Module):
                 device=oe.device, dtype=oe.dtype,
             )
 
-        fl = self.fire_head(oe).squeeze(-1)
-        sl = self.ship_head(oe)
+        fl_slot = self.fire_head(oe).squeeze(-1)
+        sl_slot = self.ship_head(oe)
+        fl = fl_slot.unsqueeze(-1).expand(-1, -1, _MAX_PLANETS)
+        sl = sl_slot.unsqueeze(2).expand(-1, -1, _MAX_PLANETS, -1)
+        if self.use_pairwise and pairwise_features is not None:
+            q_fire = self.fire_q(oe).unsqueeze(2).expand(-1, -1, n_p, -1)
+            k_fire = self.fire_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
+            fire_in = torch.cat([q_fire, k_fire, pairwise_features], dim=-1)
+            fire_resid = self.fire_scorer(fire_in).squeeze(-1)
+            q_ship = self.ship_q(oe).unsqueeze(2).expand(-1, -1, n_p, -1)
+            k_ship = self.ship_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
+            ship_in = torch.cat([q_ship, k_ship, pairwise_features], dim=-1)
+            ship_resid = self.ship_scorer(ship_in)
+            fl = fl.clone()
+            sl = sl.clone()
+            fl[..., :n_p] = fl[..., :n_p] + fire_resid
+            sl[..., :n_p, :] = sl[..., :n_p, :] + ship_resid
         if _MIN_SHIP_BIN > 0:
+            sl = sl.clone()
             sl[..., :_MIN_SHIP_BIN] = -100.0
         if target_logits is None:
             target_logits = self.target_head(oe)
@@ -209,10 +243,10 @@ class _Model(nn.Module):
             target_logits = target_logits.masked_fill(~tgt_mask, -100.0)
 
         if fire_mask is not None:
-            fl = fl.masked_fill(~fire_mask, -100.0)
+            fl = fl.masked_fill(~fire_mask.unsqueeze(-1), -100.0)
         if slot_valid is not None:
-            fl = fl.masked_fill(~slot_valid, -100.0)
-            sl = sl.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
+            fl = fl.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
+            sl = sl.masked_fill(~slot_valid.unsqueeze(-1).unsqueeze(-1), -100.0)
             target_logits = target_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
         global_token = x[:, 0, :]
@@ -460,7 +494,12 @@ def load_model(checkpoint_path: str, cfg: Config) -> EntityTransformer:
     model = EntityTransformer(cfg.model)
     if "model" in sd:
         sd = sd["model"]
-    model.load_state_dict(sd)
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    bad_missing = [k for k in missing if k not in PHASE4_COMPAT_MISSING_KEYS]
+    if bad_missing or unexpected:
+        raise RuntimeError(
+            f"checkpoint/model mismatch during export: missing={bad_missing}, unexpected={list(unexpected)}"
+        )
     model.eval()
     return model
 

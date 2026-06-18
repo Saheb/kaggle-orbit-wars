@@ -32,9 +32,9 @@ def test_overlay_forces_nearest_safe_source_and_logs_original_no_fire():
     }
     masks = compute_action_masks(obs, player=0)
     n_planets = len(obs["planets"])
-    fire_logits = torch.full((1, 16), -10.0)       # policy wants no-fire everywhere
+    fire_logits = torch.full((1, 16, n_planets), -10.0)       # policy wants no-fire everywhere
     target_logits = torch.zeros((1, 16, n_planets))
-    ship_logits = torch.zeros((1, 16, 32))
+    ship_logits = torch.zeros((1, 16, n_planets, 32))
     stats = {}
 
     moves = actions_from_target_policy(
@@ -83,9 +83,9 @@ def test_overlay_skips_hopeless_target():
     stats = {}
 
     moves = actions_from_target_policy(
-        torch.full((1, 16), -10.0),
+        torch.full((1, 16, n_planets), -10.0),
         torch.zeros((1, 16, n_planets)),
-        torch.zeros((1, 16, 32)),
+        torch.zeros((1, 16, n_planets, 32)),
         masks,
         obs,
         player=0,
@@ -118,9 +118,9 @@ def test_overlay_value_gate_can_skip_fillable_target():
     stats = {}
 
     moves = actions_from_target_policy(
-        torch.full((1, 16), -10.0),
+        torch.full((1, 16, n_planets), -10.0),
         torch.zeros((1, 16, n_planets)),
-        torch.zeros((1, 16, 32)),
+        torch.zeros((1, 16, n_planets, 32)),
         masks,
         obs,
         player=0,
@@ -156,9 +156,9 @@ def test_overlay_overfill_scales_requested_mass_and_logs_realized_fill():
     stats = {}
 
     moves = actions_from_target_policy(
-        torch.full((1, 16), -10.0),
+        torch.full((1, 16, n_planets), -10.0),
         torch.zeros((1, 16, n_planets)),
-        torch.zeros((1, 16, 32)),
+        torch.zeros((1, 16, n_planets, 32)),
         masks,
         obs,
         player=0,
@@ -195,11 +195,12 @@ def test_natural_head_audit_logs_attack_and_save_candidate_readiness():
     }
     masks = compute_action_masks(obs, player=0)
     n_planets = len(obs["planets"])
-    fire_logits = torch.full((1, 16), 10.0)
+    fire_logits = torch.full((1, 16, n_planets), -10.0)
+    fire_logits[0, 0, 2] = 10.0
     target_logits = torch.zeros((1, 16, n_planets))
     target_logits[0, 0, 2] = 10.0                  # slot 0 naturally attacks planet 2
-    ship_logits = torch.zeros((1, 16, 32))
-    ship_logits[:, :, 20] = 10.0                   # large-enough bin near the top
+    ship_logits = torch.zeros((1, 16, n_planets, 32))
+    ship_logits[:, :, :, 20] = 10.0                # large-enough bin near the top
     stats = {}
 
     actions_from_target_policy(
