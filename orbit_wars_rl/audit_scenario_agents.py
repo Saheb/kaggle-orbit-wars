@@ -38,6 +38,14 @@ from action_mask import compute_action_masks, _ship_bin_to_count  # noqa: E402
 SCENARIOS = ("agg_attack", "stage_attack", "hold_under_peel")
 
 
+def _selected_scenarios(name: str) -> tuple[str, ...]:
+    if name == "all":
+        return SCENARIOS
+    if name not in SCENARIOS:
+        raise ValueError(f"unknown scenario {name!r}")
+    return (name,)
+
+
 def _load_agent(path: str):
     p = Path(path)
     if not p.is_absolute():
@@ -299,8 +307,8 @@ def _head_audit_one(model: EntityTransformer, cfg: Config, scenario: str,
             if "pairwise_features" in features else None,
         )
     target_logits = _legalized_target_logits(outputs, masks, env, adv)
-    fire_p = torch.sigmoid(outputs["fire_logits"].detach().cpu())[0]
-    ship_logits = outputs["ship_logits"].detach().cpu()[0]
+    fire_p_by_target = torch.sigmoid(outputs["fire_logits"].detach().cpu())[0]
+    ship_logits_by_target = outputs["ship_logits"].detach().cpu()[0]
     probs = torch.softmax(target_logits[0], dim=-1)
     owned_indices = masks["owned_indices"].detach().cpu()
     owned_count = int(masks["owned_count"])
@@ -316,7 +324,8 @@ def _head_audit_one(model: EntityTransformer, cfg: Config, scenario: str,
         top_vals, top_idx = torch.topk(row, k=min(topk, row.numel()))
         target_order = torch.argsort(row, descending=True)
         target_rank = int((target_order == target).nonzero(as_tuple=False)[0].item()) + 1
-        ship_bin = int(torch.argmax(ship_logits[slot]).item())
+        fire_p_target = float(fire_p_by_target[slot, target].item())
+        ship_bin = int(torch.argmax(ship_logits_by_target[slot, target]).item())
         max_ships = int(planets[pidx, 5].item())
         decoded = _ship_bin_to_count(ship_bin, max_ships, mode=cfg.model.ship_bin_mode)
         top_desc = ", ".join(
@@ -325,7 +334,7 @@ def _head_audit_one(model: EntityTransformer, cfg: Config, scenario: str,
         )
         print(
             f"  src_pid={pid} slot={slot} ships={max_ships} "
-            f"fire_p={float(fire_p[slot].item()):.3f} "
+            f"fire_p@target={fire_p_target:.3f} "
             f"target_rank={target_rank} target_p={float(probs[slot, target].item()):.3f} "
             f"ship_bin={ship_bin} ship_count={decoded} top{topk}=[{top_desc}]"
         )
@@ -333,7 +342,7 @@ def _head_audit_one(model: EntityTransformer, cfg: Config, scenario: str,
 
 def _run_oracle(args) -> None:
     print(f"oracle games={args.games} deadline={args.deadline}")
-    for scenario in SCENARIOS:
+    for scenario in _selected_scenarios(args.scenario):
         wins = 0
         steps_sum = 0
         examples_left = args.print_examples
@@ -351,7 +360,7 @@ def _run_oracle(args) -> None:
 
 def _run_noop(args) -> None:
     print(f"noop games={args.games} deadline={args.deadline}")
-    for scenario in SCENARIOS:
+    for scenario in _selected_scenarios(args.scenario):
         wins = 0
         steps_sum = 0
         examples_left = args.print_examples
@@ -373,7 +382,7 @@ def _run_head(args) -> None:
     device = torch.device(args.device)
     model, cfg, _ = _load_checkpoint_model(args.checkpoint, device)
     print(f"head-audit checkpoint={args.checkpoint} games={args.games} deadline={args.deadline}")
-    for scenario in SCENARIOS:
+    for scenario in _selected_scenarios(args.scenario):
         for i in range(args.games):
             seed = args.seed_start + 10000 * SCENARIOS.index(scenario) + i
             _head_audit_one(model, cfg, scenario, seed, args.deadline, device, args.topk)
@@ -391,7 +400,7 @@ def _run_success(args, *, sample: bool = False) -> None:
         label = f"agent={args.agent}"
     mode = "sample" if sample else "deterministic"
     print(f"{label} mode={mode} games={args.games} deadline={args.deadline}")
-    for scenario in SCENARIOS:
+    for scenario in _selected_scenarios(args.scenario):
         if not args.checkpoint:
             _reset_agent(agent_mod)
         wins = 0
@@ -418,6 +427,7 @@ def main() -> None:
     ap.add_argument("--agent", default="opponents/candidate_ajay_1200.py")
     ap.add_argument("--checkpoint", default="", help="Run a trained torch checkpoint instead of --agent")
     ap.add_argument("--mode", choices=("run", "head", "oracle", "noop", "sample", "all"), default="run")
+    ap.add_argument("--scenario", choices=("all",) + SCENARIOS, default="all")
     ap.add_argument("--games", type=int, default=64)
     ap.add_argument("--seed-start", type=int, default=1000)
     ap.add_argument("--deadline", type=int, default=20)

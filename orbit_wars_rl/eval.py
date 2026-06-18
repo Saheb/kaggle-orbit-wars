@@ -1749,7 +1749,14 @@ def _fmt_conversion(acc):
                f"near-miss {dm_nm:.2f}  target-steps/game {dm_tpg:.1f}  (beta {_DM_BETA_EVAL:.1f})\n"
                f"     by phase <50/50-100/>=100 (gap/cross/p50)  "
                f"{_dm_ph(_dmp[0])}  {_dm_ph(_dmp[1])}  {_dm_ph(_dmp[2])}"
-               f"   [gap DOWN + cross UP = assembling to the capture floor; floor == decmass reward]\n")
+               f"   [enemy-target only; effectively the CONTESTED bucket. gap DOWN + cross UP = assembling to the capture floor]\n")
+    dm_contested_line = (
+        f"  decisive-mass CONTESTED  gap {dm_gap:.2f}  cross {dm_cross:.2f}  overkill {dm_over:.2f}  "
+        f"near-miss {dm_nm:.2f}  target-steps/game {dm_tpg:.1f}   (enemy targets only; same floor as decmass reward)\n"
+        f"     by phase <50/50-100/>=100 (gap/cross/p50)  "
+        f"{_dm_ph(_dmp[0])}  {_dm_ph(_dmp[1])}  {_dm_ph(_dmp[2])}"
+        f"   [this is the wall-facing bucket; compare against NEUTRAL to separate land-grab from contested conversion]\n"
+    )
     _dmn = acc["dm_neutral_ratios_ph"]
     _dmn_all = _dmn[0] + _dmn[1] + _dmn[2]
     dmn_gap = sum(max(0.0, 1.0 - r) for r in _dmn_all) / max(len(_dmn_all), 1)
@@ -1785,6 +1792,7 @@ def _fmt_conversion(acc):
             f"{triage_line}"
             f"{om32_line}"
             f"{dm_line}"
+            f"{dm_contested_line}"
             f"{dm_neutral_line}"
             f"{failed_attack_line}"
             f"  launch-waste<50  redundant {redf:.2f} (WG {redf_wg:.2f})  underkill {undf:.2f} (WG {undf_wg:.2f})"
