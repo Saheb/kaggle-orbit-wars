@@ -391,6 +391,21 @@ class EntityTransformer(nn.Module):
         if any(k.startswith("angle_head.") for k in state_dict):
             state_dict = {k: v for k, v in state_dict.items()
                           if not k.startswith("angle_head.")}
+        # Pairwise-channel growth (e.g. adding reachable_enemy_mass = ch15): the per-target
+        # scorers' first Linear gains trailing input columns. Zero-pad the new columns of an
+        # older checkpoint so the new feature contributes nothing at step 0 (decode + log-prob
+        # match the source model). pairwise is the last block in [q, k, pairwise], so new
+        # channels are the LAST columns → right-pad. Same parity-init idea as the Phase 4 heads.
+        own = self.state_dict()
+        for name in ("pair_kv.weight", "target_scorer.0.weight",
+                     "fire_scorer.0.weight", "ship_scorer.0.weight"):
+            if name in state_dict and name in own:
+                ck, md = state_dict[name], own[name]
+                if ck.dim() == 2 and ck.shape[0] == md.shape[0] and ck.shape[1] < md.shape[1]:
+                    pad = torch.zeros(ck.shape[0], md.shape[1] - ck.shape[1],
+                                      dtype=ck.dtype, device=ck.device)
+                    state_dict = dict(state_dict)
+                    state_dict[name] = torch.cat([ck, pad], dim=1)
         return super().load_state_dict(state_dict, strict=strict)
 
 

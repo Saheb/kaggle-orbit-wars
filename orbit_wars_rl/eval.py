@@ -12,7 +12,8 @@ import numpy as np
 
 from config import Config
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, PHASE4_COMPAT_MISSING_KEYS
-from features import extract_features, _ETA_PROBE_SPEED, set_game_phase_features, set_ablate_roi, set_ablate_channels
+from features import (extract_features, _ETA_PROBE_SPEED, set_game_phase_features,
+                      set_ablate_roi, set_ablate_channels, PAIRWISE_FEATURE_DIM)
 from action_mask import (compute_action_masks, actions_from_policy, actions_from_target_policy, _fleet_speed,
                          _ship_bin_to_count, _target_intercept_angle, MAX_OWNED_PLANETS)
 # Decisive-mass floor constants — IMPORTED from torch_env so the eval dm_* gap diagnostic uses the
@@ -67,7 +68,13 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
         cfg.model.global_feature_dim = int(sd["global_proj.weight"].shape[1])
     if "pair_kv.weight" in sd:
         D = int(sd["planet_proj.weight"].shape[0])
-        cfg.model.pairwise_feature_dim = int(sd["pair_kv.weight"].shape[1]) - D
+        ckpt_pw = int(sd["pair_kv.weight"].shape[1]) - D
+        # features.py always emits PAIRWISE_FEATURE_DIM channels, so the model's pairwise
+        # input must be that wide regardless of the checkpoint. Older/narrower checkpoints
+        # are zero-padded by EntityTransformer.load_state_dict (new channels contribute
+        # nothing → identical behaviour). Building to the checkpoint width would feed
+        # PAIRWISE_FEATURE_DIM-channel features to a narrower model → shape mismatch at forward.
+        cfg.model.pairwise_feature_dim = PAIRWISE_FEATURE_DIM if ckpt_pw > 0 else 0
     else:
         cfg.model.pairwise_feature_dim = 0
 

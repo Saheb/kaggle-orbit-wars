@@ -1590,7 +1590,7 @@ class VecTorchEnv:
                           enemy_contest=None, friendly_contest=None):
         """Vectorized counterpart of features.compute_pairwise_features().
 
-        Returns (N, MAX_OWNED, P, 15) float32 on self.device. Channel order:
+        Returns (N, MAX_OWNED, P, 16) float32 on self.device. Channel order:
           0  sin(angle src→tgt)
           1  cos(angle src→tgt)
           2  distance / BOARD_SIZE
@@ -1608,6 +1608,7 @@ class VecTorchEnv:
           12 roi_20  — (prod*20 - cap_cost_at_arrival) / cap_cost_at_arrival, clipped [-1,1]
           13 roi_50  — same at horizon 50
           14 enemy_contest / 100  — total enemy fleet ships racing toward this target
+          15 reachable_enemy_mass / 100 — distance-decayed enemy garrison reachable to this target
         """
         N = self.num_envs
         device = self.device
@@ -1717,12 +1718,33 @@ class VecTorchEnv:
         else:
             contest_b = torch.zeros(N, MO, P, device=device)
 
+        # Reachable enemy planet mass (ch 15): distance-decayed enemy garrison that could
+        # reinforce/contest each target within the horizon. Source-slot independent, so
+        # computed per-target and broadcast. Raw (no rho/eta scaling) — the per-target head
+        # learns its own reaction coefficient. Mirrors features.compute_pairwise_features ch15
+        # and the dm-floor enemy_mass term.
+        px_a = planets[:, :, 2]                                  # (N, P)
+        py_a = planets[:, :, 3]
+        gar_a = planets[:, :, 5]
+        own_a = planets[:, :, 1].long()
+        dxe = px_a.unsqueeze(2) - px_a.unsqueeze(1)             # (N, P_src, P_tgt)
+        dye = py_a.unsqueeze(2) - py_a.unsqueeze(1)
+        pde = torch.sqrt((dxe * dxe + dye * dye).clamp(min=1e-9))
+        src_reach_e = (_ship_speed(gar_a) * _DM_HORIZON).clamp(min=1e-6)   # (N, P_src)
+        dec = (1.0 - pde / src_reach_e.unsqueeze(2)).clamp(min=0.0)        # (N, P_src, P_tgt)
+        not_self = ~torch.eye(P, dtype=torch.bool, device=device).unsqueeze(0)
+        enemy_src = (planet_alive & (own_a != player) & (own_a >= 0)).unsqueeze(2)  # (N,P_src,1)
+        valid_e = enemy_src & planet_alive.unsqueeze(1) & not_self
+        reach_em = torch.where(valid_e, gar_a.unsqueeze(2) * dec,
+                               torch.zeros_like(dec)).sum(dim=1)           # (N, P_tgt)
+        reach_b = (reach_em / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1)
+
         # Stack channels
         out = torch.stack([
             sin_a, cos_a, dist / BOARD_SIZE, 1.0 / (eta + 1.0),
             sun_safe, is_mine_b, is_enemy_b, is_neutral_b, prod_b, valid_b,
-            ships_at_arr, cap_gap, roi_20, roi_50, contest_b,
-        ], dim=-1)  # (N, MO, P, 15)
+            ships_at_arr, cap_gap, roi_20, roi_50, contest_b, reach_b,
+        ], dim=-1)  # (N, MO, P, 16)
 
         # Zero out invalid owned slots AND invalid target planets (match kaggle path)
         slot_valid_b = slot_valid.unsqueeze(-1).unsqueeze(-1).float()    # (N, MO, 1, 1)

@@ -26,6 +26,7 @@ Pairwise features (15 per owned-slot × target-planet pair):
   12: roi_20                    (production*20 - cap_cost_at_arrival) / cap_cost_at_arrival, clipped [-1,1]
   13: roi_50                    same with horizon 50
   14: enemy_contest / 100       total enemy fleet ships racing toward this target
+  15: reachable_enemy_mass /100 distance-decayed enemy garrison that could reach this target
 """
 
 from __future__ import annotations
@@ -432,12 +433,25 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
 
 # Number of pairwise features per (owned-slot, target-planet) pair.
 # Keep in sync with compute_pairwise_features() and ModelConfig.pairwise_feature_dim.
-PAIRWISE_FEATURE_DIM = 15
+PAIRWISE_FEATURE_DIM = 16
 
 # Typical fleet size used to estimate an ETA prior (matches teacher MIN_SHIP_FLOOR ~ 10
 # but in practice ETA varies modestly with size since speed is log-shaped).
 _ETA_PROBE_SHIPS = 20
 _ETA_PROBE_SPEED = 1.0 + (MAX_SPEED - 1.0) * (math.log(_ETA_PROBE_SHIPS) / math.log(1000.0)) ** 1.5
+
+# Horizon (steps) over which enemy garrison counts as "reachable" to a target, scaled by
+# a garrison-dependent fleet speed. Mirrors torch_env._DM_HORIZON / _ship_speed so the
+# reachable_enemy_mass pairwise channel (ch 15) matches the GPU training path exactly.
+_REACH_HORIZON = 18.0
+
+
+def _ship_speed_np(ships: np.ndarray) -> np.ndarray:
+    """Garrison-dependent fleet speed (kaggle formula), numpy counterpart of
+    torch_env._ship_speed: speed = 1 + (MAX-1)*(log(ships)/log(1000))**1.5, clamped [1, MAX]."""
+    s = np.maximum(ships, 1.0)
+    base = (np.log(s) / math.log(1000.0)) ** 1.5
+    return np.minimum(1.0 + (MAX_SPEED - 1.0) * base, MAX_SPEED).astype(np.float32)
 
 
 def _planet_arrival_pos(init_angle: float, orbital_r: float, is_orbiting: bool,
@@ -492,6 +506,23 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         tgt_owner == -1,      tgt_ships + 1,
         np.where(tgt_owner != player, tgt_ships + tgt_prod * 3 + 1, 0.0)
     ).astype(np.float32)
+
+    # Reachable enemy planet mass per target (ch 15): distance-decayed enemy garrison
+    # that could reinforce/contest each target within the horizon. Source-slot independent
+    # (depends only on enemy planets vs target), so computed once and broadcast. Raw (no
+    # rho/eta scaling) — the per-target head learns its own reaction coefficient. Mirrors
+    # torch_env._compute_pairwise ch15 and the dm-floor enemy_mass (producer_v2 cheap_enemy_pressure).
+    reach_em = np.zeros(n_p, dtype=np.float32)
+    enemy_src_mask = (tgt_owner != player) & (tgt_owner >= 0)
+    if enemy_src_mask.any():
+        s_idx = np.where(enemy_src_mask)[0]
+        sx_e, sy_e, sg_e = tgt_x[s_idx], tgt_y[s_idx], tgt_ships[s_idx]
+        src_reach_e = np.maximum(_ship_speed_np(sg_e) * _REACH_HORIZON, 1e-6)
+        dxe = tgt_x[np.newaxis, :] - sx_e[:, np.newaxis]
+        dye = tgt_y[np.newaxis, :] - sy_e[:, np.newaxis]
+        dec = np.clip(1.0 - np.sqrt(dxe * dxe + dye * dye) / src_reach_e[:, np.newaxis], 0.0, None)
+        dec[np.arange(len(s_idx)), s_idx] = 0.0   # a planet does not reinforce itself
+        reach_em = (sg_e[:, np.newaxis] * dec).sum(axis=0).astype(np.float32)
 
     # Precompute orbit info for each target planet
     tgt_is_orbiting = np.zeros(n_p, dtype=np.bool_)
@@ -606,6 +637,7 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         out[slot, :n_p, 13] = roi_50                          # ROI at horizon 50
         if enemy_contest is not None:
             out[slot, :n_p, 14] = np.minimum(enemy_contest[:n_p], 500.0) / 100.0  # contested ships
+        out[slot, :n_p, 15] = np.minimum(reach_em, 500.0) / 100.0  # reachable enemy planet mass
         if _ABLATE_CHANNELS:                                  # diagnostic: scramble channel↔target mapping
             _perm = np.random.permutation(n_p)
             for _ch in _ABLATE_CHANNELS:

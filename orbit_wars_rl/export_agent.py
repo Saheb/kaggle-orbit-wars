@@ -19,6 +19,7 @@ import numpy as np
 
 from config import Config, ModelConfig
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, PHASE4_COMPAT_MISSING_KEYS
+from features import PAIRWISE_FEATURE_DIM
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +477,12 @@ def _apply_checkpoint_model_config(checkpoint, cfg: Config) -> dict:
         cfg.model.global_feature_dim = int(state_dict["global_proj.weight"].shape[1])
     if bool(ckpt_cfg.get("game_phase_features", False)):
         cfg.model.game_phase_features = True
+    # Pairwise input width must match what features.py emits (PAIRWISE_FEATURE_DIM), NOT the
+    # checkpoint's stored width — narrower/older checkpoints are zero-padded by
+    # EntityTransformer.load_state_dict. Stated explicitly (mirrors eval.load_checkpoint) so
+    # export doesn't silently rely on the Config default tracking the feature width.
+    if isinstance(state_dict, dict):
+        cfg.model.pairwise_feature_dim = PAIRWISE_FEATURE_DIM if "pair_kv.weight" in state_dict else 0
     # Reinforce / sufficient-commit DISCIPLINE (persisted by ppo.state_dict) so the exported
     # mask matches training without relying on remembered CLI flags. Absent in old ckpts → 0/False.
     cfg.model._discipline_persisted = ("reinforce_gate_min_planets" in ckpt_cfg)

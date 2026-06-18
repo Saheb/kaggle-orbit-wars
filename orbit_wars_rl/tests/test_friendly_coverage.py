@@ -43,6 +43,34 @@ def test_pairwise_roi_parity():
     print(f"  parity OK: max roi diff = {max_diff:.4f}")
 
 
+def test_reachable_enemy_mass_parity():
+    """reachable_enemy_mass (pairwise ch 15) must match between the torch_env GPU path and
+    the kaggle features.py path. Sim-gap on this channel = train/eval policy divergence."""
+    num_envs = 4
+    env = VecTorchEnv(num_envs=num_envs, num_players=2, device="cpu")
+    env.reset(seeds=list(range(100, 100 + num_envs)))
+    for _ in range(25):  # random play → captures → enemy planets at varied positions/garrisons
+        env.step({0: torch.randint(0, 2, (num_envs, MAX_OWNED, 3)),
+                  1: torch.randint(0, 2, (num_envs, MAX_OWNED, 3))})
+
+    max_diff = 0.0
+    exercised = False
+    for player in (0, 1):
+        vec = env.get_features(player, max_planets=48, max_fleets=128)["pairwise_features"]
+        for i in range(num_envs):
+            obs = to_legacy_obs(env, env_idx=i, player=player)
+            ref = extract_features(obs, player, num_players=2,
+                                   max_planets=48, max_fleets=128)["pairwise_features"].numpy()
+            pv = vec[i].numpy()
+            d = np.abs(pv[..., 15] - ref[..., 15])
+            max_diff = max(max_diff, float(d.max()))
+            if (ref[..., 15] != 0).any():
+                exercised = True
+    assert max_diff < 0.06, f"reachable_enemy_mass parity diverged: max|Δ|={max_diff:.4f}"
+    assert exercised, "no nonzero reachable_enemy_mass seen — scenario did not exercise the channel"
+    print(f"  parity OK: max reachable_enemy_mass diff = {max_diff:.4f}")
+
+
 def test_friendly_inbound_deflates_capture_roi():
     """Controlled: a neutral target with a big friendly fleet aimed at it should read
     much lower roi than the same board with no inbound fleet. Own targets untouched."""
@@ -77,5 +105,6 @@ def test_friendly_inbound_deflates_capture_roi():
 if __name__ == "__main__":
     print("=" * 60)
     test_pairwise_roi_parity()
+    test_reachable_enemy_mass_parity()
     test_friendly_inbound_deflates_capture_roi()
     print("ALL PASS")
