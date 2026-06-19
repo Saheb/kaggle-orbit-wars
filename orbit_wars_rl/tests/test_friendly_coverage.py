@@ -71,6 +71,39 @@ def test_reachable_enemy_mass_parity():
     print(f"  parity OK: max reachable_enemy_mass ETA-bin diff = {max_diff:.4f}")
 
 
+def test_wave_feature_parity():
+    """Phase 5 synchronized-wave features (pairwise ch 21-40) must match between the
+    torch_env path used during training and the kaggle features.py path used by eval/export."""
+    num_envs = 4
+    env = VecTorchEnv(num_envs=num_envs, num_players=2, device="cpu")
+    env.reset(seeds=list(range(200, 200 + num_envs)))
+    for _ in range(25):
+        env.step({0: torch.randint(0, 2, (num_envs, MAX_OWNED, 3)),
+                  1: torch.randint(0, 2, (num_envs, MAX_OWNED, 3))})
+
+    max_diff = 0.0
+    max_ch = -1
+    exercised = False
+    for player in (0, 1):
+        vec = env.get_features(player, max_planets=48, max_fleets=128)["pairwise_features"]
+        for i in range(num_envs):
+            obs = to_legacy_obs(env, env_idx=i, player=player)
+            ref = extract_features(obs, player, num_players=2,
+                                   max_planets=48, max_fleets=128)["pairwise_features"].numpy()
+            pv = vec[i].numpy()
+            d = np.abs(pv[..., 21:41] - ref[..., 21:41])
+            local = float(d.max())
+            if local > max_diff:
+                max_diff = local
+                max_ch = int(np.unravel_index(np.argmax(d), d.shape)[-1]) + 21
+            if (ref[..., 21:41] != 0).any():
+                exercised = True
+    assert max_diff < 0.08, f"wave feature parity diverged: max|Δ|={max_diff:.4f} at ch {max_ch}"
+    assert exercised, "no nonzero wave features seen — scenario did not exercise the channels"
+    ch_label = str(max_ch) if max_ch >= 0 else "n/a"
+    print(f"  parity OK: max wave-feature diff = {max_diff:.4f} (ch {ch_label})")
+
+
 def test_friendly_inbound_deflates_capture_roi():
     """Controlled: a neutral target with a big friendly fleet aimed at it should read
     much lower roi than the same board with no inbound fleet. Own targets untouched."""
@@ -106,5 +139,6 @@ if __name__ == "__main__":
     print("=" * 60)
     test_pairwise_roi_parity()
     test_reachable_enemy_mass_parity()
+    test_wave_feature_parity()
     test_friendly_inbound_deflates_capture_roi()
     print("ALL PASS")

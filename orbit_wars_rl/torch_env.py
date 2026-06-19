@@ -32,6 +32,9 @@ from wave_primitives import (
     DM_ETA_FREE,
     DM_ETA_SCALE,
     DM_HORIZON,
+    MATERIAL_FRAC,
+    MIN_MATERIAL_SHIPS,
+    MIN_RESERVE,
     WAVE_MARGIN,
     WAVE_TOL_STEPS,
 )
@@ -1577,6 +1580,8 @@ class VecTorchEnv:
         pairwise = self._compute_pairwise(
             planets=planets, planet_alive=planet_alive, P=P,
             owned_idx=owned_idx, slot_valid=slot_valid, player=player,
+            fleets=fleets,
+            fleet_alive=fleet_alive,
             enemy_contest=enemy_contest,
             friendly_contest=friendly_pressure,   # (N, P): own ships already inbound per target
         )
@@ -1598,10 +1603,11 @@ class VecTorchEnv:
         }
 
     def _compute_pairwise(self, planets, planet_alive, P, owned_idx, slot_valid, player,
+                          fleets=None, fleet_alive=None,
                           enemy_contest=None, friendly_contest=None):
         """Vectorized counterpart of features.compute_pairwise_features().
 
-        Returns (N, MAX_OWNED, P, 16) float32 on self.device. Channel order:
+        Returns (N, MAX_OWNED, P, 41) float32 on self.device. Channel order:
           0  sin(angle src→tgt)
           1  cos(angle src→tgt)
           2  distance / BOARD_SIZE
@@ -1621,6 +1627,7 @@ class VecTorchEnv:
           14 enemy_contest / 100  — total enemy fleet ships racing toward this target
           15-20 reachable_enemy_mass / 100 — enemy garrison by planet-reach ETA bin
                 (edges [1,2,4,7,12] → <=1 / 2 / 3-4 / 5-7 / 8-12 / >=13 steps)
+          21-40 Phase 5 synchronized-wave features
         """
         N = self.num_envs
         device = self.device
@@ -1756,12 +1763,218 @@ class VecTorchEnv:
             rb = torch.where(mb, gar_src, torch.zeros_like(gar_src)).sum(dim=1)     # (N, P_tgt)
             reach_chans.append((rb / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1))
 
-        # Stack channels (ch 0-14), then the 6 reach-ETA-bin channels (ch 15-20)
+        # Phase 5 wave features (ch 21-40): target-level deadline/floor/cover plus
+        # source-target readiness/quota. Anchor: material active friendly wave if present,
+        # otherwise minimal fresh prefix by ETA@safe_sendable.
+        if fleets is None:
+            fleets = self.fleets[:, :0, :]
+            fleet_alive = torch.zeros(N, 0, dtype=torch.bool, device=device)
+        Fw = fleets.shape[1]
+        if fleet_alive is None:
+            fleet_alive = torch.ones(N, Fw, dtype=torch.bool, device=device)
+        fwx = fleets[:, :, 2]
+        fwy = fleets[:, :, 3]
+        fwa = fleets[:, :, 4]
+        fw_owner = fleets[:, :, 1].long()
+        fw_ships = fleets[:, :, 6]
+        fw_cos = torch.cos(fwa)
+        fw_sin = torch.sin(fwa)
+        vx_fw = px_a.unsqueeze(1) - fwx.unsqueeze(2)   # (N,F,P)
+        vy_fw = py_a.unsqueeze(1) - fwy.unsqueeze(2)
+        along_fw = vx_fw * fw_cos.unsqueeze(2) + vy_fw * fw_sin.unsqueeze(2)
+        perp_fw = torch.abs(vx_fw * fw_sin.unsqueeze(2) - vy_fw * fw_cos.unsqueeze(2))
+        cand_fw = (along_fw > 0) & (perp_fw < planets[:, :, 4].unsqueeze(1) + 2.0) & planet_alive.unsqueeze(1)
+        has_fw_tgt = cand_fw.any(dim=2) & fleet_alive
+        dist_fw_all = torch.sqrt((vx_fw * vx_fw + vy_fw * vy_fw).clamp(min=1e-9))
+        fw_tgt_idx = dist_fw_all.masked_fill(~cand_fw, 1e6).argmin(dim=2)  # (N,F)
+        fw_tgt_safe = fw_tgt_idx.clamp(0, P - 1)
+        fw_tgt_dist = dist_fw_all.gather(2, fw_tgt_safe.unsqueeze(-1)).squeeze(-1)
+        fw_eta = fw_tgt_dist / _ship_speed(fw_ships).clamp(min=1e-6)
+        friendly_fw = has_fw_tgt & (fw_owner == player)
+        enemy_fw = has_fw_tgt & (fw_owner >= 0) & (fw_owner != player)
+
+        src_safe = (src[:, :, 5] - float(MIN_RESERVE)).clamp(min=0.0) * slot_valid.float()
+        src_speed = _ship_speed(src_safe).clamp(min=1e-6)
+        P_idx = torch.arange(P, device=device).view(1, 1, P)
+        not_self_src_tgt = P_idx != owned_idx.unsqueeze(-1)
+        inf_st = torch.full_like(dist, float("inf"))
+        eta_fast = torch.where((src_safe.unsqueeze(-1) > 0.0) & not_self_src_tgt,
+                               dist0 / src_speed.unsqueeze(-1), inf_st)
+        eta_slow = torch.where((src_safe.unsqueeze(-1) >= 1.0) & not_self_src_tgt,
+                               dist0 / _ship_speed(torch.ones_like(dist0)), inf_st)
+
+        def _scatter_fleet_mass(mask, weights):
+            out_m = torch.zeros(N, P, dtype=planets.dtype, device=device)
+            if Fw == 0:
+                return out_m
+            out_m.scatter_add_(1, fw_tgt_safe, torch.where(mask, weights, torch.zeros_like(weights)))
+            return out_m
+
+        def _attack_floor_cover(tau_np):
+            finite = torch.isfinite(tau_np)
+            tau_z = torch.where(finite, tau_np.clamp(min=0.0), torch.zeros_like(tau_np))
+            tau_fleet = tau_z.gather(1, fw_tgt_safe) if Fw > 0 else torch.zeros(N, 0, device=device)
+            friend_cover_m = friendly_fw & (fw_eta >= tau_fleet - float(WAVE_TOL_STEPS)) & (fw_eta <= tau_fleet + float(WAVE_TOL_STEPS))
+            cover_m = _scatter_fleet_mass(friend_cover_m, fw_ships)
+            enemy_in_m = enemy_fw & (fw_eta <= tau_fleet + float(WAVE_TOL_STEPS))
+            inbound_m = _scatter_fleet_mass(enemy_in_m, fw_ships)
+            reactive_m = torch.where(
+                valid_e & (eta_e <= tau_z.unsqueeze(1)),
+                gar_src,
+                torch.zeros_like(gar_src),
+            ).sum(dim=1)
+            rho_m = ((tau_z - float(DM_ETA_FREE)) / float(DM_ETA_SCALE)).clamp(0.0, 1.0)
+            enemy_owned = (own_a >= 0) & (own_a != player) & planet_alive
+            attackable = (own_a != player) & planet_alive
+            floor_m = gar_a + planets[:, :, 6] * tau_z + float(WAVE_MARGIN)
+            floor_m = floor_m + inbound_m + torch.where(
+                enemy_owned,
+                float(DEFAULT_REACTIVE_BETA) * rho_m * reactive_m,
+                torch.zeros_like(floor_m),
+            )
+            floor_m = torch.where(attackable & finite, floor_m, torch.zeros_like(floor_m))
+            cover_m = torch.where(attackable & finite, cover_m, torch.zeros_like(cover_m))
+            remaining_m = (floor_m - cover_m).clamp(min=0.0)
+            reactive_m = torch.where(enemy_owned & finite, reactive_m, torch.zeros_like(reactive_m))
+            return floor_m, cover_m, remaining_m, reactive_m, inbound_m
+
+        def _defense_floor_cover(tau_np):
+            finite = torch.isfinite(tau_np)
+            tau_z = torch.where(finite, tau_np.clamp(min=0.0), torch.zeros_like(tau_np))
+            tau_fleet = tau_z.gather(1, fw_tgt_safe) if Fw > 0 else torch.zeros(N, 0, device=device)
+            enemy_in_m = enemy_fw & (fw_eta <= tau_fleet + float(WAVE_TOL_STEPS))
+            enemy_mass = _scatter_fleet_mass(enemy_in_m, fw_ships)
+            friend_m = friendly_fw & (fw_eta <= tau_fleet)
+            friend_mass = _scatter_fleet_mass(friend_m, fw_ships)
+            own_target = (own_a == player) & planet_alive & finite
+            floor_m = torch.where(own_target, enemy_mass + float(WAVE_MARGIN), torch.zeros_like(enemy_mass))
+            cover_m = torch.where(own_target, gar_a + planets[:, :, 6] * tau_z + friend_mass, torch.zeros_like(enemy_mass))
+            return floor_m, cover_m, (floor_m - cover_m).clamp(min=0.0)
+
+        # Sticky active-wave anchor: latest material friendly wave currently inbound.
+        neg_inf = torch.full((N, P), -float("inf"), dtype=planets.dtype, device=device)
+        sticky_tau = neg_inf.clone()
+        sticky_src_eta = torch.where(friendly_fw, fw_eta, torch.full_like(fw_eta, -float("inf")))
+        if Fw > 0:
+            sticky_tau.scatter_reduce_(1, fw_tgt_safe, sticky_src_eta, reduce="amax", include_self=True)
+        sticky_tau = torch.where(torch.isfinite(sticky_tau), sticky_tau, torch.full_like(sticky_tau, float("inf")))
+        sticky_floor, sticky_cover, _sticky_rem, _sticky_reactive, _ = _attack_floor_cover(sticky_tau)
+        sticky_material = sticky_cover >= torch.maximum(
+            torch.full_like(sticky_floor, float(MIN_MATERIAL_SHIPS)),
+            sticky_floor * float(MATERIAL_FRAC),
+        )
+
+        # Fresh anchor: sort source ETAs per target; first prefix that crosses the reactive remaining.
+        eta_sort = eta_fast.permute(0, 2, 1)                       # (N,P,MO)
+        safe_sort_base = src_safe.unsqueeze(1).expand(-1, P, -1)   # (N,P,MO)
+        sorted_eta, order = torch.sort(eta_sort, dim=2, stable=True)
+        sorted_safe = torch.gather(safe_sort_base, 2, order)
+        cum_safe = torch.cumsum(torch.where(torch.isfinite(sorted_eta), sorted_safe, torch.zeros_like(sorted_safe)), dim=2)
+        fresh_tau = torch.full((N, P), float("inf"), dtype=planets.dtype, device=device)
+        found = torch.zeros(N, P, dtype=torch.bool, device=device)
+        for k in range(MO):
+            tau_k = sorted_eta[:, :, k]
+            floor_k, cover_k, rem_k, _react_k, _in_k = _attack_floor_cover(tau_k)
+            ok = torch.isfinite(tau_k) & ((own_a != player) & planet_alive) & (cum_safe[:, :, k] + 1e-6 >= rem_k)
+            choose = ok & ~found
+            fresh_tau = torch.where(choose, tau_k, fresh_tau)
+            found = found | choose
+
+        attack_tau = torch.where(sticky_material, sticky_tau, fresh_tau)
+        atk_floor, atk_cover, atk_remaining, atk_reactive, _atk_inbound = _attack_floor_cover(attack_tau)
+        safe_arrivable = torch.where(
+            torch.isfinite(attack_tau).unsqueeze(1) & (eta_fast <= attack_tau.unsqueeze(1) + float(WAVE_TOL_STEPS)),
+            src_safe.unsqueeze(-1),
+            torch.zeros_like(eta_fast),
+        ).sum(dim=1)
+        atk_total_safe = atk_cover + safe_arrivable
+        atk_feasible = (torch.isfinite(attack_tau) & ((atk_total_safe + 1e-6) >= atk_floor)).float()
+
+        same_tgt_enemy_tau = attack_tau.gather(1, fw_tgt_safe) if Fw > 0 else torch.zeros(N, 0, device=device)
+        recapture_mask = enemy_fw & (fw_eta > same_tgt_enemy_tau + float(WAVE_TOL_STEPS))
+        recapture = _scatter_fleet_mass(recapture_mask, fw_ships)
+        total_enemy_fleet = torch.where(enemy_fw, fw_ships, torch.zeros_like(fw_ships)).sum(dim=1, keepdim=True)
+        enemy_to_target = _scatter_fleet_mass(enemy_fw, fw_ships)
+        committed_elsewhere = (total_enemy_fleet - enemy_to_target).clamp(min=0.0)
+        committed_elsewhere = torch.where((own_a != player) & planet_alive, committed_elsewhere, torch.zeros_like(committed_elsewhere))
+
+        # Defense anchor/class features for own targets.
+        def_tau = torch.full((N, P), float("inf"), dtype=planets.dtype, device=device)
+        enemy_eta_for_min = torch.where(enemy_fw, fw_eta, torch.full_like(fw_eta, float("inf")))
+        if Fw > 0:
+            def_tau.scatter_reduce_(1, fw_tgt_safe, enemy_eta_for_min, reduce="amin", include_self=True)
+        def_floor, def_cover, def_remaining = _defense_floor_cover(def_tau)
+        reachable_def = torch.where(
+            torch.isfinite(def_tau).unsqueeze(1) & (eta_fast <= def_tau.unsqueeze(1) + float(WAVE_TOL_STEPS)),
+            src_safe.unsqueeze(-1),
+            torch.zeros_like(eta_fast),
+        ).sum(dim=1)
+        step_remaining = (float(self.episode_steps) - self.step_count.float()).clamp(min=0.0, max=40.0).unsqueeze(1)
+        hold_value = planets[:, :, 6] * step_remaining
+        own_target = (own_a == player) & planet_alive
+        def_safe = own_target & (~torch.isfinite(def_tau) | (def_remaining <= 1e-6))
+        def_holdable = own_target & ~def_safe & (reachable_def + 1e-6 >= def_remaining) & (hold_value + 1e-6 >= def_remaining)
+        def_doomed = own_target & ~def_safe & ~def_holdable
+        hold_safe_ch = def_safe.float()
+        hold_holdable_ch = def_holdable.float()
+        hold_doomed_ch = def_doomed.float()
+        def_total_safe = torch.where(torch.isfinite(def_tau), def_cover + reachable_def, torch.zeros_like(def_cover))
+        def_feasible = (torch.isfinite(def_tau) & (def_safe | def_holdable)).float()
+
+        is_attack_target = ((own_a != player) & planet_alive).float()
+        is_own_target = ((own_a == player) & planet_alive).float()
+        wave_tau = torch.where(is_own_target.bool(), def_tau, attack_tau)
+        wave_floor = torch.where(is_own_target.bool(), def_floor, atk_floor)
+        wave_cover = torch.where(is_own_target.bool(), def_cover, atk_cover)
+        wave_remaining = torch.where(is_own_target.bool(), def_remaining, atk_remaining)
+        wave_reactive = torch.where(is_attack_target.bool(), atk_reactive, torch.zeros_like(atk_reactive))
+        wave_total_safe = torch.where(is_own_target.bool(), def_total_safe, atk_total_safe)
+        wave_feasible = torch.where(is_own_target.bool(), def_feasible, atk_feasible) * planet_alive.float()
+
+        ready = (
+            (src_safe.unsqueeze(-1) > 0.0)
+            & torch.isfinite(wave_tau).unsqueeze(1)
+            & (eta_fast <= wave_tau.unsqueeze(1) + float(WAVE_TOL_STEPS))
+            & (eta_slow >= wave_tau.unsqueeze(1) - float(WAVE_TOL_STEPS))
+        )
+        ready_safe = torch.where(ready, src_safe.unsqueeze(-1), torch.zeros_like(eta_fast)).sum(dim=1)
+        quota = torch.where(
+            ready & (ready_safe.unsqueeze(1) > 1e-6),
+            wave_remaining.unsqueeze(1) * src_safe.unsqueeze(-1) / ready_safe.clamp(min=1e-6).unsqueeze(1),
+            torch.zeros_like(eta_fast),
+        )
+        marginal = torch.where(ready, torch.minimum(src_safe.unsqueeze(-1), wave_remaining.unsqueeze(1)), torch.zeros_like(eta_fast))
+        crosses_ready = ((ready_safe + 1e-6) >= wave_remaining).float() * torch.isfinite(wave_tau).float()
+
+        wave_chans = [
+            (wave_floor / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1),
+            (wave_total_safe / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1),
+            (wave_cover / wave_floor.clamp(min=1.0)).clamp(0.0, 5.0).unsqueeze(1).expand(-1, MO, -1),
+            (wave_reactive / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1),
+            wave_feasible.unsqueeze(1).expand(-1, MO, -1),
+            (committed_elsewhere / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1),
+            (recapture / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1),
+            hold_safe_ch.unsqueeze(1).expand(-1, MO, -1),
+            hold_holdable_ch.unsqueeze(1).expand(-1, MO, -1),
+            hold_doomed_ch.unsqueeze(1).expand(-1, MO, -1),
+            torch.where(torch.isfinite(eta_fast), (eta_fast / 50.0).clamp(max=1.0), torch.zeros_like(eta_fast)),
+            torch.where(torch.isfinite(eta_slow), (eta_slow / 50.0).clamp(max=1.0), torch.zeros_like(eta_slow)),
+            ready.float(),
+            (src_safe / 100.0).clamp(max=5.0).unsqueeze(-1).expand(-1, -1, P),
+            (wave_cover / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1),
+            (wave_remaining / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1),
+            (ready_safe / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1),
+            (quota / 100.0).clamp(max=5.0),
+            crosses_ready.unsqueeze(1).expand(-1, MO, -1),
+            (marginal / 100.0).clamp(max=5.0),
+        ]
+
+        # Stack channels (ch 0-14), reach-ETA bins (ch 15-20), then wave features (ch 21-40)
         out = torch.stack([
             sin_a, cos_a, dist / BOARD_SIZE, 1.0 / (eta + 1.0),
             sun_safe, is_mine_b, is_enemy_b, is_neutral_b, prod_b, valid_b,
-            ships_at_arr, cap_gap, roi_20, roi_50, contest_b, *reach_chans,
-        ], dim=-1)  # (N, MO, P, 21)
+            ships_at_arr, cap_gap, roi_20, roi_50, contest_b, *reach_chans, *wave_chans,
+        ], dim=-1)  # (N, MO, P, 41)
 
         # Zero out invalid owned slots AND invalid target planets (match kaggle path)
         slot_valid_b = slot_valid.unsqueeze(-1).unsqueeze(-1).float()    # (N, MO, 1, 1)

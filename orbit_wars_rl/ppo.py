@@ -463,7 +463,7 @@ class PPOLearner:
                 if self.roi_heads is not None and self.aux_roi_coef > 0.0:
                     pairwise = batch.get("pairwise_features")
                     if pairwise is not None:
-                        pairwise = pairwise.to(self.device)          # (B, MO, N_p, 15)
+                        pairwise = pairwise.to(self.device)          # (B, MO, N_p, F_pair)
                         x_new = pairwise[..., 12:15].reshape(-1, 3)  # (B*MO*N_p, 3)
                         # pair_kv branch — only new columns in computational graph
                         contrib_kv = F.linear(x_new, self.model.pair_kv.weight[:, 108:111])

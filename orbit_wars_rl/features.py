@@ -12,7 +12,7 @@ Features per entity type:
 - Global (11 features): player, step, angular_velocity, economy stats,
   enemy ships split (on_planets / in_fleets), mode
 
-Pairwise features (15 per owned-slot × target-planet pair):
+Pairwise features (41 per owned-slot × target-planet pair):
   0: sin of arrival direction   (corrected for rotation on orbiting targets)
   1: cos of arrival direction   (corrected for rotation on orbiting targets)
   2: arrival dist / BOARD_SIZE  (corrected for rotation on orbiting targets)
@@ -28,6 +28,7 @@ Pairwise features (15 per owned-slot × target-planet pair):
   14: enemy_contest / 100       total enemy fleet ships racing toward this target
   15-20: reachable_enemy_mass /100, binned by enemy-planet-reach ETA
          (bins: <=1 / 2 / 3-4 / 5-7 / 8-12 / >=13 steps — dense in the reactive window)
+  21-40: Phase 5 synchronized-wave features (floor/cover/anchor/quota/readiness)
 """
 
 from __future__ import annotations
@@ -88,6 +89,16 @@ def game_phase_channels(step):
     return [early, mid, late, comet_cycle]
 
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet, Fleet, CENTER, ROTATION_RADIUS_LIMIT
+from wave_primitives import (
+    DEFAULT_REACTIVE_BETA,
+    DM_ETA_FREE,
+    DM_ETA_SCALE,
+    MATERIAL_FRAC,
+    MIN_MATERIAL_SHIPS,
+    MIN_RESERVE,
+    WAVE_MARGIN,
+    WAVE_TOL_STEPS,
+)
 
 BOARD_SIZE = 100.0
 SUN_RADIUS = 10.0
@@ -417,6 +428,7 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         max_owned=max_owned, angular_velocity=angular_velocity, step=step,
         init_by_id=init_by_id, enemy_contest=enemy_contest,
         friendly_contest=None if _NO_FRIENDLY_DEFLATION else friendly_contest,
+        fleets=fleets,
         comet_ids=comet_planet_ids,
     )
 
@@ -434,7 +446,9 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
 
 # Number of pairwise features per (owned-slot, target-planet) pair.
 # Keep in sync with compute_pairwise_features() and ModelConfig.pairwise_feature_dim.
-PAIRWISE_FEATURE_DIM = 21
+PAIRWISE_FEATURE_DIM = 41
+WAVE_FEATURE_START = 21
+WAVE_FEATURE_DIM = PAIRWISE_FEATURE_DIM - WAVE_FEATURE_START
 
 # Typical fleet size used to estimate an ETA prior (matches teacher MIN_SHIP_FLOOR ~ 10
 # but in practice ETA varies modestly with size since speed is log-shaped).
@@ -447,6 +461,44 @@ _ETA_PROBE_SPEED = 1.0 + (MAX_SPEED - 1.0) * (math.log(_ETA_PROBE_SHIPS) / math.
 #   0: eta<=1 (unstoppable, arrives next step)  1: 2  2: 3-4  3: 5-7  4: 8-12  5: >=13 (reserve).
 _REACH_BIN_EDGES = np.array([1.0, 2.0, 4.0, 7.0, 12.0], dtype=np.float32)
 NUM_REACH_BINS = 6
+
+
+def _rho_np(tau):
+    return np.asarray(np.clip((tau - DM_ETA_FREE) / DM_ETA_SCALE, 0.0, 1.0), dtype=np.float32)
+
+
+def _fleet_targets_eta_np(planets, fleets, n_p):
+    """Resolve fleet targets exactly like the pairwise/eval heading projection."""
+    n_f = len(fleets or [])
+    tgt_idx = np.full(n_f, -1, dtype=np.int32)
+    eta = np.full(n_f, np.inf, dtype=np.float32)
+    owners = np.zeros(n_f, dtype=np.int32)
+    ships = np.zeros(n_f, dtype=np.float32)
+    if n_f == 0 or n_p == 0:
+        return tgt_idx, eta, owners, ships
+    px = np.array([planets[j][2] for j in range(n_p)], dtype=np.float32)
+    py = np.array([planets[j][3] for j in range(n_p)], dtype=np.float32)
+    pr = np.array([planets[j][4] for j in range(n_p)], dtype=np.float32)
+    for i, fl in enumerate(fleets):
+        owners[i] = int(fl[1])
+        ships[i] = float(fl[6])
+        if owners[i] < 0:
+            continue
+        fx, fy, ang = float(fl[2]), float(fl[3]), float(fl[4])
+        c, s = math.cos(ang), math.sin(ang)
+        vx = px - fx
+        vy = py - fy
+        along = vx * c + vy * s
+        perp = np.abs(vx * s - vy * c)
+        cand = (along > 0.0) & (perp < pr + 2.0)
+        if not cand.any():
+            continue
+        dist = np.sqrt(vx * vx + vy * vy)
+        masked = np.where(cand, dist, np.inf)
+        j = int(np.argmin(masked))
+        tgt_idx[i] = j
+        eta[i] = float(dist[j] / max(fleet_speed(int(max(ships[i], 1.0))), 1e-6))
+    return tgt_idx, eta, owners, ships
 
 
 def _ship_speed_np(ships: np.ndarray) -> np.ndarray:
@@ -477,6 +529,7 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
                               init_by_id: dict | None = None,
                               enemy_contest: np.ndarray | None = None,
                               friendly_contest: np.ndarray | None = None,
+                              fleets=None,
                               comet_ids=None):
     """For each (owned-slot, target-planet) pair return geometric + ownership features.
 
@@ -528,6 +581,169 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         bin_idx[np.arange(len(s_idx)), s_idx] = -1   # a planet does not reinforce itself
         for b in range(NUM_REACH_BINS):
             reach_bins[:, b] = np.where(bin_idx == b, sg_e[:, np.newaxis], 0.0).sum(axis=0)
+
+    # Phase 5 wave features (ch 21-40). This is a vectorizable target-anchor approximation:
+    # continue a material friendly inbound wave when present, else choose the minimal fresh
+    # prefix by ETA@safe_sendable against the reactive floor at each candidate ETA.
+    fleet_tgt, fleet_eta, fleet_owner, fleet_ships = _fleet_targets_eta_np(planets, fleets or [], n_p)
+    friendly_fleet = (fleet_owner == player) & (fleet_tgt >= 0)
+    enemy_fleet = (fleet_owner >= 0) & (fleet_owner != player) & (fleet_tgt >= 0)
+
+    owned_slots = []
+    for slot in range(min(owned_count, max_owned)):
+        src_idx = int(owned_indices[slot])
+        if src_idx < len(planets):
+            owned_slots.append((slot, src_idx, int(planets[src_idx][0]), float(planets[src_idx][5])))
+    src_safe = np.array([max(0.0, ships - MIN_RESERVE) for _slot, _idx, _pid, ships in owned_slots],
+                        dtype=np.float32)
+    src_x = np.array([planets[idx][2] for _slot, idx, _pid, _ships in owned_slots], dtype=np.float32)
+    src_y = np.array([planets[idx][3] for _slot, idx, _pid, _ships in owned_slots], dtype=np.float32)
+    src_idx_arr = np.array([idx for _slot, idx, _pid, _ships in owned_slots], dtype=np.int32)
+    slot_to_spos = {slot: spos for spos, (slot, _idx, _pid, _ships) in enumerate(owned_slots)}
+    S = len(owned_slots)
+    if S > 0:
+        dx_st = tgt_x[np.newaxis, :] - src_x[:, np.newaxis]
+        dy_st = tgt_y[np.newaxis, :] - src_y[:, np.newaxis]
+        dist_st = np.sqrt(dx_st * dx_st + dy_st * dy_st).astype(np.float32)
+        safe_speed = np.maximum(_ship_speed_np(src_safe), 1e-6)
+        eta_fast_st = np.where(src_safe[:, np.newaxis] > 0.0,
+                               dist_st / safe_speed[:, np.newaxis],
+                               np.inf).astype(np.float32)
+        eta_slow_st = np.where(src_safe[:, np.newaxis] >= 1.0,
+                               dist_st / float(fleet_speed(1)),
+                               np.inf).astype(np.float32)
+        eta_fast_st[np.arange(S), src_idx_arr] = np.inf
+        eta_slow_st[np.arange(S), src_idx_arr] = np.inf
+    else:
+        dist_st = np.zeros((0, n_p), dtype=np.float32)
+        eta_fast_st = np.zeros((0, n_p), dtype=np.float32)
+        eta_slow_st = np.zeros((0, n_p), dtype=np.float32)
+
+    def _target_floor_cover(j: int, tau: float):
+        if not np.isfinite(tau):
+            return 0.0, 0.0, 0.0, 0.0, 0.0
+        tau_f = max(float(tau), 0.0)
+        fmask = friendly_fleet & (fleet_tgt == j) & (fleet_eta >= tau_f - WAVE_TOL_STEPS) & (fleet_eta <= tau_f + WAVE_TOL_STEPS)
+        cover = float(fleet_ships[fmask].sum())
+        if tgt_owner[j] == player:
+            emask = enemy_fleet & (fleet_tgt == j) & (fleet_eta <= tau_f + WAVE_TOL_STEPS)
+            floor = float(fleet_ships[emask].sum()) + WAVE_MARGIN
+            cover_def = float(tgt_ships[j] + tgt_prod[j] * tau_f)
+            fdef = friendly_fleet & (fleet_tgt == j) & (fleet_eta <= tau_f)
+            cover_def += float(fleet_ships[fdef].sum())
+            return floor, cover_def, max(0.0, floor - cover_def), 0.0, 0.0
+        floor = float(tgt_ships[j] + tgt_prod[j] * tau_f + WAVE_MARGIN)
+        reactive = 0.0
+        emask = enemy_fleet & (fleet_tgt == j) & (fleet_eta <= tau_f + WAVE_TOL_STEPS)
+        inbound = float(fleet_ships[emask].sum())
+        floor += inbound
+        if tgt_owner[j] >= 0:
+            if enemy_src_mask.any():
+                reactive = float(np.where(eta_e[:, j] <= tau_f, sg_e, 0.0).sum())
+            floor += float(DEFAULT_REACTIVE_BETA) * float(_rho_np(np.array(tau_f))) * reactive
+        return floor, cover, max(0.0, floor - cover), reactive, inbound
+
+    wave_tau = np.full(n_p, np.inf, dtype=np.float32)
+    wave_floor = np.zeros(n_p, dtype=np.float32)
+    wave_cover = np.zeros(n_p, dtype=np.float32)
+    wave_remaining = np.zeros(n_p, dtype=np.float32)
+    wave_reactive = np.zeros(n_p, dtype=np.float32)
+    wave_total_safe = np.zeros(n_p, dtype=np.float32)
+    wave_feasible = np.zeros(n_p, dtype=np.float32)
+    wave_committed_elsewhere = np.zeros(n_p, dtype=np.float32)
+    wave_recapture = np.zeros(n_p, dtype=np.float32)
+    hold_onehot = np.zeros((n_p, 3), dtype=np.float32)
+    ready_mat = np.zeros((S, n_p), dtype=np.float32)
+    ready_safe_target = np.zeros(n_p, dtype=np.float32)
+    quota_mat = np.zeros((S, n_p), dtype=np.float32)
+    marginal_mat = np.zeros((S, n_p), dtype=np.float32)
+    crosses_ready = np.zeros(n_p, dtype=np.float32)
+
+    for j in range(n_p):
+        if tgt_owner[j] == player:
+            em = enemy_fleet & (fleet_tgt == j)
+            if not em.any():
+                hold_onehot[j, 0] = 1.0
+                continue
+            tau = float(np.min(fleet_eta[em]))
+            floor, cover, remaining, reactive, _inbound = _target_floor_cover(j, tau)
+            wave_tau[j] = tau
+            wave_floor[j] = floor
+            wave_cover[j] = cover
+            wave_remaining[j] = remaining
+            if S > 0:
+                reachable = (src_idx_arr != j) & (src_safe > 0.0) & (eta_fast_st[:, j] <= tau + WAVE_TOL_STEPS)
+                reachable_safe = float(src_safe[reachable].sum())
+            else:
+                reachable_safe = 0.0
+            wave_total_safe[j] = cover + reachable_safe
+            if remaining <= 1e-6:
+                hold_onehot[j, 0] = 1.0
+                wave_feasible[j] = 1.0
+            else:
+                hold_value = float(tgt_prod[j]) * min(max(0, 500 - int(step)), 40)
+                holdable = reachable_safe + 1e-6 >= remaining and hold_value + 1e-6 >= remaining
+                hold_onehot[j, 1 if holdable else 2] = 1.0
+                wave_feasible[j] = 1.0 if holdable else 0.0
+            if S > 0:
+                ready = (src_safe > 0.0) & (eta_fast_st[:, j] <= tau + WAVE_TOL_STEPS) & (eta_slow_st[:, j] >= tau - WAVE_TOL_STEPS)
+                ready_mat[:, j] = ready.astype(np.float32)
+                ready_safe = float(src_safe[ready].sum())
+                ready_safe_target[j] = ready_safe
+                if ready_safe > 1e-6:
+                    quota_mat[:, j] = np.where(ready, remaining * src_safe / ready_safe, 0.0)
+                    marginal_mat[:, j] = np.where(ready, np.minimum(src_safe, remaining), 0.0)
+                crosses_ready[j] = 1.0 if ready_safe + 1e-6 >= remaining else 0.0
+            continue
+
+        wave_committed_elsewhere[j] = float(fleet_ships[enemy_fleet & (fleet_tgt != j)].sum())
+        ff = friendly_fleet & (fleet_tgt == j)
+        sticky_tau = np.inf
+        if ff.any():
+            cand_tau = float(np.max(fleet_eta[ff]))
+            floor, cover, remaining, reactive, _inbound = _target_floor_cover(j, cand_tau)
+            if cover + 1e-6 >= max(MIN_MATERIAL_SHIPS, MATERIAL_FRAC * floor):
+                sticky_tau = cand_tau
+
+        if np.isfinite(sticky_tau):
+            tau = sticky_tau
+        else:
+            tau = np.inf
+            if S > 0:
+                order = np.argsort(eta_fast_st[:, j], kind="stable")
+                cum = 0.0
+                for si in order:
+                    if not np.isfinite(eta_fast_st[si, j]) or src_safe[si] <= 0.0:
+                        continue
+                    cum += float(src_safe[si])
+                    cand_tau = float(eta_fast_st[si, j])
+                    floor, cover, remaining, _reactive, _inbound = _target_floor_cover(j, cand_tau)
+                    if cum + 1e-6 >= remaining:
+                        tau = cand_tau
+                        break
+        if not np.isfinite(tau):
+            continue
+
+        floor, cover, remaining, reactive, _inbound = _target_floor_cover(j, tau)
+        wave_tau[j] = tau
+        wave_floor[j] = floor
+        wave_cover[j] = cover
+        wave_remaining[j] = remaining
+        wave_reactive[j] = reactive
+        if S > 0:
+            arrivable = (src_safe > 0.0) & (eta_fast_st[:, j] <= tau + WAVE_TOL_STEPS)
+            wave_total_safe[j] = cover + float(src_safe[arrivable].sum())
+            ready = (src_safe > 0.0) & (eta_fast_st[:, j] <= tau + WAVE_TOL_STEPS) & (eta_slow_st[:, j] >= tau - WAVE_TOL_STEPS)
+            ready_mat[:, j] = ready.astype(np.float32)
+            ready_safe = float(src_safe[ready].sum())
+            ready_safe_target[j] = ready_safe
+            if ready_safe > 1e-6:
+                quota_mat[:, j] = np.where(ready, remaining * src_safe / ready_safe, 0.0)
+                marginal_mat[:, j] = np.where(ready, np.minimum(src_safe, remaining), 0.0)
+            crosses_ready[j] = 1.0 if ready_safe + 1e-6 >= remaining else 0.0
+        wave_feasible[j] = 1.0 if wave_total_safe[j] + 1e-6 >= floor else 0.0
+        same_tgt_enemy = enemy_fleet & (fleet_tgt == j)
+        wave_recapture[j] = float(fleet_ships[same_tgt_enemy & (fleet_eta > tau + WAVE_TOL_STEPS)].sum())
 
     # Precompute orbit info for each target planet
     tgt_is_orbiting = np.zeros(n_p, dtype=np.bool_)
@@ -643,6 +859,27 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         if enemy_contest is not None:
             out[slot, :n_p, 14] = np.minimum(enemy_contest[:n_p], 500.0) / 100.0  # contested ships
         out[slot, :n_p, 15:21] = np.minimum(reach_bins, 500.0) / 100.0  # reachable enemy mass by ETA bin
+        spos = slot_to_spos.get(slot)
+        if spos is not None:
+            my_safe = src_safe[spos]
+            out[slot, :n_p, 21] = np.minimum(wave_floor, 500.0) / 100.0
+            out[slot, :n_p, 22] = np.minimum(wave_total_safe, 500.0) / 100.0
+            out[slot, :n_p, 23] = np.clip(wave_cover / np.maximum(wave_floor, 1.0), 0.0, 5.0)
+            out[slot, :n_p, 24] = np.minimum(wave_reactive, 500.0) / 100.0
+            out[slot, :n_p, 25] = wave_feasible
+            out[slot, :n_p, 26] = np.minimum(wave_committed_elsewhere, 500.0) / 100.0
+            out[slot, :n_p, 27] = np.minimum(wave_recapture, 500.0) / 100.0
+            out[slot, :n_p, 28:31] = hold_onehot
+            out[slot, :n_p, 31] = np.where(np.isfinite(eta_fast_st[spos]), np.minimum(eta_fast_st[spos] / 50.0, 1.0), 0.0)
+            out[slot, :n_p, 32] = np.where(np.isfinite(eta_slow_st[spos]), np.minimum(eta_slow_st[spos] / 50.0, 1.0), 0.0)
+            out[slot, :n_p, 33] = ready_mat[spos]
+            out[slot, :n_p, 34] = min(my_safe, 500.0) / 100.0
+            out[slot, :n_p, 35] = np.minimum(wave_cover, 500.0) / 100.0
+            out[slot, :n_p, 36] = np.minimum(wave_remaining, 500.0) / 100.0
+            out[slot, :n_p, 37] = np.minimum(ready_safe_target, 500.0) / 100.0
+            out[slot, :n_p, 38] = np.minimum(quota_mat[spos], 500.0) / 100.0
+            out[slot, :n_p, 39] = crosses_ready
+            out[slot, :n_p, 40] = np.minimum(marginal_mat[spos], 500.0) / 100.0
         if _ABLATE_CHANNELS:                                  # diagnostic: scramble channel↔target mapping
             _perm = np.random.permutation(n_p)
             for _ch in _ABLATE_CHANNELS:

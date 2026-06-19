@@ -1,7 +1,9 @@
 # Phase 5 — Synchronized-Wave Concentration (from-scratch architecture)
 
-**Status:** locked spec / build started. Steps 0-1 in §14 are implemented: the decisive-mass
-floor now uses the Phase 5 deadline/window object, and source width is `MAX_OWNED=24`.
+**Status:** locked spec / build started. Steps 0-3 in §14 are implemented: the decisive-mass
+floor uses the Phase 5 deadline/window object, source width is `MAX_OWNED=24`, the shared
+scalar wave primitives are in place, and pairwise wave channels `21:41` are wired with
+train/eval parity.
 
 **Lineage:** Phase 4 added per-target fire/ship heads as zero-init residuals on the
 revedge1 lineage. The phase4e (deb) vs h14feat (h14) controlled A/B (both 6M, same base,
@@ -469,12 +471,13 @@ shared:  out-massed%, dm<50 cross, planets@16/32/50/100, held-out Ajay
 1. **Done:** raise the one-move/source width to `MAX_OWNED=24` across train/eval/export and
    update source-selection parity tests. Still log `owned_count_gt24_rate`,
    `wave_sources_clipped_by_max_owned_rate`, and slot-17..24 label/use rates before long PPO.
-2. `cover` / `choose_anchor` / `hold_class` (single-pass, §3.4) / `safe_sendable` /
-   ready-wave quota + the ETA contract (§3.0.1) as shared functions + constants. Unit-test each,
-   including the ETA↔count round-trip (`ship_target` lands in `[D_abs-tol, D_abs+tol]`).
-3. Wave features in both paths + parity test (§10). Update/disable the stale ROI aux
-   (`ppo.py` slices `pairwise[...,12:15]`) and the roi/contest weight-norm logging; add
-   weight-norm + ablation logging for `15:21` and the new wave channels.
+2. **Done:** scalar shared reference for `cover` / `choose_anchor` / `hold_class`
+   (single-pass, §3.4) / `safe_sendable` / ready-wave quota + the ETA contract (§3.0.1).
+   Unit tests include the ETA↔count round-trip (`ship_target` lands in `[D_abs-tol,D_abs+tol]`).
+3. **Done:** Wave features in both paths + parity test (§10). The ROI aux remains anchored
+   to unchanged channels `12:15`; roi/contest weight-norm logging now reads those fixed
+   columns instead of the last three pairwise cols. Added reach-bin (`15:21`) and wave
+   (`21:41`) weight-norm logging plus eval ablation hooks.
 4. Direct per-source-target heads; `bc.py` per-target fix (evaluate fire/ship at the teacher's
    chosen target); retire the reinforce overlay / veto per §10.5; wire the `NO_OP` target.
 5. Sufficient-prefix **wave** planner (§7) + poisoning checks (§9), incl. the post-rounding

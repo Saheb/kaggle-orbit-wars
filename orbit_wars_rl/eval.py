@@ -13,7 +13,7 @@ import numpy as np
 from config import Config
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, PHASE4_COMPAT_MISSING_KEYS
 from features import (extract_features, _ETA_PROBE_SPEED, set_game_phase_features,
-                      set_ablate_roi, set_ablate_channels, PAIRWISE_FEATURE_DIM)
+                      set_ablate_channels, PAIRWISE_FEATURE_DIM)
 from action_mask import (compute_action_masks, actions_from_policy, actions_from_target_policy, _fleet_speed,
                          _ship_bin_to_count, _target_intercept_angle, MAX_OWNED_PLANETS)
 from wave_primitives import (
@@ -2347,6 +2347,10 @@ if __name__ == "__main__":
                         help="PLACEBO control for --ablate-roi: permute the sun_safe channel (ch4) the same way. "
                              "If WR also drops, the roi drop is general brittleness to inconsistent inputs; "
                              "if WR holds, the roi effect is roi-specific.")
+    parser.add_argument("--ablate-reach-eta", action="store_true",
+                        help="DIAGNOSTIC: permute reachable_enemy_mass ETA-bin channels (ch15-20) across targets.")
+    parser.add_argument("--ablate-wave", action="store_true",
+                        help="DIAGNOSTIC: permute Phase 5 synchronized-wave channels (ch21-40) across targets.")
     parser.add_argument("--panel", action="store_true",
                         help="Use 128-seed community panel with both-seat eval "
                              "(256 games, per-archetype breakdown).")
@@ -2419,12 +2423,21 @@ if __name__ == "__main__":
                              "Default reuses --decisive-mass-beta.")
     args = parser.parse_args()
     _DM_BETA_EVAL = args.decisive_mass_beta   # module global → used by _decisive_gap_step
+    ablate_channels = []
     if args.ablate_roi:
-        set_ablate_roi(True)
+        ablate_channels.extend((12, 13))
         print("ABLATION: roi_20/roi_50 permuted across targets per slot (target<->roi mapping destroyed)")
     if args.ablate_sun:
-        set_ablate_channels((4,))
+        ablate_channels.append(4)
         print("PLACEBO ABLATION: sun_safe (ch4) permuted across targets per slot")
+    if args.ablate_reach_eta:
+        ablate_channels.extend(range(15, 21))
+        print("ABLATION: reachable_enemy_mass ETA bins (ch15-20) permuted across targets per slot")
+    if args.ablate_wave:
+        ablate_channels.extend(range(21, 41))
+        print("ABLATION: Phase 5 synchronized-wave channels (ch21-40) permuted across targets per slot")
+    if ablate_channels:
+        set_ablate_channels(tuple(ablate_channels))
     if args.retarget_top_roi:
         set_retarget_top_roi(True, resize=args.retarget_resize)
         print(f"SELECTION ISOLATION: retarget each attack to top-holdable-ROI target "

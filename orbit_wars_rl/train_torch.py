@@ -1533,20 +1533,22 @@ def train(args):
             metrics["global_feat_std"] = float(flat["global_features"].std(unbiased=False).item())
             if "pairwise_features" in flat:
                 metrics["pairwise_feat_std"] = float(flat["pairwise_features"].std(unbiased=False).item())
-            # Per-feature input-weight norms on the pairwise cross-attention. The
-            # last 3 pairwise cols are the newer features (roi_20, roi_50,
-            # enemy_contest); track whether they actually get used (norm climbing
-            # toward the ~1.1 mean of the original 12) vs stay inert (~0.05).
+            # Per-feature input-weight norms on pairwise cross-attention. ROI/contest
+            # remain channels 12:15; reach bins are 15:21; Phase 5 wave features are 21:41.
             if hasattr(model, "pair_kv"):
                 fw = model.pair_kv.weight          # [2D, D + F_pair]
                 D = fw.shape[0] // 2
                 feat_cols = fw[:, D:]              # [2D, F_pair]
-                if feat_cols.shape[1] >= 3:
-                    new_norms = feat_cols[:, -3:].norm(dim=0)
+                if feat_cols.shape[1] >= 15:
+                    new_norms = feat_cols[:, 12:15].norm(dim=0)
                     metrics["wnorm_roi20"] = float(new_norms[0].item())
                     metrics["wnorm_roi50"] = float(new_norms[1].item())
                     metrics["wnorm_enemy_contest"] = float(new_norms[2].item())
-                    metrics["wnorm_pw_orig"] = float(feat_cols[:, :-3].norm(dim=0).mean().item())
+                    metrics["wnorm_pw_orig"] = float(feat_cols[:, :12].norm(dim=0).mean().item())
+                    if feat_cols.shape[1] >= 21:
+                        metrics["wnorm_reach_eta"] = float(feat_cols[:, 15:21].norm(dim=0).mean().item())
+                    if feat_cols.shape[1] >= 41:
+                        metrics["wnorm_wave"] = float(feat_cols[:, 21:41].norm(dim=0).mean().item())
             if hasattr(model, "fire_q"):
                 metrics["phase4_fire_q_norm"] = float(model.fire_q.weight.norm().item())
                 metrics["phase4_fire_k_norm"] = float(model.fire_k.weight.norm().item())
@@ -1650,7 +1652,9 @@ def train(args):
                     f"wnorm roi20/roi50/ec {metrics.get('wnorm_roi20', 0):.3f}/"
                     f"{metrics.get('wnorm_roi50', 0):.3f}/"
                     f"{metrics.get('wnorm_enemy_contest', 0):.3f} "
-                    f"(orig~{metrics.get('wnorm_pw_orig', 0):.2f})"
+                    f"(orig~{metrics.get('wnorm_pw_orig', 0):.2f}, "
+                    f"reach~{metrics.get('wnorm_reach_eta', 0):.2f}, "
+                    f"wave~{metrics.get('wnorm_wave', 0):.2f})"
                     + actcoef + pencoef
                 )
                 print(
@@ -1711,6 +1715,8 @@ def train(args):
                     "feat/wnorm_roi50": metrics.get("wnorm_roi50", 0),
                     "feat/wnorm_enemy_contest": metrics.get("wnorm_enemy_contest", 0),
                     "feat/wnorm_pw_orig": metrics.get("wnorm_pw_orig", 0),
+                    "feat/wnorm_reach_eta": metrics.get("wnorm_reach_eta", 0),
+                    "feat/wnorm_wave": metrics.get("wnorm_wave", 0),
                     "phase4/fire_target_std": metrics.get("fire_target_std", 0),
                     "phase4/ship_target_std": metrics.get("ship_target_std", 0),
                     "phase4/fire_prior_rms": metrics.get("phase4_fire_prior_rms", 0),
