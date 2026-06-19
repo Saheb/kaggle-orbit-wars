@@ -8,7 +8,8 @@ NEW reward (what we designed):
 Checks:
   (real replays)  I1 every LOSS total < 0   I2 every WIN total > 0   I3 max(loss) < min(win)  [no inversion]
                   + flag any old-reward LOSS that scored POSITIVE (the decay-bug we're fixing)
-  (synthetic)     capture-then-lose = 0 · tennis ≤ 0 · hoard = 0 · hold-to-end in (0, 1.1C] · win-small > lose-big
+  (synthetic)     capture-then-lose = 0 · tennis ≤ 0 · hoard = 0 · initial loss < 0 ·
+                  hold-to-end in (0, 1.1C] · win-small > lose-big
 """
 import argparse
 import math
@@ -40,8 +41,6 @@ def new_reward(steps, seat):
             pid, own, prod = int(p[0]), int(p[1]), float(p[6])
             if pid not in owner:
                 owner[pid], cap_t[pid] = own, t
-                if own == seat:                       # credit initial ownership (keeps home symmetric)
-                    dense += C * decay(t) * prod / total
             elif own != owner[pid]:
                 prev = owner[pid]
                 if prev == seat:                      # loss: anchored to OUR capture time
@@ -79,7 +78,7 @@ def old_reward(steps, seat):
 
 # ---------- synthetic adversarial trajectories (pure formula, no env) ----------
 def synth_dense(initial, events, seat, total):
-    """initial: {pid: (owner, prod)} at t=0 (credits seat's initial ownership, like new_reward).
+    """initial: {pid: (owner, prod)} at t=0 (pre-existing ownership, no dense credit).
     events: list of (t, pid, new_owner, prod) transitions. Returns seat dense."""
     owner, cap_t, dense = {}, {}, 0.0
     for pid, (own, prod) in initial.items():
@@ -108,10 +107,14 @@ def synthetic_checks():
     d = synth_dense({1: (-1, 4)}, [(2,1,0,4),(5,1,1,4),(8,1,0,4),(11,1,1,4)], 0, T)
     p = abs(d) < 1e-9; ok &= p
     print(f"  tennis cap/lose/cap/lose             dense={d:+.4f}  -> {'PASS (<=0)' if p else 'FAIL'}")
-    # hoard: own home from t0, never act -> ONLY the one-time initial credit, no per-step accrual
+    # hoard: own home from t0, never act -> no per-step accrual and no initial credit
     d = synth_dense({12: (0, 4)}, [], 0, T)
-    p = abs(d - C*decay(0)*4/T) < 1e-9; ok &= p
-    print(f"  hoard (hold home, no action)         dense={d:+.4f}  -> {'PASS (=initial credit only)' if p else 'FAIL'}")
+    p = abs(d) < 1e-9; ok &= p
+    print(f"  hoard (hold home, no action)         dense={d:+.4f}  -> {'PASS (=0)' if p else 'FAIL'}")
+    # initial home loss: no prior gain, but the negative delta is anchored at t=0
+    d = synth_dense({12: (0, 4)}, [(20, 12, 1, 4)], 0, T)
+    p = abs(d + C*decay(0)*4/T) < 1e-9; ok &= p
+    print(f"  lose initial home@20                 dense={d:+.4f}  -> {'PASS (<0, anchored t0)' if p else 'FAIL'}")
     # hold-to-end: capture@2 prod5, never lose -> in (0, 1.1C]
     d = synth_dense({5: (-1, 5)}, [(2, 5, 0, 5)], 0, T)
     p = 0 < d <= 1.1 * C + 1e-9; ok &= p

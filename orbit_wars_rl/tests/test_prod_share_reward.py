@@ -2,7 +2,7 @@
 
 Mirrors the offline red-team (reward_redteam.py) in the vectorized path: symmetric +
 capture-time-anchored ⇒ capture-then-lose cancels exactly (no tennis farm), holding pays
-nothing extra, and a full-board hold is bounded by 1.1·coef (so loss stays negative under ±1).
+nothing extra, and regular-board captures are bounded by 1.1·coef (so loss stays negative under ±1).
 Drives ownership transitions directly to avoid orbital/physics noise (same approach as
 test_capture_utility_reward)."""
 from __future__ import annotations
@@ -15,7 +15,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from torch_env import VecTorchEnv
+from torch_env import COMET_PRODUCTION, COMET_SLOT_START, VecTorchEnv
 
 C = 0.5
 TOTAL = 80.0
@@ -44,6 +44,33 @@ def _drive(env, owner_map, prod_map, t):
     for idx, p in prod_map.items():
         env.planets[0, idx, 6] = float(p)
     return env._prod_share_bonus(torch.zeros(1, 2))
+
+
+def test_reset_initial_ownership_pays_no_dense_reward():
+    env = VecTorchEnv(num_envs=1, num_players=2, device="cpu", prod_share_coef=C)
+    env.reset(seeds=[0])
+    env.step_count = torch.tensor([1], dtype=torch.long, device=env.device)
+    r = env._prod_share_bonus(torch.zeros(1, 2))
+    assert torch.allclose(r, torch.zeros_like(r)), r
+
+
+def test_losing_initial_planet_is_negative_delta():
+    env = VecTorchEnv(num_envs=1, num_players=2, device="cpu", prod_share_coef=C)
+    env.reset(seeds=[0])
+    owner = env.planets[0, :, 1].long()
+    regular = torch.arange(env.planets.shape[1], device=env.device) < COMET_SLOT_START
+    candidates = torch.where((owner == 0) & env.planet_alive[0] & regular)[0]
+    assert len(candidates) > 0
+    pid = int(candidates[0].item())
+    prod = float(env.planets[0, pid, 6].item())
+    total = float(env.total_board_prod[0].item())
+    assert prod > 0.0
+
+    env.step_count = torch.tensor([10], dtype=torch.long, device=env.device)
+    env.planets[0, pid, 1] = 1.0
+    r = env._prod_share_bonus(torch.zeros(1, 2))
+    assert math.isclose(r[0, 0].item(), -C * dec(0) * prod / total, abs_tol=1e-6), r
+    assert math.isclose(r[0, 1].item(), C * dec(10) * prod / total, abs_tol=1e-6), r
 
 
 def test_capture_credits_value_weighted():
@@ -104,6 +131,23 @@ def test_terminal_is_pure_pm1_when_no_margin():
     rewards, done = env._check_done()
     assert rewards[0, 0].item() == 1.0 and rewards[0, 1].item() == -1.0, rewards
     assert rewards[1, 1].item() == 1.0 and rewards[1, 0].item() == -1.0, rewards
+
+
+def test_comet_slots_are_ignored_by_prod_share():
+    env = _make()
+    c = COMET_SLOT_START
+    env.step_count = torch.tensor([50], dtype=torch.long, device=env.device)
+    env.planet_alive[0, c] = True
+    env.planets[0, c, 1] = 0.0
+    env.planets[0, c, 6] = COMET_PRODUCTION
+    r = env._prod_share_bonus(torch.zeros(1, 2))
+    assert torch.allclose(r, torch.zeros_like(r)), r
+
+    env.step_count = torch.tensor([60], dtype=torch.long, device=env.device)
+    env.planet_alive[0, c] = False
+    env.planets[0, c, 1] = -1.0
+    r = env._prod_share_bonus(torch.zeros(1, 2))
+    assert torch.allclose(r, torch.zeros_like(r)), r
 
 
 if __name__ == "__main__":

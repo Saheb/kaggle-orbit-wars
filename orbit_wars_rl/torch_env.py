@@ -804,14 +804,16 @@ class VecTorchEnv:
         self.prev_owned = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         for pl in range(self.num_players):
             self.prev_owned[:, pl] = ((owner_p == pl) & self.planet_alive).float().sum(dim=1)
-        # Prod-share term state. prev_planet_owner starts at -1 (neutral) so step 1 credits each
-        # player's INITIAL ownership through the normal gain path (keeps the home symmetric: it is
-        # credited once, and its later loss is penalized). total_board_prod is the fixed normalizer.
-        self.prev_planet_owner = torch.full((self.num_envs, self.planets.shape[1]), -1,
-                                            dtype=torch.long, device=self.device)
+        # Prod-share term state. Initial ownership is pre-existing state, not a capture: holding
+        # a home pays nothing, while losing it is a negative delta anchored at t=0.
+        self.prev_planet_owner = torch.where(
+            self.planet_alive,
+            owner_p,
+            torch.full_like(owner_p, -1),
+        )
         self.capture_time = torch.zeros(self.num_envs, self.planets.shape[1],
                                         dtype=torch.long, device=self.device)
-        self.total_board_prod = (self.planets[:, :, 6] * self.planet_alive.float()).sum(dim=1).clamp(min=1.0)
+        self.total_board_prod = self._prod_share_total_board_prod()
         # Consolidation-bonus per-planet state (only used when consolidation_coef != 0): track,
         # per planet, the owner being held + how long since this holding episode began, whether
         # it began as a CAPTURE (initial owners are NOT captures), and whether already credited.
@@ -852,19 +854,28 @@ class VecTorchEnv:
             )
         return material
 
+    def _prod_share_regular_alive(self) -> torch.Tensor:
+        regular = torch.arange(self.planets.shape[1], device=self.device) < COMET_SLOT_START
+        return self.planet_alive & regular.unsqueeze(0)
+
+    def _prod_share_total_board_prod(self) -> torch.Tensor:
+        return (self.planets[:, :, 6] * self._prod_share_regular_alive().float()).sum(dim=1).clamp(min=1.0)
+
     def _prod_share_bonus(self, terminal_rewards: torch.Tensor) -> torch.Tensor:
         """Unified capture reward: symmetric, capture-time-ANCHORED, value-weighted by share of
-        total board production. For each player pl and each planet whose owner CHANGED this step:
+        total board production, excluding transient comet slots from both numerator and denominator.
+        For each player pl and each regular planet whose owner CHANGED this step:
             gain (captured by pl) : +coef · decay(NOW)        · prod/total_board
             loss (lost from pl)   : −coef · decay(capture_time) · prod/total_board   (same anchor)
         so a capture and its eventual loss cancel exactly (no tennis farm; losing drives holding).
         Mutates capture_time (changed planets -> now) and prev_planet_owner (dead slots -> -1)."""
         owner_now = self.planets[:, :, 1].long()                          # (N, P)
         prod_p = self.planets[:, :, 6]                                    # (N, P)
-        changed = (owner_now != self.prev_planet_owner) & self.planet_alive
+        regular_alive = self._prod_share_regular_alive()
+        changed = (owner_now != self.prev_planet_owner) & regular_alive
         decay_now = (torch.exp(-2.5 * self.step_count.float() / self.episode_steps) + 0.10).unsqueeze(1)
         decay_cap = torch.exp(-2.5 * self.capture_time.float() / self.episode_steps) + 0.10
-        share = prod_p / self.total_board_prod.unsqueeze(1)               # (N, P) fraction of board economy
+        share = prod_p / self.total_board_prod.unsqueeze(1)               # (N, P) fraction of regular economy
         for pl in range(self.num_players):
             gain = (changed & (owner_now == pl)).float() * decay_now * share
             loss = (changed & (self.prev_planet_owner == pl)).float() * decay_cap * share
@@ -2491,13 +2502,17 @@ class VecTorchEnv:
             ec_owner = self.planets[:, :, 1].long()
             for pl in range(self.num_players):
                 self.prev_owned[done, pl] = ((ec_owner[done] == pl) & self.planet_alive[done]).float().sum(dim=1)
-        # Re-arm prod-share state for the fresh post-reset boards: prev_owner=-1 (credit the new
-        # board's initial ownership next step), capture_time=0, recompute the board normalizer.
+        # Re-arm prod-share state for the fresh post-reset boards: initial ownership is already held
+        # state, capture_time=0, recompute the fixed regular-planet normalizer.
         if self.prod_share_coef != 0.0 and done.any():
-            self.prev_planet_owner[done] = -1
+            ps_owner = self.planets[:, :, 1].long()
+            self.prev_planet_owner[done] = torch.where(
+                self.planet_alive[done],
+                ps_owner[done],
+                torch.full_like(ps_owner[done], -1),
+            )
             self.capture_time[done] = 0
-            self.total_board_prod[done] = (self.planets[done][:, :, 6]
-                                           * self.planet_alive[done].float()).sum(dim=1).clamp(min=1.0)
+            self.total_board_prod[done] = self._prod_share_total_board_prod()[done]
         # Reset consolidation state for done envs to their fresh post-reset ownership (initial
         # owners are NOT captures), so the bonus telescopes cleanly across the episode boundary.
         if self.consolidation_coef != 0.0 and done.any():

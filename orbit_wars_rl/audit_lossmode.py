@@ -118,8 +118,10 @@ def main():
         last = steps[-1][0].observation.get("planets") or []
         us = sum(1 for p in last if int(p[1]) == 0)
         opp = sum(1 for p in last if int(p[1]) == 1)
-        our_mat = _totals(last, steps[-1][0].observation.get("fleets") or [], 0)
-        is_loss = us <= opp
+        fleets = steps[-1][0].observation.get("fleets") or []
+        our_mat = _totals(last, fleets, 0)
+        enemy_mat = _totals(last, fleets, 1)
+        is_loss = our_mat <= enemy_mat
         if is_loss:
             game_losses += 1
             if our_mat <= 0 or us == 0:
