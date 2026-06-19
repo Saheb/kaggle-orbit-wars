@@ -1936,11 +1936,12 @@ class VecTorchEnv:
         wave_total_safe = torch.where(is_own_target.bool(), def_total_safe, atk_total_safe)
         wave_feasible = torch.where(is_own_target.bool(), def_feasible, atk_feasible) * planet_alive.float()
 
+        # ONE-SIDED arrival window (audit 2026-06-19): ready = can arrive BY the deadline.
+        # Must match features.py and wave_primitives.ship_choice_for_quota (I1-I3 parity).
         ready = (
             (src_safe.unsqueeze(-1) > 0.0)
             & torch.isfinite(wave_tau).unsqueeze(1)
             & (eta_fast <= wave_tau.unsqueeze(1) + float(WAVE_TOL_STEPS))
-            & (eta_slow >= wave_tau.unsqueeze(1) - float(WAVE_TOL_STEPS))
         )
         ready_safe = torch.where(ready, src_safe.unsqueeze(-1), torch.zeros_like(eta_fast)).sum(dim=1)
         quota = torch.where(

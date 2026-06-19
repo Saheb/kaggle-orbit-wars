@@ -496,7 +496,16 @@ shared:  out-massed%, dm<50 cross, planets@16/32/50/100, held-out Ajay
    the run). NOTE: `export_agent.py` (its own standalone submission model) and the
    `check_phase4_parity.py` diagnostic still replicate the old slot prior — update at export
    time (Step 7).
-5. Sufficient-prefix **wave** planner (§7) + poisoning checks (§9), incl. the post-rounding
-   arrival/floor validation from the ETA contract.
+5. **Done:** Sufficient-prefix **wave** planner (`wave_planner.py` §7) + poisoning checks
+   (`build_wave_bc.py` §9) + `tests/test_wave_planner.py`. **AUDIT AMENDMENT (2026-06-19):** the
+   §9 reactive-cross gate initially FAILED (0.14) — the tight two-sided arrival window starved the
+   waves (sources couldn't deliver full mass on-time). The loss-mode audit (docs/phase5-blocked.md)
+   showed staggered-arrival is ~1% of losses, so **synchronization was dropped**: the arrival
+   window is now ONE-SIDED (arrive BY `tau+tol`, early arrival allowed) — changed consistently in
+   `wave_primitives.ship_choice_for_quota`, `features.py`, and `torch_env._compute_pairwise`
+   (parity preserved, test_friendly_coverage still 0.0000). With one-sided windows + a §6 commit
+   gate (only launch a wave whose ready mass crosses), §9 now PASSES: reactive_cross 1.00,
+   overcommit p50 1.03, ready_quota_error ~3, held_when_holdable 0.83, reinforce_into_DOOMED 0.
+   `arrival_spread` is now INFO-only, not a gate.
 6. Pre-PPO no-veto gate on synthetic states (§11). **Hard stop** until it passes.
 7. From-scratch BC → PPO. Promotion gate (§11) before any `wave_head`.

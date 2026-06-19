@@ -686,7 +686,7 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
                 hold_onehot[j, 1 if holdable else 2] = 1.0
                 wave_feasible[j] = 1.0 if holdable else 0.0
             if S > 0:
-                ready = (src_safe > 0.0) & (eta_fast_st[:, j] <= tau + WAVE_TOL_STEPS) & (eta_slow_st[:, j] >= tau - WAVE_TOL_STEPS)
+                ready = (src_safe > 0.0) & (eta_fast_st[:, j] <= tau + WAVE_TOL_STEPS)   # one-sided (audit 2026-06-19): arrive BY deadline
                 ready_mat[:, j] = ready.astype(np.float32)
                 ready_safe = float(src_safe[ready].sum())
                 ready_safe_target[j] = ready_safe
@@ -733,7 +733,7 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         if S > 0:
             arrivable = (src_safe > 0.0) & (eta_fast_st[:, j] <= tau + WAVE_TOL_STEPS)
             wave_total_safe[j] = cover + float(src_safe[arrivable].sum())
-            ready = (src_safe > 0.0) & (eta_fast_st[:, j] <= tau + WAVE_TOL_STEPS) & (eta_slow_st[:, j] >= tau - WAVE_TOL_STEPS)
+            ready = (src_safe > 0.0) & (eta_fast_st[:, j] <= tau + WAVE_TOL_STEPS)   # one-sided (audit 2026-06-19): arrive BY deadline
             ready_mat[:, j] = ready.astype(np.float32)
             ready_safe = float(src_safe[ready].sum())
             ready_safe_target[j] = ready_safe

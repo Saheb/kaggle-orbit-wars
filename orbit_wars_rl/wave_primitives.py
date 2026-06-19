@@ -152,8 +152,14 @@ def ship_choice_for_quota(
 
     eta_fast = min(o.eta for o in options)
     eta_slow = max(o.eta for o in options)
-    lo, hi = float(tau) - float(tol), float(tau) + float(tol)
-    on_time = [o for o in options if lo - EPS <= o.eta <= hi + EPS]
+    # ONE-SIDED arrival window (Phase 5 audit 2026-06-19): a source is on-time if it can arrive
+    # BY the deadline (eta <= tau+tol); early arrival is allowed. The original two-sided window
+    # [tau-tol, tau+tol] forced near sources to send slow/small fleets to land exactly in the
+    # window, which starved the wave (reactive-cross 0.14 in §9). The loss-mode audit showed
+    # staggered-arrival is ~1% of losses, so synchronization is dropped in favour of sufficiency
+    # (crossing the reactive floor). See docs/phase5-blocked.md.
+    hi = float(tau) + float(tol)
+    on_time = [o for o in options if o.eta <= hi + EPS]
     ship_target = min(max(float(quota), 0.0), max(float(safe_sendable), 0.0))
     if not on_time:
         return ShipChoice(False, ship_target=ship_target, eta_fast=eta_fast, eta_slow=eta_slow)
