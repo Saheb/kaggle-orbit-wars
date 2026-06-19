@@ -1,12 +1,13 @@
 """Parity + smoke test for the decisive-mass GAP diagnostic (dm_*).
 
 The diag must use the EXACT capture floor of the Lever-A reward so the two can never drift:
-  floor = garrison + prod*eta + enemy_inbound + beta*rho(eta)*reachable_enemy_mass + overhead
+  floor = garrison + prod*tau + enemy_inbound_by_deadline
+        + beta*rho(tau)*reachable_enemy_mass_by_deadline + margin
 
 (1) PARITY: on a constructed board, the eval Python floor (eval._decisive_gap_step, pure-Python
     over a kaggle-style observation) produces the SAME per-target mass/floor ratios as the training
     torch floor (torch_env._decisive_mass_fields, vectorised). Same target resolution, same eta
-    (MAX arrival), same reachable-enemy-mass, same rho — so the eval read can't silently diverge.
+    (MAX arrival), same deadline-classified inbound/reach, same rho — so the eval read can't silently diverge.
 (2) SMOKE: VecTorchEnv(decisive_diag=True) accumulates the phase-split dm_* counters over real
     steps without error, and the gap/cross derive consistently (cross == 1 - normalized... no:
     cross+something; we just assert the accumulators populate and ratios are sane).
@@ -54,9 +55,9 @@ def _build():
     planet(2, 1, 330.0, 300.0, 50.0, 0.0)        # enemy planet near A → reachable-enemy-mass margin
     planet(3, 1, 100.0, 600.0, 12.0, 1.0)        # enemy target B (separate axis)
 
-    # Two of OUR fleets converging on A (aggregation), one slow/large to drive MAX-eta.
-    fleet(0, 0, 150.0, 300.0, 0.0, 8.0)          # → A (angle 0, along +x)
-    fleet(1, 0, 250.0, 300.0, 0.0, 30.0)         # → A
+    # Two of OUR fleets converging on A with matching arrival ETAs (aggregation).
+    fleet(0, 0, 266.5, 300.0, 0.0, 8.0)          # -> A (angle 0, along +x)
+    fleet(1, 0, 250.0, 300.0, 0.0, 30.0)         # -> A
     # An ENEMY fleet inbound to A.
     fleet(2, 1, 360.0, 300.0, 3.14159265, 6.0)   # heading -x toward A
     # OUR fleet converging on B (heading +y from below).
@@ -107,10 +108,10 @@ def _A_mass_floor(env, seat=0):
 
 
 def test_aggregation_sums_not_maxes():
-    # Two of OUR fleets converge on A: slot0 = 8 ships, slot1 = 30 ships. The diagnostic must SUM
-    # them (38), not max (30) — aggregating many planets into one strike IS the wall. Both fleets'
-    # ETA caps at the horizon so removing slot1 leaves the floor unchanged → the ratio must drop by
-    # exactly the mass factor (38→8). A max-based or non-summed bug fails the 38 assertion.
+    # Two of OUR fleets converge on A inside the same arrival window: slot0 = 8 ships,
+    # slot1 = 30 ships. The diagnostic must SUM them (38), not max (30).
+    # The slower fleet anchors tau in both cases, so removing slot1 leaves the floor unchanged
+    # and the ratio must drop by exactly the mass factor (38->8).
     env = _build()
     mass_full, floor_full = _A_mass_floor(env, seat=0)
     assert abs(mass_full - 38.0) < 1e-4, f"A mass must SUM both fleets (8+30=38), got {mass_full}"
@@ -122,6 +123,13 @@ def test_aggregation_sums_not_maxes():
     r_full, r_single = mass_full / floor_full, mass_single / floor_single
     assert r_full > r_single, "aggregating both fleets must RAISE the ratio"
     assert abs(r_full - r_single * (38.0 / 8.0)) < 1e-3, "ratio must scale with summed mass"
+
+
+def test_staggered_fleets_do_not_fake_aggregation():
+    env = _build()
+    env.fleets[0, 0, 2] = 150.0                  # make the 8-ship fleet arrive much later
+    mass, _floor = _A_mass_floor(env, seat=0)
+    assert abs(mass - 8.0) < 1e-4, f"staggered A mass should count only the anchored wave, got {mass}"
 
 
 def test_smoke_accumulators_populate():
@@ -156,5 +164,6 @@ if __name__ == "__main__":
     test_parity_eval_vs_torch()
     test_parity_nondefault_beta()
     test_aggregation_sums_not_maxes()
+    test_staggered_fleets_do_not_fake_aggregation()
     test_smoke_accumulators_populate()
     print("PASS: decisive-mass diag — eval/torch floor parity (default+beta), aggregation-sums, smoke")

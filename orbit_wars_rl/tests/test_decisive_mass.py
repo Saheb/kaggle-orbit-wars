@@ -2,7 +2,8 @@
 
 Signal: +decisive_mass_coef the step our INFLIGHT force converging on an ENEMY planet first
 reaches producer_v2's capture floor:
-    floor = garrison + prod*eta + enemy_inbound + beta*rho(eta)*reachable_enemy_mass + overhead
+    floor = garrison + prod*tau + enemy_inbound_by_deadline
+          + beta*rho(tau)*reachable_enemy_mass_by_deadline + margin
 Board-grounded, not outcome-tied → the force-concentration gradient self-play can't price
 (project_force_concentration_wall).
 
@@ -18,7 +19,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import torch
-from torch_env import VecTorchEnv
+from torch_env import VecTorchEnv, _DM_MARGIN
 
 COEF = 0.5
 
@@ -36,7 +37,7 @@ def _env():
     env.planets[0, 0, 5] = 5.0
     env.planets[0, 0, 6] = 0.0
     env.planet_alive[0, 0] = True
-    # planet 1: ENEMY target at (300,300), garrison 10, prod 0 → bare floor = 10 + 1 = 11
+    # planet 1: ENEMY target at (300,300), garrison 10, prod 0 -> bare floor = 10 + margin = 12
     env.planets[0, 1, 1] = 1
     env.planets[0, 1, 2] = 300.0
     env.planets[0, 1, 3] = 300.0
@@ -72,15 +73,15 @@ def test_target_resolves():
 
 def test_subfloor_no_credit():
     env = _env()
-    _add_fleet(env, 0, owner=0, ships=10)   # 10 < bare floor 11
+    _add_fleet(env, 0, owner=0, ships=10)   # 10 < bare floor
     assert abs(_credit(env)) < 1e-6, "sub-floor inflight must not be credited"
 
 
 def test_aggregation_credits_once_on_crossing():
     env = _env()
-    _add_fleet(env, 0, owner=0, ships=10)   # 10 < 11
+    _add_fleet(env, 0, owner=0, ships=10)   # 10 < floor
     assert abs(_credit(env)) < 1e-6
-    _add_fleet(env, 1, owner=0, ships=10)   # 10 + 10 = 20 >= 11 → CROSS
+    _add_fleet(env, 1, owner=0, ships=10)   # 10 + 10 = 20 >= floor -> CROSS
     assert abs(_credit(env) - COEF) < 1e-6, "two sub-floor fleets summing >= floor must credit once"
     assert abs(_credit(env)) < 1e-6, "must credit the crossing only, not every sufficient step"
 
@@ -94,12 +95,12 @@ def test_own_and_neutral_gated():
 
 
 def test_reactive_margin_raises_floor():
-    # Far fleets (eta capped at horizon → rho=1) carrying mass=15 > bare floor 11.
+    # Far fleets carrying mass=15 > bare floor.
     # Without a nearby enemy planet → credited. WITH one (reachable_enemy_mass>0) the v2
     # margin beta*rho*enemy_mass lifts the floor far above 15 → NOT credited.
     env = _env()
     _add_fleet(env, 0, owner=0, ships=15, x=100.0)   # far → eta>eta_free → rho=1
-    assert abs(_credit(env) - COEF) < 1e-6, "mass 15 clears bare floor 11 → credited"
+    assert abs(_credit(env) - COEF) < 1e-6, "mass 15 clears bare floor -> credited"
 
     env = _env()
     env.planets[0, 2, 1] = 1        # enemy planet near the target → reachable enemy mass
@@ -111,6 +112,20 @@ def test_reactive_margin_raises_floor():
     env.planet_alive[0, 2] = True
     _add_fleet(env, 0, owner=0, ships=15, x=100.0)
     assert abs(_credit(env)) < 1e-6, "v2 reactive margin must lift the floor above 15 → no credit"
+
+
+def test_enemy_inbound_is_deadline_classified():
+    env = _env()
+    _add_fleet(env, 0, owner=0, ships=int(10 + _DM_MARGIN + 1), x=280.0)
+    # Same-target enemy fleet, but too late for our D+tol capture window: recapture risk only.
+    _add_fleet(env, 1, owner=1, ships=50, x=100.0)
+    assert abs(_credit(env) - COEF) < 1e-6, "late same-target enemy inbound must not raise capture floor"
+
+    env = _env()
+    _add_fleet(env, 0, owner=0, ships=int(10 + _DM_MARGIN + 1), x=280.0)
+    # Same-target enemy fleet arriving before D+tol: it is defending when we land and raises floor.
+    _add_fleet(env, 1, owner=1, ships=50, x=290.0)
+    assert abs(_credit(env)) < 1e-6, "on-time same-target enemy inbound must raise capture floor"
 
 
 def test_rearm_on_episode_boundary():
@@ -140,5 +155,6 @@ if __name__ == "__main__":
     test_aggregation_credits_once_on_crossing()
     test_own_and_neutral_gated()
     test_reactive_margin_raises_floor()
+    test_enemy_inbound_is_deadline_classified()
     test_rearm_on_episode_boundary()
     print("PASS: decisive-mass (producer_v2 floor) — aggregation, crossing-once, gate, reactive margin, boundary re-arm")

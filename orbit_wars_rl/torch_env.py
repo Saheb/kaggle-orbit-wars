@@ -26,6 +26,15 @@ from typing import Optional
 
 import numpy as np
 import torch
+from wave_primitives import (
+    CAPTURE_OVERHEAD,
+    DEFAULT_REACTIVE_BETA,
+    DM_ETA_FREE,
+    DM_ETA_SCALE,
+    DM_HORIZON,
+    WAVE_MARGIN,
+    WAVE_TOL_STEPS,
+)
 
 # Constants — must match kaggle_environments.envs.orbit_wars.orbit_wars
 BOARD_SIZE = 100.0
@@ -34,16 +43,16 @@ SUN_RADIUS = 10.0
 ROTATION_RADIUS_LIMIT = 50.0
 MAX_SHIP_SPEED = 6.0
 
-# Lever A (decisive-mass reward) — capture-floor constants, mirroring producer_v2's
-# ProducerLiteConfig + orbit_lite.capture_floor (opponents/candidate_producer_v2.py):
-# floor = projected_defenders_at_arrival + beta*rho(eta)*reachable_enemy_mass + overhead.
-# The beta*rho*enemy_mass margin = the ETA-aware REACTIVE reinforcement v2 anticipates
-# (the not-yet-launched defense that out-masses us); deb uses the bare floor (margin off).
-_DM_BETA = 2.2          # reinforce_size_beta
-_DM_ETA_FREE = 3.0      # reinforce_eta_free  (eta below which the enemy can't react → rho=0)
-_DM_ETA_SCALE = 12.0    # reinforce_eta_scale
-_DM_HORIZON = 18.0      # config.horizon — reach cap for enemy_mass AND eta cap
-_DM_OVERHEAD = 1.0      # capture_overhead
+# Lever A / Phase 5 capture-floor constants. Keep the legacy _DM_* names because
+# eval/tests/audit tools import them, but the floor now uses the Phase 5 margin
+# and deadline-window semantics from wave_primitives.py.
+_DM_BETA = DEFAULT_REACTIVE_BETA
+_DM_ETA_FREE = DM_ETA_FREE
+_DM_ETA_SCALE = DM_ETA_SCALE
+_DM_HORIZON = DM_HORIZON
+_DM_OVERHEAD = CAPTURE_OVERHEAD
+_DM_MARGIN = WAVE_MARGIN
+_DM_TOL = WAVE_TOL_STEPS
 
 # Reverse-edge reinforce cooldown — "edge never fired" sentinel; must match
 # reinforce_cooldown.NEVER so the train mask and the eval/export canonical rule agree.
@@ -64,7 +73,7 @@ _SCENARIO_MIXED = "mixed"
 # Tensor sizes (worst-case bounds from kaggle env)
 MAX_PLANETS = 48
 MAX_FLEETS = 256
-MAX_OWNED = 16
+MAX_OWNED = 24
 
 # Comets (extra-solar objects) — spawn mid-game, are collidable + capturable + moving.
 # Match kaggle_environments.envs.orbit_wars: 4-comet symmetric groups spawn at these steps,
@@ -952,31 +961,28 @@ class VecTorchEnv:
 
     def _decisive_mass_fields(self):
         """Per-(N,P,num_players) inflight mass, capture floor, max-ETA and is_enemy mask — the
-        EXACT quantities producer_v2's capture floor uses. Shared by the Lever-A reward
-        (_decisive_mass_bonus) and the dm_* gap diagnostic (_accumulate_decisive_diag) so the two
-        can never drift. project_force_concentration_wall.
+        Phase 5 capture floor. Shared by the Lever-A reward (_decisive_mass_bonus) and the
+        dm_* gap diagnostic (_accumulate_decisive_diag) so the two can never drift.
 
-        floor_t = garrison + prod*eta + enemy_inbound_now      (projected defenders at arrival)
-                + beta*rho(eta)*reachable_enemy_mass           (v2's reactive-reinforcement margin)
-                + overhead
-        mass_t = our alive inflight fleet ships converging on t. eta = MAX ETA of that mass
-        (capped at the horizon — the floor must hold at the LAST arrival, when all counted mass is
-        present, and rho(eta) then gives the enemy the full reaction window). enemy_mass =
-        cheap_enemy_pressure (reachable enemy PLANET mass); enemy_inbound_now = enemy FLEET ships
-        already racing to defend t."""
+        floor_t = garrison + prod*tau
+                + enemy_inbound_to_t arriving <= tau+tol
+                + beta*rho(tau)*enemy_planet_mass with reach_eta <= tau
+                + margin
+
+        tau is the max ETA of our currently converging wave. mass_t is only our converging
+        fleet mass inside [tau-tol, tau+tol], so staggered trickles no longer look sufficient."""
         N, P = self.planets.shape[0], self.planets.shape[1]
         owner = self.planets[:, :, 1].long()                            # (N, P)
         garr = self.planets[:, :, 5]
         prod = self.planets[:, :, 6]
         px, py = self.planets[:, :, 2], self.planets[:, :, 3]
         alive = self.planet_alive
-        # Reachable-enemy-mass scaffolding (player-independent): pairwise planet distance +
-        # per-source reach decay (cheap_enemy_pressure: closer enemy planets reinforce more).
+        # Reachable-enemy-mass scaffolding (player-independent): pairwise planet ETA.
+        # Phase 5 uses a deadline threshold (reach_eta <= tau), not the old distance decay.
         dx = px.unsqueeze(2) - px.unsqueeze(1)                          # (N, P_src, P_tgt)
         dy = py.unsqueeze(2) - py.unsqueeze(1)
         pdist = torch.sqrt(dx * dx + dy * dy)
-        src_reach = (_ship_speed(garr) * _DM_HORIZON).clamp(min=1e-6)   # (N, P_src)
-        decay = (1.0 - pdist / src_reach.unsqueeze(2)).clamp(min=0.0)   # (N, P_src, P_tgt)
+        reach_eta = pdist / _ship_speed(garr).clamp(min=1e-6).unsqueeze(2)  # (N,P_src,P_tgt)
         not_self = ~torch.eye(P, dtype=torch.bool, device=self.device).unsqueeze(0)
         # Our converging fleets: target, ships, and ETA to that target.
         tgt_idx = self._fleet_target_idx()                             # (N, F)
@@ -987,7 +993,7 @@ class VecTorchEnv:
         tx = torch.gather(px, 1, tgt_safe)                             # (N, F) target planet x
         ty = torch.gather(py, 1, tgt_safe)
         f_eta = (torch.sqrt((fx - tx) ** 2 + (fy - ty) ** 2)
-                 / _ship_speed(f_ships_raw).clamp(min=1e-6)).clamp(max=_DM_HORIZON)
+                 / _ship_speed(f_ships_raw).clamp(min=1e-6))
         f_ships = f_ships_raw * self.fleet_alive.float()
         valid_f = (tgt_idx >= 0) & self.fleet_alive
         mass = torch.zeros(N, P, self.num_players, dtype=garr.dtype, device=self.device)
@@ -996,27 +1002,32 @@ class VecTorchEnv:
         is_enemy = torch.zeros(N, P, self.num_players, dtype=torch.bool, device=self.device)
         for pl in range(self.num_players):
             mine = (valid_f & (f_owner == pl)).float()                 # (N, F)
-            w = f_ships * mine
-            m = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
-            m.scatter_add_(1, tgt_safe, w)                             # our inflight per target
             # MAX ETA over our contributing fleets (non-mine get -1 so they never win the max;
             # the 0-init is harmless — targets with no mine fleet have mass=0).
             eta_src = torch.where(mine.bool(), f_eta, torch.full_like(f_eta, -1.0))
             eta = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
             eta.scatter_reduce_(1, tgt_safe, eta_src, reduce='amax', include_self=True)
-            # enemy fleets already inbound to the target (current reinforcements en route)
+            # Our wave mass must arrive in the same deadline window.
+            anchor_eta = torch.gather(eta, 1, tgt_safe)
+            in_wave = mine.bool() & (f_eta >= (anchor_eta - _DM_TOL)) & (f_eta <= (anchor_eta + _DM_TOL))
+            m = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
+            m.scatter_add_(1, tgt_safe, f_ships * in_wave.float())
+            # Enemy fleets only raise the capture floor if aimed at the same target and arriving
+            # by the same deadline window. Later same-target fleets are recapture risk, not floor.
             enemy_f = (valid_f & (f_owner != pl) & (f_owner >= 0)).float()
+            enemy_deadline = (f_eta <= (anchor_eta + _DM_TOL)).float()
             inbound = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
-            inbound.scatter_add_(1, tgt_safe, f_ships * enemy_f)
-            # reachable enemy PLANET mass for each target (producer_v2 cheap_enemy_pressure)
+            inbound.scatter_add_(1, tgt_safe, f_ships * enemy_f * enemy_deadline)
+            # Reachable enemy PLANET mass for each target by ETA deadline.
             enemy_src = (alive & (owner != pl) & (owner >= 0)).unsqueeze(2)   # (N, P_src, 1)
-            valid_sp = enemy_src & alive.unsqueeze(1) & not_self
-            enemy_mass = torch.where(valid_sp, garr.unsqueeze(2) * decay,
-                                     torch.zeros_like(decay)).sum(dim=1)      # (N, P_tgt)
+            deadline_sp = reach_eta <= eta.unsqueeze(1)
+            valid_sp = enemy_src & alive.unsqueeze(1) & not_self & deadline_sp
+            enemy_mass = torch.where(valid_sp, garr.unsqueeze(2),
+                                     torch.zeros_like(reach_eta)).sum(dim=1)  # (N, P_tgt)
             rho = ((eta - _DM_ETA_FREE) / _DM_ETA_SCALE).clamp(0.0, 1.0)
             mass[:, :, pl] = m
             floor[:, :, pl] = (garr + prod * eta + inbound
-                               + self.decisive_mass_beta * rho * enemy_mass + _DM_OVERHEAD)
+                               + self.decisive_mass_beta * rho * enemy_mass + _DM_MARGIN)
             eta_out[:, :, pl] = eta
             is_enemy[:, :, pl] = alive & (owner != pl) & (owner >= 0)
         return mass, floor, eta_out, is_enemy
@@ -1608,7 +1619,8 @@ class VecTorchEnv:
           12 roi_20  — (prod*20 - cap_cost_at_arrival) / cap_cost_at_arrival, clipped [-1,1]
           13 roi_50  — same at horizon 50
           14 enemy_contest / 100  — total enemy fleet ships racing toward this target
-          15 reachable_enemy_mass / 100 — distance-decayed enemy garrison reachable to this target
+          15-20 reachable_enemy_mass / 100 — enemy garrison by planet-reach ETA bin
+                (edges [1,2,4,7,12] → <=1 / 2 / 3-4 / 5-7 / 8-12 / >=13 steps)
         """
         N = self.num_envs
         device = self.device
@@ -1718,11 +1730,10 @@ class VecTorchEnv:
         else:
             contest_b = torch.zeros(N, MO, P, device=device)
 
-        # Reachable enemy planet mass (ch 15): distance-decayed enemy garrison that could
-        # reinforce/contest each target within the horizon. Source-slot independent, so
-        # computed per-target and broadcast. Raw (no rho/eta scaling) — the per-target head
-        # learns its own reaction coefficient. Mirrors features.compute_pairwise_features ch15
-        # and the dm-floor enemy_mass term.
+        # Reachable enemy planet mass, BINNED by enemy-planet-reach ETA (ch 15-20). For each
+        # enemy source planet, eta=dist/ship_speed(garrison); its garrison lands in the matching
+        # ETA bin (edges [1,2,4,7,12] → 6 disjoint windows, dense in the reactive window). Raw
+        # (no rho) — the head combines these with its own fleet ETA (ch3). Mirrors features.py.
         px_a = planets[:, :, 2]                                  # (N, P)
         py_a = planets[:, :, 3]
         gar_a = planets[:, :, 5]
@@ -1730,21 +1741,27 @@ class VecTorchEnv:
         dxe = px_a.unsqueeze(2) - px_a.unsqueeze(1)             # (N, P_src, P_tgt)
         dye = py_a.unsqueeze(2) - py_a.unsqueeze(1)
         pde = torch.sqrt((dxe * dxe + dye * dye).clamp(min=1e-9))
-        src_reach_e = (_ship_speed(gar_a) * _DM_HORIZON).clamp(min=1e-6)   # (N, P_src)
-        dec = (1.0 - pde / src_reach_e.unsqueeze(2)).clamp(min=0.0)        # (N, P_src, P_tgt)
+        spd_e = _ship_speed(gar_a).clamp(min=1e-6)             # (N, P_src)
+        eta_e = pde / spd_e.unsqueeze(2)                      # (N, P_src, P_tgt) planet-reach ETA
+        # bin via sum-of-comparisons (== np.digitize(eta, edges, right=True), parity-exact)
+        edges = (1.0, 2.0, 4.0, 7.0, 12.0)
+        bin_e = sum((eta_e > e).long() for e in edges)        # 0..5  (N, P_src, P_tgt)
         not_self = ~torch.eye(P, dtype=torch.bool, device=device).unsqueeze(0)
         enemy_src = (planet_alive & (own_a != player) & (own_a >= 0)).unsqueeze(2)  # (N,P_src,1)
-        valid_e = enemy_src & planet_alive.unsqueeze(1) & not_self
-        reach_em = torch.where(valid_e, gar_a.unsqueeze(2) * dec,
-                               torch.zeros_like(dec)).sum(dim=1)           # (N, P_tgt)
-        reach_b = (reach_em / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1)
+        valid_e = enemy_src & planet_alive.unsqueeze(1) & not_self                  # (N,P_src,P_tgt)
+        gar_src = gar_a.unsqueeze(2).expand(-1, -1, P)                              # (N,P_src,P_tgt)
+        reach_chans = []
+        for b in range(len(edges) + 1):
+            mb = valid_e & (bin_e == b)
+            rb = torch.where(mb, gar_src, torch.zeros_like(gar_src)).sum(dim=1)     # (N, P_tgt)
+            reach_chans.append((rb / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1))
 
-        # Stack channels
+        # Stack channels (ch 0-14), then the 6 reach-ETA-bin channels (ch 15-20)
         out = torch.stack([
             sin_a, cos_a, dist / BOARD_SIZE, 1.0 / (eta + 1.0),
             sun_safe, is_mine_b, is_enemy_b, is_neutral_b, prod_b, valid_b,
-            ships_at_arr, cap_gap, roi_20, roi_50, contest_b, reach_b,
-        ], dim=-1)  # (N, MO, P, 16)
+            ships_at_arr, cap_gap, roi_20, roi_50, contest_b, *reach_chans,
+        ], dim=-1)  # (N, MO, P, 21)
 
         # Zero out invalid owned slots AND invalid target planets (match kaggle path)
         slot_valid_b = slot_valid.unsqueeze(-1).unsqueeze(-1).float()    # (N, MO, 1, 1)
@@ -1762,14 +1779,14 @@ class VecTorchEnv:
     def owned_indices_for(self, player: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (owned_idx: (N, MAX_OWNED) long, slot_valid: (N, MAX_OWNED) bool).
 
-        SOURCE SELECTION (2026-06-15): when more than MAX_OWNED planets are owned, the 16
+        SOURCE SELECTION (2026-06-15): when more than MAX_OWNED planets are owned, the
         source slots are the highest-GARRISON owned planets (ties → lowest array index), NOT
-        the first 16 by array index. Owning >16 happens ~16% of steps (up to 30 owned), and
-        firing only from the lowest-index 16 left up to 14 force-bearing planets inert. Ranking
+        the first MAX_OWNED by array index. Owning more planets than source slots is common, and
+        firing only from the lowest-index slots left force-bearing planets inert. Ranking
         by garrison keeps the planets that can actually contribute ships (attack/reinforce/hold).
         Integer key `-round(ships)*P + idx` == sort by (-ships, idx): a 1-ship difference (=P)
         always outweighs any index difference (idx < P), so it is parity-exact with the eval/
-        export selection in features.py / action_mask.py. No-op at <=16 owned (all get a slot).
+        export selection in features.py / action_mask.py. No-op at <=MAX_OWNED owned (all get a slot).
         """
         owner = self.planets[:, :, 1]
         ships = self.planets[:, :, 5]

@@ -44,8 +44,8 @@ def test_pairwise_roi_parity():
 
 
 def test_reachable_enemy_mass_parity():
-    """reachable_enemy_mass (pairwise ch 15) must match between the torch_env GPU path and
-    the kaggle features.py path. Sim-gap on this channel = train/eval policy divergence."""
+    """reachable_enemy_mass ETA bins (pairwise ch 15-20) must match between the torch_env GPU
+    path and the kaggle features.py path. Sim-gap on these channels = train/eval divergence."""
     num_envs = 4
     env = VecTorchEnv(num_envs=num_envs, num_players=2, device="cpu")
     env.reset(seeds=list(range(100, 100 + num_envs)))
@@ -62,13 +62,13 @@ def test_reachable_enemy_mass_parity():
             ref = extract_features(obs, player, num_players=2,
                                    max_planets=48, max_fleets=128)["pairwise_features"].numpy()
             pv = vec[i].numpy()
-            d = np.abs(pv[..., 15] - ref[..., 15])
+            d = np.abs(pv[..., 15:21] - ref[..., 15:21])   # all 6 ETA bins
             max_diff = max(max_diff, float(d.max()))
-            if (ref[..., 15] != 0).any():
+            if (ref[..., 15:21] != 0).any():
                 exercised = True
-    assert max_diff < 0.06, f"reachable_enemy_mass parity diverged: max|Δ|={max_diff:.4f}"
-    assert exercised, "no nonzero reachable_enemy_mass seen — scenario did not exercise the channel"
-    print(f"  parity OK: max reachable_enemy_mass diff = {max_diff:.4f}")
+    assert max_diff < 0.06, f"reachable_enemy_mass ETA-bin parity diverged: max|Δ|={max_diff:.4f}"
+    assert exercised, "no nonzero reachable_enemy_mass bins seen — scenario did not exercise the channels"
+    print(f"  parity OK: max reachable_enemy_mass ETA-bin diff = {max_diff:.4f}")
 
 
 def test_friendly_inbound_deflates_capture_roi():

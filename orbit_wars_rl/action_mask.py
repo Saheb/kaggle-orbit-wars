@@ -37,7 +37,7 @@ ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
 CENTER = 50.0
 SUN_RADIUS = 10.0
 BOARD_SIZE = 100.0
-MAX_OWNED_PLANETS = 16
+MAX_OWNED_PLANETS = 24
 
 ANGLE_BIN_CENTERS = np.array([(i + 0.5) * ANGLE_BIN_WIDTH for i in range(NUM_ANGLE_BINS)])
 
@@ -57,9 +57,9 @@ def compute_action_masks(obs, player, max_owned=MAX_OWNED_PLANETS):
     fleets = obs["fleets"]
 
     # Find owned planets. Source selection: the highest-GARRISON owned planets fill the
-    # MAX_OWNED slots (ties -> lowest array index), NOT the first-16-by-index. Parity-exact
+    # MAX_OWNED slots (ties -> lowest array index), NOT the lowest-index slots. Parity-exact
     # with features.py / VecTorchEnv.owned_indices_for (-round(ships)*P + idx). No-op at
-    # <=max_owned owned; matters when >16 are owned (~16% of steps, up to 30) so the
+    # <=max_owned owned; matters when more planets are owned than source slots, so the
     # force-bearing planets — not arbitrary low-index ones — get the action slots.
     my_planets = [(i, p) for i, p in enumerate(planets) if p[1] == player]
     my_planets.sort(key=lambda ip: (-int(round(ip[1][5])), ip[0]))
@@ -155,8 +155,8 @@ def actions_from_policy(fire_probs, angle_logits, ship_logits, masks, obs, playe
         ship_bins = torch.argmax(ship_logits, dim=-1).cpu().numpy().squeeze(0)
 
     moves = []
-    max_moves = MAX_OWNED_PLANETS  # = model's owned-slot width (16); kaggle env has NO move cap,
-    # the old 8 was a self-nerf + train/eval mismatch (torch_env fires all 16). Bounded by owned_count.
+    max_moves = MAX_OWNED_PLANETS  # = model's owned-slot width; kaggle env has NO move cap,
+    # the old 8 was a self-nerf + train/eval mismatch. Bounded by owned_count.
     for slot in range(min(masks["owned_count"], fire_decisions.shape[0])):
         if len(moves) >= max_moves:
             break
@@ -919,8 +919,8 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
 
     move_records = []
     slot_intents: dict[int, dict] = {}
-    max_moves = MAX_OWNED_PLANETS  # = model's owned-slot width (16); kaggle env has NO move cap,
-    # the old 8 was a self-nerf + train/eval mismatch (torch_env fires all 16). Bounded by owned_count.
+    max_moves = MAX_OWNED_PLANETS  # = model's owned-slot width; kaggle env has NO move cap,
+    # the old 8 was a self-nerf + train/eval mismatch. Bounded by owned_count.
     for slot in range(min(masks["owned_count"], fire_decisions.shape[0])):
         if len(move_records) >= max_moves:
             break
@@ -1139,8 +1139,8 @@ def actions_from_sampled_policy(fire_action, angle_action, ship_action, masks, o
     ship_bins = ship_action.cpu().numpy().squeeze(0)
 
     moves = []
-    max_moves = MAX_OWNED_PLANETS  # = model's owned-slot width (16); kaggle env has NO move cap,
-    # the old 8 was a self-nerf + train/eval mismatch (torch_env fires all 16). Bounded by owned_count.
+    max_moves = MAX_OWNED_PLANETS  # = model's owned-slot width; kaggle env has NO move cap,
+    # the old 8 was a self-nerf + train/eval mismatch. Bounded by owned_count.
     for slot in range(min(masks["owned_count"], fire_decisions.shape[0])):
         if len(moves) >= max_moves:
             break

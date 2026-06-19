@@ -16,6 +16,13 @@ from features import (extract_features, _ETA_PROBE_SPEED, set_game_phase_feature
                       set_ablate_roi, set_ablate_channels, PAIRWISE_FEATURE_DIM)
 from action_mask import (compute_action_masks, actions_from_policy, actions_from_target_policy, _fleet_speed,
                          _ship_bin_to_count, _target_intercept_angle, MAX_OWNED_PLANETS)
+from wave_primitives import (
+    WAVE_TOL_STEPS,
+    capture_floor as _wave_capture_floor,
+    fleet_eta_to_target as _wave_fleet_eta_to_target,
+    fleet_target_planet as _wave_fleet_target_planet,
+    ship_speed as _wave_ship_speed,
+)
 # Decisive-mass floor constants — IMPORTED from torch_env so the eval dm_* gap diagnostic uses the
 # EXACT same floor as the training reward/diag (they can never drift). project_force_concentration_wall.
 from torch_env import (_DM_BETA, _DM_ETA_FREE, _DM_ETA_SCALE, _DM_HORIZON, _DM_OVERHEAD,
@@ -557,46 +564,29 @@ def _friendly_inbound(fleets, tgt, seat):
 
 def _ship_speed_py(ships):
     """Scalar mirror of torch_env._ship_speed (kaggle speed formula)."""
-    s = max(float(ships), 1.0)
-    base = (math.log(s) / math.log(1000.0)) ** 1.5
-    return min(1.0 + (_DM_MAX_SPEED - 1.0) * base, _DM_MAX_SPEED)
+    return _wave_ship_speed(ships)
 
 
 def _dm_fleet_target(planets, f):
     """Planet a fleet `f` is converging on — nearest alive candidate with along>0 and
     perp < radius+2.0. Mirrors torch_env._fleet_target_idx (argmin distance among candidates),
     NOT _friendly_inbound (which sums to every roughly-aligned target). Returns planet record."""
-    fx, fy, ang = f[2], f[3], f[4]
-    c, sn = math.cos(ang), math.sin(ang)
-    best, bd = None, None
-    for p in planets:
-        vx, vy = p[2] - fx, p[3] - fy
-        along = vx * c + vy * sn
-        if along <= 0:
-            continue
-        perp = abs(vx * sn - vy * c)
-        if perp < p[4] + 2.0:
-            d = math.hypot(vx, vy)
-            if bd is None or d < bd:
-                bd, best = d, p
-    return best
+    return _wave_fleet_target_planet(planets, f)
 
 
 def _decisive_gap_step(planets, fleets, seat, beta=None, targets="enemy"):
     """Per attacked-enemy-target decisive-mass RATIO (mass/floor) for `seat` from one observation,
-    using the EXACT floor of torch_env._decisive_mass_fields:
-        floor = garr + prod*eta + enemy_inbound + beta*rho(eta)*reachable_enemy_mass + overhead
-    (eta = MAX arrival ETA of our converging mass). `beta` defaults to _DM_BETA_EVAL (= the training
-    default 2.2; pass explicitly to match a non-default-beta run). Returns a list of ratios, one per
-    enemy planet we have inflight mass converging on. cross/gap/near-miss/overkill all derive from
-    the ratio (cross = ratio>=1, gap = max(0,1-ratio)), so the eval read can't drift from the reward."""
+    using the Phase 5 floor shared with torch_env._decisive_mass_fields:
+        floor = garr + prod*tau + enemy_inbound_by_deadline
+              + beta*rho(tau)*reachable_enemy_mass_by_deadline + margin
+    tau is the max ETA of the current converging wave; mass only counts friendly fleets inside
+    [tau-tol, tau+tol]. `beta` defaults to _DM_BETA_EVAL; pass explicitly to match a
+    non-default-beta run."""
     if beta is None:
         beta = _DM_BETA_EVAL
     if not planets:
         return []
-    our_mass: dict = {}
-    our_eta: dict = {}
-    enemy_inbound: dict = {}
+    our_waves: dict = {}
     for f in (fleets or []):
         own = int(f[1])
         if own < 0:
@@ -606,45 +596,36 @@ def _decisive_gap_step(planets, fleets, seat, beta=None, targets="enemy"):
             continue
         tid = tgt[0]
         if own == seat:
-            our_mass[tid] = our_mass.get(tid, 0.0) + f[6]
-            dist = math.hypot(tgt[2] - f[2], tgt[3] - f[3])
-            eta = min(dist / max(_ship_speed_py(f[6]), 1e-6), _DM_HORIZON)
-            our_eta[tid] = max(our_eta.get(tid, 0.0), eta)             # MAX ETA over our fleets
-        else:
-            enemy_inbound[tid] = enemy_inbound.get(tid, 0.0) + f[6]
+            eta = _wave_fleet_eta_to_target(f, tgt)
+            our_waves.setdefault(tid, []).append((eta, float(f[6])))
+
+    def _wave_ratio(tgt):
+        waves = our_waves.get(tgt[0], [])
+        if not waves:
+            return None
+        tau = max(e for e, _ships in waves)
+        mass = sum(ships for e, ships in waves if (tau - WAVE_TOL_STEPS) <= e <= (tau + WAVE_TOL_STEPS))
+        if mass <= 0:
+            return None
+        floor = _wave_capture_floor(tgt, planets, fleets or [], seat, tau, beta=beta)
+        return mass / floor
+
     if targets == "neutral":
-        # NEUTRAL capture sufficiency: neutrals don't grow or reinforce, so the floor is just the
-        # static garrison (+overhead) — the "did we send enough to TAKE this neutral" gap the enemy
-        # dm line (owner>=0) skips. This is the opening land-grab undercommit (e.g. 16 ships at g25).
+        # NEUTRAL capture sufficiency under the same wave timing contract.
         ratios = []
         for tgt in planets:
             if int(tgt[1]) != -1:
                 continue                                              # neutrals only
-            mass = our_mass.get(tgt[0], 0.0)
-            if mass <= 0:
-                continue                                              # attacked-with-mass only
-            floor = max(tgt[5] + _DM_OVERHEAD, 1e-6)                  # static garrison; no prod growth / no reactive term
-            ratios.append(mass / floor)
+            r = _wave_ratio(tgt)
+            if r is not None:
+                ratios.append(r)
         return ratios
     enemy_planets = [p for p in planets if int(p[1]) != seat and int(p[1]) >= 0]
     ratios = []
     for tgt in enemy_planets:
-        tid = tgt[0]
-        mass = our_mass.get(tid, 0.0)
-        if mass <= 0:
-            continue                                                  # attacked-with-mass only
-        eta = our_eta.get(tid, 0.0)
-        inbound = enemy_inbound.get(tid, 0.0)
-        em = 0.0                                                       # reachable enemy PLANET mass
-        for src in enemy_planets:
-            if src[0] == tid:
-                continue
-            pd = math.hypot(src[2] - tgt[2], src[3] - tgt[3])
-            reach = max(_ship_speed_py(src[5]) * _DM_HORIZON, 1e-6)
-            em += src[5] * max(1.0 - pd / reach, 0.0)
-        rho = min(max((eta - _DM_ETA_FREE) / _DM_ETA_SCALE, 0.0), 1.0)
-        floor = max(tgt[5] + tgt[6] * eta + inbound + beta * rho * em + _DM_OVERHEAD, 1e-6)
-        ratios.append(mass / floor)
+        r = _wave_ratio(tgt)
+        if r is not None:
+            ratios.append(r)
     return ratios
 
 

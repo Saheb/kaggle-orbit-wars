@@ -1,7 +1,7 @@
 # Phase 5 — Synchronized-Wave Concentration (from-scratch architecture)
 
-**Status:** spec / single source of truth. No code until the shared functions (§3) and the
-parity + poisoning invariants (§9–§10) are agreed. Implementation builds against this doc.
+**Status:** locked spec / build started. Steps 0-1 in §14 are implemented: the decisive-mass
+floor now uses the Phase 5 deadline/window object, and source width is `MAX_OWNED=24`.
 
 **Lineage:** Phase 4 added per-target fire/ship heads as zero-init residuals on the
 revedge1 lineage. The phase4e (deb) vs h14feat (h14) controlled A/B (both 6M, same base,
@@ -463,15 +463,13 @@ shared:  out-massed%, dm<50 cross, planets@16/32/50/100, held-out Ajay
 
 ## 14. Build order
 
-0. **Replace the floor implementation first.** `torch_env._decisive_mass_fields` and the eval
-   `dm` floor still use the OLD distance-decayed horizon mass + flat inbound scatter — a
-   *different object* than the Phase-5 classified deadline/window `floor()`. Swap them to call
-   the shared `floor()` BEFORE `dm<50 cross` is used as any gate, or the gate measures something
-   BC was never trained against (invariant I1).
-1. Raise the one-move/source width to `MAX_OWNED=24` across train/eval/export and update source
-   selection parity tests. Log `owned_count_gt24_rate`, `wave_sources_clipped_by_max_owned_rate`,
-   and slot-17..24 label/use rates before long PPO.
-2. `floor` / `cover` / `choose_anchor` / `hold_class` (single-pass, §3.4) / `safe_sendable` /
+0. **Done:** replace the decisive-mass floor implementation. `torch_env._decisive_mass_fields`
+   and eval `dm` now use deadline-filtered enemy inbound, ETA-threshold reactive planet mass,
+   Phase 5 margin, and synchronized friendly wave mass.
+1. **Done:** raise the one-move/source width to `MAX_OWNED=24` across train/eval/export and
+   update source-selection parity tests. Still log `owned_count_gt24_rate`,
+   `wave_sources_clipped_by_max_owned_rate`, and slot-17..24 label/use rates before long PPO.
+2. `cover` / `choose_anchor` / `hold_class` (single-pass, §3.4) / `safe_sendable` /
    ready-wave quota + the ETA contract (§3.0.1) as shared functions + constants. Unit-test each,
    including the ETA↔count round-trip (`ship_target` lands in `[D_abs-tol, D_abs+tol]`).
 3. Wave features in both paths + parity test (§10). Update/disable the stale ROI aux

@@ -26,7 +26,8 @@ Pairwise features (15 per owned-slot × target-planet pair):
   12: roi_20                    (production*20 - cap_cost_at_arrival) / cap_cost_at_arrival, clipped [-1,1]
   13: roi_50                    same with horizon 50
   14: enemy_contest / 100       total enemy fleet ships racing toward this target
-  15: reachable_enemy_mass /100 distance-decayed enemy garrison that could reach this target
+  15-20: reachable_enemy_mass /100, binned by enemy-planet-reach ETA
+         (bins: <=1 / 2 / 3-4 / 5-7 / 8-12 / >=13 steps — dense in the reactive window)
 """
 
 from __future__ import annotations
@@ -106,7 +107,7 @@ def fleet_speed(ships):
     return 1.0 + (MAX_SPEED - 1.0) * min(scale, 1.0)
 
 
-MAX_OWNED_PLANETS = 16  # hard cap for owned-planet slots; matches config.ModelConfig.max_owned_planets
+MAX_OWNED_PLANETS = 24  # hard cap for owned-planet slots; matches config.ModelConfig.max_owned_planets
 
 
 def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
@@ -256,8 +257,8 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
 
     # Source selection: the highest-GARRISON owned planets fill the MAX_OWNED source slots
     # (ties -> lowest array index). Parity-exact with VecTorchEnv.owned_indices_for and
-    # action_mask (-round(ships)*P + idx ordering). No-op at <=max_owned owned. Owning >16 is
-    # ~16% of steps (up to 30 owned) — firing only from the first-16-by-index left force-
+    # action_mask (-round(ships)*P + idx ordering). No-op at <=max_owned owned. Owning >max_owned is
+    # common in larger empires — firing only from the lowest-index slots left force-
     # bearing planets inert; rank by garrison so the planets that can contribute get the slots.
     owned_cands.sort(key=lambda t: (-t[1], t[0]))
     owned_count = min(len(owned_cands), max_owned)
@@ -433,17 +434,19 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
 
 # Number of pairwise features per (owned-slot, target-planet) pair.
 # Keep in sync with compute_pairwise_features() and ModelConfig.pairwise_feature_dim.
-PAIRWISE_FEATURE_DIM = 16
+PAIRWISE_FEATURE_DIM = 21
 
 # Typical fleet size used to estimate an ETA prior (matches teacher MIN_SHIP_FLOOR ~ 10
 # but in practice ETA varies modestly with size since speed is log-shaped).
 _ETA_PROBE_SHIPS = 20
 _ETA_PROBE_SPEED = 1.0 + (MAX_SPEED - 1.0) * (math.log(_ETA_PROBE_SHIPS) / math.log(1000.0)) ** 1.5
 
-# Horizon (steps) over which enemy garrison counts as "reachable" to a target, scaled by
-# a garrison-dependent fleet speed. Mirrors torch_env._DM_HORIZON / _ship_speed so the
-# reachable_enemy_mass pairwise channel (ch 15) matches the GPU training path exactly.
-_REACH_HORIZON = 18.0
+# Reachable-enemy-mass is split into ETA bins (channels 15-20): disjoint windows of the
+# enemy-planet-reach ETA, edges chosen from the measured ETA distribution of contesting
+# mass (dense in the reactive window). np.digitize(eta, edges, right=True) → bin 0..5:
+#   0: eta<=1 (unstoppable, arrives next step)  1: 2  2: 3-4  3: 5-7  4: 8-12  5: >=13 (reserve).
+_REACH_BIN_EDGES = np.array([1.0, 2.0, 4.0, 7.0, 12.0], dtype=np.float32)
+NUM_REACH_BINS = 6
 
 
 def _ship_speed_np(ships: np.ndarray) -> np.ndarray:
@@ -507,22 +510,24 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         np.where(tgt_owner != player, tgt_ships + tgt_prod * 3 + 1, 0.0)
     ).astype(np.float32)
 
-    # Reachable enemy planet mass per target (ch 15): distance-decayed enemy garrison
-    # that could reinforce/contest each target within the horizon. Source-slot independent
-    # (depends only on enemy planets vs target), so computed once and broadcast. Raw (no
-    # rho/eta scaling) — the per-target head learns its own reaction coefficient. Mirrors
-    # torch_env._compute_pairwise ch15 and the dm-floor enemy_mass (producer_v2 cheap_enemy_pressure).
-    reach_em = np.zeros(n_p, dtype=np.float32)
+    # Reachable enemy planet mass per target, BINNED by enemy-planet-reach ETA (ch 15-19).
+    # For each enemy source planet, eta = dist(src,tgt)/ship_speed(src_garrison); its garrison
+    # lands in the matching ETA bin. Source-slot independent (enemy planets vs target), so
+    # computed once and broadcast. Raw (no rho) — the per-target head learns to combine these
+    # with its own fleet ETA (ch3). Mirrors torch_env._compute_pairwise ch15-19.
+    reach_bins = np.zeros((n_p, NUM_REACH_BINS), dtype=np.float32)
     enemy_src_mask = (tgt_owner != player) & (tgt_owner >= 0)
     if enemy_src_mask.any():
         s_idx = np.where(enemy_src_mask)[0]
         sx_e, sy_e, sg_e = tgt_x[s_idx], tgt_y[s_idx], tgt_ships[s_idx]
-        src_reach_e = np.maximum(_ship_speed_np(sg_e) * _REACH_HORIZON, 1e-6)
+        spd_e = np.maximum(_ship_speed_np(sg_e), 1e-6)
         dxe = tgt_x[np.newaxis, :] - sx_e[:, np.newaxis]
         dye = tgt_y[np.newaxis, :] - sy_e[:, np.newaxis]
-        dec = np.clip(1.0 - np.sqrt(dxe * dxe + dye * dye) / src_reach_e[:, np.newaxis], 0.0, None)
-        dec[np.arange(len(s_idx)), s_idx] = 0.0   # a planet does not reinforce itself
-        reach_em = (sg_e[:, np.newaxis] * dec).sum(axis=0).astype(np.float32)
+        eta_e = np.sqrt(dxe * dxe + dye * dye) / spd_e[:, np.newaxis]    # (S, n_p) planet-reach ETA
+        bin_idx = np.digitize(eta_e, _REACH_BIN_EDGES, right=True)       # 0..4
+        bin_idx[np.arange(len(s_idx)), s_idx] = -1   # a planet does not reinforce itself
+        for b in range(NUM_REACH_BINS):
+            reach_bins[:, b] = np.where(bin_idx == b, sg_e[:, np.newaxis], 0.0).sum(axis=0)
 
     # Precompute orbit info for each target planet
     tgt_is_orbiting = np.zeros(n_p, dtype=np.bool_)
@@ -637,7 +642,7 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         out[slot, :n_p, 13] = roi_50                          # ROI at horizon 50
         if enemy_contest is not None:
             out[slot, :n_p, 14] = np.minimum(enemy_contest[:n_p], 500.0) / 100.0  # contested ships
-        out[slot, :n_p, 15] = np.minimum(reach_em, 500.0) / 100.0  # reachable enemy planet mass
+        out[slot, :n_p, 15:21] = np.minimum(reach_bins, 500.0) / 100.0  # reachable enemy mass by ETA bin
         if _ABLATE_CHANNELS:                                  # diagnostic: scramble channel↔target mapping
             _perm = np.random.permutation(n_p)
             for _ch in _ABLATE_CHANNELS:
