@@ -592,10 +592,14 @@ def classify_holds(
         p = by_pid[pid]
         info = infos[pid]
         tau = float(info.d_def_tau or 0.0)
+        # Review fix B: optimistic help is from SAFE planets ONLY — other CANDIDATEs may reserve
+        # their garrison for their own defense, so counting them over-states available help and
+        # can mis-classify a DOOMED planet as savable. Doomed planets that fall out below add their
+        # full garrison to `pool`, which pass 3 then claims from (no over-count, still no fixed-point).
         optimistic = 0.0
         for q in own:
             qid = planet_id(q)
-            if qid == pid:
+            if qid == pid or infos[qid].hold_class != HOLD_SAFE:
                 continue
             cap = max(0.0, planet_ships(q) - float(min_reserve))
             if cap > EPS and eta_between_planets(q, p, cap) <= tau + tol + EPS:

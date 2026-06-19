@@ -104,6 +104,7 @@ def main():
     atk_waves, def_waves = [], []
     holdable_total = holdable_defended = 0
     defense_moves = defense_into_doomed = 0
+    bin_overshoot = []   # §9 bin-resolution (C): chosen_count / quota_target per fired source
 
     for s in range(args.seed0, args.seed0 + args.games):
         env = make("orbit_wars", configuration={"seed": s}, debug=False)
@@ -129,6 +130,8 @@ def main():
                     defense_moves += 1
                     if d.target_pid in doomed:
                         defense_into_doomed += 1
+                if d.kind != "noop" and d.quota_target > 1e-6:
+                    bin_overshoot.append(d.ship_count / d.quota_target)
 
     # ---- §9 poisoning checks ----
     def rate(waves, pred):
@@ -157,6 +160,8 @@ def main():
     print(f"      ready_quota_error (median)     {statistics.median(quota_err) if quota_err else float('nan'):.2f}    (target SMALL)")
     print(f"      overcommit_ratio p50/p90       {statistics.median(overcommit) if overcommit else float('nan'):.2f}"
           f" / {_p90(overcommit):.2f}    (target BOUNDED)")
+    print(f"      bin_overshoot p50/p90          {statistics.median(bin_overshoot) if bin_overshoot else float('nan'):.2f}"
+          f" / {_p90(bin_overshoot):.2f}    (chosen/quota from ship-bin rounding; §3.0.1/C)")
     _med = lambda xs: (statistics.median(xs) if xs else float("nan"))
     print(f"      [diag medians] floor {_med([w.floor for w in atk_waves]):.0f}  "
           f"cover {_med([w.cover_inflight for w in atk_waves]):.0f}  "

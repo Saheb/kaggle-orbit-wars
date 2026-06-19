@@ -39,6 +39,7 @@ class SourceDecision:
     ship_bin: int | None = None
     tau: float | None = None
     arrival_tau: float | None = None
+    quota_target: float = 0.0     # the share we tried to send (for §9 bin-resolution check)
 
 
 @dataclass
@@ -128,7 +129,7 @@ def plan(
             decisions[qid] = SourceDecision(
                 src_pid=qid, kind="defense", target_pid=hinfo.planet_id,
                 ship_count=choice.chosen_count, ship_bin=choice.chosen_bin,
-                tau=tau, arrival_tau=choice.arrival_tau,
+                tau=tau, arrival_tau=choice.arrival_tau, quota_target=choice.ship_target,
             )
             assigned.add(qid)
             launched += choice.chosen_count
@@ -178,7 +179,7 @@ def plan(
             decisions[qid] = SourceDecision(
                 src_pid=qid, kind="attack", target_pid=wp.planet_id(tgt),
                 ship_count=choice.chosen_count, ship_bin=choice.chosen_bin,
-                tau=anchor.tau, arrival_tau=choice.arrival_tau,
+                tau=anchor.tau, arrival_tau=choice.arrival_tau, quota_target=choice.ship_target,
             )
             assigned.add(qid)
             launched += choice.chosen_count

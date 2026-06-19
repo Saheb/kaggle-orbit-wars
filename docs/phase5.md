@@ -324,9 +324,17 @@ ATTACK source s:
                 If my_quota > safe_sendable, ship_target=safe_sendable: send full safe capacity,
                 log the ready-set underfill, and rely on other ready/later sources for the remaining gap.
                 Residual rule (deterministic): if the ready set still under-crosses after each
-                source rounds, the shortfall is assigned to ready sources in ascending source-id
-                order, each ceiling to its next legal bin until floor is met or capacity exhausted.
-  post-round validation: arrival ∈ [D_abs-tol, D_abs+tol] and Σ launched ≥ floor − cover (log misses).
+                source rounds, the shortfall is assigned to ready sources in **ETA-ascending**
+                order (review fix A: closest sources first — they have the tightest slack to absorb
+                rounding; planet-id order arbitrarily over-asks planet 0), each ceiling to its next
+                legal bin until floor is met or capacity exhausted. (v1 `wave_planner` does not run
+                a residual loop — it gates emission on a crossing-feasible ready set per §6 — but if
+                the loop is added, it MUST be ETA-ascending. `choose_attack_anchor` already orders
+                its candidate prefix by ETA.)
+  ARRIVAL WINDOW (audit amendment 2026-06-19): ONE-SIDED — arrive BY D_abs+tol; early arrival is
+                allowed. The two-sided [D_abs-tol, D_abs+tol] window starved waves; staggered
+                arrival is ~1% of losses. See docs/phase5-blocked.md.
+  post-round validation: arrival ≤ D_abs+tol and Σ (cover + launched) ≥ floor (log misses).
 
 DEFENSE source s reinforcing owned P (P is HOLDABLE):
   D_def = choose_anchor_defense(P)
@@ -418,20 +426,24 @@ after export.
 states**, with `sufficient_commit_factor = 0` (NO veto crutch):
 ```
 oracle passes, noop fails (states are load-bearing)
-attack: BC policy crosses the REACTIVE floor with synchronized arrival (spread ≤ 2*tol)
+attack: BC policy crosses the REACTIVE floor (sufficiency; synchronization dropped per audit)
 defense: holds HOLDABLE planets; drains + counterattacks on DOOMED
-includes states where near sources must wait and far sources must launch first
 ```
 If this fails, fix features/planner — do not spend a GPU-hour discovering it in PPO.
 
-**Promotion gate (before considering the learned `wave_head`):**
+**Promotion gate (review fix G — hard numbers, not "up"; 256-game panel unless noted):**
 ```
-positive_reactive_cross_rate high      no-veto undercommit rate down
-positive_arrival_spread small          contested dm<50 cross up
-out-massed rate drops                  held-out Ajay up (selection metric)
+positive_reactive_cross_rate   >= 0.90      no-veto undercommit rate     < 0.20
+contested dm<50 cross           >= 0.61 (>= phase4e baseline)
+out-massed rate (vs Ajay)       < 0.94  (< phase4e baseline; the PRIZE metric)
+held-out Ajay win-rate          >= 0.20 (> corrpack3e's 0.18 anchor; PRIMARY selection metric)
+NON-REGRESSION guard            >= 0.50 head-to-head vs phase4e (1000g) — guard only, NOT the
+                                         objective (panel/self-play WR is not LB-predictive)
 ```
 If these pass but the deterministic anchor makes bad rush-vs-patient calls → `wave_head` is the
-next architectural step. If they fail, a learned head is premature.
+next architectural step. If they fail, a learned head is premature. CAVEAT: per the loss-mode
+audit (docs/phase5-blocked.md), out-massed is mostly economy/mid-game-expansion, so even passing
+these may not move LB — treat as guardrails, not the objective.
 
 ---
 
