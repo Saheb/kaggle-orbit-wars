@@ -1,9 +1,13 @@
 # Phase 5 — Synchronized-Wave Concentration (from-scratch architecture)
 
-**Status:** locked spec / build started. Steps 0-3 in §14 are implemented: the decisive-mass
+**Status:** locked spec / build started. Steps 0-4 in §14 are implemented: the decisive-mass
 floor uses the Phase 5 deadline/window object, source width is `MAX_OWNED=24`, the shared
-scalar wave primitives are in place, and pairwise wave channels `21:41` are wired with
-train/eval parity.
+scalar wave primitives are in place, pairwise wave channels `21:41` are wired with train/eval
+parity, and the model now uses **direct per-(source,target) fire/ship heads (no slot prior +
+residual)** with a synthetic always-legal **NO_OP target column** at index `max_planets`
+(target width `max_planets+1`). `bc.py` evaluates fire/ship at the teacher's chosen target
+column and labels NO_OP for valid no-launch slots. The model is checkpoint-incompatible with
+the revedge1 lineage by design (from-scratch).
 
 **Lineage:** Phase 4 added per-target fire/ship heads as zero-init residuals on the
 revedge1 lineage. The phase4e (deb) vs h14feat (h14) controlled A/B (both 6M, same base,
@@ -478,8 +482,20 @@ shared:  out-massed%, dm<50 cross, planets@16/32/50/100, held-out Ajay
    to unchanged channels `12:15`; roi/contest weight-norm logging now reads those fixed
    columns instead of the last three pairwise cols. Added reach-bin (`15:21`) and wave
    (`21:41`) weight-norm logging plus eval ablation hooks.
-4. Direct per-source-target heads; `bc.py` per-target fix (evaluate fire/ship at the teacher's
-   chosen target); retire the reinforce overlay / veto per §10.5; wire the `NO_OP` target.
+4. **Done:** Direct per-source-target heads (slot prior + residual removed; the per-target
+   `fire_scorer`/`ship_scorer` are now the heads) + a learned `no_op_head`. `NO_OP` target
+   wired end-to-end: model target/fire/ship width `max_planets+1`, env `target_mask` NO_OP
+   column (`= slot_valid`), env decode treats a NO_OP pick as no-launch, rollout sampling
+   forces fire=0 at NO_OP, PPO chain rule unchanged (gather widths absorb the extra column).
+   `bc.py` gathers fire/ship at the teacher's chosen target and labels NO_OP for valid
+   no-launch slots. §10.5 overlay/veto: NO code removed (tested opt-in machinery used by
+   Phase 4 experiments) — both `defensive_reinforce_k` (CLI default 0) and
+   `sufficient_commit_factor` (ckpt-metadata default 0.0) are already off-by-default, and the
+   checkpoint-as-trained eval contract means a Phase 5 ckpt evaluates without them; retirement
+   = simply never enabling them in the Phase 5 BC/PPO/eval path (enforced when Steps 5-7 wire
+   the run). NOTE: `export_agent.py` (its own standalone submission model) and the
+   `check_phase4_parity.py` diagnostic still replicate the old slot prior — update at export
+   time (Step 7).
 5. Sufficient-prefix **wave** planner (§7) + poisoning checks (§9), incl. the post-rounding
    arrival/floor validation from the ETA contract.
 6. Pre-PPO no-veto gate on synthetic states (§11). **Hard stop** until it passes.

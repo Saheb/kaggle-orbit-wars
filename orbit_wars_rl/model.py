@@ -88,8 +88,7 @@ class EntityTransformer(nn.Module):
             self.pair_out = nn.Linear(D, D)
             self.pair_ln = nn.LayerNorm(D)
 
-        # Action heads (per owned planet)
-        self.fire_head = nn.Linear(D, 1)
+        # Action heads (per owned planet).
         # NB: the angle head was removed — Phase 1 decodes fire direction from the
         # target via orbital-intercept geometry (target-decode), so the head was
         # dead weight (never sampled, no gradient). NUM_ANGLE_BINS is still used by
@@ -98,12 +97,15 @@ class EntityTransformer(nn.Module):
         # Ship head: bin count is configurable so the fraction-head experiment
         # can swap to 10 fraction bins. Default 32 = legacy absolute counts.
         self.num_ship_bins = getattr(cfg, "num_ship_bins", NUM_SHIP_BINS)
-        self.ship_head = nn.Linear(D, self.num_ship_bins)
-        # Target-index head. When pairwise features are available we score each
-        # (slot, target) pair from per-target inputs — see docs/bugs.md (target-head
-        # collapse). When pairwise is disabled we fall back to a slot-only Linear.
         self.max_planets = cfg.max_planets if hasattr(cfg, "max_planets") else 48
+        # Phase 5: synthetic NO_OP target column ("do nothing this step"), always legal
+        # for a valid source slot, at index == max_planets. Target width = max_planets+1.
+        self.no_op_idx = self.max_planets
         if self.use_pairwise:
+            # Direct per-(source, target) heads (Phase 5): fire/ship are scored per
+            # target from the same [q_slot, k_target, pairwise] inputs as target
+            # selection — NO slot-only prior + residual (that formulation left the
+            # fire residual inert; see docs/phase5.md §1). The scorers ARE the heads.
             self.tgt_q = nn.Linear(D, D)
             self.tgt_k = nn.Linear(D, D)
             tgt_in = D + D + F_pair
@@ -127,6 +129,10 @@ class EntityTransformer(nn.Module):
                 nn.GELU(),
                 nn.Linear(tgt_hidden, self.num_ship_bins),
             )
+            # Learned NO_OP target logit per source slot (the "do nothing" column key).
+            self.no_op_head = nn.Linear(D, 1)
+            # Fresh model: small-init the head output layers so they start near-neutral
+            # but off dead-zero. phase4_residual_init_std reused as the init scale.
             resid_init_std = float(getattr(cfg, "phase4_residual_init_std", 0.0))
             if resid_init_std > 0.0:
                 nn.init.normal_(self.fire_scorer[-1].weight, mean=0.0, std=resid_init_std)
@@ -137,7 +143,11 @@ class EntityTransformer(nn.Module):
             nn.init.zeros_(self.fire_scorer[-1].bias)
             nn.init.zeros_(self.ship_scorer[-1].bias)
         else:
+            # Legacy non-pairwise fallback (tests / value-only): slot-only heads,
+            # broadcast across targets. No NO_OP column on this path.
             self.target_head = nn.Linear(D, self.max_planets)
+            self.fire_head = nn.Linear(D, 1)
+            self.ship_head = nn.Linear(D, self.num_ship_bins)
 
         # Value head: concat global token + owned pool → Linear(2D→D) by default.
         # value_head_in=0 means auto (2*D); load_checkpoint sets it to D for
@@ -261,96 +271,102 @@ class EntityTransformer(nn.Module):
         B = planet_features.shape[0]
         max_owned = owned_enriched.shape[1]
         D = x.shape[-1]
-        target_logits = None
+        mp = self.max_planets
 
-        # Per-target scoring head: each (slot, target) gets its own logit from
-        # [q_slot, k_target, pair_features]. This is the fix for the collapse
-        # documented in docs/bugs.md — the prior Linear(D, max_planets) head
-        # had no per-target conditioning, capping target_top1 near random.
+        def _pad_last(t, fill):
+            """Right-pad a (..., N_p) tensor to width mp (or truncate)."""
+            if t.shape[-1] < mp:
+                pad = torch.full((*t.shape[:-1], mp - t.shape[-1]), fill,
+                                 device=t.device, dtype=t.dtype)
+                return torch.cat([t, pad], dim=-1)
+            return t[..., :mp]
+
         if self.use_pairwise and pairwise_features is not None:
+            # ---- Direct per-(slot, target) heads from [q_slot, k_target, pairwise] ----
+            # Each of target/fire/ship is scored per real planet, then a synthetic
+            # NO_OP column (idx == max_planets) is appended (Phase 5; no slot prior).
             N_p = planet_features.shape[1]
             q_tgt = self.tgt_q(owned_enriched).unsqueeze(2).expand(-1, -1, N_p, -1)
             k_tgt = self.tgt_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
-            scorer_in = torch.cat([q_tgt, k_tgt, pairwise_features], dim=-1)
-            tgt_scores = self.target_scorer(scorer_in).squeeze(-1)              # (B, MO, N_p)
+            tgt_scores = self.target_scorer(torch.cat([q_tgt, k_tgt, pairwise_features], dim=-1)).squeeze(-1)
             # Reinforcement curriculum: bias own-target logits only (is_mine, idx 5).
             # Negative bias suppresses reinforcement early; annealed → 0 so RL learns
             # the reinforce value from reward. Enemy/neutral (is_mine==0) untouched.
             if self.reinforce_logit_bias != 0.0:
                 tgt_scores = tgt_scores + self.reinforce_logit_bias * pairwise_features[..., 5]
-            # Pad to max_planets width if needed
-            if N_p < self.max_planets:
-                pad = torch.full(
-                    (B, max_owned, self.max_planets - N_p),
-                    -100.0, device=tgt_scores.device, dtype=tgt_scores.dtype,
-                )
-                tgt_scores = torch.cat([tgt_scores, pad], dim=-1)
-            elif N_p > self.max_planets:
-                tgt_scores = tgt_scores[..., :self.max_planets]
-            target_logits = tgt_scores
-        elif self.use_pairwise:
-            # Some legacy tests/callers do not pass pairwise_features and do
-            # not consume target_logits. Keep forward usable for those paths
-            # without adding fallback parameters that would break checkpoints.
-            target_logits = torch.zeros(
-                B, max_owned, self.max_planets,
-                device=owned_enriched.device, dtype=owned_enriched.dtype,
-            )
 
-        # Action heads. Fire/ship now condition on the chosen target via the same
-        # per-(slot, target) pairwise path as target selection. The legacy slot-only
-        # heads remain as residual priors so old checkpoints keep step-0 behavior.
-        fire_logits_slot = self.fire_head(owned_enriched).squeeze(-1)  # (B, max_owned)
-        ship_logits_slot = self.ship_head(owned_enriched)  # (B, max_owned, num_ship_bins)
-        fire_prior = fire_logits_slot.unsqueeze(-1).expand(-1, -1, self.max_planets)
-        ship_prior = ship_logits_slot.unsqueeze(2).expand(-1, -1, self.max_planets, -1)
-        fire_residual = torch.zeros_like(fire_prior)
-        ship_residual = torch.zeros_like(ship_prior)
-        fire_logits = fire_prior
-        ship_logits = ship_prior
-        if self.use_pairwise and pairwise_features is not None:
-            N_p = planet_features.shape[1]
             q_fire = self.fire_q(owned_enriched).unsqueeze(2).expand(-1, -1, N_p, -1)
             k_fire = self.fire_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
-            fire_in = torch.cat([q_fire, k_fire, pairwise_features], dim=-1)
-            fire_resid_live = self.fire_scorer(fire_in).squeeze(-1)
+            fire_scores = self.fire_scorer(torch.cat([q_fire, k_fire, pairwise_features], dim=-1)).squeeze(-1)
 
             q_ship = self.ship_q(owned_enriched).unsqueeze(2).expand(-1, -1, N_p, -1)
             k_ship = self.ship_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
-            ship_in = torch.cat([q_ship, k_ship, pairwise_features], dim=-1)
-            ship_resid_live = self.ship_scorer(ship_in)
+            ship_scores = self.ship_scorer(torch.cat([q_ship, k_ship, pairwise_features], dim=-1))  # (B,MO,N_p,bins)
 
-            fire_logits = fire_logits.clone()
-            ship_logits = ship_logits.clone()
-            fire_residual[..., :N_p] = fire_resid_live
-            ship_residual[..., :N_p, :] = ship_resid_live
-            fire_logits[..., :N_p] = fire_logits[..., :N_p] + fire_resid_live
-            ship_logits[..., :N_p, :] = ship_logits[..., :N_p, :] + ship_resid_live
+            target_real = _pad_last(tgt_scores, -100.0)        # (B, MO, mp)
+            fire_logits = _pad_last(fire_scores, 0.0)          # (B, MO, mp)  (pad cols never gathered)
+            if ship_scores.shape[-2] < mp:
+                pad = torch.zeros(*ship_scores.shape[:-2], mp - ship_scores.shape[-2],
+                                  ship_scores.shape[-1], device=ship_scores.device, dtype=ship_scores.dtype)
+                ship_logits = torch.cat([ship_scores, pad], dim=-2)
+            else:
+                ship_logits = ship_scores[..., :mp, :]
+
+            # Mask non-real planet columns in the TARGET head only (fire/ship are
+            # gathered at an already-legal chosen target / NO_OP, never at a pad col).
+            if planet_mask is not None:
+                tgt_mask = planet_mask.unsqueeze(1).expand(-1, max_owned, -1)
+                np_obs = tgt_mask.shape[-1]
+                if mp > np_obs:
+                    padm = torch.zeros(B, max_owned, mp - np_obs, dtype=torch.bool, device=tgt_mask.device)
+                    tgt_mask = torch.cat([tgt_mask, padm], dim=-1)
+                elif mp < np_obs:
+                    tgt_mask = tgt_mask[..., :mp]
+                target_real = target_real.masked_fill(~tgt_mask, -100.0)
+
+            # ---- Append NO_OP column (always legal for valid slots) ----
+            noop_t = self.no_op_head(owned_enriched)                                    # (B, MO, 1)
+            target_logits = torch.cat([target_real, noop_t], dim=-1)                    # (B, MO, mp+1)
+            noop_fire = torch.full((B, max_owned, 1), -100.0,
+                                   device=fire_logits.device, dtype=fire_logits.dtype)  # fire forced 0 at NO_OP
+            fire_logits = torch.cat([fire_logits, noop_fire], dim=-1)                   # (B, MO, mp+1)
+            noop_ship = torch.zeros(B, max_owned, 1, ship_logits.shape[-1],
+                                    device=ship_logits.device, dtype=ship_logits.dtype)
+            ship_logits = torch.cat([ship_logits, noop_ship], dim=-2)                   # (B, MO, mp+1, bins)
+        elif self.use_pairwise:
+            # Pairwise model called without pairwise_features (value-only / legacy
+            # test). Produce neutral logits at NO_OP width so callers don't crash.
+            target_logits = torch.zeros(B, max_owned, mp + 1,
+                                        device=owned_enriched.device, dtype=owned_enriched.dtype)
+            fire_logits = torch.full((B, max_owned, mp + 1), -100.0,
+                                     device=owned_enriched.device, dtype=owned_enriched.dtype)
+            ship_logits = torch.zeros(B, max_owned, mp + 1, self.num_ship_bins,
+                                      device=owned_enriched.device, dtype=owned_enriched.dtype)
+        else:
+            # Legacy non-pairwise fallback: slot-only heads broadcast across targets.
+            fire_slot = self.fire_head(owned_enriched).squeeze(-1)              # (B, MO)
+            ship_slot = self.ship_head(owned_enriched)                         # (B, MO, bins)
+            fire_logits = fire_slot.unsqueeze(-1).expand(-1, -1, mp).clone()
+            ship_logits = ship_slot.unsqueeze(2).expand(-1, -1, mp, -1).clone()
+            target_logits = self.target_head(owned_entities)                   # (B, MO, mp)
+            if planet_mask is not None:
+                tgt_mask = planet_mask.unsqueeze(1).expand(-1, max_owned, -1)
+                np_obs = tgt_mask.shape[-1]
+                if mp > np_obs:
+                    padm = torch.zeros(B, max_owned, mp - np_obs, dtype=torch.bool, device=tgt_mask.device)
+                    tgt_mask = torch.cat([tgt_mask, padm], dim=-1)
+                elif mp < np_obs:
+                    tgt_mask = tgt_mask[..., :mp]
+                target_logits = target_logits.masked_fill(~tgt_mask, -100.0)
+
         # min_ship_bin: bins below this are masked to -inf so they're never
-        # sampled / argmaxed. For the fraction head (10 bins on [0.1, 1.0]),
-        # setting min_ship_bin=1 removes the "10%-of-source" trap that PPO
-        # collapses to in cold-start self-play (every prior run hit ship0>0.5
-        # by iter 6-7 regardless of LR or IL/BC anchor strength).
+        # sampled / argmaxed (removes the degenerate "10%-of-source" 1-ship trap).
         min_ship_bin = int(getattr(self.cfg, "min_ship_bin", 0))
         if min_ship_bin > 0:
             ship_logits = ship_logits.clone()
             ship_logits[..., :min_ship_bin] = -100.0
-        if target_logits is None:
-            target_logits = self.target_head(owned_entities)  # (B, max_owned, max_planets)
-        # Mask out invalid planet slots (padded) so target softmax only sees real planets
-        if planet_mask is not None:
-            tgt_mask = planet_mask.unsqueeze(1).expand(-1, max_owned, -1)  # (B, MO, N_p)
-            # If max_planets in model > N_p in obs, pad the mask to model width
-            mp = target_logits.shape[-1]
-            np_obs = tgt_mask.shape[-1]
-            if mp > np_obs:
-                pad = torch.zeros(B, max_owned, mp - np_obs, dtype=torch.bool, device=tgt_mask.device)
-                tgt_mask = torch.cat([tgt_mask, pad], dim=-1)
-            elif mp < np_obs:
-                tgt_mask = tgt_mask[..., :mp]
-            target_logits = target_logits.masked_fill(~tgt_mask, -100.0)
 
-        # Apply masks (-100 is safe in float16 on MPS; -1e9 overflows)
+        # Apply slot masks across the full target width incl. NO_OP (-100 is float16-safe).
         if fire_mask is not None:
             fire_logits = fire_logits.masked_fill(~fire_mask.unsqueeze(-1), -100.0)
         if slot_valid is not None:
@@ -379,10 +395,6 @@ class EntityTransformer(nn.Module):
             "ship_logits": ship_logits,
             "target_logits": target_logits,
             "value": value,
-            "_phase4_fire_prior": fire_prior,
-            "_phase4_ship_prior": ship_prior,
-            "_phase4_fire_residual": fire_residual,
-            "_phase4_ship_residual": ship_residual,
         }
 
     def load_state_dict(self, state_dict, strict=True):

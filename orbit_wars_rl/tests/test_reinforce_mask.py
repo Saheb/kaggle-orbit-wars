@@ -36,7 +36,7 @@ def test_torch_env_target_mask_reinforce_toggle():
             # the source planet is NEVER a legal target of itself
             assert not bool(tm[0, s, src]), "source must never target itself"
             # the OTHER own planet: legal iff reinforcement is on
-            other = [p for p in range(tm.shape[2]) if owner[p] == 0 and p != src]
+            other = [p for p in range(te.planets.shape[1]) if owner[p] == 0 and p != src]
             for p in other:
                 assert bool(tm[0, s, p]) == allow, (
                     f"own-target legality should equal allow_reinforce={allow}")
@@ -61,12 +61,12 @@ def test_empire_gate_blocks_own_targets_below_threshold():
         f = te.get_features(player=0)
         tm, sv, oi = f["target_mask"], f["slot_valid"], f["owned_indices"]
         owner = te.planets[0, :, 1]
-        enemy = [p for p in range(tm.shape[2]) if owner[p] == 1]
+        enemy = [p for p in range(te.planets.shape[1]) if owner[p] == 1]
         for s in range(tm.shape[1]):
             if not sv[0, s]:
                 continue
             src = int(oi[0, s])
-            other_own = [p for p in range(tm.shape[2]) if owner[p] == 0 and p != src]
+            other_own = [p for p in range(te.planets.shape[1]) if owner[p] == 0 and p != src]
             for p in other_own:
                 assert bool(tm[0, s, p]) == expect_own_legal, (
                     f"own-target legality should be {expect_own_legal} at gate=3 "

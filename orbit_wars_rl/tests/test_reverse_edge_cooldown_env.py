@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import torch
-from torch_env import VecTorchEnv, _REINF_CD_NEVER
+from torch_env import VecTorchEnv, _REINF_CD_NEVER, MAX_OWNED
 
 K = 3
 
@@ -62,10 +62,10 @@ def test_real_fired_reinforce_records_then_blocks():
     oi, _ = env.owned_indices_for(0)
     slotA = int((oi[0] == A).nonzero()[0].item())
     # action cols: [fire, angle_bin, ship_bin, target_idx]; ship_bin 0 = a small, sendable count.
-    act0 = torch.zeros(1, 16, 4, dtype=torch.long)
+    act0 = torch.zeros(1, MAX_OWNED, 4, dtype=torch.long)
     act0[0, slotA, 0] = 1            # fire
     act0[0, slotA, 3] = B           # target = B  -> a reinforce A->B
-    actions = {0: act0, 1: torch.zeros(1, 16, 4, dtype=torch.long)}
+    actions = {0: act0, 1: torch.zeros(1, MAX_OWNED, 4, dtype=torch.long)}
 
     t0 = int(env.step_count[0].item())          # _apply_actions records BEFORE step_count += 1
     env.step(actions)

@@ -11,6 +11,7 @@ import torch
 
 from torch_env import (
     CENTER,
+    MAX_OWNED,
     _SCENARIO_AGG_ATTACK,
     _SCENARIO_HOLD_UNDER_PEEL,
     _SCENARIO_STAGE_ATTACK,
@@ -138,7 +139,7 @@ def test_hold_under_peel_terminal_success_and_failure():
 def test_hold_under_peel_noop_fails_by_deadline():
     env = _env("hold_under_peel", deadline=20)
     adv = int(env.scenario_adv_player[0])
-    noop = torch.zeros((1, 16, 4), dtype=torch.long)
+    noop = torch.zeros((1, MAX_OWNED, 4), dtype=torch.long)
     done = torch.tensor([False])
     steps = 0
     while not bool(done[0]) and steps <= 25:

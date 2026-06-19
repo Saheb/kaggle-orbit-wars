@@ -105,6 +105,10 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
     ship_dist = torch.distributions.Categorical(logits=ship_logits)
     fire_a   = fire_dist.sample()    # (N, MAX_OWNED)
     ship_a   = ship_dist.sample()    # (N, MAX_OWNED)
+    # Phase 5 NO_OP: picking the synthetic "do nothing" target column (last index)
+    # forces fire=0 (its fire logit is -100, so log_prob(0)≈0 and ship is excluded).
+    is_noop = (target_a == (target_logits.shape[-1] - 1))
+    fire_a   = fire_a.masked_fill(is_noop, 0.0)
     # Angle is unused in target-decode; zeros satisfy env.step's action shape.
     angle_a  = torch.zeros_like(fire_a)
 
@@ -857,7 +861,7 @@ def train(args):
         "fleet_mask":      torch.zeros(rollout_T, N, P, 128, dtype=torch.bool, device=storage_dev),
         "fire_mask":       torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev),
         "slot_valid":      torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.bool, device=storage_dev),
-        "target_mask":     torch.zeros(rollout_T, N, P, MAX_OWNED, cfg.env.max_planets, dtype=torch.bool, device=storage_dev),
+        "target_mask":     torch.zeros(rollout_T, N, P, MAX_OWNED, cfg.env.max_planets + 1, dtype=torch.bool, device=storage_dev),  # +1 = NO_OP column
         "owned_indices":   torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         # Store pairwise features whenever the model USES them: the target head
         # (per-(slot,target) scorer) needs them in the PPO-update forward, or it

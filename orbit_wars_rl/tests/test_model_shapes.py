@@ -114,9 +114,11 @@ def test_model_forward_shapes():
     with torch.no_grad():
         out = model(planet_features, fleet_features, global_features, planet_mask, fleet_mask)
 
-    assert out["fire_logits"].shape == (B, cfg.max_owned_planets, cfg.max_planets), out["fire_logits"].shape
-    assert out["ship_logits"].shape == (B, cfg.max_owned_planets, cfg.max_planets, NUM_SHIP_BINS), out["ship_logits"].shape
-    assert out["target_logits"].shape == (B, cfg.max_owned_planets, cfg.max_planets), out["target_logits"].shape
+    # Default config is pairwise → target space carries the NO_OP column (mp+1).
+    mp1 = cfg.max_planets + 1
+    assert out["fire_logits"].shape == (B, cfg.max_owned_planets, mp1), out["fire_logits"].shape
+    assert out["ship_logits"].shape == (B, cfg.max_owned_planets, mp1, NUM_SHIP_BINS), out["ship_logits"].shape
+    assert out["target_logits"].shape == (B, cfg.max_owned_planets, mp1), out["target_logits"].shape
     assert out["value"].shape == (B,), out["value"].shape
     print("test_model_forward_shapes: PASS")
 
@@ -185,58 +187,57 @@ def test_model_forward_with_pairwise_target_head():
             owned_indices=owned_indices, pairwise_features=pairwise_features,
         )
 
+    # Phase 5: pairwise path appends a synthetic NO_OP target column → width mp+1.
+    mp1 = cfg.max_planets + 1
     assert out["target_logits"] is not None
-    assert out["target_logits"].shape == (B, max_owned, cfg.max_planets), out["target_logits"].shape
-    assert out["fire_logits"].shape == (B, max_owned, cfg.max_planets), out["fire_logits"].shape
-    assert out["ship_logits"].shape == (B, max_owned, cfg.max_planets, NUM_SHIP_BINS), out["ship_logits"].shape
+    assert out["target_logits"].shape == (B, max_owned, mp1), out["target_logits"].shape
+    assert out["fire_logits"].shape == (B, max_owned, mp1), out["fire_logits"].shape
+    assert out["ship_logits"].shape == (B, max_owned, mp1, NUM_SHIP_BINS), out["ship_logits"].shape
     assert out["value"].shape == (B,), out["value"].shape
     print("test_model_forward_with_pairwise_target_head: PASS")
 
 
-def test_residual_broadcast_parity():
-    """Zero-init residuals should broadcast legacy slot logits across targets."""
+def test_no_op_target_column():
+    """Phase 5 NO_OP column: always-legal 'do nothing' target at idx == max_planets.
+
+    - target width is max_planets+1; NO_OP fire logit is forced ≤ -100 (fire→0);
+    - NO_OP target is legal (not masked) for valid slots, masked for invalid slots;
+    - the slot-only prior heads (fire_head/ship_head) are gone on the pairwise model.
+    """
     cfg = ModelConfig()
     model = EntityTransformer(cfg)
     model.eval()
+    assert not hasattr(model, "fire_head"), "pairwise model must not carry a slot fire_head"
+    assert not hasattr(model, "ship_head"), "pairwise model must not carry a slot ship_head"
+    assert hasattr(model, "no_op_head")
 
-    B, N_p, N_f = 1, 8, 4
+    B, N_p, N_f = 1, 12, 4
     max_owned = cfg.max_owned_planets
+    NO_OP = cfg.max_planets
     planet_features = torch.randn(B, N_p, cfg.planet_feature_dim)
     fleet_features = torch.randn(B, N_f, cfg.fleet_feature_dim)
     global_features = torch.randn(B, cfg.global_feature_dim)
     planet_mask = torch.ones(B, N_p, dtype=torch.bool)
     fleet_mask = torch.ones(B, N_f, dtype=torch.bool)
-    fire_mask = torch.ones(B, max_owned, dtype=torch.bool)
-    slot_valid = torch.zeros(B, max_owned, dtype=torch.bool)
-    slot_valid[:, :2] = True
+    fire_mask = torch.zeros(B, max_owned, dtype=torch.bool); fire_mask[0, :2] = True
+    slot_valid = torch.zeros(B, max_owned, dtype=torch.bool); slot_valid[0, :2] = True
     owned_indices = torch.zeros(B, max_owned, dtype=torch.long)
     pairwise_features = torch.randn(B, max_owned, N_p, cfg.pairwise_feature_dim)
 
     with torch.no_grad():
-        encoded = model.encode_state(
-            planet_features, fleet_features, global_features,
-            planet_mask, fleet_mask, slot_valid=slot_valid,
-            owned_indices=owned_indices, pairwise_features=pairwise_features,
-        )
-        old_fire = model.fire_head(encoded["owned_enriched"]).squeeze(-1)
-        old_ship = model.ship_head(encoded["owned_enriched"])
         out = model(
             planet_features, fleet_features, global_features, planet_mask, fleet_mask,
             fire_mask=fire_mask, slot_valid=slot_valid,
             owned_indices=owned_indices, pairwise_features=pairwise_features,
         )
 
-    valid = slot_valid.unsqueeze(-1).expand(-1, -1, N_p)
-    assert torch.allclose(
-        out["fire_logits"][..., :N_p][valid],
-        old_fire.unsqueeze(-1).expand(-1, -1, N_p)[valid],
-    )
-    valid_ship = slot_valid.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, N_p, old_ship.shape[-1])
-    assert torch.allclose(
-        out["ship_logits"][..., :N_p, :][valid_ship],
-        old_ship.unsqueeze(2).expand(-1, -1, N_p, -1)[valid_ship],
-    )
-    print("test_residual_broadcast_parity: PASS")
+    assert out["target_logits"].shape[-1] == NO_OP + 1
+    # NO_OP fire forced off for valid slots (so a NO_OP pick never launches)
+    assert (out["fire_logits"][0, :2, NO_OP] <= -100.0).all()
+    # NO_OP target legal for valid slots, masked for invalid slots
+    assert out["target_logits"][0, 0, NO_OP].item() > -50.0
+    assert out["target_logits"][0, 5, NO_OP].item() <= -100.0
+    print("test_no_op_target_column: PASS")
 
 
 def test_residual_small_init_wakes_output_layer():
@@ -318,7 +319,7 @@ if __name__ == "__main__":
     test_model_forward_shapes()
     test_model_with_masks()
     test_model_forward_with_pairwise_target_head()
-    test_residual_broadcast_parity()
+    test_no_op_target_column()
     test_residual_small_init_wakes_output_layer()
     test_end_to_end_obs_to_actions()
     print("\nAll model shape tests passed!")

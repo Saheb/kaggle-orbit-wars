@@ -325,45 +325,12 @@ class PPOLearner:
                 ship_target_var = (((ship_target_scores - ship_target_mean.unsqueeze(-1)).masked_fill(~target_valid, 0.0) ** 2).sum(dim=-1)
                                    / target_valid.float().sum(dim=-1).clamp(min=1.0))
                 ship_target_std = ((ship_target_var * sv).sum() / sv_sum).sqrt()
-                fire_prior = outputs.get("_phase4_fire_prior")
-                fire_residual = outputs.get("_phase4_fire_residual")
-                ship_prior = outputs.get("_phase4_ship_prior")
-                ship_residual = outputs.get("_phase4_ship_residual")
+                # Phase 5 removed the slot-only fire/ship prior + residual heads, so
+                # the prior/residual drift diagnostics no longer exist — report zeros
+                # to keep the metric keys (and downstream logging) stable.
                 fire_prior_rms = fire_resid_rms = fire_resid_ratio = fire_resid_abs_mean = 0.0
                 ship_prior_rms = ship_resid_rms = ship_resid_ratio = ship_resid_abs_mean = 0.0
                 fire_decision_flip = ship_decision_flip = 0.0
-                if fire_prior is not None and fire_residual is not None:
-                    valid_targets = target_valid & slot_valid_2d.unsqueeze(-1)
-                    valid_targets_f = valid_targets.float()
-                    vt_sum = valid_targets_f.sum().clamp(min=1.0)
-                    fire_prior_rms = (((fire_prior * valid_targets_f) ** 2).sum() / vt_sum).sqrt()
-                    fire_resid_rms = (((fire_residual * valid_targets_f) ** 2).sum() / vt_sum).sqrt()
-                    fire_resid_ratio = fire_resid_rms / fire_prior_rms.clamp(min=1e-6)
-                    fire_resid_abs_mean = (fire_residual.abs() * valid_targets_f).sum() / vt_sum
-                    fire_prior_logits = _gather_target_logits(fire_prior, target_action)
-                    fire_decision_flip = (
-                        (((fire_prior_logits > 0) != (fire_logits > 0)).float() * sv).sum()
-                        / sv_sum
-                    )
-                if ship_prior is not None and ship_residual is not None:
-                    valid_targets_bins = target_valid.unsqueeze(-1) & slot_valid_2d.unsqueeze(-1).unsqueeze(-1)
-                    min_ship_bin = int(getattr(self.model.cfg, "min_ship_bin", 0))
-                    if min_ship_bin > 0:
-                        valid_targets_bins = valid_targets_bins.clone()
-                        valid_targets_bins[..., :min_ship_bin] = False
-                    valid_targets_bins_f = valid_targets_bins.float()
-                    vtb_sum = valid_targets_bins_f.sum().clamp(min=1.0)
-                    ship_prior_rms = (((ship_prior * valid_targets_bins_f) ** 2).sum() / vtb_sum).sqrt()
-                    ship_resid_rms = (((ship_residual * valid_targets_bins_f) ** 2).sum() / vtb_sum).sqrt()
-                    ship_resid_ratio = ship_resid_rms / ship_prior_rms.clamp(min=1e-6)
-                    ship_resid_abs_mean = (ship_residual.abs() * valid_targets_bins_f).sum() / vtb_sum
-                    ship_prior_logits = _gather_target_ship_logits(ship_prior, target_action)
-                    ship_slots = (((fire_logits > 0) | (fire_prior_logits > 0)).float() * sv
-                                  if fire_prior is not None else sv)
-                    ship_decision_flip = (
-                        ((ship_prior_logits.argmax(dim=-1) != ship_logits.argmax(dim=-1)).float() * ship_slots).sum()
-                        / ship_slots.sum().clamp(min=1.0)
-                    )
 
             metrics = {
                 "loss": loss.item(),

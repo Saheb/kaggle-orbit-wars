@@ -294,64 +294,75 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
     Trains fire, ship, and target heads. Angle head is dead weight in
     target-decode mode and is excluded from the loss.
     """
-    fire_logits = outputs["fire_logits"]     # (B, max_owned)
-    ship_logits = outputs["ship_logits"]     # (B, max_owned, num_ship_bins)
+    # Phase 5 per-target heads: fire/ship are scored per (slot, target), so the BC
+    # loss must evaluate them at the TEACHER'S CHOSEN target column (gather), not a
+    # slot-only head. The target head selects a planet column for a launch, or the
+    # synthetic NO_OP column (idx == width-1) to "do nothing" — so a valid source
+    # that the teacher did not launch from is an explicit NO_OP label.
+    fire_logits = outputs["fire_logits"]     # (B, MO, TW)    per-(slot, target)
+    ship_logits = outputs["ship_logits"]     # (B, MO, TW, bins)
+    target_logits = outputs["target_logits"] # (B, MO, TW), NO_OP at index TW-1
 
-    slot_valid = batch["slot_valid"].float()  # (B, max_owned)
-    fire_target = batch["fire_target"]        # (B, max_owned)
-    ship_target = batch["ship_target"]        # (B, max_owned)
+    B, MO, TW = target_logits.shape
+    NO_OP = TW - 1
+    slot_valid_b = batch["slot_valid"].bool()         # (B, MO)
+    fire_target = batch["fire_target"]                # (B, MO) in {0,1}
+    ship_target = batch["ship_target"]                # (B, MO) bin
+    target_target = batch["target_target"]            # (B, MO), -1 = unresolved/none
 
-    # Fire loss (binary cross-entropy per slot, masked).
-    # pos_weight (>1) up-weights the fire=1 class to counter the ~1:9.5 imbalance that
-    # otherwise collapses the head toward "never fire" (the passive-BC failure).
-    # Clamp logits to ±30 to avoid MPS float16 overflow from -1e9 mask values
-    fire_loss = F.binary_cross_entropy_with_logits(
-        fire_logits.clamp(-30, 30), fire_target.float(), reduction="none",
-        pos_weight=torch.tensor(_FIRE_POS_WEIGHT, device=fire_logits.device),
-    ) * slot_valid
-    fire_loss = fire_loss.sum() / slot_valid.sum().clamp(min=1)
+    fired    = (fire_target == 1) & slot_valid_b
+    resolved = fired & (target_target >= 0)           # fired with a known target planet
+    # The column each head is trained at: the teacher's planet for resolved launches,
+    # else NO_OP for a valid no-launch slot. Fired-but-unresolved slots (teacher fired
+    # at unrecoverable space) are ignored — there is no column to gather.
+    train_target = resolved | (slot_valid_b & ~fired)
+    chosen = torch.where(resolved, target_target.clamp(min=0),
+                         torch.full_like(target_target, NO_OP))   # (B, MO)
+    tt_f = train_target.float()
+    n_tgt = tt_f.sum().clamp(min=1)
 
-    # Ship loss: only on slots where heuristic actually fired
-    B, max_owned = fire_logits.shape
-    fired = (fire_target == 1).float() * slot_valid  # (B, max_owned)
-    ship_loss = F.cross_entropy(
-        ship_logits.view(B * max_owned, -1),
-        ship_target.view(B * max_owned),
-        reduction="none",
-    ).view(B, max_owned)
-    ship_loss = (ship_loss * fired).sum() / fired.sum().clamp(min=1)
-
-    # Target-index loss: which planet did the teacher choose? Cross-entropy over
-    # max_planets logits, only on slots that fired AND have a valid (non-(-1)) label.
-    target_logits = outputs["target_logits"]            # (B, MO, max_planets)
-    target_target = batch["target_target"]              # (B, MO) with -1 = ignore
-    valid_tgt = (target_target >= 0).float() * fired    # (B, MO)
-    # Replace -1 with 0 to avoid OOB in cross_entropy; mask result instead
-    safe_tgt = target_target.clamp(min=0)
-    B, MO, MP = target_logits.shape
+    # Target loss: which column (planet or NO_OP) did the teacher choose?
     target_loss_raw = F.cross_entropy(
-        target_logits.view(B * MO, MP),
-        safe_tgt.view(B * MO),
-        reduction="none",
+        target_logits.reshape(B * MO, TW), chosen.reshape(B * MO), reduction="none",
     ).view(B, MO)
-    n_valid_tgt = valid_tgt.sum().clamp(min=1)
-    target_loss = (target_loss_raw * valid_tgt).sum() / n_valid_tgt
+    target_loss = (target_loss_raw * tt_f).sum() / n_tgt
+
+    # Fire loss: BCE at the chosen column (pos_weight counters the no-fire imbalance).
+    # For NO_OP slots the chosen column's fire logit is the fixed -100, so label 0
+    # contributes ~0 — the "don't act" signal is carried by the target head's NO_OP pick.
+    fire_at_chosen = torch.gather(fire_logits, -1, chosen.unsqueeze(-1)).squeeze(-1)  # (B, MO)
+    fire_loss = F.binary_cross_entropy_with_logits(
+        fire_at_chosen.clamp(-30, 30), fired.float(), reduction="none",
+        pos_weight=torch.tensor(_FIRE_POS_WEIGHT, device=fire_logits.device),
+    ) * tt_f
+    fire_loss = fire_loss.sum() / n_tgt
+
+    # Ship loss: CE at the chosen column, only on resolved (actually-launched) slots.
+    ship_at_chosen = torch.gather(
+        ship_logits, 2,
+        chosen.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, ship_logits.shape[-1]),
+    ).squeeze(2)                                                                      # (B, MO, bins)
+    res_f = resolved.float()
+    ship_loss = F.cross_entropy(
+        ship_at_chosen.reshape(B * MO, -1), ship_target.reshape(B * MO), reduction="none",
+    ).view(B, MO)
+    ship_loss = (ship_loss * res_f).sum() / res_f.sum().clamp(min=1)
 
     total = fire_loss + ship_loss + target_loss
 
-    # Top-k accuracy on target prediction (only on valid slots)
+    # Top-k accuracy on target/NO_OP prediction (over trained slots)
     with torch.no_grad():
-        topk = target_logits.topk(min(3, MP), dim=-1).indices  # (B, MO, k)
-        match_top1 = (topk[..., 0] == safe_tgt).float() * valid_tgt
-        match_top3 = (topk == safe_tgt.unsqueeze(-1)).any(dim=-1).float() * valid_tgt
-        top1_acc = (match_top1.sum() / n_valid_tgt).item()
-        top3_acc = (match_top3.sum() / n_valid_tgt).item()
+        topk = target_logits.topk(min(3, TW), dim=-1).indices  # (B, MO, k)
+        match_top1 = (topk[..., 0] == chosen).float() * tt_f
+        match_top3 = (topk == chosen.unsqueeze(-1)).any(dim=-1).float() * tt_f
+        top1_acc = (match_top1.sum() / n_tgt).item()
+        top3_acc = (match_top3.sum() / n_tgt).item()
 
     # Normalized losses (entropy-reduction fraction vs uniform baseline).
     import math as _m
     fire_uniform   = _m.log(2)
     ship_uniform   = _m.log(max(2, ship_logits.shape[-1]))
-    target_uniform = _m.log(MP)
+    target_uniform = _m.log(TW)
     fire_red   = 1.0 - fire_loss.item()   / fire_uniform
     ship_red   = 1.0 - ship_loss.item()   / ship_uniform
     target_red = 1.0 - target_loss.item() / target_uniform

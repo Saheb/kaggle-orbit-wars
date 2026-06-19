@@ -1567,6 +1567,11 @@ class VecTorchEnv:
                 target_mask = target_mask & ~(is_own_cd & blocked_slot)
         else:
             target_mask = target_alive & (target_owner != player) & slot_valid.unsqueeze(-1)
+        # Phase 5: append the always-legal NO_OP target column at idx == P (== max_planets).
+        # It lets a valid source slot choose "do nothing" so the target softmax is
+        # well-posed even when every real target is illegal/infeasible. Decode treats a
+        # NO_OP pick as no launch (see _decode below).
+        target_mask = torch.cat([target_mask, slot_valid.unsqueeze(-1)], dim=-1)  # (N, MAX_OWNED, P+1)
         # Per-env owned_count for the model
         owned_count = slot_valid.long().sum(dim=1).tolist()
 
@@ -2113,6 +2118,9 @@ class VecTorchEnv:
         if self.action_decode == "target" and actions.shape[-1] >= 4:
             raw_target_idx = actions[:, :, 3].long()
             use_target_decode = raw_target_idx >= 0
+            # Phase 5 NO_OP: target idx == P (== max_planets, beyond every real planet)
+            # means "do nothing". Never launches regardless of the fire decision.
+            is_noop = raw_target_idx >= self.planets.shape[1]
             target_idx = raw_target_idx.clamp(0, self.planets.shape[1] - 1)
             target_gather = target_idx.unsqueeze(-1).expand(-1, -1, 7)
             tgt = self.planets.gather(1, target_gather)
@@ -2130,6 +2138,7 @@ class VecTorchEnv:
                 tgt_ok,
                 torch.ones_like(target_alive, dtype=torch.bool),
             )
+            target_valid = target_valid & ~is_noop   # NO_OP never launches
             target_angle = self._target_intercept_angle(src_x, src_y, src_r, ship_count, target_idx)
             angle = torch.where(use_target_decode, target_angle, angle)
 
