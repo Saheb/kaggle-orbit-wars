@@ -3,38 +3,54 @@
 Living doc — crisp, prioritized. Discipline: **one delta per cloud run**, eval (vs Ajay) is the arbiter.
 Full session history archived in [`archive/docs/next-steps-legacy.md`](../archive/docs/next-steps-legacy.md).
 
-**Current focus:** rebuild the BC seed on **corrected target labels** (the 2026-06-20 fix), then attack the
-force-concentration wall with **curriculum**, not reward proxies.
+**Current focus:** UNFILTERED Jake BC seed is built + validated (best BC ever); two PPO runs in flight from it
+against a producer-pressure pool. Wall sharpened: we under-deploy *available* force **by choice**, not capacity.
 
 ---
 
-## 🟢 Now — corrected-label BC seed (2026-06-20 metric fix)
+## 🟢 Now — UNFILTERED Jake BC seed built + 2 PPO runs LIVE (2026-06-20)
 
-The launch→target resolver was angle-only (≈56–66% correct). Fixed to lead-collision (≈96–98%) across
-eval, the training reward, and the **BC label builder**. This corrupted what we were steering by *and* what
-the BC learned. Details + corrected references: [`docs/metrics.md`](metrics.md) (top banner).
+**The unfiltered seed (DONE).** Rebuilt the Jake BC on **all 442 Jake wins** (full corpus, not the 267
+attack-heavy "decisive" subset) with **NO move filters** — every "hopeless/late/already-safe/reverse-edge"
+judgment OFF (those are *our* heuristics, and they were deleting real Jake reinforces). Only sub-1% technical
+drops (unresolved-target / source-not-in-slots). Built at 15-dim globals (game-phase) + 22 pairwise.
+Dataset: `gpu_run_artifacts/bc_rp_20dim/replay_action_bc_jake_unfiltered_allfeat.pkl` (33,051 samples).
+- **Results (best BC ever): Zach 77.3% · Ajay 8.2% · random 100%** (prior BC seeds were 0/256 vs planners).
+- Recovered Jake's reinforce-heaviness that filtering destroyed: **reinf@<50 0.10 → 0.21–0.25** (ref 0.29);
+  reinforce ramp by empire size 0.00→0.66, smooth/monotonic (real Jake, not noise).
+- **Gate settled at 2** (Jake reinforces 0% at 1 planet → gate2 deletes nothing; gate3 would delete 133 real
+  reinforces). `--fire-pos-weight 6.2` (13.87% fire rate). Checkpoint:
+  `gpu_run_artifacts/bc_rp_20dim/checkpoints/bc_jake_unfiltered_pw6.2_20260620.pt`.
 
-1. **🟢 Rebuild the Jake BC dataset + retrain.** `build_replay_action_bc.py` now emits correct target labels
-   (55.7%→95.7%) and save/attack split (75.5%→98.0%), so the proactive/save-quality/attack-value filters
-   finally curate the right moves. Diff the new label set vs old; retrain; check **open<50 cap/atk-launch
-   moves off 0.56 → Jake's 0.70** and **@4-6 reinforce share off 0.10 → 0.52**. Builder details:
-   [`docs/replay-action-bc.md`](replay-action-bc.md).
-2. **🟢 Validate the reward-attribution change** (`torch_env._fleet_target_idx`, now lead-collision). It
-   alters the decisive-mass reward + incoming features — needs a **fresh run + SPS check** before trusting.
-   Parity test: `orbit_wars_rl/tests/test_fleet_target_lead.py`.
-3. **🟡 Recompute the stale top-player refs** (Isaiah/TonyK rows in [`metrics.md`](metrics.md)) via
-   `conversion_from_replays.py` — they're still on the old resolver. Jake already corrected.
+**Two PPO runs LIVE from this seed** (Jarvis A100-80GB spot; same recipe as `jake_h1012` but unfiltered seed):
+prod-share 1.0 reward, critic-warmup bridge (BC has no value head), IL-anchor to the seed, lr 1e-4, gate2 + cd3,
+external pool = **producer_h12 (42%) + h1166_peak (39%) + lb1084 (37.5%)** @ 60% PFSP (h12 = the wall pressure).
+1. **`jake_unfilt_h12`** — r128/ppo2/512env (jake_h1012 baseline regime). Instance 430878.
+2. **`jake_unfilt_h12_r32`** — r32/ppo1/1024env (light/fast-update A/B). Instance 430882.
+Bar = beat `jake_h1012`'s Ajay trajectory; wall metric = out-massed% ↓. Scripts in `gpu_run_artifacts/jake_unfilt_h12{,_r32}/`.
+**DESTROY both boxes when done** (`jl destroy 430878 --yes`, `jl destroy 430882 --yes`).
 
-**Keep `reinforce_forward_only = False`** — confirmed: it would ban ~21% of Jake's real reinforces (27% late
-game). The lever is the *policy* reinforcing forward more early, not a mask. [`metrics.md`](metrics.md) banner.
+**Open:** validate the reward-attribution change (`torch_env._fleet_target_idx`, lead-collision) — these runs
+are the fresh-run check. Recompute stale top-player refs (Isaiah/TonyK in [`metrics.md`](metrics.md)).
+
+**Keep `reinforce_forward_only = False`** — it would ban ~21% of Jake's real reinforces. Lever is the *policy*
+reinforcing forward early, not a mask. **cd3/min-ship-bin inference A/B = flat** (7.0 vs 8.2 Ajay; veto removes,
+doesn't teach; min-ship-bin can't fix ship0 — it's garrison-limited 1-ship sends, not head miscalibration).
 
 ---
 
 ## 🔵 The wall — curriculum, not reward proxies
 
-Root cause (unchanged): we get **out-massed** on defendable captures; the opening land-grab is under-floor
-(`<50` cross ~0.23). Now *quantified honestly*: opening capture efficiency is the real gap (ours 0.54 vs
-Jake 0.70) and it **survives PPO** (phase4e ≈ BC seed) → not a PPO-tuning problem.
+Root cause **sharpened (2026-06-20, single-game replay dig-in vs Ajay)**: we don't lack force — we
+**under-deploy *available* force by choice.** Of single-source contested launches that fall short of the
+floor, **72%** had ≥1 *other* owned planet with spare garrison **in range** (avg 2.4 such sources), and
+**65%** of those would have crossed the floor if we'd piled them on. Only 28% are real capacity limits.
+Multi-source concentration *works when we use it* (76% cross, 81% hold-in-wins) but we deploy it on only
+**7%** of contested targets and **cap at 2 sources** (winners go 4–5). So the fix isn't more force or a new
+feature — it's a policy habit: **concentrate from more sources, more often, sustained.** The loss signature:
+total garrison can exceed the enemy's yet we lose because it's *dispersed* (e.g. 518 garr vs 80, eliminated
+by a single concentrated 269-ship wave). Tools: `gpu_run_artifacts/{analyze_one_game,multi_source_events,multi_source_why}.py`.
+Prior framing (out-massed on defendable captures; opening `<50` cross ~0.23; survives PPO phase4e≈BC) still holds.
 
 - **🟢 Curriculum / opponent-relative — make holding-via-concentration NECESSARY to win.** Boards where a
   capture is only holdable if you concentrate the defensive response; a contested opening where single-planet
