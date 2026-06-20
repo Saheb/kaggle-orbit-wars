@@ -121,70 +121,72 @@ def _bc_fleet_speed(ships: int) -> float:
 
 def _find_target_planet_index(src_xy, emitted_angle, ship_count, planets, initial_planets,
                               angular_velocity, current_step, max_planets=48):
-    """Recover which planet the teacher meant by its (angle, ships) launch.
+    """Recover which planet a teacher's (angle, ships) launch actually hits.
 
-    Replicates teacher's logic: for each planet, ETA-iterate to find the predicted
-    arrival position (handles orbital intercept), compute angle from src to that
-    predicted position, pick the planet whose predicted-angle is circularly
-    closest to the teacher's emitted angle.
+    The fleet flies straight at `emitted_angle` and captures whatever it physically COLLIDES with,
+    so the real target depends on distance, planet radius AND the target's orbital motion over the
+    flight. This projects each candidate to its orbit position at the fleet ETA (lead/intercept,
+    mirroring the aimer), then keeps the min-ETA planet the heading reaches within radius — the same
+    lead-collision resolver as eval._lead_collision_target (validated 98.4% vs true swept-collision;
+    the old min-angular-error match was ~56% — distance-blind AND its orbit projection depended on the
+    absolute `current_step`, which is 0 in many replays → broken for mid/late-game orbiting targets).
 
-    Returns int index into planets[:max_planets], or -1 if no match.
+    `initial_planets` / `current_step` are kept for signature compatibility but no longer used: the
+    orbit radius is rotation-invariant (read from the current position) and the phase is advanced by
+    `angular_velocity * eta` from NOW, so no absolute step is needed.
+
+    Returns int index into planets[:max_planets], or -1 if the fleet hits nothing (fired into the void).
     """
     if not planets:
         return -1
-    sx, sy = src_xy
-    speed = _bc_fleet_speed(ship_count)
-
-    # Build orbital table from initial_planets
-    init_by_id = {int(p[0]): p for p in initial_planets}
-
-    best_pid_idx = -1
-    best_circ_err = float("inf")
+    cx, cy = src_xy
+    c, sn = math.cos(emitted_angle), math.sin(emitted_angle)
+    speed = max(_bc_fleet_speed(ship_count), 1e-6)
+    # Fleet spawns at the source SURFACE + a small offset along the heading (engine:
+    # start = planet_center + cos/sin(angle)*(radius + 0.1)), not the center — matters for
+    # near targets and to push the source planet behind the fleet. Recover the source (and skip
+    # it as a candidate) by matching its center to src_xy (the caller passes the source center).
+    src_pid = None
+    sx, sy = cx, cy
+    for p in planets:
+        if float(p[2]) == cx and float(p[3]) == cy:
+            src_pid = int(p[0])
+            sx = cx + c * (float(p[4]) + 0.1)
+            sy = cy + sn * (float(p[4]) + 0.1)
+            break
+    best_idx, best_eta = -1, None
     for j, tgt in enumerate(planets[:max_planets]):
-        pid = int(tgt[0])
+        if src_pid is not None and int(tgt[0]) == src_pid:
+            continue
         tx, ty, tr = float(tgt[2]), float(tgt[3]), float(tgt[4])
-
-        # Iterate ETA→position fixed-point (4 iters; converges fast)
-        ax, ay = tx, ty
-        ip = init_by_id.get(pid)
-        if ip is not None:
-            irx = float(ip[2]) - _BC_CENTER
-            iry = float(ip[3]) - _BC_CENTER
-            init_angle = math.atan2(iry, irx)
-            orbital_r = math.hypot(irx, iry)
-            is_orbiting = (orbital_r + tr) < _ROTATION_LIMIT
-        else:
-            is_orbiting = False
-            init_angle = 0.0
-            orbital_r = 0.0
-
+        dx, dy = tx - _BC_CENTER, ty - _BC_CENTER
+        orbital_r = math.hypot(dx, dy)
+        is_orbiting = (orbital_r + tr) < _ROTATION_LIMIT
+        phase0 = math.atan2(dy, dx)
+        # Converge ETA against the moving target (4 iters).
+        eta = max(0.0, (math.hypot(tx - sx, ty - sy) - tr) / speed)
         for _ in range(4):
-            dist = math.hypot(ax - sx, ay - sy)
-            eta = max(1, int(math.ceil(dist / speed)))
             if is_orbiting:
-                ang = init_angle + angular_velocity * (current_step + eta)
-                nax = _BC_CENTER + orbital_r * math.cos(ang)
-                nay = _BC_CENTER + orbital_r * math.sin(ang)
+                a = phase0 + angular_velocity * eta
+                lx = _BC_CENTER + orbital_r * math.cos(a)
+                ly = _BC_CENTER + orbital_r * math.sin(a)
             else:
-                nax, nay = tx, ty
-            if abs(nax - ax) < 0.5 and abs(nay - ay) < 0.5:
-                ax, ay = nax, nay
-                break
-            ax, ay = nax, nay
-
-        predicted_angle = math.atan2(ay - sy, ax - sx)
-        # Circular angular error (in radians)
-        d = abs(predicted_angle - emitted_angle)
-        d = min(d, 2 * math.pi - d)
-        if d < best_circ_err:
-            best_circ_err = d
-            best_pid_idx = j
-
-    # Reject if even the best match is way off (teacher fired at empty space or
-    # something we can't decode) — > 15° circular error is suspicious
-    if best_circ_err > math.radians(15.0):
-        return -1
-    return best_pid_idx
+                lx, ly = tx, ty
+            eta = max(0.0, (math.hypot(lx - sx, ly - sy) - tr) / speed)
+        if is_orbiting:
+            a = phase0 + angular_velocity * eta
+            lx = _BC_CENTER + orbital_r * math.cos(a)
+            ly = _BC_CENTER + orbital_r * math.sin(a)
+        else:
+            lx, ly = tx, ty
+        vx, vy = lx - sx, ly - sy
+        along = vx * c + vy * sn
+        if along <= 0:                              # planet is behind the heading (incl. the source)
+            continue
+        perp = abs(vx * sn - vy * c)
+        if perp < tr + 0.5 and (best_eta is None or eta < best_eta):
+            best_eta, best_idx = eta, j
+    return best_idx
 
 
 def trajectory_to_training_sample(traj: dict, max_owned: int = MAX_OWNED_PLANETS, max_planets: int = 48) -> dict | None:

@@ -1,10 +1,53 @@
 # Orbit Wars — Training & Eval Metrics Reference
 
-Which numbers mean what, what's normal, and **which to trust**. Two overhauls baked in:
+Which numbers mean what, what's normal, and **which to trust**. Overhauls baked in:
 - **Rev54 false-alarm** — we mis-called a collapse on `Vμ` + `avgfleet` + `srcs_multi`, all non-signals.
 - **2026-06-11 conversion/hoard overhaul** — replaced the end-skewed `avgfleet`/`p90` with
   controlled-time **milestone** metrics, and added **conversion** metrics (eval + training) with a
   top-player reference. See "Conversion & hoard" below.
+- **⭐ 2026-06-20 target-resolution fix** — see banner below; re-read every target-derived number.
+
+---
+
+## ⭐ 2026-06-20 session findings (target-resolution fix + re-reads)
+
+**The bug:** the env has NO launch "target" — a fire flies straight and captures whatever it physically
+collides with (distance + planet radius + orbital motion). `eval._resolve_launch_target` picked the planet
+of MIN ANGULAR DEVIATION → **65.6% correct, 12.5% of launches flipped attack↔reinforce** (vs true
+swept-collision). Fixed → **lead-aware collision resolver** (project each candidate to its orbit position at
+the fleet ETA, keep the min-ETA hit within radius; mirrors the agent's intercept aimer) = **98.4%**. Same
+fix in `torch_env._fleet_target_idx` (decisive-mass reward + features, was ~85% — ⚠️ changes the training
+signal, needs a fresh run + SPS check). `captures` / `planets@N` (direct ownership reads) were always
+reliable. **It is a REPORTING bug, not a play bug** — the agent's aimer is a validated ~95% intercept aimer
+and captures use the exact kaggle swept-collision; only our *measurement* of which planet a launch went to
+was wrong.
+
+**What it changed in the diagnosis (corrected, vs Ajay 64g; Jake = 313 jake_decisive replays):**
+
+| metric | Jake (corrected) | phase4e 3.67M | BC jake pw6.8 | was (angle) |
+|---|---|---|---|---|
+| cap/atk-launch **open<50** | **0.70** | 0.54 | 0.56 | Jake 0.47 ≈ ours 0.43 (gap MASKED) |
+| **underkill<50** | **0.03** | 0.08 | 0.09 | ~0.40 everywhere (ARTIFACT) |
+| reinf ramp @4-6 / @7-9 / @13+ | **0.52 / 0.61 / 0.57** | 0.36 / 0.48 / 0.57 | 0.10 / 0.07 / — | ref @9-12:0.30 |
+
+1. **"underkill doesn't discriminate" was a resolver artifact** — it inflated underkill to a uniform ~0.40,
+   hiding the real gap. Corrected, winners ~0.03, ours ~0.08 (discriminates, small).
+2. **The real opening gap is `open<50 cap/atk-launch`: Jake 0.70 vs ours 0.54** — the old resolver MASKED it
+   (had Jake 0.47 ≈ ours 0.43). We capture per ~1.9 opening launches, Jake per ~1.4. **Gap is in the BC SEED
+   and survives PPO** (phase4e 0.54 ≈ BC 0.56) → lever = improve opening capture efficiency in the seed.
+3. **BC under-reinforces even at MATCHED empire size** (@4-6: 0.10 vs Jake 0.52); its low aggregate
+   reinf_share (0.08) is partly the win/size confound (never grows vs Ajay) but also a real 5× deficit.
+4. **`reinforce_forward_only` → KEEP `False`.** Measured against the exact `action_mask` test, **forward_only=True
+   would ban 21.0% of Jake's actual reinforces** (ship-wt 20.1%; by phase open<50 17.8% · mid 18.3% · **late
+   26.6%**). Only 22% of those "rear" reinforces are frontline consolidations — ~78% are genuinely backward
+   (median target 6.5 board-units farther from the enemy than source). Jake reinforces rear/laterally ~1 in 5,
+   most in the late game when holding a big empire and pulling mass back to defend threatened planets. A
+   forward-only mask would delete that defensive repertoire and can't *teach* forward-staging anyway
+   (masks remove, don't teach) → the lever is the POLICY/BC reinforcing forward more early, not a mask.
+
+**Code:** `eval.py` (`_lead_collision_target`/`_planet_pos_at`, `_resolve_launch_target(...,ships)`,
+`_dm_fleet_target`, `_CONV_ANGVEL`), `torch_env._fleet_target_idx`, test `test_fleet_target_lead.py`.
+Driver to recompute any reference: `conversion_from_replays.py`. STILL STALE: Isaiah/TonyK rows below.
 
 ---
 
@@ -117,6 +160,33 @@ conditions on firing steps.)
 
 ## Conversion & hoard metrics (the 2026-06-11 overhaul)
 
+> **⭐ 2026-06-20 TARGET-RESOLUTION FIX — re-read every target-derived number below.** The env has no
+> launch "target": a fire flies straight and captures whatever it physically collides with (distance +
+> planet radius + orbital motion). The old `_resolve_launch_target` picked the planet of MIN ANGULAR
+> DEVIATION (distance/radius/motion-blind) → **65.6% correct, 12.5% of launches flipped attack↔reinforce**
+> (measured vs true swept-collision). Replaced with a **lead-aware collision resolver** (project each
+> candidate to its orbit position at the fleet ETA, keep the min-ETA hit within radius — mirrors the
+> agent's intercept aimer): **98.4%.** Same fix in `torch_env._fleet_target_idx` (decisive-mass reward +
+> features, was ~85%). `captures`/`planets@N` (direct ownership reads) were always reliable; everything
+> keyed on a launch's *target* — cap/atk-launch, underkill, redundant, near/far, reinf_share, the
+> reinforce ramp — was up to 34% noise. **Corrected top-player + agent reference (vs Ajay, 2026-06-20):**
+>
+> | metric | Jake (corrected) | phase4e 3.67M | BC jake pw6.8 | OLD(angle) Jake |
+> |---|---|---|---|---|
+> | cap/atk-launch **open<50** | **0.70** | 0.54 | 0.56 | 0.47 (masked the gap) |
+> | cap/atk-launch whole | 0.71 | 0.66 | 0.59 | 0.50 |
+> | **underkill<50** | **0.03** | 0.08 | 0.09 | 0.44 (artifact) |
+> | reinf_share (size-confounded) | 0.56 | 0.49 | 0.08 | 0.38 |
+> | reinf ramp @4-6 / @7-9 / @13+ | **0.52 / 0.61 / 0.57** | 0.36 / 0.48 / 0.57 | 0.10 / 0.07 / — | @9-12:0.30 |
+>
+> **What changed in the diagnosis:** (1) "underkill ~0.43 doesn't discriminate" (the 2026-06-12 CORRECTION
+> below) was **itself a resolver artifact** — corrected, winners sit ~0.03, ours ~0.08, so it *does*
+> discriminate (small gap). (2) `open<50 cap/atk-launch` is the real opening gap and the old resolver
+> **masked it** (Jake 0.47≈ours 0.43 → corrected Jake 0.70 vs ours 0.54). (3) The gap is in the BC seed and
+> survives PPO (phase4e 0.54 ≈ BC 0.56). (4) BC under-reinforces even at MATCHED empire size (@4-6: 0.10 vs
+> Jake 0.52) — not just the win/size confound. The per-player table further down (Isaiah/TonyK/213tubo) is
+> STALE (old resolver) until recomputed with `conversion_from_replays.py`.
+
 Printed on **every eval** (`eval.py`, both `--panel` and baseline) and computed identically from the
 top-player replays, so eval is directly comparable to the human reference. The whole-game read that
 win-rate alone can't give you: *are we capturing efficiently, expanding, and deploying — or churning
@@ -130,7 +200,7 @@ Conversion: caps/game X  atk-launch/game X  cap/atk-launch X (open<50 X)  ships/
   fire-rate  launch_rate X  fire_frac X   [ref Isaiah 0.036 / 0.17]
      WON(Ng) lr X ff X  |  LOST(Ng) lr X ff X   (read WON; ff inflates on losses)
   hoard  garr_frac@ a/b/c/d  ships/planet@ a/b/c/d
-  reinf by empire size  1:r(n)  2-3:r(n)  4-6:r(n)  7-9:r(n)  10-12:r(n)  13+:r(n)   [ref ramp @1:0.00 @2:0.10 @9-12:0.30 @13+:0.34-0.61]
+  reinf by empire size  1:r(n)  2-3:r(n)  4-6:r(n)  7-9:r(n)  10-12:r(n)  13+:r(n)   [ref ramp (Jake corrected 2026-06-20) @1:0.00 @2:0.17 @3:0.33 @4-6:0.52 @7-9:0.61 @10-12:0.60 @13+:0.57]
 ```
 Printed on **every** eval (`--panel` and baseline). `churn`, `launch-waste<50 (redundant/underkill)` are
 defined below; all compute identically from top-player replays via `conversion_from_replays.py`.
@@ -245,16 +315,18 @@ defined below; all compute identically from top-player replays via `conversion_f
     launch (id-keyed lookahead, no slot-reorder issue) ÷ opening attack-launches → ships that didn't lead to
     a capture (the seed1030 18-at-23 lone-undercommit case). A per-launch `sent+inbound<cost` threshold is
     WRONG here — it mis-flags legit multi-wave (each wave < cost) at ~0.86; forward-looking fixes that
-    (a target a later wave captures reads effective for all waves). Top-player ref **~0.43** (Isaiah 0.40 ·
-    Jake 0.43 · TonyK 0.50). ⚠️ **CORRECTION (2026-06-12): underkill does NOT discriminate winners from
-    losers** — winners sit ~0.40–0.43 and our p2rev4 aggregate is 0.41 (*below* winners) yet loses; ~40%
-    of opening attacks "not capturing within eta+10" is just normal probing/multi-wave/contested-neutral
-    play. Do NOT alarm on underkill ~0.4, and don't read it as "the conversion gap." **The real opening
-    discriminator is `open<50 cap/atk-launch`** (captures *per launch*): winners ~0.51, our losses ~0.26 —
-    i.e. we need ~4 launches per captured planet, winners need ~2. The disease is **launches-per-capture
-    (over-launching / fragments under the target's defense), not "launches that never capture."** Anchor to
-    the WINNER ref, never the `(WG)` self-reference (which normalizes a bad opening against our own padded
-    whole-game average).
+    (a target a later wave captures reads effective for all waves). ⚠️⚠️ **SUPERSEDED 2026-06-20 — the
+    2026-06-12 "underkill doesn't discriminate" CORRECTION below was a RESOLVER ARTIFACT.** Old top-player ref
+    ~0.43 (Isaiah 0.40 · Jake 0.43 · TonyK 0.50) was computed with the 65%-accurate angle resolver, which
+    mis-attributed attacks to planets that never flipped *because the fleet actually hit a different planet
+    that did flip*. **Corrected (lead-collision resolver): Jake underkill<50 = 0.03**, our agents ~0.08 — so
+    underkill collapses to single digits AND now discriminates (small ~5pp gap). The ORIGINAL 2026-06-12 text
+    (kept for history): "underkill does NOT discriminate winners from losers — winners sit ~0.40–0.43 and our
+    p2rev4 aggregate is 0.41 yet loses." → **Both halves were inflated by the bug; ignore the 0.4 numbers.**
+    **The real opening discriminator is still `open<50 cap/atk-launch`** — corrected: **Jake 0.70 vs ours
+    ~0.54** (was masked as 0.47≈0.43 by the old resolver). We capture per ~1.9 opening launches, Jake per
+    ~1.4. The disease is **launches-per-capture (over-launching / fragments under the target's defense)**.
+    Anchor to the CORRECTED winner ref, never the `(WG)` self-reference.
   (Same-step double-fires at one fresh target aren't counted for redundant — neither fleet exists at decision
   time — matching the fix's reach.)
 - **reinf_share** = reinforce-launches ÷ all launches. ⚠️ **Opponent/success-confounded**: it co-moves
@@ -280,16 +352,17 @@ controlled, comparable points (immune to game length / end-state), and the **rat
 
 ### Top-player reference (timing-corrected replays: action@t paired with obs@t-1)
 
-Computed over **269 replays** (`/tmp/fresh_validate` 180 + `/tmp/snowball` 89) by running the eval's own
-`game_conversion()` over the replays — driver `conversion_from_replays.py <dirs> [--player NAME]`, so the
-top-player numbers and the eval numbers come from the *same function* (true eval == replay parity).
-`n` = games each player appears in (all outcomes, not just wins); ratios are pooled over all those games.
+⚠️ **`cap/atk-launch` + `reinf_share` columns below are STALE (pre-2026-06-20 angle resolver, 65% accurate)
+and UNDERSTATE both.** Recompute with `conversion_from_replays.py` on the fixed code before citing. Known
+correction so far — **Jake Will: cap/atk-launch 0.42 → 0.71, reinf_share 0.43 → 0.56, ships/cap 140 → 83**
+(313-game `gpu_run_artifacts/jake_decisive/replays`). `ships/cap`, `planets@`, `garr_frac@`, `ships/planet@`
+are NOT target-derived → still valid.
 
 | player | rank | n | cap/atk-launch | ships/cap | reinf_share | planets@16/32/50/100 | garr_frac@16/32/50/100 | ships/planet@16/32/50/100 |
 |---|---|---|---|---|---|---|---|---|
-| Isaiah @ Tufa Labs | #1 | 194 | **0.59** | 168 | 0.30 | 2/6/9/10 | 0.50/0.51/0.54/0.87 | 11/15/22/60 |
-| Jake Will | #2 | 83 | 0.42 | 140 | 0.43 | 2/5/8/11 | 0.59/0.59/0.60/0.77 | 13/16/24/43 |
-| TonyK | — | 83 | 0.53 | 181 | 0.40 | 2/6/9/9 | 0.46/0.46/0.50/0.80 | 10/14/20/63 |
+| Isaiah @ Tufa Labs | #1 | 194 | 0.59 ⚠stale | 168 | 0.30 ⚠ | 2/6/9/10 | 0.50/0.51/0.54/0.87 | 11/15/22/60 |
+| Jake Will | #2 | 83 | **0.71** (was 0.42) | 83 | **0.56** (was 0.43) | 2/5/8/11 | 0.59/0.59/0.60/0.77 | 13/16/24/43 |
+| TonyK | — | 83 | 0.53 ⚠stale | 181 | 0.40 ⚠ | 2/6/9/9 | 0.46/0.46/0.50/0.80 | 10/14/20/63 |
 | 213tubo | mid | 46 | 0.07 | 199 | 0.45 | 2/5/8/10 | 0.52/0.51/0.45/0.49 | 11/15/18/21 |
 
 Read it: elite play = **high cap/atk-launch** (Isaiah 0.59 vs carpet-bomber 213tubo 0.07), steady

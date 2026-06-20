@@ -83,7 +83,10 @@ def test_game_conversion_routes_failed_attack_bucket():
 
 def test_game_conversion_routes_reachable_agg2():
     src = [1, SEAT, 0.0, 0.0, 8.0, 10.0, 1.0]
-    helper = [2, SEAT, 20.0, 0.0, 8.0, 15.0, 1.0]
+    # helper sits OFF the src->tgt firing line (perp 18 > radius) so the launch resolves to the
+    # target rather than physically colliding with the helper, but is still a reachable drainable
+    # source for the aggregate-failure bucket.
+    helper = [2, SEAT, 20.0, 18.0, 8.0, 15.0, 1.0]
     tgt = [3, -1, 100.0, 0.0, 8.0, 20.0, 1.0]
     planets = [src, tgt, helper]
     steps = [
