@@ -47,12 +47,20 @@ class ModelConfig:
     # MUST match the BC label scheme that produced the checkpoint.
     # Default "absolute" preserves legacy checkpoint behaviour.
     ship_bin_mode: str = "absolute"
-    pairwise_feature_dim: int = 16   # see features.PAIRWISE_FEATURE_DIM
+    pairwise_feature_dim: int = 22   # see features.PAIRWISE_FEATURE_DIM
     max_planets: int = 48            # for target_head output size; matches EnvConfig
     # Phase 4 residual output init scale. 0.0 = exact parity (legacy Stage A/B);
     # small nonzero values preserve near-parity while letting the residual path
     # influence behavior before PPO has to move a zeroed output layer off dead-zero.
     phase4_residual_init_std: float = 0.0
+    # Target-decode discipline. These are persisted in checkpoints so train/eval/export
+    # do not silently disagree about own-target legality or attack concentration vetoes.
+    allow_reinforce: bool = False
+    reinforce_gate_min_planets: int = 0
+    reinforce_forward_only: bool = False
+    reinforce_garrison_floor: float = 0.0
+    reverse_edge_cooldown: int = 0
+    sufficient_commit_factor: float = 0.0
     dropout: float = 0.0
     # Value head input width. 0 = auto (2*entity_dim, new concat head).
     # Set to entity_dim when loading pre-Phase-1 checkpoints (old mean-pool head).

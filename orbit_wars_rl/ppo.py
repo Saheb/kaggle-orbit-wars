@@ -47,7 +47,7 @@ class PPOLearner:
         # Current IL coefficient — schedule updated externally each iter
         self.il_coef = float(getattr(cfg.ppo, "il_lambda", 0.0)) if frozen_il_model is not None else 0.0
 
-        # ROI auxiliary regression heads — keep new pairwise feature columns
+        # ROI auxiliary regression heads — keep the original ROI/contest pairwise columns
         # (pair_kv.weight[:, 108:111] and target_scorer[0].weight[:, 204:207])
         # anchored to encoding roi_20/roi_50/enemy_contest throughout PPO.
         # Transient: not saved to checkpoint, discarded after training.
@@ -463,7 +463,7 @@ class PPOLearner:
                 if self.roi_heads is not None and self.aux_roi_coef > 0.0:
                     pairwise = batch.get("pairwise_features")
                     if pairwise is not None:
-                        pairwise = pairwise.to(self.device)          # (B, MO, N_p, 15)
+                        pairwise = pairwise.to(self.device)          # (B, MO, N_p, F_pair)
                         x_new = pairwise[..., 12:15].reshape(-1, 3)  # (B*MO*N_p, 3)
                         # pair_kv branch — only new columns in computational graph
                         contrib_kv = F.linear(x_new, self.model.pair_kv.weight[:, 108:111])
@@ -561,6 +561,7 @@ class PPOLearner:
             cfg_blob = {
                 "num_ship_bins": int(getattr(model_cfg, "num_ship_bins", 32)),
                 "min_ship_bin": int(getattr(model_cfg, "min_ship_bin", 0)),
+                "pairwise_feature_dim": int(getattr(model_cfg, "pairwise_feature_dim", 0)),
                 "ship_bin_mode": str(getattr(model_cfg, "ship_bin_mode", "absolute")),
                 "action_decode": str(getattr(model_cfg, "action_decode", "angle")),
                 "allow_reinforce": bool(getattr(model_cfg, "allow_reinforce", False)),

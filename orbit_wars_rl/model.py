@@ -5,7 +5,7 @@ Architecture (ADR-001/002/003 documented):
 - Shared backbone + mode token for 2p/4p (ADR-002)
 - Baked-in geometric features, discovered strategy (ADR-003)
 
-Phase 1 feature dims: planet=20, fleet=13, global=11, pairwise=12, max_owned=16.
+Phase 1 feature dims: planet=20, fleet=13, global=11, pairwise=20, max_owned=16.
 Value head: concat(global_token, owned_pool) → 2D → D → D/2 → 1.
 ~350K params: 3 layers, 96 dim, 4 heads, 3x MLP expansion.
 """
@@ -391,14 +391,17 @@ class EntityTransformer(nn.Module):
         if any(k.startswith("angle_head.") for k in state_dict):
             state_dict = {k: v for k, v in state_dict.items()
                           if not k.startswith("angle_head.")}
-        # Pairwise-channel growth (e.g. adding reachable_enemy_mass = ch15): the per-target
-        # scorers' first Linear gains trailing input columns. Zero-pad the new columns of an
-        # older checkpoint so the new feature contributes nothing at step 0 (decode + log-prob
-        # match the source model). pairwise is the last block in [q, k, pairwise], so new
-        # channels are the LAST columns → right-pad. Same parity-init idea as the Phase 4 heads.
+        # Input-channel growth (e.g. adding target-value / keepability pairwise channels, or
+        # game-phase globals 11-14 on top of an 11-global checkpoint): the affected input Linear
+        # gains trailing input columns. Zero-pad the new columns of an older checkpoint so the
+        # new feature contributes nothing at step 0 (decode + log-prob match the source model).
+        # New channels are appended LAST (pairwise is the last block in [q, k, pairwise]; phase
+        # globals are extend()-ed after the base globals) → right-pad. Same parity-init idea as
+        # the Phase 4 heads. global_proj/mode_proj both consume the global vector (see forward).
         own = self.state_dict()
         for name in ("pair_kv.weight", "target_scorer.0.weight",
-                     "fire_scorer.0.weight", "ship_scorer.0.weight"):
+                     "fire_scorer.0.weight", "ship_scorer.0.weight",
+                     "global_proj.weight", "mode_proj.weight"):
             if name in state_dict and name in own:
                 ck, md = state_dict[name], own[name]
                 if ck.dim() == 2 and ck.shape[0] == md.shape[0] and ck.shape[1] < md.shape[1]:

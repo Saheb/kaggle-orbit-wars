@@ -31,6 +31,7 @@ for _path in (ROOT, PKG):
         sys.path.insert(0, str(_path))
 
 from orbit_wars_rl import eval as ev  # noqa: E402
+from orbit_wars_rl.features import extract_features  # noqa: E402
 
 
 PHASES = (("all", 0, 10**9), ("open", 0, 50), ("mid", 50, 100), ("late", 100, 10**9))
@@ -203,6 +204,66 @@ def _fmt(v: float | None, digits: int = 2) -> str:
     return "NA" if v is None else f"{v:.{digits}f}"
 
 
+def _target_value_context(obs: dict[str, Any], seat: int) -> dict[str, Any] | None:
+    """Build a cheap lookup from replay planet ids to pairwise target-value rows."""
+    planets = obs.get("planets") or []
+    if not planets:
+        return None
+    try:
+        feats = extract_features(obs, player=seat, num_players=2, max_planets=48, max_fleets=128)
+    except Exception:
+        return None
+
+    pairwise = feats.get("pairwise_features")
+    owned_indices = feats.get("owned_indices")
+    if pairwise is None or owned_indices is None:
+        return None
+    if hasattr(pairwise, "detach"):
+        pairwise = pairwise.detach().cpu().numpy()
+    if hasattr(owned_indices, "detach"):
+        owned_indices = owned_indices.detach().cpu().numpy()
+
+    pid_to_idx = {_pid(p): i for i, p in enumerate(planets)}
+    src_pid_to_slot: dict[int, int] = {}
+    for slot, src_idx in enumerate(owned_indices):
+        idx = int(src_idx)
+        if idx >= len(planets) or slot >= pairwise.shape[0]:
+            continue
+        p = planets[idx]
+        if _owner(p) == seat:
+            src_pid_to_slot[_pid(p)] = slot
+    return {"pairwise": pairwise, "pid_to_idx": pid_to_idx, "src_pid_to_slot": src_pid_to_slot}
+
+
+def _target_value_row(ctx: dict[str, Any] | None, src_pid: int, tgt_pid: int) -> tuple[float, float, float, float] | None:
+    if ctx is None:
+        return None
+    slot = ctx["src_pid_to_slot"].get(src_pid)
+    tgt_idx = ctx["pid_to_idx"].get(tgt_pid)
+    if slot is None or tgt_idx is None:
+        return None
+    pairwise = ctx["pairwise"]
+    if tgt_idx >= pairwise.shape[1] or pairwise.shape[2] < 20:
+        return None
+    row = pairwise[slot, tgt_idx]
+    return float(row[16]), float(row[17]), float(row[18]), float(row[19])
+
+
+def _record_target_value(stats: Counter, ratios: dict[str, list[float]],
+                         row: tuple[float, float, float, float] | None) -> None:
+    if row is None:
+        stats["value_missing_attack_moves"] += 1
+        return
+    capture_value, reactive_roi, friendly_reach, keepability = row
+    stats["value_audited_attack_moves"] += 1
+    stats["low_value_attack_moves"] += int(capture_value < 0.05 or reactive_roi < 0.0)
+    stats["negative_keep_attack_moves"] += int(keepability < 0.0)
+    ratios["capture_value_40"].append(capture_value)
+    ratios["reactive_roi_40"].append(reactive_roi)
+    ratios["friendly_reachable_mass"].append(friendly_reach)
+    ratios["keepability_margin"].append(keepability)
+
+
 def _update_list_stats(c: Counter, action_len: int) -> None:
     c["action_turns"] += 1
     c["native_moves"] += action_len
@@ -223,6 +284,7 @@ def _analyze_turn(obs: dict[str, Any], action: Any, seat: int, step: int, beta: 
 
     pmap = {_pid(p): p for p in planets}
     own_pids = {_pid(p) for p in planets if _owner(p) == seat}
+    value_ctx = _target_value_context(obs, seat) if raw_moves else None
     if raw_moves:
         _update_list_stats(stats, len(raw_moves))
 
@@ -259,6 +321,7 @@ def _analyze_turn(obs: dict[str, Any], action: Any, seat: int, step: int, beta: 
             stats["save_moves"] += 1
             continue
         stats["attack_moves"] += 1
+        _record_target_value(stats, ratios, _target_value_row(value_ctx, src_pid, _pid(tgt)))
         target_groups[_pid(tgt)].append({"src": src, "tgt": tgt, "ships": ships})
 
     stats["owned_moves"] += owned_moves
@@ -424,6 +487,10 @@ def _summarize(label: str, c: Counter, ratios: dict[str, list[float]]) -> dict[s
     lens = c.get("_list_lens", [])
     floor_ratios = ratios.get("floor_needed_multi_source_cross_ratio", [])
     coarrival_ratios = ratios.get("floor_needed_coarrival_ratio", [])
+    capture_values = ratios.get("capture_value_40", [])
+    reactive_rois = ratios.get("reactive_roi_40", [])
+    friendly_reaches = ratios.get("friendly_reachable_mass", [])
+    keepability_margins = ratios.get("keepability_margin", [])
     return {
         "label": label,
         "replays_used": int(c["replays_used"]),
@@ -454,6 +521,20 @@ def _summarize(label: str, c: Counter, ratios: dict[str, list[float]]) -> dict[s
         "floor_needed_cross_ratio_p90": _quantile(floor_ratios, 0.90),
         "floor_needed_coarrival_ratio_p50": _quantile(coarrival_ratios, 0.50),
         "floor_needed_coarrival_ratio_p90": _quantile(coarrival_ratios, 0.90),
+        "value_audited_attack_moves": int(c["value_audited_attack_moves"]),
+        "value_missing_attack_moves": int(c["value_missing_attack_moves"]),
+        "low_value_attack_rate": _pct(c["low_value_attack_moves"], c["value_audited_attack_moves"]),
+        "negative_keep_attack_rate": _pct(c["negative_keep_attack_moves"], c["value_audited_attack_moves"]),
+        "capture_value_p10": _quantile(capture_values, 0.10),
+        "capture_value_p50": _quantile(capture_values, 0.50),
+        "capture_value_p90": _quantile(capture_values, 0.90),
+        "reactive_roi_p10": _quantile(reactive_rois, 0.10),
+        "reactive_roi_p50": _quantile(reactive_rois, 0.50),
+        "reactive_roi_p90": _quantile(reactive_rois, 0.90),
+        "friendly_reach_p50": _quantile(friendly_reaches, 0.50),
+        "keepability_p10": _quantile(keepability_margins, 0.10),
+        "keepability_p50": _quantile(keepability_margins, 0.50),
+        "keepability_p90": _quantile(keepability_margins, 0.90),
     }
 
 
@@ -471,7 +552,11 @@ def _print_summary(row: dict[str, Any]) -> None:
         f"msCross={row['floor_needed_multi_source_cross_rate']:.3f} "
         f"coArr={row['floor_needed_coarrival_cross_rate']:.3f} "
         f"stopShort={row['floor_needed_stop_short_rate']:.3f} "
-        f"lean_p50/p90={_fmt(row['floor_needed_cross_ratio_p50'])}/{_fmt(row['floor_needed_cross_ratio_p90'])}"
+        f"lean_p50/p90={_fmt(row['floor_needed_cross_ratio_p50'])}/{_fmt(row['floor_needed_cross_ratio_p90'])} "
+        f"valueN={row['value_audited_attack_moves']} lowVal={row['low_value_attack_rate']:.3f} "
+        f"negKeep={row['negative_keep_attack_rate']:.3f} "
+        f"val_p50={_fmt(row['capture_value_p50'])} roi_p50={_fmt(row['reactive_roi_p50'])} "
+        f"keep_p50={_fmt(row['keepability_p50'])}"
     )
 
 
@@ -506,6 +591,22 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
             f"{row['floor_needed_coarrival_cross_rate']:.3f} | {row['floor_needed_stop_short_rate']:.3f} | "
             f"{_fmt(row['floor_needed_cross_ratio_p50'])}/{_fmt(row['floor_needed_cross_ratio_p90'])} | "
             f"{_fmt(row['floor_needed_coarrival_ratio_p50'])}/{_fmt(row['floor_needed_coarrival_ratio_p90'])} |"
+        )
+    lines.extend([
+        "",
+        "## Target Value Audit",
+        "",
+        "| phase | audited attacks | missing | low-value rate | negative-keep rate | value p10/p50/p90 | reactive ROI p10/p50/p90 | friendly reach p50 | keepability p10/p50/p90 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ])
+    for row in payload["summaries"]:
+        lines.append(
+            f"| {row['label']} | {row['value_audited_attack_moves']} | {row['value_missing_attack_moves']} | "
+            f"{row['low_value_attack_rate']:.3f} | {row['negative_keep_attack_rate']:.3f} | "
+            f"{_fmt(row['capture_value_p10'])}/{_fmt(row['capture_value_p50'])}/{_fmt(row['capture_value_p90'])} | "
+            f"{_fmt(row['reactive_roi_p10'])}/{_fmt(row['reactive_roi_p50'])}/{_fmt(row['reactive_roi_p90'])} | "
+            f"{_fmt(row['friendly_reach_p50'])} | "
+            f"{_fmt(row['keepability_p10'])}/{_fmt(row['keepability_p50'])}/{_fmt(row['keepability_p90'])} |"
         )
     lines.extend([
         "",

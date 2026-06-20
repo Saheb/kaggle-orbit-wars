@@ -74,6 +74,8 @@ def test_feature_shapes():
         feats["fleet_features"].shape
     assert feats["global_features"].shape == (cfg.global_feature_dim,), \
         feats["global_features"].shape
+    assert feats["pairwise_features"].shape == (cfg.max_owned_planets, cfg.max_entities, cfg.pairwise_feature_dim), \
+        feats["pairwise_features"].shape
     assert feats["planet_mask"].shape == (cfg.max_entities,)
     assert feats["fleet_mask"].shape == (128,)
     print("test_feature_shapes: PASS")

@@ -604,7 +604,7 @@ def train(args):
             "kv": nn.Linear(2 * cfg.model.entity_dim, 3, bias=False),
             "ts": nn.Linear(cfg.model.entity_dim, 3, bias=False),
         }
-        print(f"ROI aux loss: coef={args.aux_roi_coef} (keeps pair_kv/target_scorer new cols encoding roi_20/roi_50/enemy_contest)")
+        print(f"ROI aux loss: coef={args.aux_roi_coef} (keeps pair_kv/target_scorer columns encoding roi_20/roi_50/enemy_contest)")
 
     learner = PPOLearner(model, cfg, device=device, frozen_il_model=frozen_il_model,
                         roi_heads=roi_heads, aux_roi_coef=args.aux_roi_coef)
@@ -758,22 +758,15 @@ def train(args):
                 pool.add_external_heuristic(name, path)
                 print(f"  pool external loaded: {name} ({path})")
         # Create one dispatcher per external heuristic, keyed by member name so
-        # compute_pool_actions can dispatch by opp.name. Planner-externals (heavy
-        # orbit_lite agents) use the in-process GPU adapter; the rest use CPU pools.
-        planner_names = {Path(p.strip()).stem for p in args.planner_externals.split(",") if p.strip()}
+        # compute_pool_actions can dispatch by opp.name. All externals run via CPU
+        # worker pools (the in-process GPU planner adapter deadlocked rollout 1).
         heur_worker_pools: dict[str, HeuristicWorkerPool] = {}
-        planner_adapters: dict = {}
         nw = args.heuristic_workers if args.heuristic_workers > 0 else max(1, (os.cpu_count() or 2) - 1)
         for m in pool.members:
             if m.kind == "external_heuristic":
                 src = getattr(m, "_source_path", None) or args.external_opponents.split(",")[0].strip()
-                if m.name in planner_names:
-                    from batched_planner import BatchedPlannerOpponent
-                    planner_adapters[m.name] = BatchedPlannerOpponent(src, args.num_envs, device=str(device))
-                    print(f"  planner adapter (GPU in-process): {m.name} on {device}")
-                else:
-                    heur_worker_pools[m.name] = HeuristicWorkerPool(src, nw)
-                    print(f"  heuristic worker pool: {m.name} × {nw} workers")
+                heur_worker_pools[m.name] = HeuristicWorkerPool(src, nw)
+                print(f"  heuristic worker pool: {m.name} × {nw} workers")
         # Pre-allocate a frozen model for 'self' opponents (loaded with state_dict per rollout)
         pool_opp_model = copy.deepcopy(model).to(device)
         pool_opp_model.eval()
@@ -922,7 +915,7 @@ def train(args):
                              cached_feats: dict | None = None) -> torch.Tensor:
         """Return (action tensor, cont_angle|None) for the opponent playing `player`
         in the envs listed in `env_ids` (1-D LongTensor). Supports 'self' (frozen RL
-        model on GPU) and 'external_heuristic' (.py agent / in-process planner).
+        model on GPU) and 'external_heuristic' (.py agent via CPU worker pool).
 
         Keyed by an arbitrary index set, NOT a contiguous slice: per-episode pool
         assignment lets different envs hold different members at the same step, so the
@@ -954,33 +947,24 @@ def train(args):
 
         if opp.kind == "external_heuristic":
             from torch_env import to_legacy_obs_batch
-            pa = planner_adapters.get(opp.name)
-            if pa is not None:
-                # In-process GPU planner: compute over all envs, then select our ids
-                # (env_ids may be non-contiguous under per-episode assignment). Only this
-                # branch needs the python id list — build it here, not unconditionally
-                # (an eager env_ids.tolist() would force a GPU->CPU sync every group).
-                moves_full = pa.moves(env, player, env_slice=None)
-                moves_per_env = [moves_full[e] for e in env_ids.tolist()]
-            else:
-                # Patch B: ONE batched GPU->CPU copy per field over the group, instead of
-                # ~8 tiny per-env syncs × |ids| (the dominant per-step transport tax).
+            # Patch B: ONE batched GPU->CPU copy per field over the group, instead of
+            # ~8 tiny per-env syncs × |ids| (the dominant per-step transport tax).
+            _t0 = time.perf_counter()
+            obs_list = to_legacy_obs_batch(env, env_ids, player)
+            _t_acc["ext_obs"] += time.perf_counter() - _t0
+            wp = heur_worker_pools.get(opp.name)
+            if wp is not None:
                 _t0 = time.perf_counter()
-                obs_list = to_legacy_obs_batch(env, env_ids, player)
-                _t_acc["ext_obs"] += time.perf_counter() - _t0
-                wp = heur_worker_pools.get(opp.name)
-                if wp is not None:
-                    _t0 = time.perf_counter()
-                    moves_per_env = wp.map(obs_list)
-                    _t_acc["ext_wait"] += time.perf_counter() - _t0
-                else:
-                    # Fallback: serial path (no worker pool registered)
-                    moves_per_env = []
-                    for obs in obs_list:
-                        try:
-                            moves_per_env.append(opp.agent_fn(obs) or [])
-                        except Exception:
-                            moves_per_env.append([])
+                moves_per_env = wp.map(obs_list)
+                _t_acc["ext_wait"] += time.perf_counter() - _t0
+            else:
+                # Fallback: serial path (no worker pool registered)
+                moves_per_env = []
+                for obs in obs_list:
+                    try:
+                        moves_per_env.append(opp.agent_fn(obs) or [])
+                    except Exception:
+                        moves_per_env.append([])
             # Patch C: reuse this seat's already-computed owned_idx/slot_valid (get_features
             # calls owned_indices_for, so cached_feats holds the IDENTICAL tensors) + one
             # subset gather for source planet ids, replacing the per-group owned_indices_for
@@ -1553,20 +1537,25 @@ def train(args):
             metrics["global_feat_std"] = float(flat["global_features"].std(unbiased=False).item())
             if "pairwise_features" in flat:
                 metrics["pairwise_feat_std"] = float(flat["pairwise_features"].std(unbiased=False).item())
-            # Per-feature input-weight norms on the pairwise cross-attention. The
-            # last 3 pairwise cols are the newer features (roi_20, roi_50,
-            # enemy_contest); track whether they actually get used (norm climbing
-            # toward the ~1.1 mean of the original 12) vs stay inert (~0.05).
+            # Per-feature input-weight norms on the pairwise cross-attention. Track whether
+            # newer target-value / keepability columns actually get used after a padded
+            # checkpoint resume (norm climbing toward the original geometry/owner channels)
+            # vs staying inert near zero.
             if hasattr(model, "pair_kv"):
                 fw = model.pair_kv.weight          # [2D, D + F_pair]
                 D = fw.shape[0] // 2
                 feat_cols = fw[:, D:]              # [2D, F_pair]
-                if feat_cols.shape[1] >= 3:
-                    new_norms = feat_cols[:, -3:].norm(dim=0)
-                    metrics["wnorm_roi20"] = float(new_norms[0].item())
-                    metrics["wnorm_roi50"] = float(new_norms[1].item())
-                    metrics["wnorm_enemy_contest"] = float(new_norms[2].item())
-                    metrics["wnorm_pw_orig"] = float(feat_cols[:, :-3].norm(dim=0).mean().item())
+                if feat_cols.shape[1] >= 15:
+                    metrics["wnorm_roi20"] = float(feat_cols[:, 12].norm().item())
+                    metrics["wnorm_roi50"] = float(feat_cols[:, 13].norm().item())
+                    metrics["wnorm_enemy_contest"] = float(feat_cols[:, 14].norm().item())
+                    metrics["wnorm_pw_orig"] = float(feat_cols[:, :12].norm(dim=0).mean().item())
+                if feat_cols.shape[1] >= 20:
+                    metrics["wnorm_reachable_enemy"] = float(feat_cols[:, 15].norm().item())
+                    metrics["wnorm_capture_value"] = float(feat_cols[:, 16].norm().item())
+                    metrics["wnorm_reactive_roi"] = float(feat_cols[:, 17].norm().item())
+                    metrics["wnorm_friendly_reach"] = float(feat_cols[:, 18].norm().item())
+                    metrics["wnorm_keepability"] = float(feat_cols[:, 19].norm().item())
             if hasattr(model, "fire_q"):
                 metrics["phase4_fire_q_norm"] = float(model.fire_q.weight.norm().item())
                 metrics["phase4_fire_k_norm"] = float(model.fire_k.weight.norm().item())
@@ -1670,6 +1659,8 @@ def train(args):
                     f"wnorm roi20/roi50/ec {metrics.get('wnorm_roi20', 0):.3f}/"
                     f"{metrics.get('wnorm_roi50', 0):.3f}/"
                     f"{metrics.get('wnorm_enemy_contest', 0):.3f} "
+                    f"val/keep {metrics.get('wnorm_capture_value', 0):.3f}/"
+                    f"{metrics.get('wnorm_keepability', 0):.3f} "
                     f"(orig~{metrics.get('wnorm_pw_orig', 0):.2f})"
                     + actcoef + pencoef
                 )
@@ -1730,6 +1721,11 @@ def train(args):
                     "feat/wnorm_roi20": metrics.get("wnorm_roi20", 0),
                     "feat/wnorm_roi50": metrics.get("wnorm_roi50", 0),
                     "feat/wnorm_enemy_contest": metrics.get("wnorm_enemy_contest", 0),
+                    "feat/wnorm_reachable_enemy": metrics.get("wnorm_reachable_enemy", 0),
+                    "feat/wnorm_capture_value": metrics.get("wnorm_capture_value", 0),
+                    "feat/wnorm_reactive_roi": metrics.get("wnorm_reactive_roi", 0),
+                    "feat/wnorm_friendly_reach": metrics.get("wnorm_friendly_reach", 0),
+                    "feat/wnorm_keepability": metrics.get("wnorm_keepability", 0),
                     "feat/wnorm_pw_orig": metrics.get("wnorm_pw_orig", 0),
                     "phase4/fire_target_std": metrics.get("fire_target_std", 0),
                     "phase4/ship_target_std": metrics.get("ship_target_std", 0),
@@ -2189,7 +2185,7 @@ if __name__ == "__main__":
                              "by step total_steps*0.5, stays 0 after. 0 = constant penalty.")
     parser.add_argument("--aux-roi-coef", type=float, default=0.0,
                         help="Coefficient for ROI auxiliary regression loss. Keeps "
-                             "pair_kv.weight[:, 108:111] and target_scorer new columns "
+                             "pair_kv.weight[:, 108:111] and target_scorer ROI columns "
                              "anchored to encoding roi_20/roi_50/enemy_contest throughout "
                              "PPO. Reg heads are transient (not saved). Typical: 0.01–0.05.")
     parser.add_argument("--fleet-activity-coef", type=float, default=0.0,
@@ -2270,11 +2266,6 @@ if __name__ == "__main__":
                         help="Comma-separated paths to .py heuristic agents (e.g. "
                              "'opponents/candidate_suneet_lb1200.py,opponents/candidate_zach_public.py'). "
                              "Only used when --pool-mode=mixed.")
-    parser.add_argument("--planner-externals", type=str, default="",
-                        help="Comma list of external-opponent member names (file stems, e.g. "
-                             "'candidate_flowdiff') that run via the in-process GPU "
-                             "BatchedPlannerOpponent instead of CPU worker pools. For heavy "
-                             "orbit_lite planners whose per-step cost saturates the CPU.")
     parser.add_argument("--lr-schedule-steps", type=int, default=0,
                         help="Decouple the LR cosine decay horizon from --total-steps. "
                              "Set larger than --total-steps for slow/partial decay "

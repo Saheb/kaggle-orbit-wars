@@ -43,7 +43,14 @@ _DM_BETA = 2.2          # reinforce_size_beta
 _DM_ETA_FREE = 3.0      # reinforce_eta_free  (eta below which the enemy can't react → rho=0)
 _DM_ETA_SCALE = 12.0    # reinforce_eta_scale
 _DM_HORIZON = 18.0      # config.horizon — reach cap for enemy_mass AND eta cap
+
+# Threat-timing window (ch 20-21): enemy fleet mass landing within this many steps is "soon".
+# Matches the age 0-5 post-capture under-defense window + a nearby reinforce ETA (~3-5 steps).
+# Must match features._THREAT_ETA_WINDOW. ch14 (enemy_contest) is ETA-agnostic, so this pair is
+# the only observation of WHEN pressure lands — the timing signal the policy needs to defend.
+_THREAT_ETA_WINDOW = 6.0
 _DM_OVERHEAD = 1.0      # capture_overhead
+_VALUE_HORIZON = 40.0   # capped production-value lookahead for target value / keepability channels
 
 # Reverse-edge reinforce cooldown — "edge never fired" sentinel; must match
 # reinforce_cooldown.NEVER so the train mask and the eval/export canonical rule agree.
@@ -1616,11 +1623,25 @@ class VecTorchEnv:
         # `incoming` (N, P, F) and enemy mask reuse tensors already computed above.
         enemy_fleet = (f_owner != player) & (f_owner >= 0) & fleet_alive   # (N, F)
         enemy_contest = (f_ships.unsqueeze(1) * (incoming & enemy_fleet.unsqueeze(1)).float()).sum(dim=2)  # (N, P)
+        # Threat timing (ch 20-21): ETA-profiled enemy pressure. enemy_contest (ch14) sums ALL
+        # inbound enemy mass with no ETA; these add the WHEN. eta = Euclidean planet-fleet dist /
+        # fleet speed (matches _fleet_target_idx eta_to_target, torch_env.py:1478). Mirrors
+        # features.py compute_pairwise_features ch20-21 byte-for-byte.
+        enemy_inc = incoming & enemy_fleet.unsqueeze(1)                    # (N, P, F)
+        dist_pf = torch.sqrt((vx * vx + vy * vy).clamp(min=1e-9))          # (N, P, F)
+        f_speed_pf = _ship_speed(f_ships).unsqueeze(1)                     # (N, 1, F)
+        eta_pf = (dist_pf / f_speed_pf.clamp(min=1e-3)).clamp(min=1.0)     # (N, P, F)
+        soon = enemy_inc & (eta_pf <= _THREAT_ETA_WINDOW)                  # (N, P, F)
+        enemy_mass_soon = (f_ships.unsqueeze(1) * soon.float()).sum(dim=2)  # (N, P)
+        eta_for_min = torch.where(enemy_inc, eta_pf, torch.full_like(eta_pf, 1e6))
+        threat_imminence = 1.0 / (eta_for_min.min(dim=2).values + 1.0)     # (N, P) in (0, 0.5], 0 if none
         pairwise = self._compute_pairwise(
             planets=planets, planet_alive=planet_alive, P=P,
             owned_idx=owned_idx, slot_valid=slot_valid, player=player,
             enemy_contest=enemy_contest,
             friendly_contest=friendly_pressure,   # (N, P): own ships already inbound per target
+            enemy_mass_soon=enemy_mass_soon,
+            threat_imminence=threat_imminence,
         )
 
         return {
@@ -1640,10 +1661,11 @@ class VecTorchEnv:
         }
 
     def _compute_pairwise(self, planets, planet_alive, P, owned_idx, slot_valid, player,
-                          enemy_contest=None, friendly_contest=None):
+                          enemy_contest=None, friendly_contest=None,
+                          enemy_mass_soon=None, threat_imminence=None):
         """Vectorized counterpart of features.compute_pairwise_features().
 
-        Returns (N, MAX_OWNED, P, 16) float32 on self.device. Channel order:
+        Returns (N, MAX_OWNED, P, 22) float32 on self.device. Channel order:
           0  sin(angle src→tgt)
           1  cos(angle src→tgt)
           2  distance / BOARD_SIZE
@@ -1662,6 +1684,12 @@ class VecTorchEnv:
           13 roi_50  — same at horizon 50
           14 enemy_contest / 100  — total enemy fleet ships racing toward this target
           15 reachable_enemy_mass / 100 — distance-decayed enemy garrison reachable to this target
+          16 capture_value_40 — production value over a capped 40-step horizon / board production
+          17 reactive_roi_40 — value vs cap_cost_at_arrival + contest + reachable enemy mass
+          18 friendly_reachable_mass / 100 — distance-decayed friendly support mass
+          19 keepability_margin / 100 — friendly support minus enemy contest/reaction
+          20 enemy_mass_soon / 100 — enemy fleet mass landing within _THREAT_ETA_WINDOW steps (clamp 5)
+          21 threat_imminence — 1/(min_enemy_eta+1); urgency in (0,0.5], 0 if no enemy inbound
         """
         N = self.num_envs
         device = self.device
@@ -1679,6 +1707,8 @@ class VecTorchEnv:
         ships_t = planets[:, :, 5].unsqueeze(1)                  # (N, 1, P) — current ships
         prod_t = planets[:, :, 6].unsqueeze(1)                   # (N, 1, P)
         alive_t = planet_alive.unsqueeze(1)                      # (N, 1, P)
+        regular_t_1d = (torch.arange(P, device=device) < COMET_SLOT_START).view(1, P)
+        regular_alive = planet_alive & regular_t_1d
 
         sx_b = sx.unsqueeze(-1)                                  # (N, MO, 1)
         sy_b = sy.unsqueeze(-1)
@@ -1728,6 +1758,20 @@ class VecTorchEnv:
         prod_b = (prod_t / 5.0).expand(-1, MO, -1)
         valid_b = alive_t.float().expand(-1, MO, -1)
 
+        total_board_prod = (planets[:, :, 6] * regular_alive.float()).sum(dim=1).clamp(min=1.0)  # (N,)
+        value_h = (self.episode_steps - self.step_count.float()).clamp(min=0.0, max=_VALUE_HORIZON)  # (N,)
+        owner_t_2d = planets[:, :, 1].long()
+        owner_weight = torch.where(
+            owner_t_2d == player,
+            torch.ones_like(planets[:, :, 6]),
+            torch.where(owner_t_2d == -1,
+                        torch.ones_like(planets[:, :, 6]),
+                        torch.full_like(planets[:, :, 6], 2.0)),
+        )
+        capture_value_mass = owner_weight * planets[:, :, 6] * value_h.unsqueeze(1)
+        capture_value_mass = torch.where(regular_alive, capture_value_mass, torch.zeros_like(capture_value_mass))
+        capture_value = (capture_value_mass / (total_board_prod * _VALUE_HORIZON).unsqueeze(1)).clamp(0.0, 2.0)
+
         # Ships-at-arrival features (ch 10-11)
         ships_b = ships_t.expand(-1, MO, -1)                     # (N, MO, P)
         ships_at_arr = (ships_b + prod_b * 5.0 * eta).clamp(max=500.0) / 200.0
@@ -1768,8 +1812,14 @@ class VecTorchEnv:
         # Enemy contest feature (ch 14): broadcast (N, P) → (N, MO, P)
         if enemy_contest is not None:
             contest_b = (enemy_contest / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1)
+            enemy_contest_raw = enemy_contest
         else:
             contest_b = torch.zeros(N, MO, P, device=device)
+            enemy_contest_raw = torch.zeros(N, P, device=device)
+        if friendly_contest is not None:
+            friendly_contest_raw = friendly_contest
+        else:
+            friendly_contest_raw = torch.zeros(N, P, device=device)
 
         # Reachable enemy planet mass (ch 15): distance-decayed enemy garrison that could
         # reinforce/contest each target within the horizon. Source-slot independent, so
@@ -1792,12 +1842,48 @@ class VecTorchEnv:
                                torch.zeros_like(dec)).sum(dim=1)           # (N, P_tgt)
         reach_b = (reach_em / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1)
 
+        # Reachable friendly planet mass and keepability pressure (ch 18-19). This mirrors the
+        # enemy reach calculation but uses our planets, excluding transient comet slots. It tells
+        # the target head whether a captured/saved planet has nearby friendly support.
+        friend_src = (regular_alive & (own_a == player)).unsqueeze(2)       # (N,P_src,1)
+        valid_f = friend_src & regular_alive.unsqueeze(1) & not_self
+        reach_fm = torch.where(valid_f, gar_a.unsqueeze(2) * dec,
+                               torch.zeros_like(dec)).sum(dim=1)           # (N, P_tgt)
+        friendly_reach_b = (reach_fm / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1)
+
+        enemy_pressure = reach_em + enemy_contest_raw
+        friendly_support = reach_fm + friendly_contest_raw
+        keepability_margin = ((friendly_support - enemy_pressure) / 100.0).clamp(-5.0, 5.0)
+        keepability_margin = torch.where(regular_alive, keepability_margin, torch.zeros_like(keepability_margin))
+        keepability_b = keepability_margin.unsqueeze(1).expand(-1, MO, -1)
+
+        target_value_b = capture_value.unsqueeze(1).expand(-1, MO, -1)
+        target_value_mass_b = capture_value_mass.unsqueeze(1).expand(-1, MO, -1)
+        enemy_pressure_b = enemy_pressure.unsqueeze(1).expand(-1, MO, -1)
+        reactive_cost = cap_at_arr + enemy_pressure_b
+        non_mine_regular = ((owner_exp != player) & regular_alive.unsqueeze(1).expand(-1, MO, -1))
+        reactive_roi_40 = ((target_value_mass_b - reactive_cost) / reactive_cost.clamp(min=1.0)).clamp(-1.0, 1.0)
+        reactive_roi_40 = torch.where(non_mine_regular, reactive_roi_40, torch.zeros_like(reactive_roi_40))
+
+        # Threat-timing channels (ch 20-21): ETA-profiled enemy pressure. Computed in get_features
+        # (eta = dist/speed per (target,fleet)); here just normalize+broadcast like ch14.
+        if enemy_mass_soon is not None:
+            mass_soon_b = (enemy_mass_soon / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1)
+        else:
+            mass_soon_b = torch.zeros(N, MO, P, device=device)
+        if threat_imminence is not None:
+            imminence_b = threat_imminence.unsqueeze(1).expand(-1, MO, -1)
+        else:
+            imminence_b = torch.zeros(N, MO, P, device=device)
+
         # Stack channels
         out = torch.stack([
             sin_a, cos_a, dist / BOARD_SIZE, 1.0 / (eta + 1.0),
             sun_safe, is_mine_b, is_enemy_b, is_neutral_b, prod_b, valid_b,
             ships_at_arr, cap_gap, roi_20, roi_50, contest_b, reach_b,
-        ], dim=-1)  # (N, MO, P, 16)
+            target_value_b, reactive_roi_40, friendly_reach_b, keepability_b,
+            mass_soon_b, imminence_b,
+        ], dim=-1)  # (N, MO, P, 22)
 
         # Zero out invalid owned slots AND invalid target planets (match kaggle path)
         slot_valid_b = slot_valid.unsqueeze(-1).unsqueeze(-1).float()    # (N, MO, 1, 1)

@@ -7,8 +7,28 @@ import math
 from kaggle_environments import make
 from onegame_load import load_faithful_agent
 from eval import _dm_fleet_target
+from features import extract_features
 
 WHO = {-1: "neutral", 0: "US", 1: "OPP"}
+
+
+def _target_value_row(obs, player, src_pid, tgt_pid):
+    """Return pairwise target-value channels for the source->target launch, if the source
+    is represented in the policy's owned-source slots. Values are model inputs at launch:
+    capture_value_40, reactive_roi_40, friendly_reachable_mass, keepability_margin."""
+    feats = extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128)
+    planets = obs.get("planets") or []
+    src_idx = next((i for i, p in enumerate(planets) if int(p[0]) == int(src_pid)), None)
+    tgt_idx = next((i for i, p in enumerate(planets) if int(p[0]) == int(tgt_pid)), None)
+    if src_idx is None or tgt_idx is None:
+        return None
+    owned = feats["owned_indices"].numpy()
+    slots = [i for i, idx in enumerate(owned) if int(idx) == int(src_idx)]
+    if not slots:
+        return None
+    row = feats["pairwise_features"].numpy()[slots[0], tgt_idx]
+    return dict(cap_value=float(row[16]), reactive_roi=float(row[17]),
+                friendly_reach=float(row[18]), keepability=float(row[19]))
 
 
 def main():
@@ -60,11 +80,14 @@ def main():
 
     sides = [0, 1] if args.side == "both" else [int(args.side)]
     print(f"\n=== SEED {args.seed}  per-launch audit (side={args.side}, steps<= {args.maxstep}) ===")
-    print("legend: sent | tgt@launch g0(prod) | eta | tgt@arrival g_arr owner | RESULT")
+    print("legend: sent | tgt@launch g0(prod) | eta | value roi keep | tgt@arrival g_arr owner | RESULT")
     print("        UNDERCOMMIT = sent <= defense at arrival (can't take); WASTE = arrived, no capture\n")
 
     summ = {0: dict(n=0, cap=0, waste=0, under=0, ships_sent=0.0, ships_waste=0.0),
             1: dict(n=0, cap=0, waste=0, under=0, ships_sent=0.0, ships_waste=0.0)}
+    for d in summ.values():
+        d.update(tv_n=0, cap_value=0.0, reactive_roi=0.0, keepability=0.0,
+                 low_value=0, negative_keep=0)
 
     for fid in order:
         s = seen[fid]
@@ -76,6 +99,8 @@ def main():
         eta = arr - t0
         tid = s["tgt"]
         g0 = pstate[t0].get(tid, (None, 0, 0))
+        launch_obs = steps[t0][0].observation
+        tv = _target_value_row(launch_obs, s["owner"], s["src"], tid)
         # target state just before impact (growth + reinforcement captured by replay)
         ti = min(arr, n - 1)
         g_pre = pstate[ti - 1].get(tid, (None, 0, 0)) if ti - 1 >= 0 else (None, 0, 0)
@@ -97,9 +122,20 @@ def main():
             d["waste"] += 1; d["ships_waste"] += sent
         if under:
             d["under"] += 1
+        if tv is not None and attack:
+            d["tv_n"] += 1
+            d["cap_value"] += tv["cap_value"]
+            d["reactive_roi"] += tv["reactive_roi"]
+            d["keepability"] += tv["keepability"]
+            d["low_value"] += int(tv["cap_value"] < 0.05 or tv["reactive_roi"] < 0.0)
+            d["negative_keep"] += int(tv["keepability"] < 0.0)
+        tv_str = "   n/a   " if tv is None else (
+            f"{tv['cap_value']:>4.2f} {tv['reactive_roi']:>+5.2f} {tv['keepability']:>+5.2f}"
+        )
         flag = "CAPTURED" if captured else ("UNDERCOMMIT/WASTE" if under else ("WASTE" if waste else "reinforce/ok"))
         print(f" t{t0:>3} {WHO[s['owner']]:<3} p{s['src']:<3}->p{tid:<3}({WHO[g0[0]]:<7}) "
               f"sent {sent:>5.0f} | g0 {g0[1]:>4.0f}(pr{g0[2]:>4.1f}) | eta {eta:>2} | "
+              f"{tv_str} | "
               f"g_arr {def_arr:>5.0f} {WHO[owner_before] if owner_before is not None else '?':<7} -> {flag}")
 
     print("\n--- summary ---")
@@ -108,6 +144,11 @@ def main():
         print(f" {WHO[sd]}: launches {d['n']}  captured {d['cap']}  waste(no-cap) {d['waste']}  "
               f"undercommit {d['under']}  | ships sent {d['ships_sent']:.0f} wasted {d['ships_waste']:.0f} "
               f"({100*d['ships_waste']/max(d['ships_sent'],1):.0f}%)")
+        if d["tv_n"]:
+            n = max(d["tv_n"], 1)
+            print(f"      target-value attacks: avg value {d['cap_value']/n:.3f}  "
+                  f"avg reactive_roi {d['reactive_roi']/n:+.3f}  avg keep {d['keepability']/n:+.3f}  "
+                  f"low-value {100*d['low_value']/n:.0f}%  negative-keep {100*d['negative_keep']/n:.0f}%")
 
 
 if __name__ == "__main__":

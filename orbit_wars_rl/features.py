@@ -12,7 +12,7 @@ Features per entity type:
 - Global (11 features): player, step, angular_velocity, economy stats,
   enemy ships split (on_planets / in_fleets), mode
 
-Pairwise features (15 per owned-slot × target-planet pair):
+Pairwise features (20 per owned-slot × target-planet pair):
   0: sin of arrival direction   (corrected for rotation on orbiting targets)
   1: cos of arrival direction   (corrected for rotation on orbiting targets)
   2: arrival dist / BOARD_SIZE  (corrected for rotation on orbiting targets)
@@ -27,6 +27,12 @@ Pairwise features (15 per owned-slot × target-planet pair):
   13: roi_50                    same with horizon 50
   14: enemy_contest / 100       total enemy fleet ships racing toward this target
   15: reachable_enemy_mass /100 distance-decayed enemy garrison that could reach this target
+  16: capture_value_40          production value over a capped 40-step horizon, normalized by board prod
+  17: reactive_roi_40           value vs cap_cost_at_arrival + contest + reachable enemy mass
+  18: friendly_reachable_mass/100 distance-decayed friendly garrison that can support this target
+  19: keepability_margin/100    friendly support minus enemy contest/reaction, clipped [-5,5]
+  20: enemy_mass_soon/100       enemy fleet mass landing within _THREAT_ETA_WINDOW steps (clamp 5)
+  21: threat_imminence          1/(min_enemy_eta+1); urgency in (0,0.5], 0 if no enemy inbound
 """
 
 from __future__ import annotations
@@ -367,6 +373,8 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
     # Result shape: (n_p_pair,) — independent of source slot, broadcast in compute_pairwise_features.
     n_p_pair = min(len(planets), max_planets)
     enemy_contest = np.zeros(n_p_pair, dtype=np.float32)
+    enemy_mass_soon = np.zeros(n_p_pair, dtype=np.float32)
+    threat_imminence = np.zeros(n_p_pair, dtype=np.float32)
     if n_fleets > 0 and n_p_pair > 0:
         enemy_fleet_mask = (fleet_owner != player) & (fleet_owner >= 0)
         if enemy_fleet_mask.any():
@@ -385,6 +393,17 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
             perp_ep  = np.abs(vx_ep * efsin[:, np.newaxis] - vy_ep * efcos[:, np.newaxis])
             headed = (along_ep > 0) & (perp_ep < tgt_r_p[np.newaxis, :] + 1.5)
             enemy_contest = (efships[:, np.newaxis] * headed).sum(axis=0).astype(np.float32)
+            # Threat timing (ch 20-21): ETA-profile the inbound enemy mass. eta = Euclidean
+            # planet-fleet dist / fleet speed (mirrors torch_env _fleet_target_idx eta + the
+            # training path's threat computation byte-for-byte). ch14 sums ALL inbound mass;
+            # these add the WHEN — the only urgency signal in the pairwise bundle.
+            dist_ep = np.sqrt(vx_ep * vx_ep + vy_ep * vy_ep)                              # (E, n_p)
+            efspeed = _ship_speed_np(efships)                                            # (E,)
+            eta_ep = np.clip(dist_ep / np.maximum(efspeed[:, np.newaxis], 1e-3), 1.0, None)  # (E, n_p)
+            soon = headed & (eta_ep <= _THREAT_ETA_WINDOW)                               # (E, n_p)
+            enemy_mass_soon = (efships[:, np.newaxis] * soon).sum(axis=0).astype(np.float32)
+            eta_for_min = np.where(headed, eta_ep, 1e6)                                  # (E, n_p)
+            threat_imminence = (1.0 / (eta_for_min.min(axis=0) + 1.0)).astype(np.float32)
 
     # Precompute FRIENDLY fleet ships already racing toward each target — the missing
     # symmetric counterpart of enemy_contest. Used in compute_pairwise_features to deflate
@@ -416,6 +435,7 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         max_owned=max_owned, angular_velocity=angular_velocity, step=step,
         init_by_id=init_by_id, enemy_contest=enemy_contest,
         friendly_contest=None if _NO_FRIENDLY_DEFLATION else friendly_contest,
+        enemy_mass_soon=enemy_mass_soon, threat_imminence=threat_imminence,
         comet_ids=comet_planet_ids,
     )
 
@@ -433,7 +453,7 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
 
 # Number of pairwise features per (owned-slot, target-planet) pair.
 # Keep in sync with compute_pairwise_features() and ModelConfig.pairwise_feature_dim.
-PAIRWISE_FEATURE_DIM = 16
+PAIRWISE_FEATURE_DIM = 22
 
 # Typical fleet size used to estimate an ETA prior (matches teacher MIN_SHIP_FLOOR ~ 10
 # but in practice ETA varies modestly with size since speed is log-shaped).
@@ -444,6 +464,10 @@ _ETA_PROBE_SPEED = 1.0 + (MAX_SPEED - 1.0) * (math.log(_ETA_PROBE_SHIPS) / math.
 # a garrison-dependent fleet speed. Mirrors torch_env._DM_HORIZON / _ship_speed so the
 # reachable_enemy_mass pairwise channel (ch 15) matches the GPU training path exactly.
 _REACH_HORIZON = 18.0
+_VALUE_HORIZON = 40.0
+# Threat-timing window for ch20-21 (enemy mass landing "soon"). Must match torch_env._THREAT_ETA_WINDOW.
+_THREAT_ETA_WINDOW = 6.0
+_EPISODE_STEPS = 500.0
 
 
 def _ship_speed_np(ships: np.ndarray) -> np.ndarray:
@@ -474,6 +498,8 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
                               init_by_id: dict | None = None,
                               enemy_contest: np.ndarray | None = None,
                               friendly_contest: np.ndarray | None = None,
+                              enemy_mass_soon: np.ndarray | None = None,
+                              threat_imminence: np.ndarray | None = None,
                               comet_ids=None):
     """For each (owned-slot, target-planet) pair return geometric + ownership features.
 
@@ -501,11 +527,26 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
     tgt_owner  = np.array([planets[j][1] for j in range(n_p)], dtype=np.int32)
     tgt_prod   = np.array([planets[j][6] for j in range(n_p)], dtype=np.float32)
     tgt_ships  = np.array([planets[j][5] for j in range(n_p)], dtype=np.float32)
+    comet_id_set = set(int(c) for c in (comet_ids or []))
+    is_comet_target = np.array([int(planets[j][0]) in comet_id_set for j in range(n_p)], dtype=np.bool_)
+    regular_target = ~is_comet_target
     # Current capture cost: how many ships needed to take each planet right now
     tgt_cap_cost = np.where(
         tgt_owner == -1,      tgt_ships + 1,
         np.where(tgt_owner != player, tgt_ships + tgt_prod * 3 + 1, 0.0)
     ).astype(np.float32)
+
+    total_board_prod = float(np.sum(tgt_prod[regular_target]))
+    total_board_prod = max(total_board_prod, 1.0)
+    value_horizon = min(max(_EPISODE_STEPS - float(step), 0.0), _VALUE_HORIZON)
+    owner_value_weight = np.where(
+        tgt_owner == player,
+        1.0,
+        np.where(tgt_owner == -1, 1.0, 2.0),
+    ).astype(np.float32)
+    capture_value_mass = (owner_value_weight * tgt_prod * value_horizon).astype(np.float32)
+    capture_value = np.clip(capture_value_mass / (total_board_prod * _VALUE_HORIZON), 0.0, 2.0)
+    capture_value = np.where(regular_target, capture_value, 0.0).astype(np.float32)
 
     # Reachable enemy planet mass per target (ch 15): distance-decayed enemy garrison
     # that could reinforce/contest each target within the horizon. Source-slot independent
@@ -524,11 +565,26 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         dec[np.arange(len(s_idx)), s_idx] = 0.0   # a planet does not reinforce itself
         reach_em = (sg_e[:, np.newaxis] * dec).sum(axis=0).astype(np.float32)
 
+    # Reachable friendly planet mass per target (ch 18): same distance-decayed support
+    # calculation as reachable_enemy_mass, but from our planets. This is a keepability
+    # signal: after capture, can nearby friendly garrisons support the target?
+    reach_fm = np.zeros(n_p, dtype=np.float32)
+    friendly_src_mask = (tgt_owner == player) & regular_target
+    if friendly_src_mask.any():
+        s_idx = np.where(friendly_src_mask)[0]
+        sx_f, sy_f, sg_f = tgt_x[s_idx], tgt_y[s_idx], tgt_ships[s_idx]
+        src_reach_f = np.maximum(_ship_speed_np(sg_f) * _REACH_HORIZON, 1e-6)
+        dxf = tgt_x[np.newaxis, :] - sx_f[:, np.newaxis]
+        dyf = tgt_y[np.newaxis, :] - sy_f[:, np.newaxis]
+        dec = np.clip(1.0 - np.sqrt(dxf * dxf + dyf * dyf) / src_reach_f[:, np.newaxis], 0.0, None)
+        dec[np.arange(len(s_idx)), s_idx] = 0.0
+        dec[:, ~regular_target] = 0.0
+        reach_fm = (sg_f[:, np.newaxis] * dec).sum(axis=0).astype(np.float32)
+
     # Precompute orbit info for each target planet
     tgt_is_orbiting = np.zeros(n_p, dtype=np.bool_)
     tgt_init_angle = np.zeros(n_p, dtype=np.float64)
     tgt_orbital_r = np.zeros(n_p, dtype=np.float64)
-    comet_id_set = set(int(c) for c in (comet_ids or []))
     if init_by_id is not None:
         for j in range(n_p):
             pid = int(planets[j][0])
@@ -621,6 +677,23 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
             roi_20 = roi_20 * (1.0 - coverage)
             roi_50 = roi_50 * (1.0 - coverage)
 
+        enemy_contest_raw = enemy_contest[:n_p] if enemy_contest is not None else np.zeros(n_p, dtype=np.float32)
+        friendly_contest_raw = friendly_contest[:n_p] if friendly_contest is not None else np.zeros(n_p, dtype=np.float32)
+        enemy_pressure = reach_em + enemy_contest_raw
+        friendly_support = reach_fm + friendly_contest_raw
+        reactive_cost = cap_cost_at_arrival + enemy_pressure
+        reactive_roi_40 = np.where(
+            (tgt_owner != player) & regular_target,
+            np.clip((capture_value_mass - reactive_cost) / np.maximum(reactive_cost, 1.0), -1.0, 1.0),
+            0.0,
+        ).astype(np.float32)
+        friendly_reach = np.where(regular_target, np.minimum(reach_fm, 500.0) / 100.0, 0.0).astype(np.float32)
+        keepability_margin = np.where(
+            regular_target,
+            np.clip((friendly_support - enemy_pressure) / 100.0, -5.0, 5.0),
+            0.0,
+        ).astype(np.float32)
+
         out[slot, :n_p, 0]  = sin_a                         # arrival direction sin
         out[slot, :n_p, 1]  = cos_a                         # arrival direction cos
         out[slot, :n_p, 2]  = dist / BOARD_SIZE             # arrival dist
@@ -638,6 +711,14 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
         if enemy_contest is not None:
             out[slot, :n_p, 14] = np.minimum(enemy_contest[:n_p], 500.0) / 100.0  # contested ships
         out[slot, :n_p, 15] = np.minimum(reach_em, 500.0) / 100.0  # reachable enemy planet mass
+        out[slot, :n_p, 16] = capture_value
+        out[slot, :n_p, 17] = reactive_roi_40
+        out[slot, :n_p, 18] = friendly_reach
+        out[slot, :n_p, 19] = keepability_margin
+        if enemy_mass_soon is not None:
+            out[slot, :n_p, 20] = np.minimum(enemy_mass_soon[:n_p], 500.0) / 100.0  # enemy mass landing soon
+        if threat_imminence is not None:
+            out[slot, :n_p, 21] = threat_imminence[:n_p]                            # 1/(min_enemy_eta+1)
         if _ABLATE_CHANNELS:                                  # diagnostic: scramble channel↔target mapping
             _perm = np.random.permutation(n_p)
             for _ch in _ABLATE_CHANNELS:

@@ -294,41 +294,64 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
     Trains fire, ship, and target heads. Angle head is dead weight in
     target-decode mode and is excluded from the loss.
     """
-    fire_logits = outputs["fire_logits"]     # (B, max_owned)
-    ship_logits = outputs["ship_logits"]     # (B, max_owned, num_ship_bins)
+    fire_logits = outputs["fire_logits"]     # (B, max_owned) or (B, max_owned, max_planets)
+    ship_logits = outputs["ship_logits"]     # (B, max_owned, C) or (B, max_owned, max_planets, C)
 
     slot_valid = batch["slot_valid"].float()  # (B, max_owned)
     fire_target = batch["fire_target"]        # (B, max_owned)
     ship_target = batch["ship_target"]        # (B, max_owned)
+    target_logits = outputs["target_logits"]  # (B, MO, max_planets)
+    target_target = batch["target_target"]    # (B, MO) with -1 = ignore
+    safe_tgt = target_target.clamp(min=0)
+    fired = (fire_target == 1).float() * slot_valid  # (B, max_owned)
+    valid_tgt = (target_target >= 0).float() * fired  # (B, MO)
+    B, MO, MP = target_logits.shape
 
     # Fire loss (binary cross-entropy per slot, masked).
     # pos_weight (>1) up-weights the fire=1 class to counter the ~1:9.5 imbalance that
     # otherwise collapses the head toward "never fire" (the passive-BC failure).
     # Clamp logits to ±30 to avoid MPS float16 overflow from -1e9 mask values
-    fire_loss = F.binary_cross_entropy_with_logits(
-        fire_logits.clamp(-30, 30), fire_target.float(), reduction="none",
-        pos_weight=torch.tensor(_FIRE_POS_WEIGHT, device=fire_logits.device),
-    ) * slot_valid
-    fire_loss = fire_loss.sum() / slot_valid.sum().clamp(min=1)
+    if fire_logits.dim() == 3:
+        target_valid = (target_logits > -99.0).float()
+        fire_target_pair = torch.zeros_like(fire_logits)
+        fire_target_pair.scatter_(
+            -1,
+            safe_tgt.unsqueeze(-1),
+            (fire_target.float() * (target_target >= 0).float()).unsqueeze(-1),
+        )
+        fire_mask_pair = slot_valid.unsqueeze(-1) * target_valid
+        fire_loss = F.binary_cross_entropy_with_logits(
+            fire_logits.clamp(-30, 30), fire_target_pair, reduction="none",
+            pos_weight=torch.tensor(_FIRE_POS_WEIGHT, device=fire_logits.device),
+        ) * fire_mask_pair
+        fire_loss = fire_loss.sum() / fire_mask_pair.sum().clamp(min=1)
+    else:
+        fire_loss = F.binary_cross_entropy_with_logits(
+            fire_logits.clamp(-30, 30), fire_target.float(), reduction="none",
+            pos_weight=torch.tensor(_FIRE_POS_WEIGHT, device=fire_logits.device),
+        ) * slot_valid
+        fire_loss = fire_loss.sum() / slot_valid.sum().clamp(min=1)
 
     # Ship loss: only on slots where heuristic actually fired
-    B, max_owned = fire_logits.shape
-    fired = (fire_target == 1).float() * slot_valid  # (B, max_owned)
+    max_owned = fire_target.shape[1]
+    ship_mask = fired
+    if ship_logits.dim() == 4:
+        ship_logits = torch.gather(
+            ship_logits,
+            2,
+            safe_tgt.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, ship_logits.shape[-1]),
+        ).squeeze(2)
+        ship_mask = valid_tgt
     ship_loss = F.cross_entropy(
         ship_logits.view(B * max_owned, -1),
         ship_target.view(B * max_owned),
         reduction="none",
     ).view(B, max_owned)
-    ship_loss = (ship_loss * fired).sum() / fired.sum().clamp(min=1)
+    ship_loss = (ship_loss * ship_mask).sum() / ship_mask.sum().clamp(min=1)
 
     # Target-index loss: which planet did the teacher choose? Cross-entropy over
     # max_planets logits, only on slots that fired AND have a valid (non-(-1)) label.
-    target_logits = outputs["target_logits"]            # (B, MO, max_planets)
-    target_target = batch["target_target"]              # (B, MO) with -1 = ignore
-    valid_tgt = (target_target >= 0).float() * fired    # (B, MO)
     # Replace -1 with 0 to avoid OOB in cross_entropy; mask result instead
-    safe_tgt = target_target.clamp(min=0)
-    B, MO, MP = target_logits.shape
     target_loss_raw = F.cross_entropy(
         target_logits.view(B * MO, MP),
         safe_tgt.view(B * MO),
@@ -380,9 +403,18 @@ def _save_bc_checkpoint(model: EntityTransformer, cfg, save_path: str):
             "ship_bin_mode":  cfg.model.ship_bin_mode,
             "num_ship_bins":  cfg.model.num_ship_bins,
             "min_ship_bin":   cfg.model.min_ship_bin,
+            "pairwise_feature_dim": cfg.model.pairwise_feature_dim,
             # 15-global feature flag — load_checkpoint/train_torch restore the global dim from
             # this so a 15-global BC warmstart loads correctly (omitting it silently breaks resume).
             "game_phase_features": cfg.model.game_phase_features,
+            # Target-decode discipline — persisted so train/eval/export agree on own-target
+            # legality and attack-concentration vetoes (the previous silent-disagreement bug).
+            "allow_reinforce": bool(getattr(cfg.model, "allow_reinforce", False)),
+            "reinforce_gate_min_planets": int(getattr(cfg.model, "reinforce_gate_min_planets", 0)),
+            "reinforce_forward_only": bool(getattr(cfg.model, "reinforce_forward_only", False)),
+            "reinforce_garrison_floor": float(getattr(cfg.model, "reinforce_garrison_floor", 0.0)),
+            "reverse_edge_cooldown": int(getattr(cfg.model, "reverse_edge_cooldown", 0)),
+            "sufficient_commit_factor": float(getattr(cfg.model, "sufficient_commit_factor", 0.0)),
         },
     }, save_path)
     print(f"BC model saved → {save_path}")
@@ -669,6 +701,18 @@ if __name__ == "__main__":
     parser.add_argument("--fire-pos-weight", type=float, default=1.0,
                         help="pos_weight on the fire-head BCE to counter class imbalance "
                              "(winners fire ~9.5%% of slots). >1 = the BC fires more. Try ~5-9.")
+    parser.add_argument("--allow-reinforce", action=argparse.BooleanOptionalAction, default=False,
+                        help="Persist own-target reinforcement legality in the saved BC checkpoint.")
+    parser.add_argument("--reinforce-gate-min-planets", type=int, default=0,
+                        help="Persist the empire-size gate for own-target reinforcement.")
+    parser.add_argument("--reinforce-forward-only", action=argparse.BooleanOptionalAction, default=False,
+                        help="Persist forward-only reinforcement discipline.")
+    parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0,
+                        help="Persist the source garrison floor for reinforcement launches.")
+    parser.add_argument("--reverse-edge-cooldown", type=int, default=0,
+                        help="Persist reverse-edge reinforce cooldown in steps.")
+    parser.add_argument("--sufficient-commit-factor", type=float, default=0.0,
+                        help="Persist eval/train attack-veto factor for undersized attacks.")
     args = parser.parse_args()
 
     _FIRE_POS_WEIGHT = args.fire_pos_weight  # module-level rebind; bc_loss reads this global
@@ -690,6 +734,12 @@ if __name__ == "__main__":
         set_game_phase_features(True)   # so any on-the-fly extraction emits 15-global too
     if args.entity_dim > 0:
         cfg.model.entity_dim = args.entity_dim
+    cfg.model.allow_reinforce = bool(args.allow_reinforce)
+    cfg.model.reinforce_gate_min_planets = int(args.reinforce_gate_min_planets)
+    cfg.model.reinforce_forward_only = bool(args.reinforce_forward_only)
+    cfg.model.reinforce_garrison_floor = float(args.reinforce_garrison_floor)
+    cfg.model.reverse_edge_cooldown = int(args.reverse_edge_cooldown)
+    cfg.model.sufficient_commit_factor = float(args.sufficient_commit_factor)
 
     if args.samples:
         validate_bc_from_samples(cfg, args.samples, save_path=args.save,

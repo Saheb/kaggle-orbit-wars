@@ -1,4 +1,4 @@
-"""Friendly-coverage roi deflation: (A) parity of pairwise roi between the GPU
+"""Friendly-coverage roi deflation and target-value channels: (A) parity of pairwise roi between the GPU
 torch_env path and the kaggle features.py path with fleets in flight, and
 (B) correctness — a friendly fleet already inbound to a capture target deflates
 that target's roi_20/roi_50 toward 0, and never touches own (reinforce) targets."""
@@ -71,6 +71,35 @@ def test_reachable_enemy_mass_parity():
     print(f"  parity OK: max reachable_enemy_mass diff = {max_diff:.4f}")
 
 
+def test_target_value_keepability_parity():
+    """capture_value/reactive_roi/friendly_reach/keepability (ch 16:20) must match
+    between torch_env and features.py. This is the target-priority signal for
+    "worth taking and keeping"; sim-gap here poisons train/eval target choice."""
+    num_envs = 4
+    env = VecTorchEnv(num_envs=num_envs, num_players=2, device="cpu")
+    env.reset(seeds=list(range(200, 200 + num_envs)))
+    for _ in range(25):
+        env.step({0: torch.randint(0, 2, (num_envs, MAX_OWNED, 3)),
+                  1: torch.randint(0, 2, (num_envs, MAX_OWNED, 3))})
+
+    max_diff = 0.0
+    exercised = False
+    for player in (0, 1):
+        vec = env.get_features(player, max_planets=48, max_fleets=128)["pairwise_features"]
+        for i in range(num_envs):
+            obs = to_legacy_obs(env, env_idx=i, player=player)
+            ref = extract_features(obs, player, num_players=2,
+                                   max_planets=48, max_fleets=128)["pairwise_features"].numpy()
+            pv = vec[i].numpy()
+            d = np.abs(pv[..., 16:20] - ref[..., 16:20])
+            max_diff = max(max_diff, float(d.max()))
+            if (ref[..., 16:20] != 0).any():
+                exercised = True
+    assert max_diff < 0.06, f"target-value/keepability parity diverged: max|Δ|={max_diff:.4f}"
+    assert exercised, "no nonzero target-value/keepability channels seen"
+    print(f"  parity OK: max target-value/keepability diff = {max_diff:.4f}")
+
+
 def test_friendly_inbound_deflates_capture_roi():
     """Controlled: a neutral target with a big friendly fleet aimed at it should read
     much lower roi than the same board with no inbound fleet. Own targets untouched."""
@@ -102,9 +131,45 @@ def test_friendly_inbound_deflates_capture_roi():
     print(f"  deflation OK: roi_20 {roi20_no:.3f}->{roi20_yes:.3f}  roi_50 {roi50_no:.3f}->{roi50_yes:.3f}")
 
 
+def test_keepability_channels_prefer_supported_targets():
+    """Controlled: same-production targets get equal raw value, but the nearby supported
+    one should have better reactive ROI and keepability than the far target beside enemy mass."""
+    from features import compute_pairwise_features
+
+    planets = [
+        [0, 0, 10.0, 10.0, 1.0, 50.0, 2.0],   # source
+        [1, -1, 26.0, 10.0, 1.0, 5.0, 4.0],   # supported neutral target
+        [2, -1, 85.0, 85.0, 1.0, 5.0, 4.0],   # unsupported neutral target
+        [3, 0, 24.0, 10.0, 1.0, 80.0, 2.0],   # friendly support beside target 1
+        [4, 1, 83.0, 85.0, 1.0, 100.0, 2.0],  # enemy support beside target 2
+        [5, 1, 32.0, 10.0, 1.0, 5.0, 4.0],    # same-prod enemy target: double value swing
+    ]
+    out = compute_pairwise_features(
+        planets,
+        owned_indices=np.array([0], dtype=np.int64),
+        owned_count=1,
+        player=0,
+        max_planets=8,
+        max_owned=1,
+        step=10,
+    )
+    supported = out[0, 1]
+    unsupported = out[0, 2]
+    enemy_same_prod = out[0, 5]
+
+    assert abs(float(supported[16]) - float(unsupported[16])) < 1e-6
+    assert float(enemy_same_prod[16]) > 1.9 * float(supported[16])
+    assert float(supported[17]) > float(unsupported[17]), (supported[17], unsupported[17])
+    assert float(supported[18]) > float(unsupported[18]), (supported[18], unsupported[18])
+    assert float(supported[19]) > float(unsupported[19]), (supported[19], unsupported[19])
+    print("  keepability OK: supported target outranks unsupported trap on roi/support/margin")
+
+
 if __name__ == "__main__":
     print("=" * 60)
     test_pairwise_roi_parity()
     test_reachable_enemy_mass_parity()
+    test_target_value_keepability_parity()
     test_friendly_inbound_deflates_capture_roi()
+    test_keepability_channels_prefer_supported_targets()
     print("ALL PASS")

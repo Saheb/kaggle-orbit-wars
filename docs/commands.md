@@ -416,7 +416,7 @@ kaggle competitions logs <EPISODE_ID> 0 -p ./logs
 **Quick 2p-vs-4p win-rate from a submission's replays** (the FFA-baseline check, 2026-06-08):
 ```bash
 mkdir -p /tmp/sub_replays
-kaggle competitions episodes <SUBMISSION_ID> -v 2>/dev/null | tail -n +2 | cut -d',' -f1 \
+kaggle competitions episodes 53802378 -v 2>/dev/null | tail -n +2 | cut -d',' -f1 \
   | while read ep; do kaggle competitions replay "$ep" -p /tmp/sub_replays >/dev/null 2>&1; done
 orbit_wars_rl/.venv/bin/python - <<'PY'
 import json, glob
@@ -732,3 +732,31 @@ python -m pytest orbit_wars_rl/tests/ -x -q
 | Panel watcher running with old opponent paths | Kill watcher (`ps aux \| grep run_panel_eval_watcher ... xargs kill`), fix paths, restart |
 | Running many evals in parallel on Mac | CPU contention → each eval takes 10× longer; limit to 3 at most |
 | Eval OOM on training instance | Training occupies GPU; eval auto-detects CUDA and OOMs. Always prefix: `CUDA_VISIBLE_DEVICES="" python3 orbit_wars_rl/eval.py ...` on any instance running training |
+
+---
+
+## 11. Download top-player / winner replays (for BC datasets)
+
+`fetch_analyze_top_replays.py` pulls a **score-sorted slice** of Kaggle's daily Orbit Wars
+episode datasets (`kaggle/orbit-wars-episodes-YYYY-MM-DD`), not the full ~20GB/day. These are
+the top-of-leaderboard games used to build the replay-action BC corpus (`ar_stage0/replays/top2`).
+Needs `~/.kaggle/kaggle.json`. Today's dataset publishes ~00:10 UTC next day; unpublished dates
+return 403 and are skipped, so `--last-days` is always safe to run.
+
+```bash
+# Download the last 14 days' top-100 two-player games into a worktree dir (no analysis):
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/fetch_analyze_top_replays.py \
+  --last-days 14 --n-per-day 100 --agent-count 2 \
+  --out-dir gpu_run_artifacts/ar_stage1/replays
+
+# Specific dates instead of recent N:
+/Users/saheb/home/.venv/bin/python orbit_wars_rl/fetch_analyze_top_replays.py \
+  --dates 2026-06-17 2026-06-18 --n-per-day 100 --agent-count 2 --out-dir <dir>
+
+# Add --analyze to also run the winner behavioural characterisation; --no-download to
+# re-analyze an existing dir; --player / --exclude to focus on or skip a named player.
+```
+
+Then rebuild the BC dataset over the combined replay dirs (see `docs/replay-action-bc.md`):
+build with the worktree's `build_replay_action_bc.py` so samples are emitted at the phase4
+**20-dim** feature width (`PAIRWISE_FEATURE_DIM=20`), not main's 41-dim.
