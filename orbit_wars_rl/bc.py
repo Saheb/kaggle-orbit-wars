@@ -391,6 +391,13 @@ def _save_bc_checkpoint(model: EntityTransformer, cfg, save_path: str):
             "ship_bin_mode":  cfg.model.ship_bin_mode,
             "num_ship_bins":  cfg.model.num_ship_bins,
             "min_ship_bin":   cfg.model.min_ship_bin,
+            "pairwise_feature_dim": cfg.model.pairwise_feature_dim,
+            "allow_reinforce": bool(getattr(cfg.model, "allow_reinforce", False)),
+            "reinforce_gate_min_planets": int(getattr(cfg.model, "reinforce_gate_min_planets", 0)),
+            "reinforce_forward_only": bool(getattr(cfg.model, "reinforce_forward_only", False)),
+            "reinforce_garrison_floor": float(getattr(cfg.model, "reinforce_garrison_floor", 0.0)),
+            "reverse_edge_cooldown": int(getattr(cfg.model, "reverse_edge_cooldown", 0)),
+            "sufficient_commit_factor": float(getattr(cfg.model, "sufficient_commit_factor", 0.0)),
             # 15-global feature flag — load_checkpoint/train_torch restore the global dim from
             # this so a 15-global BC warmstart loads correctly (omitting it silently breaks resume).
             "game_phase_features": cfg.model.game_phase_features,
@@ -680,6 +687,18 @@ if __name__ == "__main__":
     parser.add_argument("--fire-pos-weight", type=float, default=1.0,
                         help="pos_weight on the fire-head BCE to counter class imbalance "
                              "(winners fire ~9.5%% of slots). >1 = the BC fires more. Try ~5-9.")
+    parser.add_argument("--allow-reinforce", action=argparse.BooleanOptionalAction, default=False,
+                        help="Persist own-target reinforcement legality in the saved BC checkpoint.")
+    parser.add_argument("--reinforce-gate-min-planets", type=int, default=0,
+                        help="Persist the empire-size gate for own-target reinforcement.")
+    parser.add_argument("--reinforce-forward-only", action=argparse.BooleanOptionalAction, default=False,
+                        help="Persist forward-only reinforcement discipline.")
+    parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0,
+                        help="Persist the source garrison floor for reinforcement launches.")
+    parser.add_argument("--reverse-edge-cooldown", type=int, default=0,
+                        help="Persist reverse-edge reinforce cooldown in steps.")
+    parser.add_argument("--sufficient-commit-factor", type=float, default=0.0,
+                        help="Persist eval/train attack-veto factor for undersized attacks.")
     args = parser.parse_args()
 
     _FIRE_POS_WEIGHT = args.fire_pos_weight  # module-level rebind; bc_loss reads this global
@@ -701,6 +720,12 @@ if __name__ == "__main__":
         set_game_phase_features(True)   # so any on-the-fly extraction emits 15-global too
     if args.entity_dim > 0:
         cfg.model.entity_dim = args.entity_dim
+    cfg.model.allow_reinforce = bool(args.allow_reinforce)
+    cfg.model.reinforce_gate_min_planets = int(args.reinforce_gate_min_planets)
+    cfg.model.reinforce_forward_only = bool(args.reinforce_forward_only)
+    cfg.model.reinforce_garrison_floor = float(args.reinforce_garrison_floor)
+    cfg.model.reverse_edge_cooldown = int(args.reverse_edge_cooldown)
+    cfg.model.sufficient_commit_factor = float(args.sufficient_commit_factor)
 
     if args.samples:
         validate_bc_from_samples(cfg, args.samples, save_path=args.save,

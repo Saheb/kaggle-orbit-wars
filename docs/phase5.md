@@ -1,6 +1,8 @@
 # Phase 5 — Synchronized-Wave Concentration (from-scratch architecture)
 
-**Status:** locked spec / build started. Steps 0-4 in §14 are implemented: the decisive-mass
+**Status:** locked spec / build started. Steps 0-6 in §14 are implemented (Step 5 = wave planner
++ §9 poisoning checks; Step 6 = pre-PPO no-veto gate harness, load-bearing-validated; Step 7's
+BC→PPO + hard-stop gate run is next). The decisive-mass
 floor uses the Phase 5 deadline/window object, source width is `MAX_OWNED=24`, the shared
 scalar wave primitives are in place, pairwise wave channels `21:41` are wired with train/eval
 parity, and the model now uses **direct per-(source,target) fire/ship heads (no slot prior +
@@ -519,5 +521,14 @@ shared:  out-massed%, dm<50 cross, planets@16/32/50/100, held-out Ajay
    gate (only launch a wave whose ready mass crosses), §9 now PASSES: reactive_cross 1.00,
    overcommit p50 1.03, ready_quota_error ~3, held_when_holdable 0.83, reinforce_into_DOOMED 0.
    `arrival_spread` is now INFO-only, not a gate.
-6. Pre-PPO no-veto gate on synthetic states (§11). **Hard stop** until it passes.
-7. From-scratch BC → PPO. Promotion gate (§11) before any `wave_head`.
+6. **Harness done:** Pre-PPO no-veto gate on synthetic states (§11) — `gate_phase5.py` +
+   `tests/test_gate_phase5.py`. A 4-state load-bearing battery (2 attack-sufficiency, 1
+   defense-HOLDABLE, 1 defense-DOOMED-drain) scored by the SHARED `wave_primitives` floors
+   (invariant I1). Validated load-bearing: the deterministic oracle (`wave_planner`) passes every
+   state, a no-op policy fails every state. A policy is any `(obs, player) -> {pid: SourceDecision}`
+   callable; `run_gate(policy)` is the scorer. **Model-policy half is the actual hard stop and runs
+   at Step 7**: the BC pipeline owns the feature/decode path and must decode with
+   `sufficient_commit_factor=0` (no veto), feeding decoded decisions into `run_gate`. CLI with no
+   `--checkpoint` runs the oracle/noop self-validation.
+7. From-scratch BC → PPO. **Run the Step-6 gate on the BC'd policy (hard stop) before PPO**, then
+   the promotion gate (§11) before any `wave_head`.

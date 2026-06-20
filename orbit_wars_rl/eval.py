@@ -1808,6 +1808,47 @@ def _fmt_conversion(acc):
             f"LOST best%≪WON => value-aware selection IS the lever; WON≈LOST => systematic but not outcome-relevant]")
 
 
+def _fmt_tier_summary(acc):
+    """⭐ TIERED SUMMARY — re-prints the highest-signal metrics in priority order so the
+    decision-relevant numbers aren't buried in the ~30-line dump above. Values are DUPLICATED
+    (not moved). Priority + confound notes per docs/metrics.md. Read top-down, stop when answered."""
+    gw, gl = acc["games_won"], acc["games_lost"]
+    wr = gw / max(gw + gl, 1)
+    _med = lambda h: (sorted(h)[len(h) // 2] if h else 0)
+    # T2 — diagnose our wall
+    lmt = sum(acc["loss_mode"]) or 1
+    outmassed = acc["loss_mode"][1] / lmt
+    _dm = acc["dm_ratios_ph"][0] + acc["dm_ratios_ph"][1] + acc["dm_ratios_ph"][2]
+    dm_gap = sum(max(0.0, 1.0 - r) for r in _dm) / max(len(_dm), 1)
+    dm_cross = sum(1 for r in _dm if r >= 1.0) / max(len(_dm), 1)
+    h05 = acc["hold_age"][0]
+    h05_under = (sum(1 for r in h05 if r < 1.0) / len(h05)) if h05 else 0.0
+    cap_open_w = acc["caps_early_won"] / max(acc["atk_early_won"], 1)
+    rsh_e = acc["reinf_early"] / max(acc["reinf_early"] + acc["atk_early"], 1)  # opening reinforce/stage share
+    p50w = (acc["p50_sum_won"] / acc["p50_n_won"]) if acc["p50_n_won"] else 0.0
+    # T3 — degeneracy tripwires (binary; normal = ignore)
+    lr = acc["launch_count"] / max(acc["launch_states"], 1)
+    ff_w = acc["fire_frac_sum_won"] / max(acc["fire_steps_won"], 1)
+    s0 = sum(acc["ship1_ph"]) / max(sum(acc["launches_ph"]), 1)
+    medlen_w = _med(acc["game_len_won"])
+    bar = "─" * 78
+    return (
+        f"\n{bar}\n"
+        f"⭐ TIERED METRIC SUMMARY  (priority order; values duplicated from above — docs/metrics.md)\n"
+        f"{bar}\n"
+        f"  T1 ARBITER   win-rate {wr:.1%} ({gw}/{gw + gl})   ← only signal that sees absolute regression\n"
+        f"  T2 THE WALL  out-massed {outmassed:.0%} (want ↓ = wall breaking)   "
+        f"decisive-mass gap {dm_gap:.2f} / cross {dm_cross:.2f} (gap↓ cross↑ = concentrating)\n"
+        f"               hold-floor @age0-5 under {h05_under:.0%} (↓; capture-then-lose wall)   "
+        f"open<50 cap/atk WON {cap_open_w:.2f} (ref .51)   planets@50 WON {p50w:.0f} (ref 9)\n"
+        f"               reinf@<50 {rsh_e:.2f} (ref .29 = stage the attack early)\n"
+        f"  T3 TRIPWIRE  launch_rate {lr:.3f} (→0 passive)   fire_frac WON {ff_w:.2f} (→1 carpet-bomb)   "
+        f"ship0 {s0:.0%} (high = 1-ship collapse)\n"
+        f"  colour only  game-len WON {medlen_w}st  (symptom of the root, NOT a gate — don't bribe with speed_coef)\n"
+        f"{bar}"
+    )
+
+
 def evaluate_against_baseline(
     model: EntityTransformer,
     device: torch.device,
@@ -2164,6 +2205,8 @@ def print_panel_report(result: dict, opponent: str) -> None:
     print(f"Best:  {best[1]}  ({best[0]:.1f}%)")
     print(f"Worst: {worst[1]}  ({worst[0]:.1f}%)")
     print(f"Spread: {best[0] - worst[0]:.1f}pp")
+    if "conversion" in result:
+        print(_fmt_tier_summary(result["conversion"]))
 
 
 def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
@@ -2325,6 +2368,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     for r in results["results"][:5]:
         print(f"  seed={r['seed']} win={r['win']} "
               f"material={r['material']} rewards={r['rewards']}")
+    print(_fmt_tier_summary(results["conversion"]))  # tiered summary LAST = bottom of output
 
     return results
 

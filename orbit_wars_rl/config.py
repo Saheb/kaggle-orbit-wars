@@ -53,6 +53,14 @@ class ModelConfig:
     # small nonzero values preserve near-parity while letting the residual path
     # influence behavior before PPO has to move a zeroed output layer off dead-zero.
     phase4_residual_init_std: float = 0.0
+    # Target-decode discipline. These are persisted in checkpoints so train/eval/export
+    # do not silently disagree about own-target legality or attack concentration vetoes.
+    allow_reinforce: bool = False
+    reinforce_gate_min_planets: int = 0
+    reinforce_forward_only: bool = False
+    reinforce_garrison_floor: float = 0.0
+    reverse_edge_cooldown: int = 0
+    sufficient_commit_factor: float = 0.0
     dropout: float = 0.0
     # Value head input width. 0 = auto (2*entity_dim, new concat head).
     # Set to entity_dim when loading pre-Phase-1 checkpoints (old mean-pool head).

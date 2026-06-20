@@ -406,6 +406,24 @@ def train(args):
     print(f"Expansion coeff: {args.expansion_coef}")
     print(f"Defense coeff: {args.defense_coef}")
     print(f"Early capture coeff: {args.early_capture_coef} (decay over {args.early_capture_steps} steps)")
+    print(f"Production-share coeff: {args.prod_share_coef}")
+    if args.prod_share_coef != 0.0:
+        other_reward_knobs = [
+            ("win_margin_coeff", args.win_margin_coeff),
+            ("shaping_coef", args.shaping_coef),
+            ("expansion_coef", args.expansion_coef),
+            ("defense_coef", args.defense_coef),
+            ("early_capture_coef", args.early_capture_coef),
+            ("speed_coef", args.speed_coef),
+            ("consolidation_coef", args.consolidation_coef),
+            ("capture_utility_coef", args.capture_utility_coef),
+            ("capture_idle_penalty", args.capture_idle_penalty),
+            ("decisive_mass_coef", args.decisive_mass_coef),
+        ]
+        active_reward_knobs = [name for name, value in other_reward_knobs if value != 0.0]
+        if active_reward_knobs:
+            print("WARNING: --prod-share-coef is active together with other reward knobs: "
+                  + ", ".join(active_reward_knobs))
     if args.early_capture_anneal_frac > 0.0:
         print(f"Early capture ANNEAL: cosine {args.early_capture_coef}→0 over "
               f"{args.early_capture_anneal_frac * args.total_steps:,.0f} steps "
@@ -523,6 +541,7 @@ def train(args):
                       expansion_coef=args.expansion_coef,
                       defense_coef=args.defense_coef,
                       early_capture_coef=args.early_capture_coef,
+                      prod_share_coef=args.prod_share_coef,
                       early_capture_steps=args.early_capture_steps,
                       first_strike_steps=args.first_strike_steps,
                       first_strike_mult=args.first_strike_mult,
@@ -826,6 +845,7 @@ def train(args):
                     "capture_utility_coef": args.capture_utility_coef,
                     "capture_utility_window": args.capture_utility_window,
                     "capture_idle_penalty": args.capture_idle_penalty,
+                    "prod_share_coef": args.prod_share_coef,
                     "il_lambda": cfg.ppo.il_lambda,
                     "win_margin_coeff": args.win_margin_coeff,
                     "speed_coef": args.speed_coef,
@@ -2044,6 +2064,12 @@ if __name__ == "__main__":
                              "mid-game so GAE 18-step horizon can see captures throughout, not just "
                              "the opening. Coeff math: one capture event ≈ coeff × decay_at_t; "
                              "keep ≤10%% of terminal win → range 0.05-0.10. 0 = off.")
+    parser.add_argument("--prod-share-coef", type=float, default=0.0,
+                        help="Unified production-share capture reward coefficient. Rewards ownership "
+                             "deltas by planet production share, anchored to capture time: gain pays "
+                             "+coef*decay(now)*prod/total, loss pays -coef*decay(capture_time)*prod/total. "
+                             "Initial homes are pre-existing state, so holding them pays no dense reward. "
+                             "Use as the cleanup replacement for early_capture/expansion/defense shaping.")
     parser.add_argument("--early-capture-steps", type=int, default=400,
                         help="Step at which the delta-capture decay reaches zero. Default 400.")
     parser.add_argument("--early-capture-anneal-frac", type=float, default=0.0,
