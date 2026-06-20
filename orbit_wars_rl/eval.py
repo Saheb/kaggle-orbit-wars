@@ -20,13 +20,13 @@ from wave_primitives import (
     WAVE_TOL_STEPS,
     capture_floor as _wave_capture_floor,
     fleet_eta_to_target as _wave_fleet_eta_to_target,
-    fleet_target_planet as _wave_fleet_target_planet,
     ship_speed as _wave_ship_speed,
 )
 # Decisive-mass floor constants — IMPORTED from torch_env so the eval dm_* gap diagnostic uses the
 # EXACT same floor as the training reward/diag (they can never drift). project_force_concentration_wall.
 from torch_env import (_DM_BETA, _DM_ETA_FREE, _DM_ETA_SCALE, _DM_HORIZON, _DM_OVERHEAD,
                        MAX_SHIP_SPEED as _DM_MAX_SPEED)
+from kaggle_environments.envs.orbit_wars.orbit_wars import CENTER, ROTATION_RADIUS_LIMIT
 # Reactive-margin weight for the eval dm_* floor. Defaults to torch_env's 2.2 (= training default).
 # A decmass run trained with a NON-default --decisive-mass-beta must pass --decisive-mass-beta to
 # eval for "eval floor == reward floor" to hold (beta is an env param, not persisted in the ckpt).
@@ -381,19 +381,77 @@ def _reinf_bin_idx(owned):
     return 0  # owned 0 can't launch; guard
 
 
-def _resolve_launch_target(planets, src, angle):
-    """Planet a launch from `src` at `angle` is aimed at (direction match), or None.
-    Mirrors fetch_analyze_top_replays._resolve_target so eval == replay analysis."""
-    sx, sy = src[2], src[3]
-    best, bd = None, 0.6
+# Orbit rate of the game currently being analysed, set once per game by game_conversion (it is
+# constant for a game). Read by the lead-aware target resolvers below so they don't need it threaded
+# through every helper signature. Default 0.0 = treat planets as static (safe: degrades to a
+# distance-aware ray test, never worse than the old angle-only heuristic).
+_CONV_ANGVEL = 0.0
+
+
+def _planet_pos_at(p, t):
+    """Planet `p`'s (x, y) `t` steps in the future along its orbit. Static at/beyond the rotation
+    radius limit (the engine leaves those fixed). Orbit radius is rotation-invariant, so it can be
+    read from the current position; phase advances by _CONV_ANGVEL*t (engine: angle = init + w*step)."""
+    dx, dy = p[2] - CENTER, p[3] - CENTER
+    orb = math.hypot(dx, dy)
+    if orb + p[4] >= ROTATION_RADIUS_LIMIT:
+        return p[2], p[3]
+    ph = math.atan2(dy, dx) + _CONV_ANGVEL * t
+    return CENTER + orb * math.cos(ph), CENTER + orb * math.sin(ph)
+
+
+def _lead_collision_target(planets, x, y, angle, ships, skip_pid=None):
+    """Planet a fleet at (x, y) heading `angle` (speed from `ships`) will physically collide with,
+    accounting for the target's ORBITAL motion over the flight — a lead/intercept projection that
+    mirrors the aimer the agent fires with (`_target_intercept_angle`). Picks the min-ETA hit among
+    planets the straight-line heading reaches within radius; None if it hits nothing (flies to the
+    void). Validated at 98.4% vs the true swept-collision on replay (the old angle-only heuristic was
+    65.6%); the residual is grazing geometry. `skip_pid` excludes the source planet for a launch."""
+    c, sn = math.cos(angle), math.sin(angle)
+    speed = max(_ship_speed_py(ships), 1e-6)
+    best, best_eta = None, None
     for p in planets:
-        if p[0] == src[0]:
+        if skip_pid is not None and p[0] == skip_pid:
             continue
-        pa = math.atan2(p[3] - sy, p[2] - sx)
-        dd = abs((pa - angle + math.pi) % (2 * math.pi) - math.pi)
-        if dd < bd:
-            bd, best = dd, p
+        pr = p[4]
+        eta = max(0.0, (math.hypot(p[2] - x, p[3] - y) - pr) / speed)
+        for _ in range(4):                          # converge ETA against the moving target
+            lx, ly = _planet_pos_at(p, eta)
+            eta = max(0.0, (math.hypot(lx - x, ly - y) - pr) / speed)
+        lx, ly = _planet_pos_at(p, eta)
+        vx, vy = lx - x, ly - y
+        along = vx * c + vy * sn
+        if along <= 0:                              # planet is behind the heading
+            continue
+        perp = abs(vx * sn - vy * c)
+        if perp < pr + 0.5 and (best_eta is None or eta < best_eta):
+            best_eta, best = eta, p
     return best
+
+
+def _resolve_launch_target(planets, src, angle, ships=None):
+    """Planet a launch from `src` at `angle` actually hits. With `ships` given (the launched ship
+    count, needed for fleet speed) this is the lead-aware collision resolver — the fleet flies
+    straight and captures whatever it physically collides with, so distance / planet radius / the
+    target's orbital motion all matter (none of which the old angle-only match saw). `ships=None`
+    falls back to the legacy angle-only match for the live retarget intent-probe (`_apply_retarget`),
+    which has no ship count and only wants the aimed direction."""
+    if ships is None:
+        sx, sy = src[2], src[3]
+        best, bd = None, 0.6
+        for p in planets:
+            if p[0] == src[0]:
+                continue
+            pa = math.atan2(p[3] - sy, p[2] - sx)
+            dd = abs((pa - angle + math.pi) % (2 * math.pi) - math.pi)
+            if dd < bd:
+                bd, best = dd, p
+        return best
+    # Fleet spawns at the source surface + a small launch offset along the heading (engine:
+    # start = planet + cos/sin(angle)*(radius + 0.1)), then flies straight.
+    sx = src[2] + math.cos(angle) * (src[4] + 0.1)
+    sy = src[3] + math.sin(angle) * (src[4] + 0.1)
+    return _lead_collision_target(planets, sx, sy, angle, ships, skip_pid=src[0])
 
 
 def _cap_cost_at_arrival(src, tgt, seat):
@@ -568,10 +626,11 @@ def _ship_speed_py(ships):
 
 
 def _dm_fleet_target(planets, f):
-    """Planet a fleet `f` is converging on — nearest alive candidate with along>0 and
-    perp < radius+2.0. Mirrors torch_env._fleet_target_idx (argmin distance among candidates),
-    NOT _friendly_inbound (which sums to every roughly-aligned target). Returns planet record."""
-    return _wave_fleet_target_planet(planets, f)
+    """Planet a fleet `f` is converging on — the lead-aware swept-collision target (min-ETA hit,
+    accounting for the planet's orbital motion over the flight). Mirrors torch_env._fleet_target_idx
+    so the eval dm_* gap diagnostic and the training reward attribute the SAME target; NOT
+    _friendly_inbound (which sums to every roughly-aligned target). Returns planet record or None."""
+    return _lead_collision_target(planets, f[2], f[3], f[4], f[6])
 
 
 def _decisive_gap_step(planets, fleets, seat, beta=None, targets="enemy"):
@@ -816,6 +875,16 @@ def game_conversion(steps, seat):
     Also records owned-planet count at step milestones (expansion/retention).
     Returns per-game counts; `add_conversion` aggregates across games.
     """
+    # Orbit rate for the lead-aware target resolvers (constant per game) — set once here so the
+    # per-launch / per-fleet resolution below sees the planets' motion over each flight.
+    global _CONV_ANGVEL
+    _CONV_ANGVEL = 0.0
+    for _s in steps:
+        if seat < len(_s):
+            _av = _s[seat].observation.get("angular_velocity")
+            if _av is not None:
+                _CONV_ANGVEL = float(_av)
+                break
     caps = atk = reinf = atk_ships = redundant = underkill = 0
     atk_early = redundant_early = underkill_early = caps_early = 0   # opening window (t < _LAUNCH_WINDOW)
     atk_mid = caps_mid = 0                                           # mid-game window [50, 100)
@@ -1071,9 +1140,9 @@ def game_conversion(steps, seat):
             ship_ph_sum[_ph] += sent
             if sent == 1:
                 ship1_ph[_ph] += 1
-            tgt = _resolve_launch_target(p0, src, float(mv[1]))
+            tgt = _resolve_launch_target(p0, src, float(mv[1]), sent)
             if tgt is None:
-                continue                            # unclassifiable → skip (== analyzer)
+                continue                            # flew to the void / unresolvable → skip
             if int(tgt[1]) == seat:
                 reinf += 1                          # reinforce: cannot capture
                 reinf_bin[bidx] += 1
@@ -1204,7 +1273,7 @@ def game_conversion(steps, seat):
                 for _mv in (steps[_s][seat].action or []):
                     if not _mv or len(_mv) < 3 or int(_mv[0]) != _pid:
                         continue
-                    _tgt_prev = _resolve_launch_target(_ps_prev, _src_prev, float(_mv[1]))
+                    _tgt_prev = _resolve_launch_target(_ps_prev, _src_prev, float(_mv[1]), int(_mv[2]))
                     if _tgt_prev is not None and int(_tgt_prev[1]) != seat:
                         _attacked = True
                         break

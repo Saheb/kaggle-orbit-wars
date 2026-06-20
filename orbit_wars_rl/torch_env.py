@@ -992,27 +992,51 @@ class VecTorchEnv:
         return terminal_rewards
 
     def _fleet_target_idx(self) -> torch.Tensor:
-        """Geometry-only target planet index per fleet, (N, F), or -1 if none.
-        Mirrors the heading-projection in get_features (nearest alive planet ahead of
-        the fleet along its heading). Player-independent — depends only on geometry."""
-        fx = self.fleets[:, :, 2]
-        fy = self.fleets[:, :, 3]
+        """Lead-aware swept-collision target planet index per fleet, (N, F), or -1 if it hits nothing.
+
+        A launched fleet flies straight and captures whatever it physically collides with, so the
+        true target depends on distance, planet radius AND the target's orbital motion over the
+        flight — not just the launch-instant heading. For each candidate planet we project it to its
+        orbit position at the fleet's ETA (the engine advances phase by angular_velocity*step),
+        converge the ETA in 4 iterations, then keep the min-ETA planet the heading reaches within
+        radius. This mirrors the agent's own intercept aimer (`_target_intercept_angle`).
+
+        Scalar mirror: eval._dm_fleet_target / _lead_collision_target, validated at 98.4% vs the true
+        swept-collision on replay (the old along/perp-r+2 nearest-distance heuristic was ~85% — it
+        ignored orbital lead and over-loosely matched). Player-independent (geometry only). Feeds the
+        decisive-mass reward + diagnostic via _decisive_mass_fields; dead fleets are masked by the
+        caller (valid_f). project_force_concentration_wall."""
+        fx = self.fleets[:, :, 2].unsqueeze(2)                          # (N, F, 1)
+        fy = self.fleets[:, :, 3].unsqueeze(2)
         fang = self.fleets[:, :, 4]
-        fcos = torch.cos(fang)
-        fsin = torch.sin(fang)
-        x = self.planets[:, :, 2]
-        y = self.planets[:, :, 3]
-        r = self.planets[:, :, 4]
-        F = self.fleets.shape[1]
-        vx_fp = x.unsqueeze(1) - fx.unsqueeze(2)                 # (N, F, P)
-        vy_fp = y.unsqueeze(1) - fy.unsqueeze(2)
-        along_fp = vx_fp * fcos.unsqueeze(2) + vy_fp * fsin.unsqueeze(2)
-        perp_fp = torch.abs(vx_fp * fsin.unsqueeze(2) - vy_fp * fcos.unsqueeze(2))
-        alive_expand = self.planet_alive.unsqueeze(1).expand(-1, F, -1)
-        candidate = (along_fp > 0) & (perp_fp < r.unsqueeze(1) + 2.0) & alive_expand
+        fcos = torch.cos(fang).unsqueeze(2)                            # (N, F, 1)
+        fsin = torch.sin(fang).unsqueeze(2)
+        speed = _ship_speed(self.fleets[:, :, 6]).clamp(min=1e-6).unsqueeze(2)   # (N, F, 1)
+        px = self.planets[:, :, 2].unsqueeze(1)                        # (N, 1, P)
+        py = self.planets[:, :, 3].unsqueeze(1)
+        pr = self.planets[:, :, 4].unsqueeze(1)
+        angvel = self.angular_velocity.view(-1, 1, 1)                  # (N, 1, 1)
+        dx0 = px - CENTER
+        dy0 = py - CENTER
+        orbit_r = torch.sqrt(dx0 * dx0 + dy0 * dy0)                    # rotation-invariant radius
+        static = (orbit_r + pr) >= ROTATION_RADIUS_LIMIT
+        phase0 = torch.atan2(dy0, dx0)
+        eta = ((torch.sqrt((px - fx) ** 2 + (py - fy) ** 2) - pr) / speed).clamp(min=0.0)   # (N, F, P)
+        for _ in range(4):                                             # converge ETA vs the moving target
+            a = phase0 + angvel * eta
+            lx = torch.where(static, px, CENTER + orbit_r * torch.cos(a))
+            ly = torch.where(static, py, CENTER + orbit_r * torch.sin(a))
+            eta = ((torch.sqrt((lx - fx) ** 2 + (ly - fy) ** 2) - pr) / speed).clamp(min=0.0)
+        a = phase0 + angvel * eta
+        lx = torch.where(static, px, CENTER + orbit_r * torch.cos(a))
+        ly = torch.where(static, py, CENTER + orbit_r * torch.sin(a))
+        vx = lx - fx
+        vy = ly - fy
+        along = vx * fcos + vy * fsin
+        perp = torch.abs(vx * fsin - vy * fcos)
+        candidate = (along > 0) & (perp < pr + 0.5) & self.planet_alive.unsqueeze(1)
         has_candidate = candidate.any(dim=2)
-        dists_fp = torch.sqrt(vx_fp * vx_fp + vy_fp * vy_fp)
-        tgt_idx = dists_fp.masked_fill(~candidate, 1e6).argmin(dim=2)    # (N, F)
+        tgt_idx = eta.masked_fill(~candidate, 1e6).argmin(dim=2)        # (N, F) — min-ETA hit
         return torch.where(has_candidate, tgt_idx, torch.full_like(tgt_idx, -1))
 
     def _decisive_mass_fields(self):
