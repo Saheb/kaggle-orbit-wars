@@ -177,6 +177,33 @@ _sync() {  # _sync <run>
   echo "[sync] $RUN no longer active — exiting" >> "$DST/watchers.log"
 }
 
+# Entropy/anchor health for one checkpoint, parsed from the synced training log (NOT eval — these
+# are learner-internal). Writes eval_health.csv + a HEALTH line to watcher_eval.log. Works on a live
+# run with no restart (reads the iter/diag/CKPT_METRICS lines already in the log). Uses caller's
+# $MATCH/$ROOT (in-process; does NOT re-source .watch_env, which would clobber a 2nd loop's OPP).
+_health() {  # _health <run> <step> <base>
+  local RUN="$1" step="$2" base="$3"
+  local DST="$ROOT/gpu_run_artifacts/$RUN" HOUT="$ROOT/gpu_run_artifacts/$RUN/eval_health.csv"
+  local LOG; LOG=$(ls -t "$DST/logs/train_gpu_phase1_${MATCH}"*.log 2>/dev/null | head -1)
+  [ -f "$HOUT" ] || echo "step,H_fire,dH_fire,H_ship,H_tgt,il_coef,il_kl,checkpoint" > "$HOUT"
+  grep -q "^${step}," "$HOUT" && return 0   # idempotent: a 2nd eval loop won't double-write this step
+  local hfire="" hship="" htgt="" ilc="" ilk="" dhf="NA" prev="" ctx="" diag=""
+  if [ -n "$LOG" ] && [ -f "$LOG" ]; then
+    hfire=$(grep -E "CKPT_METRICS step=${step} " "$LOG" | tail -1 | grep -oE 'Hfire=[0-9.]+' | cut -d= -f2)
+    ctx=$(grep -B3 "CKPT_METRICS step=${step} " "$LOG" | grep -oE 'il_kl [0-9.]+ il_coef [0-9.]+' | tail -1)
+    ilk=$(echo "$ctx" | awk '{print $2}'); ilc=$(echo "$ctx" | awk '{print $4}')
+    diag=$(grep -B120 "CKPT_METRICS step=${step} " "$LOG" | grep -oE 'H_ship [0-9.]+ H_tgt [0-9.]+' | tail -1)
+    hship=$(echo "$diag" | awk '{print $2}'); htgt=$(echo "$diag" | awk '{print $4}')
+  fi
+  hfire=${hfire:-NA}; hship=${hship:-NA}; htgt=${htgt:-NA}; ilc=${ilc:-NA}; ilk=${ilk:-NA}
+  prev=$(grep -v '^step' "$HOUT" 2>/dev/null | tail -1 | cut -d, -f2)
+  if [ "$hfire" != "NA" ] && [ -n "$prev" ] && [ "$prev" != "NA" ]; then
+    dhf=$(awk -v a="$hfire" -v b="$prev" 'BEGIN{printf "%+.3f", a-b}')
+  fi
+  echo "${step},${hfire},${dhf},${hship},${htgt},${ilc},${ilk},${base}" >> "$HOUT"
+  echo "[$(date -u +%FT%TZ)] HEALTH step=${step} H_fire=${hfire}(Δ${dhf}) H_ship=${hship} H_tgt=${htgt} il_coef=${ilc} il_kl=${ilk}" >> "$DST/watcher_eval.log"
+}
+
 _eval() {  # _eval <run> [opp_override]   (platform-independent — local files only)
   local RUN="$1"; . "$ROOT/gpu_run_artifacts/$1/.watch_env"
   # An explicit opp arg overrides .watch_env's OPP, so a SECOND eval loop (e.g. Ajay) can run
@@ -231,6 +258,7 @@ _eval() {  # _eval <run> [opp_override]   (platform-independent — local files 
     # hold-loss out-massed%% — THE force-concentration verdict (enemy fleet > our garrison at loss).
     om=$(grep -E "hold-loss" "$elog" | tail -1 | sed -E 's#.*out-massed ([0-9]+)%.*#\1#')
     echo "$(date -u +%FT%TZ),${step},${wr:-ERR},${s0:-ERR},${s1:-ERR},${om:-NA},${oc:-NA},${mc:-NA},${pr:-NA},${p100:-NA},${rse:-NA},${rsm:-NA},${rdf:-NA},256,${base}" >> "$OUT"
+    _health "$RUN" "$step" "$base"   # entropy/anchor health line from the synced training log
   done
   echo "[eval] $RUN no longer active — exiting" >> "$ROOT/gpu_run_artifacts/$RUN/watchers.log"
 }
@@ -283,6 +311,20 @@ case "${1:-}" in
     RUN="${2:?usage: sync-once <run>}"
     sync_once "$RUN"
     ;;
+  health)
+    # Backfill eval_health.csv (entropy/anchor health) for every synced checkpoint of a run, parsing
+    # the training log. Idempotent — safe to re-run. Lets a LIVE run get health lines without
+    # restarting its eval loop (no panel churn). New checkpoints auto-emit once the eval loop runs
+    # the updated _eval (i.e. after the watcher's next start).
+    RUN="${2:?usage: health <run>}"; . "$ROOT/gpu_run_artifacts/$RUN/.watch_env"
+    DIR="$ROOT/gpu_run_artifacts/$RUN/checkpoints"
+    while IFS= read -r ck; do
+      [ -n "$ck" ] || continue
+      b=$(basename "$ck"); s=$(echo "$b" | sed -E 's/torch_step_([0-9]+)_.*/\1/')
+      _health "$RUN" "$s" "$b"
+    done < <(find "$DIR" -maxdepth 1 -name "torch_step_*${MATCH}*.pt" 2>/dev/null | sort -V)
+    echo "backfilled health -> $ROOT/gpu_run_artifacts/$RUN/eval_health.csv"
+    ;;
   stop-run)
     RUN="${2:?usage: stop-run <run>}"
     stop_run "$RUN"
@@ -308,5 +350,5 @@ case "${1:-}" in
     ;;
   _sync)  _sync "$2" ;;
   _eval)  _eval "$2" "${3:-}" ;;
-  *) echo "usage: $0 {start|start-parallel <run> <platform> <target> [opp] | add-eval <run> <opp> [from-latest] | sync-once <run> | stop-run <run> | stop | status}"; exit 1 ;;
+  *) echo "usage: $0 {start|start-parallel <run> <platform> <target> [opp] | add-eval <run> <opp> [from-latest] | sync-once <run> | health <run> | stop-run <run> | stop | status}"; exit 1 ;;
 esac

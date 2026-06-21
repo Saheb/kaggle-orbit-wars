@@ -234,6 +234,7 @@ class VecTorchEnv:
         ship_overflow_mode: str = "clamp",   # matches eval (_ship_bin_to_count clamps); "drop"=legacy bug
         action_decode: str = "angle",
         win_margin_coeff: float = 0.0,
+        eliminate_to_win: bool = False,
         shaping_coef: float = 0.0,
         expansion_coef: float = 0.0,
         defense_coef: float = 0.0,
@@ -374,6 +375,12 @@ class VecTorchEnv:
         # Terminal bonus for winners: +win_margin_coeff * (my_score / total_score).
         # 0.0 = pure ±1 reward (default, backward-compatible).
         self.win_margin_coeff = float(win_margin_coeff)
+        # Eliminate-to-win: a terminal win counts ONLY on an elimination (few_left).
+        # Games that reach the step cap without an elimination are draws (reward 0 for
+        # both), removing the "most ships wins at timeout" hoard-to-timeout attractor
+        # that keeps self-play in the under-mass Nash. project_force_concentration_wall.
+        # False = legacy ±1 most-ships-wins (default, backward-compatible).
+        self.eliminate_to_win = bool(eliminate_to_win)
         self.shaping_coef = float(shaping_coef)
         # Expansion shaping: potential-based reward on OWNED PRODUCTION (sum of
         # planet production rates owned). Unlike material (ships), production only
@@ -2717,6 +2724,10 @@ class VecTorchEnv:
             scores[:, pl] = sp.sum(dim=1) + sf.sum(dim=1)
         max_score, _ = scores.max(dim=1, keepdim=True)  # (N, 1)
         wins = (scores == max_score) & (max_score > 0)
+        if self.eliminate_to_win:
+            # A win only counts on an elimination; a timeout without one is a draw (set to
+            # 0 below). The dense prod_share shaping still supplies an in-episode gradient.
+            wins = wins & few_left.unsqueeze(1)
         # Expose the RAW winner mask (pre-shaping/bonus) so callers (PFSP result
         # attribution) don't have to infer win/loss from the shaped reward tensor —
         # which already carries material/expansion/early-capture/etc. shaping by the
@@ -2754,6 +2765,10 @@ class VecTorchEnv:
             self._last_wins[env_idx] = False
             self._last_wins[env_idx, adv_idx] = succ
             self._last_wins[env_idx, opp_idx] = ~succ
+        if self.eliminate_to_win:
+            # Newly-done, non-scenario envs with no winner = timeout draws → reward 0.
+            draw = (~self._last_wins.any(dim=1)) & newly_done & ~scenario_done
+            rewards[draw] = 0.0
         # Only return rewards for newly-done envs; zero otherwise
         rewards = rewards * newly_done.unsqueeze(1).float()
         self.rewards = torch.where(newly_done.unsqueeze(1), rewards, self.rewards)

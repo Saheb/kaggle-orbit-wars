@@ -398,6 +398,7 @@ def train(args):
         print(f"SUFFICIENT-COMMIT MASK: veto attack launches with ships <= target_defense × "
               f"{args.sufficient_commit_factor} (force concentration; mask, no Nash risk)")
     print(f"Win margin coeff: {args.win_margin_coeff}")
+    print(f"Eliminate-to-win: {args.eliminate_to_win} (timeout = draw when on)")
     print(f"Shaping coeff: {args.shaping_coef}")
     print(f"Expansion coeff: {args.expansion_coef}")
     print(f"Defense coeff: {args.defense_coef}")
@@ -533,6 +534,7 @@ def train(args):
                       reverse_edge_cooldown=args.reverse_edge_cooldown,
                       sufficient_commit_factor=args.sufficient_commit_factor,
                       win_margin_coeff=args.win_margin_coeff,
+                      eliminate_to_win=args.eliminate_to_win,
                       shaping_coef=args.shaping_coef,
                       expansion_coef=args.expansion_coef,
                       defense_coef=args.defense_coef,
@@ -837,6 +839,7 @@ def train(args):
                     "prod_share_coef": args.prod_share_coef,
                     "il_lambda": cfg.ppo.il_lambda,
                     "win_margin_coeff": args.win_margin_coeff,
+                    "eliminate_to_win": args.eliminate_to_win,
                     "speed_coef": args.speed_coef,
                     "action_decode": args.action_decode,
                     "resume": args.resume or "",
@@ -2056,6 +2059,11 @@ if __name__ == "__main__":
                              "+coef*decay(now)*prod/total, loss pays -coef*decay(capture_time)*prod/total. "
                              "Initial homes are pre-existing state, so holding them pays no dense reward. "
                              "Use as the cleanup replacement for early_capture/expansion/defense shaping.")
+    parser.add_argument("--eliminate-to-win", action="store_true",
+                        help="A terminal win counts ONLY on an elimination; a timeout without one is a "
+                             "draw (reward 0 for both). Removes the most-ships-wins-at-timeout hoarding "
+                             "attractor that pins self-play in the under-mass Nash. Pair with dense "
+                             "prod-share shaping for the in-episode gradient. Default off (legacy ±1).")
     parser.add_argument("--early-capture-steps", type=int, default=400,
                         help="Step at which the delta-capture decay reaches zero. Default 400.")
     parser.add_argument("--early-capture-anneal-frac", type=float, default=0.0,
