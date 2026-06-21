@@ -416,6 +416,7 @@ def train(args):
             ("capture_utility_coef", args.capture_utility_coef),
             ("capture_idle_penalty", args.capture_idle_penalty),
             ("decisive_mass_coef", args.decisive_mass_coef),
+            ("staging_shaping_coef", args.staging_shaping_coef),
         ]
         active_reward_knobs = [name for name, value in other_reward_knobs if value != 0.0]
         if active_reward_knobs:
@@ -552,6 +553,9 @@ def train(args):
                       decisive_mass_coef=args.decisive_mass_coef,
                       decisive_mass_beta=args.decisive_mass_beta,
                       decisive_diag=args.decisive_diag,
+                      staging_shaping_coef=args.staging_shaping_coef,
+                      staging_topk=args.staging_topk,
+                      staging_gamma=cfg.ppo.gamma,
                       handicap_frac=args.handicap_frac,
                       handicap_ships=args.handicap_ships,
                       ssdr_frac=args.ssdr_frac,
@@ -2120,6 +2124,17 @@ if __name__ == "__main__":
                              "(beta*rho(eta)*reachable_enemy_mass). 2.2 = v2-faithful (planner-"
                              "conservative). LOWER it (e.g. 0.5-1.0) if `decis` stays ~0 on the "
                              "resumed policy — a high beta makes the floor strict → sparse signal.")
+    parser.add_argument("--staging-shaping-coef", type=float, default=0.0,
+                        help="PBRS staging shaping (project_undermass_by_choice): potential-based "
+                             "reward r += coef*(gamma*Phi(s') - Phi(s)), Phi = top-k Σ min(1, our_"
+                             "inflight/capture_floor) over NEUTRAL targets. Injects the DIRECTED "
+                             "gradient the idle fire head lacks (A≈0 on spare-fire), telescoping so "
+                             "spray-safe. Neutral-ONLY (enemy = decmass, which failed). 0 = off. "
+                             "Start ~0.2 (pre-test calibrated). Tripwire: fire_frac/launch_rate up "
+                             "without caps up = spray.")
+    parser.add_argument("--staging-topk", type=int, default=2,
+                        help="k for the staging potential (top-k neutral targets summed). k=2 keeps "
+                             "serial expansion-breadth while bounding simultaneous spread.")
     parser.add_argument("--decisive-diag", action=argparse.BooleanOptionalAction, default=True,
                         help="Compute the dm_* GAP diagnostic every step using the EXACT decisive-"
                              "mass reward floor, even when --decisive-mass-coef=0. The `dm` diag "

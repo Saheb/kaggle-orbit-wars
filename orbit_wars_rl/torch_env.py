@@ -252,6 +252,9 @@ class VecTorchEnv:
         decisive_mass_coef: float = 0.0,
         decisive_mass_beta: float = _DM_BETA,
         decisive_diag: bool = False,
+        staging_shaping_coef: float = 0.0,
+        staging_topk: int = 2,
+        staging_gamma: float = 0.995,
         handicap_frac: float = 0.0,
         handicap_ships: int = 5,
         ssdr_frac: float = 0.0,
@@ -450,6 +453,14 @@ class VecTorchEnv:
         # itself is off (decisive_mass_coef=0) — tells us whether the policy is moving toward the
         # decmass target vs only improving adjacent competence. project_force_concentration_wall.
         self.decisive_diag = bool(decisive_diag)
+        # PBRS staging shaping (project_undermass_by_choice): potential-based reward that injects a
+        # DIRECTED gradient for the idle fire head to STAGE inflight toward NEUTRAL captures.
+        # Φ = top-k Σ min(1, our_inflight/capture_floor) over neutral targets; r += coef·(γΦ' − Φ).
+        # Telescoping → spray-safe (can't farm by cycling). Neutral-ONLY (enemy = decmass, which failed).
+        self.staging_shaping_coef = float(staging_shaping_coef)
+        self.staging_topk = int(staging_topk)
+        self.staging_gamma = float(staging_gamma)
+        self.prev_staging_phi = None         # (N, num_players) — allocated in reset()
         self.prev_decisive_suff = None       # (N, P, num_players) bool — allocated in reset()
         self._decisive_credit = None         # (N, num_players) diag accumulator — reset_reinforce_stats()
         # dm_* phase-split (early<50 / mid50-100 / late>=100) accumulators — reset_reinforce_stats()
@@ -847,6 +858,9 @@ class VecTorchEnv:
         # enemy planet" — so the bonus fires only on the crossing (assembly), not every step.
         self.prev_decisive_suff = torch.zeros(
             self.num_envs, P, self.num_players, dtype=torch.bool, device=self.device)
+        # PBRS staging: Φ of the previous state. Fresh boards have no inflight → Φ(s_0)=0.
+        self.prev_staging_phi = torch.zeros(
+            self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         # Reverse-edge reinforce cooldown: last step each (player, src, tgt) reinforce edge fired.
         # _DM-style NEVER sentinel so untouched edges never trip the (step - last) <= K test.
         if self.reverse_edge_cooldown > 0:
@@ -1111,6 +1125,22 @@ class VecTorchEnv:
             eta_out[:, :, pl] = eta
             is_enemy[:, :, pl] = alive & (owner != pl) & (owner >= 0)
         return mass, floor, eta_out, is_enemy
+
+    def _staging_potential(self, fields):
+        """PBRS potential Φ(s) for the staging shaping reward (project_undermass_by_choice):
+        Φ = top-k Σ min(1, our_inflight_mass / capture_floor) over NEUTRAL targets (owner<0, alive),
+        per (N, num_players). Rewards building inflight toward neutrals we can take-and-hold (the
+        floor folds in enemy reactive defense, so contested neutrals count). NEUTRAL-ONLY: enemy
+        targets are excluded (staging into reactive enemy defense = the out-mass contest = decmass,
+        which failed). Reuses _decisive_mass_fields' mass/floor — no new geometry."""
+        mass, floor, _eta, _is_enemy = fields
+        owner = self.planets[:, :, 1].long()                          # (N, P)
+        neutral = ((owner < 0) & self.planet_alive).unsqueeze(-1)     # (N, P, 1)
+        ratio = (mass / floor.clamp(min=1e-6)).clamp(min=0.0, max=1.0)   # (N, P, players), capped
+        ratio = ratio * neutral.float()                              # neutral targets only
+        k = min(self.staging_topk, ratio.shape[1])
+        phi = ratio.topk(k, dim=1).values.sum(dim=1)                 # (N, players): top-k per player
+        return phi
 
     def _decisive_mass_bonus(self, terminal_rewards: torch.Tensor, fields=None) -> torch.Tensor:
         """Lever A: +decisive_mass_coef the step our inflight force converging on an ENEMY target
@@ -2596,12 +2626,22 @@ class VecTorchEnv:
             terminal_rewards = self._consolidation_bonus(terminal_rewards)
         if self.capture_utility_active:
             terminal_rewards = self._capture_utility_bonus(terminal_rewards)
-        if self.decisive_mass_coef != 0.0 or self.decisive_diag:
+        if self.decisive_mass_coef != 0.0 or self.decisive_diag or self.staging_shaping_coef != 0.0:
             dm_fields = self._decisive_mass_fields()
             if self.decisive_mass_coef != 0.0:
                 terminal_rewards = self._decisive_mass_bonus(terminal_rewards, dm_fields)
             if self.decisive_diag and self._dm_targets is not None:
                 self._accumulate_decisive_diag(*dm_fields)
+            if self.staging_shaping_coef != 0.0:
+                # PBRS: r += coef·(γΦ(s') − Φ(s)). Φ(s') from the post-step pre-reset state.
+                # Terminal Φ(s')=0 (absorbing) on done envs so the potential collapses cleanly.
+                phi_now = self._staging_potential(dm_fields)         # (N, players)
+                gamma_phi = torch.where(done.unsqueeze(1),
+                                        torch.zeros_like(phi_now),
+                                        self.staging_gamma * phi_now)
+                terminal_rewards = terminal_rewards + self.staging_shaping_coef * (
+                    gamma_phi - self.prev_staging_phi)
+                self.prev_staging_phi = phi_now                      # done envs fixed post-reset
         # Reinforcement transit cost (#2): price the ships each player sent to its own
         # planets this step. Costless reinforcement floods (rev56, ~30× launch volume);
         # this prunes the wasteful tail. Calibrate reinforce_cost so reinforce_rate
@@ -2650,6 +2690,10 @@ class VecTorchEnv:
         # opening launch landing on a previously-armed index would be suppressed (uncredited).
         if self.decisive_mass_coef != 0.0 and done.any():
             self.prev_decisive_suff[done] = False
+        # PBRS staging: fresh post-reset boards have no inflight → Φ=0; reset prev so the next step's
+        # γΦ(s')−Φ(s) telescopes from 0 (no spurious spike across the episode boundary).
+        if self.staging_shaping_coef != 0.0 and done.any():
+            self.prev_staging_phi[done] = 0.0
         # Reverse-edge cooldown: clear the per-edge history for fresh games (else a prior game's
         # reinforce edges mis-block the new board — same boundary bug class as decmass re-arm).
         if self.reverse_edge_cooldown > 0 and self.reinf_cd is not None and done.any():
