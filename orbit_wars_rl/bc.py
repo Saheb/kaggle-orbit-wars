@@ -372,6 +372,11 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
         top1_acc = (match_top1.sum() / n_valid_tgt).item()
         top3_acc = (match_top3.sum() / n_valid_tgt).item()
 
+        # Top-1 accuracy on ship-bin prediction (only on fired slots where it is meaningful).
+        ship_pred = ship_logits.argmax(dim=-1)                # (B, max_owned)
+        ship_top1 = ((ship_pred == ship_target).float() * ship_mask).sum() / ship_mask.sum().clamp(min=1)
+        ship_top1_acc = ship_top1.item()
+
     # Normalized losses (entropy-reduction fraction vs uniform baseline).
     import math as _m
     fire_uniform   = _m.log(2)
@@ -391,6 +396,7 @@ def bc_loss(outputs: dict, batch: dict) -> tuple[torch.Tensor, dict]:
         "target_red":  target_red,
         "target_top1": top1_acc,
         "target_top3": top3_acc,
+        "ship_top1":   ship_top1_acc,
     }
     return total, metrics
 
@@ -585,11 +591,14 @@ def train_bc(
     tgt_red  = val_metrics.get("val_target_red", 0.0)
     tgt_top1 = val_metrics.get("val_target_top1", 0.0)
     tgt_top3 = val_metrics.get("val_target_top3", 0.0)
+    ship_top1 = val_metrics.get("val_ship_top1", 0.0)
     tgt_pass = (tgt_red >= 0.40) or (tgt_top1 >= 0.30)
     gate = "PASS" if tgt_pass else "FAIL"
     print(f"\nPhase-A target-head gate: target_red={tgt_red:+.2f}  "
           f"top1={tgt_top1:.2f}  top3={tgt_top3:.2f}  → {gate}")
     print(f"  side metrics: ship_red={ship_red:+.2f}  fire_red={fire_red:+.2f}")
+    print(f"  ship top-1 (fired slots) = {ship_top1:.2f}  "
+          f"[chance ~{1.0/max(2, 32):.3f} over 32 bins]")
     return val_metrics
 
 

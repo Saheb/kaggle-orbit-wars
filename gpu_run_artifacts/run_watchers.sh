@@ -190,7 +190,7 @@ _health() {  # _health <run> <step> <base>
   local hfire="" hship="" htgt="" ilc="" ilk="" dhf="NA" prev="" ctx="" diag=""
   if [ -n "$LOG" ] && [ -f "$LOG" ]; then
     hfire=$(grep -E "CKPT_METRICS step=${step} " "$LOG" | tail -1 | grep -oE 'Hfire=[0-9.]+' | cut -d= -f2)
-    ctx=$(grep -B3 "CKPT_METRICS step=${step} " "$LOG" | grep -oE 'il_kl [0-9.]+ il_coef [0-9.]+' | tail -1)
+    ctx=$(grep -B20 "CKPT_METRICS step=${step} " "$LOG" | grep -oE 'il_kl [0-9.]+ il_coef [0-9.]+' | tail -1)
     ilk=$(echo "$ctx" | awk '{print $2}'); ilc=$(echo "$ctx" | awk '{print $4}')
     diag=$(grep -B120 "CKPT_METRICS step=${step} " "$LOG" | grep -oE 'H_ship [0-9.]+ H_tgt [0-9.]+' | tail -1)
     hship=$(echo "$diag" | awk '{print $2}'); htgt=$(echo "$diag" | awk '{print $4}')
