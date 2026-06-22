@@ -398,7 +398,8 @@ def train(args):
         print(f"SUFFICIENT-COMMIT MASK: veto attack launches with ships <= target_defense × "
               f"{args.sufficient_commit_factor} (force concentration; mask, no Nash risk)")
     print(f"Win margin coeff: {args.win_margin_coeff}")
-    print(f"Eliminate-to-win: {args.eliminate_to_win} (timeout = draw when on)")
+    print(f"Eliminate-to-win: {args.eliminate_to_win} "
+          f"(timeout = {'planet-margin x'+str(args.timeout_planet_coef) if args.timeout_planet_coef>0 else 'draw'} when on)")
     print(f"Shaping coeff: {args.shaping_coef}")
     print(f"Expansion coeff: {args.expansion_coef}")
     print(f"Defense coeff: {args.defense_coef}")
@@ -536,6 +537,7 @@ def train(args):
                       sufficient_commit_factor=args.sufficient_commit_factor,
                       win_margin_coeff=args.win_margin_coeff,
                       eliminate_to_win=args.eliminate_to_win,
+                      timeout_planet_coef=args.timeout_planet_coef,
                       shaping_coef=args.shaping_coef,
                       expansion_coef=args.expansion_coef,
                       defense_coef=args.defense_coef,
@@ -844,11 +846,15 @@ def train(args):
                     "il_lambda": cfg.ppo.il_lambda,
                     "win_margin_coeff": args.win_margin_coeff,
                     "eliminate_to_win": args.eliminate_to_win,
+                    "timeout_planet_coef": args.timeout_planet_coef,
                     "speed_coef": args.speed_coef,
                     "action_decode": args.action_decode,
                     "resume": args.resume or "",
                     "ship_bin_mode": cfg.model.ship_bin_mode,
                     "game_phase_features": cfg.model.game_phase_features,
+                    "staging_shaping_coef": args.staging_shaping_coef,
+                    "staging_topk": args.staging_topk,
+                    "entropy_coef_fire": args.entropy_coef_fire,
                 },
                 resume="allow",
             )
@@ -1466,6 +1472,8 @@ def train(args):
                 metrics["reinf_step_e"] = float((rs[0] / fs[0]).item())
                 metrics["reinf_step_m"] = float((rs[1] / fs[1]).item())
                 metrics["reinf_step_l"] = float((rs[2] / fs[2]).item())
+        if args.staging_shaping_coef != 0.0 and getattr(env, "_staging_phi_n", 0) > 0:
+            metrics["staging_phi"] = env._staging_phi_acc / env._staging_phi_n
         # overask_rate: fraction of the current policy's INTENDED launches whose ship_count >
         # source garrison (→ DROPPED in "drop" mode, clamped-to-full in "clamp"/eval). Always
         # logged (not gated on allow_reinforce); split by episode window [<50/50-100/>100].
@@ -1792,6 +1800,8 @@ def train(args):
                     "dm/overkill": metrics.get("dm_overkill", 0),
                     "dm/nearmiss": metrics.get("dm_nearmiss", 0),
                     "dm/tgt_per_step": metrics.get("dm_tgt", 0),
+                    # PBRS staging potential (is the agent staging toward neutrals?)
+                    "staging/phi": metrics.get("staging_phi", 0),
                 }, step=total_env_steps)
 
             # Collapse warnings — flag early instead of finding via replay at 10M
@@ -2068,6 +2078,12 @@ if __name__ == "__main__":
                              "draw (reward 0 for both). Removes the most-ships-wins-at-timeout hoarding "
                              "attractor that pins self-play in the under-mass Nash. Pair with dense "
                              "prod-share shaping for the in-episode gradient. Default off (legacy ±1).")
+    parser.add_argument("--timeout-planet-coef", type=float, default=0.0,
+                        help="With --eliminate-to-win: resolve a no-elimination timeout by PLANET "
+                             "dominance instead of a 0/0 draw. Reward = coef * planet-share margin in "
+                             "[-1,1] (zero-sum); strict planet-leader credited as the PFSP winner. Fixes "
+                             "the draw-neutral STARVATION while keeping the anti-hoard property (ships "
+                             "don't win). Keep < 1.0 so an elimination (±1) stays strictly best. 0=draw.")
     parser.add_argument("--early-capture-steps", type=int, default=400,
                         help="Step at which the delta-capture decay reaches zero. Default 400.")
     parser.add_argument("--early-capture-anneal-frac", type=float, default=0.0,
@@ -2303,8 +2319,8 @@ if __name__ == "__main__":
                         help="Run 'sudo shutdown -h +1' after training. Combined "
                              "with EC2 InstanceInitiatedShutdownBehavior=terminate "
                              "this stops the instance to end billing.")
-    parser.add_argument("--wandb", action="store_true",
-                        help="Enable Weights & Biases logging.")
+    parser.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable Weights & Biases logging (default: on). Use --no-wandb to disable.")
     parser.add_argument("--log-timing", action="store_true",
                         help="Print per-rollout timing breakdowns in the console log. "
                              "Off by default; enable only for profiling.")

@@ -1,6 +1,6 @@
 # Current Problem — the Force-Concentration Wall, diagnosed
 
-_Last updated: 2026-06-21. Supersedes the scattered "wall" notes; this is the standing statement of
+_Last updated: 2026-06-22. Supersedes the scattered "wall" notes; this is the standing statement of
 what the wall is, what's ruled out, and where the fix has to come from._
 
 ## TL;DR
@@ -25,13 +25,133 @@ critic can't price it → A≈0 → nobody fires. It is **not** a true Nash (Aja
 so aggregation is a profitable deviation we never explored) and **not** a broken critic. That's the
 optimistic reading — it's an exploration/credit gap, the regime shaping is built to break.
 
-**Chosen lever: PBRS staging reward** (potential-based: `r += α(γΦ(s')−Φ(s))`, Φ = top-k staging
-potential toward contestable floors). It injects *directed* exploration the idle head is missing —
-validated by a cheap pre-test (α·shaping ≈ +0.19/step ≫ the A≈0 floor). Run PBRS alone first; if it
-plateaus, that's the signal to add Door 1 (a permanent aggregating opponent). Prior reward attempts
-failed for nameable reasons that PBRS avoids — see below.
+**~~Chosen lever: PBRS staging reward~~ — TRIED, RULED OUT (2026-06-22, see CLOSED section below).**
+PBRS (`r += α(γΦ(s')−Φ(s))`) + a fire-entropy spike un-trapped the idle fire head (mechanism worked) but
+did **not** break the wall: fired-spare plateaued ~6.7%, WR collapsed to 4.3% @4M, and `delta_V≈0` shows
+firing spare is **value-neutral** in the current Nash — the policy-invariance limit, exactly the deepest
+risk we flagged. With this, the **reward/action-space family is exhausted with a mechanistic reason**; the
+only remaining lever is the **GAME** (a win-gradient opponent we can beat). The pre-test "LEVER PULLS" was
+necessary-only and is now known insufficient.
 
 Baseline reference (ild 6M vs Ajay): WR ~23%, out-massed 96%, caps@50 LOST 6.1, planet-deficit ~−2.
+
+---
+
+## CLOSED RUNS (2026-06-22) — both destroyed; NEITHER dented the wall (avg_sources pinned ~2.2)
+
+Two parallel Jarvis A100-80GB spot runs, both resumed the **3M peak** of r32_stage_h12 (shared start →
+comparable), h12-only beatable pool, LR 5e-5. **Both destroyed; no live boxes.** Net: WR is movable
+(retention/execution), pooling width (`avg_sources`) is NOT — by either lever.
+
+**1. `r32_stage_hlr` (inst 431294 @217.18.55.19)** — *was the collapse LR-thrash?* One delta vs the dead
+PBRS run: **LR 1e-4 → 5e-5**, resume the 3M peak (the 4M/5M ckpts are collapsed: WR 9.0→4.3→1.2%). Keeps
+PBRS staging + entropy spike 0.05. Read: WR holds ≥9% past ~2M + ship0 stays ~24% = collapse was thrash;
+slides under ~6% with ship0 climbing = LR wasn't the driver → entropy-decay 0.05→0.02 is the next delta.
+**RESULT (confirmed thrash, not structural): WR 9.0(start)→10.5→16.0→13.7% @+1/2/3M (settled ~13-14%; the
+16.0 was a +1σ blip, NOT a climb), ship0 25% (not 44), open cap/atk WON 0.54 (≥ winner ref 0.51) — vastly
+better than the original collapse (4.3→1.2%). KILLED @4M, ckpt saved. The "PBRS NEGATIVE /
+delta_V≈0 / kill" call was PREMATURE: delta_V≈0 was measured on the 4M ckpt that was ALREADY mid-collapse
+(ship0 44%), so it reflected thrash, not a fixed property. At LR 5e-5 the same PBRS+spike config climbs. Wall
+itself still intact (out-massed 94%) — half-LR salvaged+improved the run, doesn't break the wall. TODO: re-measure
+delta_V on the healthy 16% ckpt (torch_step_2097152) to see if value-neutrality survives outside the collapse.**
+**AGGREGATION-WIDTH metric (the real wall steering metric, USER-flagged): `avg_sources` from
+`multi_source_events.py --our-name Saheb` (on our-loss replays vs Ajay) = 2.19 IDENTICAL at 3M-start (WR 9%) AND
+half-LR 2M (WR 16%) — DEAD FLAT across the WR climb (winners pool 4-5; we pool the minimum 2 + leave ~2.8 idle).
+The 9→16% climb came from RETENTION (held@+15 45→51%) + single-source execution, NOT wider pooling → WR is a POOR
+wall proxy. Steer by avg_sources (pinned 2.19 by every lever). elim-planet's REAL success criterion = avg_sources > 2.19.
+The per-NEUTRAL idle in value_spare_diagnostic is MISLEADING (denominator inflation); per-SOURCE idle (multi_source_why) 87% is the real one.**
+
+**2. `r32_elimplanet` (inst 431296 @217.18.55.29)** — *is the TERMINAL reward the root of `delta_V≈0`?*
+The reward-neutrality fix: **drop PBRS** (policy-invariant, confirmed inert) and **fix the terminal reward** —
+`--eliminate-to-win --timeout-planet-coef 0.5`: elimination → ±1; timeout → 0.5·planet-share-margin (zero-sum,
+graded). Kills the most-ships hoard attractor AND the draw-neutral starvation; rewards expansion+retention (the
+root). Thesis: firing is neutral only because hoarding wins at timeout → make planets-held decide the timeout →
+the fire→capture→hold→win chain becomes the only win path → **credit assignment makes firing reward-positive
+with NO shaping.** Code: `torch_env._check_done` planet-margin branch + `timeout_planet_coef` (test_eliminate_to_win
+6/6). Read: **WR↑ AND out-massed↓ with reinforce HELD high** = real wall-break (not the disengagement confound
+[[feedback_outmassed_reinforce_confound]]). Tripwire: all-equal-planet draws (starvation even vs h12) or spray.
+**RESULT (NO DENT, killed): WR 9.0(start)→4.7(+1M, reward-adaptation dip)→9.4(+2M, recovered) — NOT a
+scenario-style collapse, but recovered only to baseline and trailed half-LR. Wall UNMOVED: out-massed 95-96%,
+`avg_sources 2.20` (= 2.19 baseline), per-source idle 85% (= 87% baseline) on +2M loss replays. The terminal-
+reward fix did not price the 3rd/4th pile-on source by +2M (early for slow credit-propagation, but ZERO signal).
+Joins the failed reward-change family on the wall metric. Code (`timeout_planet_coef` + planet-margin _check_done,
+test 6/6) is sound and retained for any future league run — the lever, not the code, is what didn't fire.**
+
+**SESSION VERDICT (2026-06-22): the wall = pooling WIDTH (`avg_sources`), and it is robustly pinned at ~2.2
+(winners 4-5) against half-LR, the terminal-reward fix, PBRS, and every prior reward/LR lever. WR moved
+(9→16) via retention + single-source execution but that is NOT wall progress (WR is a poor proxy). The
+honest open question: can anything short of a league/anti-cycling rebuild move pooling width — or is ~2.2 the
+ceiling of this self-play setup. Both boxes destroyed; clean stop.**
+
+---
+
+## CLOSED — `r32_stage_h12` PBRS staging reward: NEGATIVE (killed @4M, 2026-06-22)
+
+**Result up front:** PBRS + fire-entropy spike got the *mechanism* (fire head un-trapped) but **not the
+outcome** (no wall break). Killed at 4M, Jarvis box destroyed. Trajectory vs held-out Ajay: WR
+7.0 → 5.9 → 9.0 → **4.3%** @1/2/3/4M; out-massed flat 93–96%; planets@50 stuck at 7. **ship0 24% → 44%**
+between 3M and 4M = the entropy spike's firing pressure discharging as 1-ship probes (the cheap-out),
+actively harmful.
+
+**The kill is mechanistic, not "flat WR" (`value_spare_diagnostic.py` @4M, 24 seeds):**
+- **fired-spare plateaued** 3.9 (pre) → 6.2 (2M) → **6.7% (4M)** — the un-trap was a one-time step, not a
+  trajectory. Idle 93.3%.
+- **`delta_V ≈ 0`** (won +0.002 / lost +0.012, both noise) with a **well-calibrated critic** (V|won −0.166
+  > V|lost −0.330). Firing spare carries ZERO value advantage *even though the agent self-selects favorable
+  moments* (the confound runs in our favor). PBRS cannot relocate an optimum where idle-spare is
+  value-neutral — the policy-invariance limit.
+- **ship-size split** (newly added to `value_spare_diagnostic.py`): fired-spare is mostly **real mass**
+  (mean 19 / median 14), not junk. Only **9% is "had-mass probe"** (could solo but sent ≤4 ships) = the
+  *entire* min-ship-bin headroom; **65% is the `agg` bucket** (needs pooling, zero single-send headroom).
+  ⇒ min-ship-bin is a symptom-stabilizer (closes the ship0 hatch), **not** a wall-breaker — Lesson 3 verbatim.
+- **PBRS pre-test "LEVER PULLS" (+0.181) is necessary-only** (script's own caveat: "not a Nash-vs-fixedpoint
+  test"). Green before launch; the live run is the sufficient test and it failed.
+
+**Net:** under-aggregation is value-neutral in the current self-play Nash (a HABIT), and the majority
+opportunity is multi-source **pooling** that no single-send/shaping knob touches → the lever is the GAME
+(win-gradient opponent we can beat), per `project_h14_wingradient` / win-starvation.
+
+<details><summary>Run design history (what shaped r32_stage_h12)</summary>
+
+The PBRS staging reward was **built, tested, and run** (Jarvis A100-80GB spot, inst 431251). Env-side
+`_staging_potential` (torch_env) + `r += coef·(γΦ(s')−Φ(s))`; flags `--staging-shaping-coef 0.2
+--staging-topk 2`; unit test `tests/test_staging_shaping.py` proves neutral-only/cap/top-k, the per-step
+formula, and the telescoping (spray-safe) identity.
+
+**Config:** jake-BC seed (`bc_jake_unfiltered_pw6.2`) → PPO, **h12-only** external pool, **no anchor**,
+critic-warmup ev0.8, **fire-entropy spike 0.05** (fire-head only). Throughput: **4096 envs / 24 workers /
+num-minibatches 64** (~800 SPS; the model is tiny so the box was CPU-serial-bound — num-envs is the SPS
+lever, not workers/GPU).
+
+**Two findings that shaped the run:**
+- **Jake BC does NOT carry the aggregating shape** (fire-spare 3.9% ≈ the trained policy's 3.4%; Jake is a
+  reinforce-and-hold player, *not* an expander). So PBRS must **build** staging from a ~4% prior, not
+  maintain it — the harder test. This elevated the **PPO-clip bottleneck** risk (raising p(fire) off 0.04
+  blows past the ±0.2 clip; and you can't reward fires you never sample).
+- **Fix = the fire-entropy spike** (0.05, fire-head only) to force fire-sampling so PBRS can reinforce the
+  good ones. Constant, **decayed manually by observation** (not a timer — critic-warmup would burn a timer).
+
+**First real signal (@2M, ~0.9M post-warmup) — cautiously positive:**
+- Warmup released clean (EV 0.87); **fire-clip spiked 0.11→0.01 = the fire head moved through the clip, not
+  trapped** (the clip-bottleneck risk did not bite).
+- **fired-spare rate 3.9% → 6.2% vs held-out Ajay** (223/3605, ~5.7 SE — real, and it generalizes since
+  it's measured vs Ajay not the h12 we train on). **First intervention all session to measurably lift the
+  idle fire head.**
+- Entropy spike adds broad spray noise (overall tgt-enemy up, dm-cross down), but PBRS lifts the *specific*
+  neutral-spare subset it rewards; caps holding (pl@100=10) ⇒ **not** the kill-spray failure.
+
+**The verdict is the 3–4M trajectory** (pending): fired-spare climbing toward 8–10%+ with caps@50 /
+out-massed responding = PBRS breaking the wall; plateau ~6% with caps flat = marginal → weigh **Door 1**
+(permanent aggregating opponent). Lower the entropy spike 0.05→0.02 once staging is clearly established.
+
+**Open risks being watched** (tripwires): (a) fired-spare/fire_frac rises then *falls* by 3–4M = the
+DAgger-style race lost; (b) **h12-WR↑ but held-out Ajay flat = overfit to h12** (Ajay panel is the
+arbiter, not in-train h12-WR); (c) fire_frac/launch_rate balloon *without* caps↑ = spray. Deepest structural
+risk: PBRS is policy-invariant, so a converged critic nets the shaping advantage back to ~0 — it's a *race*
+to reach the staging basin before the critic neutralizes the boost. **[This is exactly what happened —
+see CLOSED result above.]**
+
+</details>
 
 ---
 
@@ -157,11 +277,14 @@ gets the directed gradient it's missing, spray-safe by the telescoping guarantee
     decisive 10–50 window: 13–19 remain).
 - **Reward**: `r_t += α·(γ·Φ(s_{t+1}) − Φ(s_t))` (strict PBRS → telescopes → can't be farmed by spray).
 - **α = 0.2** (pre-test-calibrated), sweep {0.1, 0.2, 0.3}. Flags `--staging-shaping-coef`, `--staging-topk`.
-- **Run design**: warmstart off the jake/ild lineage (~5–6M), **no anchor**, base pool (prod-share,
-  h12+h14 @0.60) — PBRS the only delta. Pure self-play first to isolate it.
+- **Run design (EXECUTED as `r32_stage_h12` — see LIVE RUN section above for actual config + results):**
+  warmstart from the **jake-BC seed** (not a PPO checkpoint — the BC doesn't carry the shape, so PBRS builds
+  it), **no anchor**, **h12-only** external (winnable → the win-gradient bootstraps), + **fire-entropy spike
+  0.05** (added after the BC-shape finding to beat the clip/sampling bottleneck). PBRS the only reward delta.
 - **Success**: caps@50↑ + planet-deficit closes + out-massed↓ with reinforce held + fired-spare rate ↑ from
   ~3%. **Tripwire**: `fire_frac`/`launch_rate` balloon *without* caps↑ = spray → kill.
-- **Pre-build check**: a unit test proving the telescoping property (Σ shaping ≈ γᵀΦ_T − Φ₀) before any GPU.
+- **Pre-build check (DONE)**: unit test proves the telescoping property (Σ shaping ≈ γᵀΦ_T − Φ₀). Status:
+  live; first signal fired-spare 3.9%→6.2%@2M (positive, early — verdict at 3–4M).
 
 **Step 2 — Door 1 (only if PBRS plateaus).** A *permanent* aggregating opponent in the pool so spare-use
 predicts winning in the data (breaks the loop at the data layer, not just the signal). More expensive
@@ -178,6 +301,10 @@ self-play); the fix is permanence.
 - Memory: `project_undermass_by_choice`, `project_ajay_dagger_seed`, `project_aggregation_probe`,
   `project_force_concentration_wall`, `project_decisive_mass_lever`, `feedback_win_starvation`.
 - Tools (all in tree): `transition_autopsy.py`, `expansion_autopsy.py`, `value_spare_diagnostic.py`
-  (+`--shaping-coef` PBRS pre-test), `gpu_run_artifacts/multi_source_why.py` (+`--our-name`). Untracked —
-  commit if keeping.
-- Last run: `r32_ajayclone` (Jarvis spot 431164) — warmstart bet FAILED (shape dissolved by 3M); **destroyed**.
+  (+`--shaping-coef` PBRS pre-test), `gpu_run_artifacts/multi_source_why.py` (+`--our-name`),
+  `plot_train_log.py` (5×4 staging-first trend plot of a train log). Mostly untracked — commit if keeping.
+- PBRS reward: `torch_env._staging_potential` + step() shaping; flags in `train_torch.py`; test
+  `tests/test_staging_shaping.py`.
+- **Current run: `r32_stage_h12`** (Jarvis spot 431251) — LIVE; PBRS staging from jake-BC, first signal
+  positive (fired-spare 3.9→6.2%@2M). DESTROY 431251 when done.
+- Prior run: `r32_ajayclone` (431164) — warmstart bet FAILED (shape dissolved by 3M); destroyed.

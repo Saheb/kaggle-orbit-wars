@@ -235,6 +235,7 @@ class VecTorchEnv:
         action_decode: str = "angle",
         win_margin_coeff: float = 0.0,
         eliminate_to_win: bool = False,
+        timeout_planet_coef: float = 0.0,
         shaping_coef: float = 0.0,
         expansion_coef: float = 0.0,
         defense_coef: float = 0.0,
@@ -384,6 +385,13 @@ class VecTorchEnv:
         # that keeps self-play in the under-mass Nash. project_force_concentration_wall.
         # False = legacy ±1 most-ships-wins (default, backward-compatible).
         self.eliminate_to_win = bool(eliminate_to_win)
+        # Timeout resolved by PLANET dominance (only with eliminate_to_win): instead of a
+        # draw (0/0), a no-elimination timeout pays timeout_planet_coef * planet-share margin
+        # in [-1,1] (zero-sum). Fixes BOTH the most-ships hoard attractor (ships don't win) AND
+        # the draw-neutral STARVATION (graded signal when you can't eliminate) — rewards the
+        # expansion+retention race that is the wall's root. project_undermass_by_choice.
+        # 0.0 = legacy draw (backward-compatible). Keep < 1.0 so elimination (±1) stays best.
+        self.timeout_planet_coef = float(timeout_planet_coef)
         self.shaping_coef = float(shaping_coef)
         # Expansion shaping: potential-based reward on OWNED PRODUCTION (sum of
         # planet production rates owned). Unlike material (ships), production only
@@ -461,6 +469,8 @@ class VecTorchEnv:
         self.staging_topk = int(staging_topk)
         self.staging_gamma = float(staging_gamma)
         self.prev_staging_phi = None         # (N, num_players) — allocated in reset()
+        self._staging_phi_acc = 0.0          # rollout mean Φ accumulator — reset_reinforce_stats()
+        self._staging_phi_n = 0
         self.prev_decisive_suff = None       # (N, P, num_players) bool — allocated in reset()
         self._decisive_credit = None         # (N, num_players) diag accumulator — reset_reinforce_stats()
         # dm_* phase-split (early<50 / mid50-100 / late>=100) accumulators — reset_reinforce_stats()
@@ -2317,6 +2327,8 @@ class VecTorchEnv:
         self._dm_gap_sum = z3()
         self._dm_overkill_sum = z3()
         self._dm_nearmiss = z3()
+        self._staging_phi_acc = 0.0
+        self._staging_phi_n = 0
 
     # ---------------------------------------------------------------------
     # Step — pure tensor ops, runs all N envs in one pass.
@@ -2642,6 +2654,8 @@ class VecTorchEnv:
                 terminal_rewards = terminal_rewards + self.staging_shaping_coef * (
                     gamma_phi - self.prev_staging_phi)
                 self.prev_staging_phi = phi_now                      # done envs fixed post-reset
+                self._staging_phi_acc += float(phi_now.mean().item())
+                self._staging_phi_n += 1
         # Reinforcement transit cost (#2): price the ships each player sent to its own
         # planets this step. Costless reinforcement floods (rev56, ~30× launch volume);
         # this prunes the wasteful tail. Calibrate reinforce_cost so reinforce_rate
@@ -2810,9 +2824,29 @@ class VecTorchEnv:
             self._last_wins[env_idx, adv_idx] = succ
             self._last_wins[env_idx, opp_idx] = ~succ
         if self.eliminate_to_win:
-            # Newly-done, non-scenario envs with no winner = timeout draws → reward 0.
+            # Newly-done, non-scenario envs with no elimination winner.
             draw = (~self._last_wins.any(dim=1)) & newly_done & ~scenario_done
-            rewards[draw] = 0.0
+            if self.timeout_planet_coef > 0.0 and draw.any():
+                # Resolve by PLANET dominance instead of a flat draw: the player holding more
+                # planets at the cap is credited, reward = coef * planet-share margin in [-1,1]
+                # (zero-sum). Removes the most-ships hoard win AND the draw-neutral starvation;
+                # rewards expansion+retention (the wall root). Ties (equal planets) stay 0/0.
+                planet_counts = torch.zeros(N, P_, dtype=torch.float32, device=self.device)
+                for pl in range(P_):
+                    planet_counts[:, pl] = ((owner_p == pl) & self.planet_alive).sum(dim=1).float()
+                total_p = planet_counts.sum(dim=1, keepdim=True).clamp(min=1.0)
+                planet_margin = (2.0 * planet_counts - total_p) / total_p   # (N,P) in [-1,1], zero-sum
+                graded = self.timeout_planet_coef * planet_margin
+                rewards = torch.where(draw.unsqueeze(1), graded, rewards)
+                # Credit the strict planet-leader (>half) as the PFSP winner; ties leave no winner.
+                lead_count, lead_idx = planet_counts.max(dim=1)
+                strict_lead = draw & (2.0 * lead_count > total_p.squeeze(1))
+                if strict_lead.any():
+                    rows = torch.where(strict_lead)[0]
+                    self._last_wins[rows] = False
+                    self._last_wins[rows, lead_idx[rows]] = True
+            else:
+                rewards[draw] = 0.0
         # Only return rewards for newly-done envs; zero otherwise
         rewards = rewards * newly_done.unsqueeze(1).float()
         self.rewards = torch.where(newly_done.unsqueeze(1), rewards, self.rewards)

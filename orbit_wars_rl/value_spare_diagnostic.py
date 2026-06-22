@@ -50,7 +50,7 @@ from kaggle_environments import make
 import eval as E
 from transition_autopsy import _load_model, _obs_to_dict
 from expansion_autopsy import _classify_neutrals  # noqa: F401  (parity-validated floor)
-from action_mask import compute_action_masks, _head_threat_maps
+from action_mask import compute_action_masks, _head_threat_maps, _ship_bin_to_count
 from features import extract_features
 
 # PBRS pre-test: γ for the single-step potential term γΦ(s')−Φ(s). γ≈1, so the
@@ -88,7 +88,7 @@ def _spare_sources_for_neutral(neutral, planets, fleets, seat):
     return out
 
 
-def _decode_slot_targets(outputs, masks, obs, player, allow_reinforce):
+def _decode_slot_targets(outputs, masks, obs, player, allow_reinforce, ship_bin_mode="absolute"):
     """Mirror actions_from_target_policy's per-slot (target, fire) decode so the
     (source -> target) pairing is EXACTLY what the policy decided. Returns
     dict: slot_idx -> {"fired": bool, "target_planet_idx": int|None,
@@ -127,22 +127,38 @@ def _decode_slot_targets(outputs, masks, obs, player, allow_reinforce):
     ).squeeze(-1).squeeze(0)
     fire_decisions = (torch.sigmoid(chosen_fire_logits) > 0.5).numpy()
 
+    # ship-size decode: gather ship_logits at the chosen target, argmax bin, then
+    # _ship_bin_to_count — EXACTLY as actions_from_target_policy (action_mask.py:925-942).
+    # Lets us split fired-spare into 1-ship probes vs floor-reaching sends, and check
+    # whether the source had the garrison to send big (the min-ship-bin headroom test).
+    ship_logits = outputs["ship_logits"].cpu()  # [1, slots, targets, bins]
+    max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
+    tgt_idx_t = torch.as_tensor(target_indices).unsqueeze(0)  # [1, slots]
+    chosen_ship_logits = torch.gather(
+        ship_logits, 2,
+        tgt_idx_t.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, ship_logits.shape[-1]),
+    ).squeeze(2).squeeze(0)  # [slots, bins]
+    ship_bins = torch.argmax(chosen_ship_logits, dim=-1).numpy()
+
     slot_map = {}
     for slot in range(min(owned_count, target_indices.shape[0])):
         pidx = int(owned_indices[slot])
         if pidx >= len(planets):
             slot_map[slot] = {"fired": False, "target_planet_idx": None,
                               "target_id": None, "target_owner": None,
-                              "src_planet_idx": pidx}
+                              "src_planet_idx": pidx, "ships": 0, "max_ships": 0}
             continue
         tidx = int(target_indices[slot])
         tgt_ok = 0 <= tidx < len(planets)
+        ms = int(max_ships[slot])
         slot_map[slot] = {
             "fired": bool(fire_decisions[slot]),
             "target_planet_idx": tidx if tgt_ok else None,
             "target_id": int(planets[tidx][0]) if tgt_ok else None,
             "target_owner": int(planets[tidx][1]) if tgt_ok else None,
             "src_planet_idx": pidx,
+            "ships": int(_ship_bin_to_count(int(ship_bins[slot]), ms, mode=ship_bin_mode)),
+            "max_ships": ms,
         }
     return slot_map
 
@@ -174,7 +190,8 @@ def build_tracking_agent(model, device, target_decode, ship_bin_mode, allow_rein
                     if "pairwise_features" in features else None,
             )
         v_s = float(outputs["value"][0].cpu())
-        slot_targets = _decode_slot_targets(outputs, masks, obs, player, allow_reinforce)
+        slot_targets = _decode_slot_targets(outputs, masks, obs, player, allow_reinforce,
+                                            ship_bin_mode=ship_bin_mode)
 
         step_records.append({
             "step": int(obs["step"]),
@@ -249,15 +266,21 @@ def _scan_opportunities(step_records, seat):
             if bucket == "cap":
                 continue  # no amount of pooling captures it; not an opportunity
 
-            # Did any spare source's slot fire at THIS neutral?
+            # Did any spare source's slot fire at THIS neutral? If so, capture that
+            # source's send size, its solo capture-cost (the floor), and its garrison
+            # (max_ships) — for the min-ship-bin headroom test downstream.
             fired_at = False
             n_id = int(neutral[0])
-            for pidx, spare, _ in sources:
+            fired_ships = fired_cost = fired_maxships = None
+            for pidx, spare, src_cost in sources:
                 info = by_src.get(pidx)
                 if info is None:
                     continue
                 if info["fired"] and info["target_id"] == n_id:
                     fired_at = True
+                    fired_ships = int(info["ships"])
+                    fired_cost = float(src_cost)
+                    fired_maxships = int(info["max_ships"])
                     break
 
             # ---- PBRS counterfactual: the per-target potential rise firing the spare
@@ -280,6 +303,9 @@ def _scan_opportunities(step_records, seat):
                 "n_spare_sources": len(sources),
                 "bucket": bucket,
                 "shaping_raw": shaping_raw,
+                "fired_ships": fired_ships,
+                "fired_cost": fired_cost,
+                "fired_maxships": fired_maxships,
             })
     return rows
 
@@ -333,6 +359,68 @@ def _pbrs_pretest(all_rows, alpha):
           f"→ {'PBRS injects the gradient. Launch with α-sweep.' if pulls else 'raise α or refix Φ.'}")
     print("  (caveat: shaping is positive by construction at below-floor targets; the test")
     print("   confirms the gradient EXISTS and calibrates α — it is not a Nash-vs-fixedpoint test.)")
+
+
+def _ship_size_split(all_rows):
+    """min-ship-bin headroom test. Of the fired-spare events, how many are 1-ship /
+    sub-min-bin probes, and CRUCIALLY did those probes come from sources that HAD the
+    garrison to send a floor-reaching amount but chose a probe anyway?
+
+      - probe (<=4 ships): min-ship-bin 4 would force these up.
+      - of probes, 'had-mass' = max_ships >= solo capture-cost: the source could have
+        soloed the neutral but sent a probe -> min-ship-bin has real headroom.
+      - 'garrison-limited' = max_ships < cost: clamps to garrison anyway, min-ship-bin
+        can't manufacture ships -> no help (this is an AGGREGATION problem, not size).
+
+    Decision: min-ship-bin helps idleness->mass conversion only if a large share of
+    fired-spare are had-mass probes (esp. in the af1/solo bucket). If probes are mostly
+    garrison-limited or on agg neutrals (need pooling), min-ship-bin is dead weight."""
+    fired = [r for r in all_rows if r["fired_at"] and r.get("fired_ships") is not None]
+    print("\n" + "=" * 92)
+    print("SHIP-SIZE SPLIT of fired-spare  (min-ship-bin headroom test)")
+    print("=" * 92)
+    if not fired:
+        print("  no fired-spare events with ship-size recorded.")
+        return
+    n = len(fired)
+    ships = [r["fired_ships"] for r in fired]
+    probes = [r for r in fired if r["fired_ships"] <= 4]       # min-ship-bin 4 target
+    one_ship = [r for r in fired if r["fired_ships"] == 1]
+    reached = [r for r in fired if r["fired_ships"] >= r["fired_cost"]]  # real solo-capture send
+    had_mass_probe = [r for r in probes if r["fired_maxships"] >= r["fired_cost"]]
+    garr_lim_probe = [r for r in probes if r["fired_maxships"] < r["fired_cost"]]
+
+    def pct(x):
+        return 100.0 * len(x) / n if n else 0.0
+
+    print(f"  fired-spare events: {n}   mean ship-size {_mean(ships):.1f}  "
+          f"(median {sorted(ships)[n//2]})")
+    print(f"    1-ship probes     : {len(one_ship):>4} ({pct(one_ship):.0f}%)")
+    print(f"    <=4-ship probes   : {len(probes):>4} ({pct(probes):.0f}%)   <- min-ship-bin 4 would force these up")
+    print(f"    reached solo floor: {len(reached):>4} ({pct(reached):.0f}%)   <- already a real capture-attempt send")
+    print(f"\n  Of the <=4-ship probes (n={len(probes)}):")
+    if probes:
+        pp = lambda x: 100.0 * len(x) / len(probes)
+        print(f"    had-mass (max_ships>=cost): {len(had_mass_probe):>4} ({pp(had_mass_probe):.0f}%)   "
+              f"<- COULD have soloed, sent a probe => min-ship-bin headroom")
+        print(f"    garrison-limited (<cost)  : {len(garr_lim_probe):>4} ({pp(garr_lim_probe):.0f}%)   "
+              f"<- clamps to garrison anyway => min-ship-bin can't help (aggregation, not size)")
+    # bucket split: af1 (solo-takeable) vs agg (needs pooling)
+    for bk in ("af1", "agg"):
+        fb = [r for r in fired if r["bucket"] == bk]
+        if not fb:
+            continue
+        pb = [r for r in fb if r["fired_ships"] <= 4]
+        hm = [r for r in pb if r["fired_maxships"] >= r["fired_cost"]]
+        print(f"    [{bk}] fired {len(fb)}  probe {len(pb)}  had-mass-probe {len(hm)}")
+    headroom = len(had_mass_probe)
+    verdict = (headroom >= 0.30 * n)
+    print(f"\n  VERDICT: min-ship-bin {'HAS headroom' if verdict else 'WEAK'} — "
+          f"had-mass probes = {100.0*headroom/n:.0f}% of fired-spare "
+          f"{'>=' if verdict else '<'} 30% bar.")
+    print("  (had-mass probe = source could solo the neutral but sent <=4 ships. High => the un-")
+    print("   trapped firing is being discharged as junk that min-ship-bin would convert to mass.")
+    print("   Low => the probes are garrison-limited / pooling problems min-ship-bin cannot fix.)")
 
 
 def _report_and_plot(all_rows, output_path, shaping_coef=None):
@@ -407,6 +495,9 @@ def _report_and_plot(all_rows, output_path, shaping_coef=None):
     print("  (3) delta_V clearly POSITIVE (and n_fired >= 30): critic prices spare-firing higher")
     print("      but policy still idles -> true POLICY bottleneck. Fix: entropy_coef_fire, or")
     print("      a shaped per-step bonus for firing a spare at a takeable neutral.")
+
+    # ---- ship-size split (min-ship-bin headroom test) ----
+    _ship_size_split(all_rows)
 
     # ---- PBRS pre-test (counterfactual shaping gradient) ----
     if shaping_coef is not None and all("shaping_raw" in r for r in all_rows):
