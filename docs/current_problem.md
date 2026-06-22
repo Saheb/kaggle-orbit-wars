@@ -48,6 +48,9 @@ exactly what `delta_V≈0` shows is missing.
   → bigger signal). (b) *adaptation risk* — COMA is multi-*agent*; here it's a factored single-agent action
   (16 slots, one forward pass) — the Q-head over the joint action space is the real engineering crux.
   (c) *early read* — does per-slot `A_i` on spare-fire come back materially > 0, and does `held@+15` climb.
+- **Full design + build order:** [`q-head.md`](q-head.md) (Q-head mirrors the value head; additive pool →
+  cheap per-slot counterfactuals; **fire-marginalized** baseline — *not* silence, which can't activate the
+  idle 87%; offline action-sensitivity gate before any GPU).
 
 **Tools (this session, in tree):** `value_spare_diagnostic.py` (delta_V sweep), `probe_aggregation.py` +
 `gpu_run_artifacts/multi_source_events.py` (won/lost crossed&held), `orbit_wars_rl/ship0_why.py` +
