@@ -1,9 +1,8 @@
-"""Sufficient-commit mask: in torch_env._apply_actions, an ATTACK launch whose ship
-count <= target's current defense × sufficient_commit_factor is VETOED (no fleet
-leaves, source ships unchanged); a launch that beats the defense fires normally; and
-with the factor OFF even the under-strength attack fires (proving the flag blocks it).
-
-Reinforces (own targets) are NOT affected by this mask — they keep the garrison floor.
+"""Sufficient-commit mask (arrival-aware): in torch_env._apply_actions, a NEUTRAL
+attack launch whose (ship_count + friendly inbound) can't beat the target's PROJECTED
+defense at arrival (current garrison + production×ETA + enemy inbound arriving before
+us) × factor is VETOED. Enemy targets are exempt — under-strength attacks on enemies
+can soften/feint. Reinforces (own targets) are NOT affected — garrison floor instead.
 """
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -11,13 +10,14 @@ import torch
 
 from orbit_wars_rl.torch_env import VecTorchEnv, SHIP_COUNTS
 
-SRC, TGT = 0, 1            # planet indices: source (mine) and the neutral attack target
+SRC, TGT = 0, 1            # planet indices: source (mine) and the attack target
 DEF = 30                  # target defense; SHIP_COUNTS[16]=30 (== def), [17]=35 (> def)
 BIN_EQ, BIN_GT = 16, 17
 
 
-def _board(factor):
-    """1 env: player-0 source planet (100 ships) + a neutral target with DEF ships."""
+def _board(factor, target_owner=-1, target_prod=1):
+    """1 env: player-0 source planet (100 ships) + a target with DEF ships.
+    target_owner: -1 = neutral (default), 1 = enemy. target_prod: production rate."""
     te = VecTorchEnv(num_envs=1, num_players=2, device="cpu",
                      action_decode="target", sufficient_commit_factor=factor)
     te.reset([7])
@@ -25,8 +25,9 @@ def _board(factor):
     te.planets[0, :, 1] = -1            # all neutral first
     te.planets[0, SRC, 1] = 0           # source owned by player 0
     te.planets[0, SRC, 5] = 100.0
-    te.planets[0, TGT, 1] = -1          # target neutral
+    te.planets[0, TGT, 1] = target_owner
     te.planets[0, TGT, 5] = float(DEF)
+    te.planets[0, TGT, 6] = float(target_prod)
     return te
 
 
@@ -43,16 +44,41 @@ def _fire(te, ship_bin):
     return float(te.planets[0, SRC, 5])
 
 
-def test_sufficient_commit_vetoes_underpowered_attack():
-    # factor 1.0: ships == defense (30) cannot take it -> VETOED, source untouched.
+def test_vetoes_underpowered_neutral_attack():
+    # factor 1.0: ships == defense (30) on NEUTRAL, close range (ETA=1, prod=1 -> proj 31).
+    # 30 <= 31 -> VETOED, source untouched.
     te = _board(1.0)
-    assert _fire(te, BIN_EQ) == 100.0, "ships<=defense attack must be vetoed (no debit)"
+    assert _fire(te, BIN_EQ) == 100.0, "ships<=projected_defense neutral attack must be vetoed (no debit)"
 
 
-def test_sufficient_commit_allows_winning_attack():
-    # factor 1.0: ships (35) > defense (30) -> fires, source debited by 35.
+def test_allows_winning_neutral_attack():
+    # factor 1.0: ships (50) vs projected defense. Close target (ETA=1, prod=1 -> proj 31).
+    # 50 > 31 -> fires, source debited by 50.
     te = _board(1.0)
-    assert _fire(te, BIN_GT) == 100.0 - SHIP_COUNTS[BIN_GT], "ships>defense attack must fire"
+    # Place source and target adjacent (ETA=1, projected = 30 + 1*1 = 31)
+    te.planets[0, SRC, 2] = 50.0; te.planets[0, SRC, 3] = 50.0
+    te.planets[0, TGT, 2] = 52.0; te.planets[0, TGT, 3] = 50.0
+    te.planets[0, TGT, 5] = 30.0; te.planets[0, TGT, 6] = 1.0
+    # BIN 19 = 50 ships, speed ~3.2, ETA=1, projected=31, 50 > 31 -> fires
+    result = _fire(te, 19)
+    assert result == 100.0 - SHIP_COUNTS[19], f"ships>projected_defense neutral attack must fire, got {result}"
+
+
+def test_vetoes_far_neutral_production_outgrows_attack():
+    # Far target with high production: 30 ships at ETA~19, prod=5 -> projected 125.
+    # Ship bin 19 = 50 ships. 50 <= 125 -> VETOED (production outgrows the attack).
+    te = _board(1.0, target_prod=5)
+    te.planets[0, SRC, 2] = 10.0; te.planets[0, SRC, 3] = 10.0
+    te.planets[0, TGT, 2] = 90.0; te.planets[0, TGT, 3] = 90.0
+    te.planets[0, TGT, 5] = 30.0
+    result = _fire(te, 19)
+    assert result == 100.0, f"far neutral with high prod must be vetoed (50 <= projected), got {result}"
+
+
+def test_lets_underpowered_enemy_attack_fire():
+    # factor 1.0: ships == defense (30) on ENEMY -> fires (enemy exempt from veto).
+    te = _board(1.0, target_owner=1)
+    assert _fire(te, BIN_EQ) == 100.0 - SHIP_COUNTS[BIN_EQ], "ships<=defense ENEMY attack must fire (enemy exempt)"
 
 
 def test_off_lets_underpowered_attack_fire():
@@ -62,7 +88,14 @@ def test_off_lets_underpowered_attack_fire():
 
 
 if __name__ == "__main__":
-    test_sufficient_commit_vetoes_underpowered_attack()
-    test_sufficient_commit_allows_winning_attack()
+    test_vetoes_underpowered_neutral_attack()
+    print("PASS vetoes_underpowered_neutral_attack")
+    test_allows_winning_neutral_attack()
+    print("PASS allows_winning_neutral_attack")
+    test_vetoes_far_neutral_production_outgrows_attack()
+    print("PASS vetoes_far_neutral_production_outgrows_attack")
+    test_lets_underpowered_enemy_attack_fire()
+    print("PASS lets_underpowered_enemy_attack_fire")
     test_off_lets_underpowered_attack_fire()
-    print("sufficient-commit mask tests passed")
+    print("PASS off_lets_underpowered_attack_fire")
+    print("All sufficient-commit tests passed (arrival-aware, neutral-only, enemy exempt)")

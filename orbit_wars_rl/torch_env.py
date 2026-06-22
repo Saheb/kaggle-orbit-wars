@@ -2198,15 +2198,55 @@ class VecTorchEnv:
                 is_neutral = use_target_decode & (target_owner < 0)  # neutral planet owner = -1
                 self._neutral_launch_count[:, owner_id] += (can_fire & is_neutral).sum(dim=1).float()
 
-        # SUFFICIENT-COMMIT MASK: veto an attack launch (enemy/neutral target) whose ship
-        # count can't beat the target's current defense × factor → fragments impossible by
-        # construction, forcing concentration. Reinforces (own targets) are untouched —
-        # they have their own garrison-floor discipline. Pure veto, no reward tax.
+        # SUFFICIENT-COMMIT MASK (arrival-aware): veto a NEUTRAL attack launch whose
+        # ship count + friendly inbound can't beat the target's PROJECTED defense at
+        # arrival (current garrison + production×ETA + enemy inbound arriving before
+        # us). Enemy targets are exempt — under-strength attacks on enemies can soften,
+        # feint, or arrive as a second wave. Reinforces (own targets) are untouched.
         if (self.sufficient_commit_factor > 0.0 and self.action_decode == "target"
                 and actions.shape[-1] >= 4):
-            is_attack = use_target_decode & (target_owner != owner_id)
-            insufficient = is_attack & (ship_count <= target_ships * self.sufficient_commit_factor)
-            can_fire = can_fire & ~insufficient
+            is_neutral_attack = use_target_decode & (target_owner < 0)
+            if is_neutral_attack.any():
+                tgt_x = tgt[:, :, 2]; tgt_y = tgt[:, :, 3]
+                tgt_prod = tgt[:, :, 6]
+                # ETA from source to target (fleet speed depends on launched ship_count)
+                dist = torch.sqrt((src_x - tgt_x) ** 2 + (src_y - tgt_y) ** 2)
+                speed = _ship_speed(ship_count).clamp(min=1e-6)
+                eta = torch.ceil(dist / speed).clamp(min=1.0)           # (N, MAX_OWNED)
+                # Projected defense: current ships + production growth + enemy inbound
+                projected_defense = target_ships + tgt_prod * eta      # (N, MAX_OWNED)
+                # Enemy inbound: fleets (owner != us, owner >= 0) heading to the same
+                # target, arriving before or at our ETA. Friendly inbound (our fleets
+                # already en route) counts as added offense — subtract from the cost.
+                # Resolved via the vectorized fleet-target resolver to match the real
+                # swept-collision target (not just angle alignment).
+                fi = self.fleets                                       # (N, F, 7)
+                fa = self.fleet_alive                                  # (N, F)
+                f_owner = fi[:, :, 1].long()
+                f_ships = fi[:, :, 6] * fa.float()
+                f_tgt = self._fleet_target_idx()                       # (N, F) — cached if available
+                f_fx, f_fy = fi[:, :, 2], fi[:, :, 3]
+                f_speed = _ship_speed(fi[:, :, 6]).clamp(min=1e-6)
+                # Per-(slot, fleet) ETA: distance from fleet to the slot's target / fleet speed
+                # tgt per slot (N, MAX_OWNED); broadcast fleets (N, F) → (N, MAX_OWNED, F)
+                tx = tgt_x.unsqueeze(2); ty = tgt_y.unsqueeze(2)       # (N, MAX_OWNED, 1)
+                fxp = f_fx.unsqueeze(1); fyp = f_fy.unsqueeze(1)       # (N, 1, F)
+                f_eta_to_tgt = (torch.sqrt((fxp - tx) ** 2 + (fyp - ty) ** 2)
+                                / f_speed.unsqueeze(1)).clamp(max=100.0)  # (N, MAX_OWNED, F)
+                hits_tgt = (f_tgt.unsqueeze(1) == target_idx.unsqueeze(2))  # (N, MAX_OWNED, F)
+                arrives_before = f_eta_to_tgt <= eta.unsqueeze(2)      # (N, MAX_OWNED, F)
+                # Enemy inbound (adds to defense); friendly inbound (adds to offense)
+                enemy_mask = (f_owner.unsqueeze(1) != owner_id) & (f_owner.unsqueeze(1) >= 0)  # (N, 1, F)
+                friendly_mask = (f_owner.unsqueeze(1) == owner_id)     # (N, 1, F)
+                valid = hits_tgt & arrives_before & fa.unsqueeze(1)    # (N, MAX_OWNED, F)
+                enemy_inbound = (f_ships.unsqueeze(1) * (valid & enemy_mask).float()).sum(dim=2)
+                friendly_inbound = (f_ships.unsqueeze(1) * (valid & friendly_mask).float()).sum(dim=2)
+                # Veto if (ship_count + friendly_inbound) <= projected_defense * factor
+                total_offense = ship_count + friendly_inbound
+                insufficient = is_neutral_attack & (total_offense <= projected_defense * self.sufficient_commit_factor)
+                can_fire = can_fire & ~insufficient
+            else:
+                can_fire = can_fire  # no-op when no neutral attacks
 
         # Compute launch positions (just outside planet radius along angle)
         start_x = src_x + torch.cos(angle) * (src_r + 0.1)

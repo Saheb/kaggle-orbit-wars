@@ -442,6 +442,22 @@ def _report_and_plot(all_rows, output_path, shaping_coef=None):
     for r in all_rows:
         by_out[r["outcome"]].append(r)
 
+    # ---- PILE-ON RATE by outcome — the won/lost AGGREGATION test: do we aggregate MORE in wins? ----
+    print(f"\n  PILE-ON RATE by outcome (>=1 spare fired at a contested neutral, steps {STEP_LO}-{STEP_HI}):")
+    rates = {}
+    for outcome in ("won", "lost"):
+        rows = by_out[outcome]
+        nf = sum(1 for r in rows if r["fired_at"])
+        na = sum(1 for r in rows if r["bucket"] == "agg")
+        nfa = sum(1 for r in rows if r["fired_at"] and r["bucket"] == "agg")
+        rates[outcome] = nf / max(1, len(rows))
+        print(f"    {outcome:>4}: {nf:>4}/{len(rows):<5} = {100*rates[outcome]:5.1f}% piled on   "
+              f"(agg-bucket {nfa}/{na} = {100*nfa/max(1,na):4.1f}%)")
+    gap = rates.get("won", 0.0) - rates.get("lost", 0.0)
+    print(f"    => won−lost pile-on gap {100*gap:+.1f} pp  →  "
+          f"{'aggregation TRACKS winning (lever real)' if gap > 0.05 else 'aggregation does NOT track winning'}"
+          f"   [caveat: phase-composition + fire-on-loss confounds — read with care]")
+
     # ---- CALIBRATION CHECK (is the critic even right about outcome?) ----
     # This is the cleanest signal and free of the fire-selection confound. If mean V(s) on
     # LOST games is ~0 or positive, the critic is over-optimistic on the exact trajectories

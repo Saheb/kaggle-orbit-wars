@@ -918,7 +918,7 @@ def train(args):
         m = getattr(member, "_pool_model", None)
         if m is None:
             m = copy.deepcopy(pool_opp_model)
-            m.load_state_dict(member.state_dict)
+            m.load_state_dict(member.state_dict, strict=False)
             m.to(device)
             m.eval()
             member._pool_model = m

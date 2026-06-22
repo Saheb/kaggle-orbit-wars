@@ -1,9 +1,64 @@
 # Current Problem — the Force-Concentration Wall, diagnosed
 
-_Last updated: 2026-06-22 (CONCLUSION added). The CONCLUSION below is the standing statement; the sections
-under it are the investigation that led there, newest-first._
+_Last updated: 2026-06-22 PM (CONCLUSION v2 added — COMA refuted, lever = expansion). The newest CONCLUSION
+at top is the standing statement; sections below are the investigation, newest-first._
 
-## ⭐⭐ CONCLUSION (2026-06-22) — the wall is a CREDIT-ASSIGNMENT fixed point; the lever is COMA, not reward/data/decode
+## ⭐⭐⭐ CONCLUSION v2 (2026-06-22, PM) — COMA/aggregation REFUTED; the lever is EXPANSION via SUFFICIENT SOLO-CAPTURE
+
+**The COMA conclusion below is SUPERSEDED.** The COMA Q-head was built and gated (full detail +
+refutation in [`q-head.md`](q-head.md) CONCLUSION). Multi-source aggregation is refuted by **four
+converging lines**:
+1. **Offline Q-head** prices `q_fire−q_idle` on idle spares ≤0/≈0 on all 3 substrates (hlr −3.7%, phase4e ≈0,
+   expert-replay ≈0 — corr(Q,return)=0.99 yet flat on the marginal).
+2. **Env-grounded force-fire** (`force_fire_counterfactual.py` — force the policy to fire idle spares onto
+   contested neutrals vs Ajay) is **net-negative**, maximal AND selective-holdable (holdability filter
+   screened 88%; still 15.6%→0% win, garrison crashes 190→73/130). Firing spares drains defense, captures
+   don't hold.
+3. **Our own won/lost split vs h12** (`value_spare_diagnostic.py`, 4044 won / 2185 lost opp-rows): pile-on
+   3.0% won vs 4.3% lost — we aggregate *more* when we LOSE.
+4. **Winner replay** (Jake Will WON vs Isaiah, `leader-analysis/81327125.json`, `analyze_action_list_replays.py`):
+   `aggTurn=0.039`, ZERO in opening, max 2 sources. Top winners barely pool. (A correct centralized Q prices
+   firing ≤0 ⇒ COMA would reinforce *idling*: not wrong, just not the lever.)
+
+**The lever is EXPANSION via SUFFICIENT SOLO-CAPTURE** — the winner's actual engine (Jake vs Isaiah; n=1 but
+converges with the h12 split, the 171-replay probe, and the standing planets@50 wall):
+- **Winner profile:** Jake planets@50 = **11** (our wall ~7) → 20 by t150; ships@50 184 → **923** by t150
+  (Isaiah collapsed to 4 planets / 215 ships); avg single send **47** vs 37.
+- **Jake's expansion rule** (decoded, steps 25–27): fire the instant a **single source clears garrison+1**;
+  assign each target to its **nearest sufficient source**; let **every planet take its own nearby neutral**
+  (breadth = `af1` solo-capture), **NOT pooling**. The apparent "wait" is just accumulating to garrison+1 (he
+  had 19 vs a 19-garrison target, waited one tick to 22, sent 20). He does NOT pool two ~14-ship planets onto
+  one target — pooling staggers arrivals (defeated piecemeal) and wastes each planet's own expansion (the
+  closer 14-ship planet went on to solo its OWN nearby neutral).
+- **Hoard-passivity loses:** Isaiah (the loser, also a top player) expanded identically through step 75 (both
+  ~13 planets), then under mid-game pressure went **passive** (launches 4→0→0, ships/planet hoarded to 60) and
+  was peeled to elimination; Jake stayed **active** and snowballed. Winning = sustained expansion to holdable
+  land — not hoarding, not pooling.
+
+**Targeting / ETA facts (we are NOT blocked from this):** the agent has **no hard ETA/distance cap** on
+targets — the target head is free (only self + own-when-no-reinforce masked); the one ETA knob
+`target_sanity_penalty` **defaults to 0 (off)** and is only a soft per-source *relative* nudge when on;
+`_MAX_ETA=25` is **diagnostic-only** (`value_spare_diagnostic` / `expansion_autopsy`, defines "reachable" for
+*measuring*). Fleet ETA = dist/speed with **bigger fleets FASTER** (5sh 1.56 → 100sh 3.72 /step), so a big
+*sufficient* send is also the *fastest* capture (1-ship probes are doubly bad — insufficient AND slow). Jake's
+"far" dist-34.8 capture was only **ETA ~14**. ⇒ the lever is to **ADD** a "target the nearest single source
+that clears garrison+1, prefer breadth" preference, NOT to remove a constraint.
+
+**Open question (the hard part):** how to *instill* sufficient solo-capture / expansion tempo. It is a
+DIRECTION, not yet a mechanism — and prior reward attempts at expansion (expansion-coef, decmass) were
+negative, so it is not a trivial reward knob. Candidates: a sufficient-capture action logic / shaping robust
+to the self-play mirror, or a curriculum/opponent that rewards the land-grab. **Next:** quantify Jake's rule
+across the full game (% of captures that are nearest-sufficient-single-source, garrison+1, solo, ETA ≤ ~15) to
+fix the spec before touching code.
+
+**Tools (this session):** `force_fire_counterfactual.py` (env force-fire overlay, maximal/selective),
+`value_spare_diagnostic.py` (pile-on won/lost split), `analyze_action_list_replays.py` (winner aggTurn),
+`build_replay_action_bc._decode_move` (per-launch source→target decode). Logs under
+`gpu_run_artifacts/qhead/eval_logs/`.
+
+---
+
+## ⛔ CONCLUSION (2026-06-22, AM) — SUPERSEDED by v2 above — the wall is a CREDIT-ASSIGNMENT fixed point; the lever is COMA, not reward/data/decode
 
 **The wall is an escapable PPO fixed point in CREDIT ASSIGNMENT.** `ppo.py` puts a single scalar GAE
 advantage on the *summed* joint log-prob (`ppo.py:226` sums fire+ships+target over all slots; `ppo.py:243`

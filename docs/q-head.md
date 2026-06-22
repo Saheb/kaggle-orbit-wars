@@ -2,12 +2,28 @@
 
 _Plan, 2026-06-22. Implements the lever from [`current_problem.md`](current_problem.md) CONCLUSION._
 
-## ⭐⭐ STATUS (2026-06-22) — step 1 (offline gate) BUILT + RUN; verdict NEGATIVE on every self-play substrate
+## ⭐⭐ STATUS (2026-06-22) — COMA / multi-source AGGREGATION REFUTED (4 converging lines). Lever = EXPANSION-SPEED (planets@50) + retention/production-snowball, NOT pile-on. See CONCLUSION.
+
+### CONCLUSION (2026-06-22) — aggregation is not the lever; expansion + retention is
+Four converging lines refute COMA's premise (recruit the idle spares to pile on):
+1. **Offline Q-head** prices firing the idle spare ≤0/≈0 on all 3 substrates (hlr −3.7%, phase4e ≈0, expert-replay ≈0 — corr(Q,return)=0.99 yet flat on the marginal).
+2. **Env-grounded force-fire** (`force_fire_counterfactual.py`, force the policy to fire idle spares onto contested neutrals vs Ajay) is **net-negative** — maximal AND selective-holdable (holdability filter screened 88%, still 15.6%→0% win, material 190→73/130). Firing spares drains garrison; captures don't hold.
+3. **Our own won/lost split vs h12** (correct aggregator, 4044 won / 2185 lost opp-rows, `value_spare_diagnostic.py`): pile-on 3.0% won vs 4.3% lost (gap −1.3pp) — we aggregate *more* when we LOSE.
+4. **Winner replay** (Jake Will WON vs Isaiah, `leader-analysis/81327125.json`, `analyze_action_list_replays.py`): `aggTurn=0.039` (3.9%, ZERO in opening, max 2 sources). A top winner barely pools — matches the 171-replay probe (~0.08).
+
+**What the winner actually does (the lever):** Jake — planets@50=**11** (our wall ~7), planets@150=20; ships@50=**184** → ships@150=**923** (Isaiah collapsed to 4 planets / 215 ships); avg_send **47** (vs 37); 76/162 turns with launches. Edge = **faster/sustained EXPANSION + HOLDABLE captures + bigger single sends (sufficiency) + production snowball** — size-to-floor + retention, NOT pile-on. Confirms the standing planets@50 wall and [[project_aggregation_probe]]'s "sufficiency+retention not presence."
+
+**COMA verdict: CLOSED.** A correct centralized Q prices firing the idle spares ≤0 (the env agrees), so COMA would reinforce *idling* — it's not wrong, it's not the lever. Tools (`model.py` Q-head, `force_fire_counterfactual.py`, the `value_spare_diagnostic.py` pile-on split) remain for reference. The step-1 detail below is the record of how we got here.
+
+---
+
 
 **Step 1 is done and the gate did not clear.** The Q-head, the offline action-sensitivity probe, the
 per-opportunity probe, and a pure-replay dataset builder are all built, tested, and run (tools below). The
 make-or-break question — *does a Q-head trained on returns price firing an idle spare as helping?* — comes
-back **negative on every self-play substrate**, so COMA-as-planned should **not** go to GPU yet.
+back **negative on every self-play substrate AND ≈0 on the expert-replay escape** — the Q-head route is now
+exhausted across all three data substrates, so COMA-as-planned should **not** go to GPU. The decisive next
+step is the env-grounded force-fire test (below).
 
 **The numbers** (`q_fire − q_idle` on **IDLE spare-source slots at real spare-fire opportunities vs Ajay**;
 > 0 = "firing the idle spare helps" = the signal `delta_V≈0` lacked; % = fraction of that checkpoint's
@@ -17,6 +33,7 @@ returns-std, the only cross-checkpoint-comparable scale):
 |---|---|---|---|---|
 | **hlr 2M** (0.315), 24-seed, n=29762 | **−0.0117 ± 0.0002** (−3.7%) | −0.0063 (−2.0%) | +0.0016 (**wrong sign**) | firing priced negative *everywhere* |
 | **phase4e 3.6M** (~1.17), 4-game, n=1643 | **−0.0039 ± 0.0015** (−0.3% ≈ 0) | **+0.0574 (+4.9%)** | −0.0010 (right sign, ≈0) | fires credited, idle-counterfactual ≈0 |
+| **expert-replay (bc_jake)** (0.449), 4g all-loss/~2 eff, n=493 | **−0.0006 ± 0.0020** (−0.1% ≈ 0) | **+0.0195 (+4.3%)** | −0.0008 (≈0) | escape didn't fire; ≈0 = ambiguous (experts hold correctly) |
 
 **Mechanism — two faces of the same wall:**
 - **hlr = the on-policy confound.** Firing priced negative everywhere, and *most* negative in the games we
@@ -31,20 +48,58 @@ returns-std, the only cross-checkpoint-comparable scale):
   must recruit. *Firing the spare is valued where the policy fires; it can't be valued where the policy
   never fires.*
 
-**Pure-replay escape attempt (`build_replay_returns.py`, IN PROGRESS — result pending) + its ceiling.**
-Train the Q-head on real **expert** games (Isaiah/Jake/…, mixed win/loss, terminal ±1 returns, never
-self-play). The head fits outcomes (corr 0.757 — but that is the *overall* outcome fit, dominated by
-game-phase / who's-ahead, **NOT** the idle-spare marginal; the gate isolates the marginal). **Validity
-ceiling (USER):** experts' idle spares are idle *correctly*, so expert data lacks the
-*wrongly-held-spare-that-lost-the-game* counterfactual that the wall actually **is**. ⇒ a **positive**
-idle-spare read would CONFIRM the escape (expert value says our holds are mistakes); a **≈0 / negative** is
-**ambiguous** (could be correct-to-hold, not a confound). **This test can confirm the escape, not cleanly
-refute it.**
+**Pure-replay escape attempt (`build_replay_returns.py`) — RAN 2026-06-22, ≈0, escape did NOT fire.**
+Q-head trained on real **expert** games (Jake replays: 21 games, 11/21 balanced wins, 20k samples, returns
+std 0.449, never self-play); bc_jake policy played vs Ajay (4 games, all losses, ~2 effective). It fit
+outcomes essentially perfectly — **corr(Q,return) 0.991** — yet **idle-spare `q_fire−q_idle` = −0.0006 ±
+0.0020 (≈0)**, agg/pooling bucket −0.0019, fired-spares +0.0195 (fires still credited). **The sharpest
+result in the whole step:** a value head that predicts *who wins* at corr 0.99 is **flat on whether firing
+the idle spare helps** — the wall is not a value-fitting problem; the marginal signal isn't in the data,
+however well outcomes are fit. **Validity ceiling (USER, pre-registered):** experts' idle spares are idle
+*correctly*, so expert data lacks the *wrongly-held-spare-that-lost* counterfactual the wall **is** ⇒ a
+**positive** read would have CONFIRMED the escape; a **≈0** is **AMBIGUOUS** (can't refute "firing would
+help"). So the escape didn't fire **and couldn't have refuted** — by construction. (se is optimistic: ~2
+effective games, slots correlated within game; but the point estimate is glued to 0 and ≈0 is ambiguous
+regardless, so a seeds-24 rerun only tightens a CI around an inconclusive answer — low value. Log:
+`gpu_run_artifacts/qhead/eval_logs/replay_gate.log`.)
 
-**The clean test (identified, not built): env-grounded counterfactual.** Take our loss states with an idle
-spare, *force-fire it onto the contested target*, simulate forward, compare win rate vs the idle branch.
-Measures "would firing the idle spare have won" **directly** — no Q-head, no confounded data, no
-expert-correctness ambiguity. The falsification that sidesteps everything above.
+**The clean test — env-grounded counterfactual (DONE 2026-06-22, `force_fire_counterfactual.py`): firing the
+idle spares is NET-NEGATIVE.** Persistent aggregation overlay (policy + ALWAYS fire idle spares onto contested
+neutrals — the af1+agg opportunity set, pooled cheapest-first to the floor, aimed with the policy's own
+intercept aimer) vs the baseline policy, paired by (seed, seat) = common random numbers, hlr 2M vs Ajay,
+32 games. **Result: win-rate 15.6% → 0.0%** (prize 0 / regress 5 — the overlay LOST all 5 games the baseline
+WON and flipped NONE); **planets@50 6.84 → 5.97 (Δ −0.88)**; **material@50 190.7 → 73.1 (Δ −117.6)**. Firing
+the "spares" bleeds garrison: vs a forward-projector our spares aren't actually spare (they're the defense
+Ajay's inbound will require), the captures don't hold, the depleted sources fall. **Three consequences:**
+(1) "we fail to fire spares" is **NOT the wall** — the spares are idle *correctly*; (2) this **retroactively
+confirms the offline ≤0 reads as a TRUE signal, not the on-policy confound** — the env, with no confound,
+independently says firing hurts; (3) **COMA's premise is undercut**, and COMA's own math agrees — with a Q
+that correctly prices firing<idling, `A_i = −p·(Q_fire−Q_idle) > 0` on idle slots → COMA would reinforce
+*idling*. So COMA isn't *wrong*, it's **not the lever**. **Caveat:** the overlay is MAXIMAL/indiscriminate
+aggregation (66.8 fires/game); it refutes "fire all idle spares → win," not a hypothetical narrow *selective*
+aggregation — but the offline marginal said ≤0 there too, so the evidence is heavily against. **Redirect:**
+the wall is force-concentration / retention, not under-aggregation (`project_force_concentration_wall`).
+
+**⚠ CORRECTION (USER, 2026-06-22):** the maximal overlay does NOT differentiate holdable from HOPELESS
+captures (it never calls `_holdable_roi` — only reach/spare/capture-cost via `_spare_sources_for_neutral`) and
+sprays across ~22 neutrals/turn sized to the *static* cost, so the captures don't hold. The net-negative was
+nearly guaranteed by construction and does **NOT** refute SELECTIVE aggregation — consequences (2)/(3) above
+are **PREMATURE**. The real test = a SELECTIVE overlay (`--roi-min 0`: only holdable neutrals via
+`_holdable_roi`, best-ROI-first, sized to floor, sources used once).
+
+**SELECTIVE RESULT (seeds=16, roi_min=0, hlr vs Ajay).** The holdability filter screened **88%** (370
+holdable-piled of 3000 idle-spare opps) — so most idle spares ARE hopeless (negative reactive ROI), and the
+maximal overlay was largely spraying at them (USER point confirmed). **But firing only the holdable 12% is
+STILL net-negative:** win 15.6%→0.0% (prize 0 / regress 5), planets@50 6.84→5.88 (Δ −0.97), material@50
+190.7→129.7 (Δ −61, less than maximal's −117). So "hopeless captures" is **ruled out** as the whole cause —
+firing the holdable spares doesn't win either. **Remaining confound (USER):** this is vs **Ajay, who
+out-masses hlr regardless** = a WIN-STARVED opponent, so net-negative here can't separate "aggregation is
+bad" from "Ajay is unbeatable by hlr." ⇒ **the env-vs-Ajay test is the wrong instrument.** **PIVOT
+(2026-06-22):** measure/learn aggregation against a **correct-aggregator opponent at matched difficulty**
+(win-gradient, not win-starved) — which also supplies the **supervised `Q^fire`** the idle-step COMA
+counterfactual lacks (the OOD-collapse: `Q_t^fire` on never-fired slots is unsupervised → A_i≈0). COMA
+verdict: **leaning negative but NOT airtight**; the clean test is now learning from a demonstrator, not
+beating Ajay. [[feedback_win_starvation]] [[project_h14_wingradient]] [[project_force_concentration_wall]]
 
 **Tools (all in tree):** `model.py` Q-head (`q_counterfactual` + `_q_slot_tokens`; `tests/test_q_head.py`
 4/4 — additive-pool-delta parity), `train_torch.py --dump-rollout-and-exit` (warmup-gated),
