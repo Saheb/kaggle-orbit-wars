@@ -65,6 +65,24 @@ def autopsy_game(steps, seat, enemy):
     return events, total_caps
 
 
+_MODES = ("ABANDONED", "OUT-MASSED", "TOO-LATE", "OTHER")
+
+
+def _report(tag, label, events, total_caps):
+    """Loss-mode breakdown for ONE seat's captured-then-lost planets.
+    Also emits a machine-readable `RAW <tag> ...` line so parallel seed-shards aggregate."""
+    n = len(events)
+    modes = Counter(e[0] for e in events)
+    print(f"\n    --- {label}: captures {total_caps} | lost-captures {n} | peel-rate {n/max(total_caps,1):.2f}")
+    if n:
+        parts = [f"{m} {100*modes.get(m,0)/n:.0f}%" for m in _MODES]
+        print("        loss-mode:  " + "   ".join(parts))
+        gloss = [e[3] for e in events]; ein = [e[4] for e in events]
+        print(f"        garrison@loss {statistics.median(gloss):.0f}  vs  enemy-inbound@loss {statistics.median(ein):.0f}")
+    rc = " ".join(f"{m}={modes.get(m,0)}" for m in _MODES)
+    print(f"    RAW {tag} caps={total_caps} lost={n} {rc}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
@@ -75,41 +93,26 @@ def main():
     args = ap.parse_args()
 
     agent = load_ckpt_agent(args.checkpoint, args.gate)
-    all_events, total_caps, wins = [], 0, 0
+    our_ev, our_caps, opp_ev, opp_caps, wins = [], 0, [], 0, 0
     for s in range(args.seed0, args.seed0 + args.games):
         env = make("orbit_wars", configuration={"seed": s}, debug=False)
         env.run([agent, args.opponent])
         steps = env.steps
-        # seat-0 win = we own >= material at end (use planets-owned as the proxy)
         last = steps[-1][0].observation.get("planets") or []
         us = sum(1 for p in last if int(p[1]) == 0)
         opp = sum(1 for p in last if int(p[1]) == 1)
         wins += int(us > opp)
-        ev, caps = autopsy_game(steps, seat=0, enemy=1)
-        all_events += ev
-        total_caps += caps
+        ev0, c0 = autopsy_game(steps, seat=0, enemy=1)   # OUR lost captures
+        ev1, c1 = autopsy_game(steps, seat=1, enemy=0)   # OPPONENT's lost captures
+        our_ev += ev0; our_caps += c0
+        opp_ev += ev1; opp_caps += c1
 
-    n = len(all_events)
-    print(f"\n=== HOLD AUTOPSY: {args.checkpoint}")
-    print(f"    vs {args.opponent}  |  {args.games} games (seeds {args.seed0}..{args.seed0+args.games-1}), gate{args.gate}")
-    print(f"    seat-0 planet-wins: {wins}/{args.games}")
-    print(f"    captures: {total_caps}  |  lost: {n}  |  peel-rate {n/max(total_caps,1):.2f}")
-    if n == 0:
-        print("    (no lost captures — nothing to autopsy)")
-        return
-    modes = Counter(e[0] for e in all_events)
-    print("\n    LOSS MODE breakdown (of lost captures):")
-    for m in ("ABANDONED", "OUT-MASSED", "TOO-LATE", "OTHER"):
-        c = modes.get(m, 0)
-        print(f"      {m:11s} {c:4d}  ({100*c/n:4.1f}%)")
-    holds = [e[1] for e in all_events]
-    gcap = [e[2] for e in all_events]
-    gloss = [e[3] for e in all_events]
-    ein = [e[4] for e in all_events]
-    print(f"\n    median hold-steps before loss : {statistics.median(holds):.0f}  (mean {statistics.mean(holds):.0f})")
-    print(f"    garrison AT CAPTURE (median)   : {statistics.median(gcap):.0f}  <- low = captured with just-enough, no holding surplus")
-    print(f"    garrison AT LOSS (median)      : {statistics.median(gloss):.0f}")
-    print(f"    enemy inbound AT LOSS (median) : {statistics.median(ein):.0f}")
+    print(f"\n=== HOLD AUTOPSY (both seats): {args.checkpoint}")
+    print(f"    vs {args.opponent}  |  {args.games} games, gate{args.gate}  |  seat-0 wins {wins}/{args.games}")
+    print("    [OUT-MASSED% = of a seat's OWN lost captures, fraction lost to enemy-inbound > garrison]")
+    print("    [GHOST test: if OPPONENT's OUT-MASSED% ~ OURS, out-massing is just how captures get lost. Asymmetric = real wall.]")
+    _report("US", "US (seat 0) lost captures", our_ev, our_caps)
+    _report("OPP", "OPPONENT (seat 1) lost captures", opp_ev, opp_caps)
 
 
 if __name__ == "__main__":

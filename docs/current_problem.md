@@ -1,9 +1,61 @@
-# Current Problem — the Force-Concentration Wall, diagnosed
+# Current Problem — RETENTION & capital efficiency (the "out-massing wall" was a measurement ghost)
 
-_Last updated: 2026-06-22 PM (CONCLUSION v2 added — COMA refuted, lever = expansion). The newest CONCLUSION
-at top is the standing statement; sections below are the investigation, newest-first._
+_Last updated: 2026-06-23 (CONCLUSION v3 — `out-massed%` is a GHOST; real axis = peel-rate/retention; lever =
+capital efficiency, the `cu` thread). Newest CONCLUSION at top is the standing statement; sections below are the
+investigation, newest-first. **⚠️ EVERY section below framed around "the out-massing wall" / "out-massed 96%"
+is measuring the ghost — read it through v3.**_
 
-## ⭐⭐⭐ CONCLUSION v2 (2026-06-22, PM) — COMA/aggregation REFUTED; the lever is EXPANSION via SUFFICIENT SOLO-CAPTURE
+## ⭐⭐⭐ CONCLUSION v3 (2026-06-23) — the "out-massing wall" is a GHOST; real axis = RETENTION (peel-rate); lever = CAPITAL EFFICIENCY (`cu`)
+
+**`out-massed%` — the metric this entire doc is built on — is a measurement artifact, not a wall.** A dual-seat
+hold-autopsy (`hold_autopsy.py`, now reports BOTH seats' lost-capture loss-modes; phase4fs 7.34M) shows
+out-massed% is **symmetric and pinned ~90–100% for whoever loses a capture — on both seats, in games we win AND
+lose, vs the strongest AND the weakest opponent:**
+
+| matchup | seat | peel-rate (lost/caps) | **held %** | OUT-MASSED% of lost caps | garrison@loss vs inbound |
+|---|---|---|---|---|---|
+| vs Ajay (we lose) | us   | 0.77 | 23% | **92%** | 20 vs 54 |
+|                   | Ajay | 0.64 | 36% | **90%** | 10 vs **112** |
+| vs zach (we 96%)  | us   | 0.25 | 75% | 99%  | 36 vs 81 |
+|                   | zach | 0.95 |  5% | **100%** | 32 vs 156 |
+
+Out-massed% is the **definition of how a planet flips** (more ships arrive than defend) — it is ~constant for the
+losing side of any capture and **cannot encode skill.** We spent the whole investigation grading every lever
+(credit-assignment, retention, tempo, decmass, PBRS, eliminate-to-win, …) by whether it moved a number that is
+**structurally unmovable.** That is the mechanical reason for months of "nothing breaks the wall": **there was no
+wall — there was a tautology on the scoreboard.** (Confirmed at N=120 games vs Ajay — see autopsy logs below.)
+
+**The real discriminator is PEEL-RATE (retention), and it is RELATIVE.** Winning = holding a higher fraction of
+*your* captures than the opponent holds of *theirs*: vs zach we hold **75%** / they hold **5%** → 96% WR; vs Ajay
+we hold **23%** / Ajay holds **36%** → we lose. `out-massed%` can't see this; peel-rate tracks WR cleanly.
+"Retention" was the right AREA all along — it kept getting killed because it was **graded by the ghost**
+(out-massed%), with peel/`held@+15` treated as secondary to a "wall" that wasn't one.
+
+**The mechanism is CAPITAL EFFICIENCY (over-commitment) — i.e. the `cu` thread.** Inbound-vs-garrison at the loss
+point: we take Ajay's planets with **112 ships against a garrison of 10** (11× overkill); Ajay takes ours with 54
+vs 20 (2.7×). We defend with MORE garrison than Ajay (20 vs 10) and still hold *less* — because we **squander
+force overkilling captures**, leaving too little to hold and re-take. It is NOT "bring more mass" (we already
+over-bring); it is **allocate it efficiently** — exactly what capital-utilization (`phase4fs_cu`, the current WR
+high at 50.4%@2.0M) targets. (Leading hypothesis from the overkill asymmetry; the direct test is whether cutting
+overkill raises held-fraction without dropping captures — `cu` is the live probe.)
+
+**What changes:**
+1. **Retire `out-massed%` as the wall/steering metric.** Every section below framed on "break the out-massing
+   wall / out-massed 96%" is measuring the tautology.
+2. **Steer by the peel-rate differential** (our held-fraction − opponent's), or net-captures-held. Re-read the
+   killed "retention" runs by this — some may be progress mis-scored as failure.
+3. **The lever is capital efficiency / overkill-reduction** (the `cu` direction), NOT out-massing, NOT
+   aggregation. (v2's "sufficient solo-capture, not overkill" instinct was partly right — recast here as
+   capital efficiency with the correct scoreboard.)
+
+**Tooling:** `hold_autopsy.py` (now dual-seat: `_report(tag,…)` emits `RAW US`/`RAW OPP` lines, seed-shardable
+for big-N). Logs: `gpu_run_artifacts/phase4fs/eval_logs/autopsy_*`. The wall memories
+(`project_force_concentration_wall`, `project_firststrike_ajay_peak`, …) still carry the ghost framing — pending
+the same correction.
+
+---
+
+## ⛔ CONCLUSION v2 (2026-06-22, PM) — SUPERSEDED by v3 (metric was the ghost); COMA/aggregation REFUTED; lever was framed EXPANSION via SUFFICIENT SOLO-CAPTURE
 
 **The COMA conclusion below is SUPERSEDED.** The COMA Q-head was built and gated (full detail +
 refutation in [`q-head.md`](q-head.md) CONCLUSION). Multi-source aggregation is refuted by **four

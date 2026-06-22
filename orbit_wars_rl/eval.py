@@ -2032,6 +2032,38 @@ def evaluate_against_baseline(
     }
 
 
+def _accumulate_panel_records(records: list) -> dict:
+    """Build the panel result dict from a list of per-game records.
+
+    Each record is {archetype, my_seat, is_win, material, conv}. This is the SAME
+    accumulation evaluate_panel does inline, factored out so sharded runs can collect
+    records per-process and replay ALL of them here → numbers identical to a full panel
+    (add_conversion is a pure additive accumulator, so partition-then-merge is exact).
+    """
+    from eval_panel import BY_ARCHETYPE
+    per_arch = {arch: {"wins": 0, "total": 0,
+                       "wins_seat0": 0, "wins_seat1": 0,
+                       "total_seat0": 0, "total_seat1": 0,
+                       "material_sum": 0}
+                for arch in BY_ARCHETYPE}
+    overall = {"wins": 0, "total": 0, "wins_seat0": 0, "wins_seat1": 0,
+               "total_seat0": 0, "total_seat1": 0}
+    conv_tot = new_conversion_acc()
+    for r in records:
+        arch = r["archetype"]; my_seat = r["my_seat"]
+        is_win = r["is_win"]; material = r["material"]
+        add_conversion(conv_tot, r["conv"], won=is_win)
+        c = per_arch[arch]
+        c["wins"] += int(is_win); c["total"] += 1
+        c[f"wins_seat{my_seat}"] += int(is_win)
+        c[f"total_seat{my_seat}"] += 1
+        c["material_sum"] += material
+        overall["wins"] += int(is_win); overall["total"] += 1
+        overall[f"wins_seat{my_seat}"] += int(is_win)
+        overall[f"total_seat{my_seat}"] += 1
+    return {"overall": overall, "per_archetype": per_arch, "conversion": conv_tot}
+
+
 def evaluate_panel(
     model: EntityTransformer,
     device: torch.device,
@@ -2048,6 +2080,9 @@ def evaluate_panel(
     defensive_reinforce_overfill: float = 1.0,
     natural_head_audit: bool = False,
     natural_head_audit_beta: float = 2.2,
+    shard_idx: int = 0,
+    shard_count: int = 1,
+    collect_records: bool = False,
 ) -> dict:
     """Stratified eval over the 128-seed community panel, playing both seats.
 
@@ -2073,24 +2108,27 @@ def evaluate_panel(
                               natural_head_audit_stats=natural_head_stats,
                               natural_head_audit_beta=natural_head_audit_beta)
 
-    per_arch: dict[str, dict] = {arch: {"wins": 0, "total": 0,
-                                        "wins_seat0": 0, "wins_seat1": 0,
-                                        "total_seat0": 0, "total_seat1": 0,
-                                        "material_sum": 0}
-                                 for arch in BY_ARCHETYPE}
-    overall = {"wins": 0, "total": 0, "wins_seat0": 0, "wins_seat1": 0,
-               "total_seat0": 0, "total_seat1": 0}
-    conv_tot = new_conversion_acc()
-    game_idx = 0
+    records: list = []
     total_games = sum(len(seeds) for seeds in BY_ARCHETYPE.values()) * 2
+    shard_total = sum(1 for i in range(total_games) if i % shard_count == shard_idx)
 
     print(f"Panel eval START — opponent: {opponent} | {total_games} games "
           f"(128 seeds × 2 seats) | decode={'target' if target_decode else 'argmax'} "
-          f"fire_thr={fire_threshold}", flush=True)
+          f"fire_thr={fire_threshold}"
+          + (f" | SHARD {shard_idx}/{shard_count} ({shard_total} games)" if shard_count > 1 else ""),
+          flush=True)
 
+    # Global game index over the fixed (archetype, seed, seat) order. Shard i runs only
+    # games where idx % shard_count == i — a deterministic partition of the SAME 256 games.
+    gi = 0
+    wins_running = 0
     for archetype, seeds in BY_ARCHETYPE.items():
         for seed in seeds:
             for my_seat in (0, 1):
+                do_this = (gi % shard_count == shard_idx)
+                gi += 1
+                if not do_this:
+                    continue
                 agents = [agent_fn, opponent] if my_seat == 0 else [opponent, agent_fn]
                 env = make("orbit_wars", configuration={"seed": seed}, debug=False)
                 env.run(agents)
@@ -2099,30 +2137,26 @@ def evaluate_panel(
                 my_reward = rewards[my_seat]
                 opp_reward = rewards[1 - my_seat]
                 is_win = my_reward > opp_reward
-                add_conversion(conv_tot, game_conversion(env.steps, my_seat), won=is_win)
+                conv = game_conversion(env.steps, my_seat)
                 # Material on the model's side
                 obs = final[0].observation
                 material = sum(p[5] for p in obs.planets if p[1] == my_seat)
                 material += sum(f[6] for f in obs.fleets if f[1] == my_seat)
-
-                c = per_arch[archetype]
-                c["wins"] += int(is_win); c["total"] += 1
-                c[f"wins_seat{my_seat}"] += int(is_win)
-                c[f"total_seat{my_seat}"] += 1
-                c["material_sum"] += material
-                overall["wins"] += int(is_win); overall["total"] += 1
-                overall[f"wins_seat{my_seat}"] += int(is_win)
-                overall[f"total_seat{my_seat}"] += 1
-                game_idx += 1
-                if game_idx % 16 == 0 or game_idx == total_games:
-                    print(f"  panel progress: {game_idx}/{total_games}  "
-                          f"overall {overall['wins']}/{overall['total']} "
-                          f"({100*overall['wins']/max(overall['total'],1):.1f}%)",
+                records.append({"archetype": archetype, "my_seat": my_seat,
+                                "is_win": is_win, "material": material, "conv": conv})
+                wins_running += int(is_win)
+                if len(records) % 16 == 0 or len(records) == shard_total:
+                    print(f"  panel progress: {len(records)}/{shard_total}  "
+                          f"overall {wins_running}/{len(records)} "
+                          f"({100*wins_running/max(len(records),1):.1f}%)",
                           flush=True)
 
-    return {"overall": overall, "per_archetype": per_arch, "conversion": conv_tot,
-            "defensive_reinforce": def_reinf_stats,
-            "natural_head_audit": natural_head_stats or {}}
+    result = _accumulate_panel_records(records)
+    result["defensive_reinforce"] = def_reinf_stats
+    result["natural_head_audit"] = natural_head_stats or {}
+    if collect_records:
+        result["_records"] = records
+    return result
 
 
 def _fmt_defensive_reinforce(stats: dict) -> str:
@@ -2321,7 +2355,10 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         defensive_reinforce_value_margin: float | None = None,
                         defensive_reinforce_overfill: float = 1.0,
                         natural_head_audit: bool = False,
-                        natural_head_audit_beta: float = 2.2):
+                        natural_head_audit_beta: float = 2.2,
+                        shard_idx: int = 0,
+                        shard_count: int = 1,
+                        collect_records: bool = False):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
 
@@ -2426,8 +2463,11 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                                  defensive_reinforce_value_margin=defensive_reinforce_value_margin,
                                  defensive_reinforce_overfill=defensive_reinforce_overfill,
                                  natural_head_audit=natural_head_audit,
-                                 natural_head_audit_beta=natural_head_audit_beta)
-        print_panel_report(results, opponent)
+                                 natural_head_audit_beta=natural_head_audit_beta,
+                                 shard_idx=shard_idx, shard_count=shard_count,
+                                 collect_records=collect_records)
+        if not collect_records:
+            print_panel_report(results, opponent)
         return results
 
     results = evaluate_against_baseline(
@@ -2557,6 +2597,15 @@ if __name__ == "__main__":
     parser.add_argument("--natural-head-audit-beta", type=float, default=None,
                         help="Reactive-margin beta for --natural-head-audit save candidates. "
                              "Default reuses --decisive-mass-beta.")
+    parser.add_argument("--panel-shards", type=int, default=1,
+                        help="Split the --panel run into this many deterministic shards (by game "
+                             "index). Run one process per shard with --panel-shard-idx + --shard-out, "
+                             "then merge_panel_shards.py the pickles → identical numbers, parallel.")
+    parser.add_argument("--panel-shard-idx", type=int, default=0,
+                        help="Which shard this process runs (0..panel-shards-1).")
+    parser.add_argument("--shard-out", type=str, default=None,
+                        help="With --panel-shards>1: pickle this shard's per-game records here "
+                             "(suppresses the report; merge_panel_shards.py prints the merged report).")
     args = parser.parse_args()
     _DM_BETA_EVAL = args.decisive_mass_beta   # module global → used by _decisive_gap_step
     if args.ablate_roi:
@@ -2575,7 +2624,7 @@ if __name__ == "__main__":
 
     cfg = Config()
     cfg.env.num_players = args.num_players
-    evaluate_checkpoint(
+    _eval_result = evaluate_checkpoint(
         args.checkpoint,
         cfg,
         num_games=args.games,
@@ -2599,7 +2648,20 @@ if __name__ == "__main__":
         natural_head_audit=args.natural_head_audit,
         natural_head_audit_beta=(args.decisive_mass_beta if args.natural_head_audit_beta is None
                                  else args.natural_head_audit_beta),
+        shard_idx=args.panel_shard_idx,
+        shard_count=args.panel_shards,
+        collect_records=bool(args.shard_out),
     )
+    if args.shard_out and _eval_result is not None:
+        import pickle
+        with open(args.shard_out, "wb") as _f:
+            pickle.dump({"records": _eval_result.get("_records", []),
+                         "defensive_reinforce": _eval_result.get("defensive_reinforce", {}),
+                         "natural_head_audit": _eval_result.get("natural_head_audit", {})}, _f)
+        _o = _eval_result["overall"]
+        print(f"SHARD {args.panel_shard_idx}/{args.panel_shards} → {args.shard_out}: "
+              f"{len(_eval_result.get('_records', []))} games, {_o['wins']}/{_o['total']} wins",
+              flush=True)
     if args.retarget_top_roi:
         rt = _RETARGET
         funnel = rt["uniq_sum"] / max(rt["turns"], 1)
