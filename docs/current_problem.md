@@ -1,7 +1,71 @@
 # Current Problem — the Force-Concentration Wall, diagnosed
 
-_Last updated: 2026-06-22. Supersedes the scattered "wall" notes; this is the standing statement of
+_Last updated: 2026-06-22 (later). Supersedes the scattered "wall" notes; this is the standing statement of
 what the wall is, what's ruled out, and where the fix has to come from._
+
+## ⭐ 2026-06-22 (later) — CORRECTION: the wall is RETENTION/SUFFICIENCY, not pooling width
+
+The "wall = pooling WIDTH (`avg_sources` ~2.2)" verdict (in the CLOSED RUNS section below) is
+**superseded**. It was measured on **loss replays only**; the test it never ran — won-vs-lost pooling on
+the *same* checkpoint (`r32_stage_hlr` 2M, WR 16%, via `probe_aggregation.py`, 122 games vs Ajay) —
+overturns it:
+
+| side | avg_sources | crossed_floor | crossed&held |
+|---|---|---|---|
+| our WINS  | 2.09 | 90% | **84%** |
+| our LOSSES | 2.04 | 64% | **47%** |
+
+**`avg_sources` is flat ~2.0 in wins AND losses AND every phase** (phase-matched mid-game 40–80: won 2.03
+/ lost 2.03) — a quantity that doesn't vary with the outcome can't gate it. **What separates our wins from
+losses is sufficiency+retention** (`crossed&held` 84 vs 47; 68 vs 50 phase-matched, same width). This is
+Probe A's original 06-16 conclusion ("aggregation SUFFICIENCY + RETENTION, not presence"); the diagnosis
+had drifted to width. "Winners 4-5" was Probe A's *max* sources in *won* games — our *mean* is ~2 in our own
+wins too, so there is **no measured width gap to close**.
+
+**De-confounded across training** (loss replays, outcome held fixed at "lost"; full hlr trajectory vs Ajay):
+
+| ckpt | WR | crossed&held-LOST | ship0 (vs Ajay) | avg_src-LOST |
+|---|---|---|---|---|
+| 1M | 10.5 | 38% | 25% | 2.07 |
+| 2M | 16.0 | **47%** | **12%** | 2.04 |
+| 3M | 13.7 | 46% | 24% | 2.07 |
+| 4M | 12.5 | 38% | (eval killed) | 2.07 |
+
+`crossed&held`-LOST tracks WR (r≈0.87); `avg_sources` never moves. **The doc steered by the one metric that
+is immovable AND uncorrelated with WR, and dismissed the one that is movable AND tracks it.** The half-LR
+run's WR climb (9→16) was real progress on the right axis, not noise.
+
+### ship0 (1-ship probes) — the competing sink for firing pressure
+
+ship0 moves *inversely* with WR/retention (the 2M trough 12% = the WR peak). It is **deliberate undersend,
+not capacity**: 95–100% of 1–4-ship launches come from garrisons with a median of **27–34 ships**; the
+forced small-garrison bucket is ~1% of launches. ~2.5× worse when behind. Mechanism
+(`ship0_counterfactual.py`, model re-run): when the ship-head argmax is a low bin it's a **~0.41 spike on
+one probe size**, with the other ~0.59 mass **diffused** across the real-size bins (each individually < 0.41)
+→ argmax = probe. The classic multi-modal degenerate-mode trap. The 2M→3M regression (12→24%) is *more slots*
+falling into the probe mode (9→17%) at the *same* spike depth (0.41→0.44) — the trap spreads by frequency.
+
+**What masking does (`--min-ship-bin 4`):** counterfactually masking bins 0–3 sends the argmax to the
+**real-size secondary mode (~25–26 ships median), 0% to bin4 (5 ships)** — the garrison (median 34–57)
+affords it. The fire head is *separate* from the ship head (`model.py:92,303`), so masking **cannot force a
+firing source to idle at decode** — it strictly upgrades probe→mass. It reveals a preference the policy
+**already holds** (the 0.59), so it should survive PPO far better than a pure veto-mask. Residual risk is
+*training-time*: each fire now costs ~25 ships (~25×), so the fire head could learn to fire from fewer
+sources — the desired direction; tripwire = `launch_rate`→passive (idle).
+
+### Corrected plan
+
+ship0, sufficiency, and the wall are **one phenomenon**: cheap claims aren't punished in symmetric self-play,
+so firing pressure leaks into 1-ship probes instead of cross-and-hold mass. **One coherent run:** resume the
+**2M peak** of `r32_stage_hlr` (not 4M — regressed) + **`--min-ship-bin 4`** (weld the cheap exit shut) +
+**h12-only beatable pool** (make the forced real mass reward-positive) + keep the fire-entropy spike, and
+**steer by `crossed&held` and ship0**, NOT `avg_sources`. `--min-ship-bin 4` is a symptom-stabilizer
+(Lesson 3) — which is exactly its role here: it doesn't break the wall, it routes firing pressure onto the
+retention lever. Door-1's "widen pooling" justification is **void** (width isn't the lever); a league may
+still help for anti-cycling, not for width.
+
+Tools (this session, all in tree): `probe_aggregation.py` (won/lost replay split), `multi_source_events.py`
+(`avg_sources`/`crossed&held`, `--our-name`), `orbit_wars_rl/ship0_why.py` + `ship0_counterfactual.py`.
 
 ## TL;DR
 
@@ -77,7 +141,9 @@ reward fix did not price the 3rd/4th pile-on source by +2M (early for slow credi
 Joins the failed reward-change family on the wall metric. Code (`timeout_planet_coef` + planet-margin _check_done,
 test 6/6) is sound and retained for any future league run — the lever, not the code, is what didn't fire.**
 
-**SESSION VERDICT (2026-06-22): the wall = pooling WIDTH (`avg_sources`), and it is robustly pinned at ~2.2
+**SESSION VERDICT (2026-06-22) — ⚠️ SUPERSEDED, see the CORRECTION section at the top of this doc: width is
+a non-lever (flat in wins too); the discriminator is retention/sufficiency.** Original verdict, for the
+record: the wall = pooling WIDTH (`avg_sources`), and it is robustly pinned at ~2.2
 (winners 4-5) against half-LR, the terminal-reward fix, PBRS, and every prior reward/LR lever. WR moved
 (9→16) via retention + single-source execution but that is NOT wall progress (WR is a poor proxy). The
 honest open question: can anything short of a league/anti-cycling rebuild move pooling width — or is ~2.2 the
@@ -262,6 +328,11 @@ reached best-ever 18% Ajay but still plateaued at the wall. **Decision: next run
 
 ## The plan — PBRS staging reward first, Door 1 as the evidenced fallback
 
+> ⚠️ SUPERSEDED — PBRS ran and was NEGATIVE (see CLOSED section), and the diagnosis that motivated this plan
+> (pooling width) was overturned. The **current plan is the "Corrected plan" at the top** of this doc
+> (resume `r32_stage_hlr` 2M + `--min-ship-bin 4` + h12 pool, steer by `crossed&held`/ship0). Kept below
+> for the reasoning history only.
+
 **Step 1 — PBRS staging reward (chosen; build + run).** Potential-based shaping so the idle fire head
 gets the directed gradient it's missing, spray-safe by the telescoping guarantee.
 - **Φ(s)** (vectorized in `torch_env`, reusing `_decisive_mass_fields` `mass`/`floor` tensors): `top-k Σ of
@@ -303,6 +374,11 @@ self-play); the fix is permanence.
 - Tools (all in tree): `transition_autopsy.py`, `expansion_autopsy.py`, `value_spare_diagnostic.py`
   (+`--shaping-coef` PBRS pre-test), `gpu_run_artifacts/multi_source_why.py` (+`--our-name`),
   `plot_train_log.py` (5×4 staging-first trend plot of a train log). Mostly untracked — commit if keeping.
+- Retention/ship0 tools (committed 2026-06-22): `orbit_wars_rl/probe_aggregation.py` (plays N games, splits
+  replays into won/ lost/ by our result — the won/lost test); `gpu_run_artifacts/multi_source_events.py`
+  (`avg_sources`/`crossed`/`held@+15`/`crossed&held` per replay set, `--our-name`); `orbit_wars_rl/ship0_why.py`
+  (ship0 by source-garrison bucket + behind/ahead, from logged actions); `orbit_wars_rl/ship0_counterfactual.py`
+  (model re-run: ship-bin distribution + where the argmax goes when bins 0–3 are masked).
 - PBRS reward: `torch_env._staging_potential` + step() shaping; flags in `train_torch.py`; test
   `tests/test_staging_shaping.py`.
 - **Current run: `r32_stage_h12`** (Jarvis spot 431251) — LIVE; PBRS staging from jake-BC, first signal
