@@ -1,14 +1,15 @@
-"""Sufficient-commit mask (arrival-aware): in torch_env._apply_actions, a NEUTRAL
-attack launch whose (ship_count + friendly inbound) can't beat the target's PROJECTED
-defense at arrival (current garrison + production×ETA + enemy inbound arriving before
-us) × factor is VETOED. Enemy targets are exempt — under-strength attacks on enemies
-can soften/feint. Reinforces (own targets) are NOT affected — garrison floor instead.
+"""Sufficient-commit mask: in torch_env._apply_actions, a NEUTRAL attack launch whose
+(ship_count + friendly inbound) can't beat the target's defense (current garrison +
+enemy inbound arriving before us) × factor is VETOED. Neutrals DON'T regrow (the engine
+applies production only to owner != -1), so there is NO production×ETA term. Enemy
+targets are exempt — under-strength attacks on enemies can soften/feint. Reinforces
+(own targets) are NOT affected — garrison floor instead.
 """
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 
-from orbit_wars_rl.torch_env import VecTorchEnv, SHIP_COUNTS
+from torch_env import VecTorchEnv, SHIP_COUNTS
 
 SRC, TGT = 0, 1            # planet indices: source (mine) and the attack target
 DEF = 30                  # target defense; SHIP_COUNTS[16]=30 (== def), [17]=35 (> def)
@@ -45,34 +46,32 @@ def _fire(te, ship_bin):
 
 
 def test_vetoes_underpowered_neutral_attack():
-    # factor 1.0: ships == defense (30) on NEUTRAL, close range (ETA=1, prod=1 -> proj 31).
-    # 30 <= 31 -> VETOED, source untouched.
+    # factor 1.0: ships == garrison (30) on NEUTRAL -> 30 <= 30 -> VETOED, source untouched.
     te = _board(1.0)
-    assert _fire(te, BIN_EQ) == 100.0, "ships<=projected_defense neutral attack must be vetoed (no debit)"
+    assert _fire(te, BIN_EQ) == 100.0, "ships<=garrison neutral attack must be vetoed (no debit)"
 
 
 def test_allows_winning_neutral_attack():
-    # factor 1.0: ships (50) vs projected defense. Close target (ETA=1, prod=1 -> proj 31).
-    # 50 > 31 -> fires, source debited by 50.
+    # factor 1.0: ships (50) > garrison (30) -> fires, source debited by 50.
     te = _board(1.0)
-    # Place source and target adjacent (ETA=1, projected = 30 + 1*1 = 31)
     te.planets[0, SRC, 2] = 50.0; te.planets[0, SRC, 3] = 50.0
     te.planets[0, TGT, 2] = 52.0; te.planets[0, TGT, 3] = 50.0
-    te.planets[0, TGT, 5] = 30.0; te.planets[0, TGT, 6] = 1.0
-    # BIN 19 = 50 ships, speed ~3.2, ETA=1, projected=31, 50 > 31 -> fires
+    te.planets[0, TGT, 5] = 30.0
+    # BIN 19 = 50 ships, 50 > garrison 30 -> fires
     result = _fire(te, 19)
-    assert result == 100.0 - SHIP_COUNTS[19], f"ships>projected_defense neutral attack must fire, got {result}"
+    assert result == 100.0 - SHIP_COUNTS[19], f"ships>garrison neutral attack must fire, got {result}"
 
 
-def test_vetoes_far_neutral_production_outgrows_attack():
-    # Far target with high production: 30 ships at ETA~19, prod=5 -> projected 125.
-    # Ship bin 19 = 50 ships. 50 <= 125 -> VETOED (production outgrows the attack).
+def test_far_neutral_high_prod_still_fires():
+    # Neutrals DON'T regrow: a far target with high production rate does NOT gain ships
+    # before capture. Garrison 30, send 50 -> fires regardless of distance/prod (the old
+    # production×ETA phantom term would have vetoed this — regression guard for that bug).
     te = _board(1.0, target_prod=5)
     te.planets[0, SRC, 2] = 10.0; te.planets[0, SRC, 3] = 10.0
     te.planets[0, TGT, 2] = 90.0; te.planets[0, TGT, 3] = 90.0
     te.planets[0, TGT, 5] = 30.0
     result = _fire(te, 19)
-    assert result == 100.0, f"far neutral with high prod must be vetoed (50 <= projected), got {result}"
+    assert result == 100.0 - SHIP_COUNTS[19], f"far neutral must fire (neutrals don't regrow), got {result}"
 
 
 def test_lets_underpowered_enemy_attack_fire():
@@ -92,8 +91,8 @@ if __name__ == "__main__":
     print("PASS vetoes_underpowered_neutral_attack")
     test_allows_winning_neutral_attack()
     print("PASS allows_winning_neutral_attack")
-    test_vetoes_far_neutral_production_outgrows_attack()
-    print("PASS vetoes_far_neutral_production_outgrows_attack")
+    test_far_neutral_high_prod_still_fires()
+    print("PASS far_neutral_high_prod_still_fires")
     test_lets_underpowered_enemy_attack_fire()
     print("PASS lets_underpowered_enemy_attack_fire")
     test_off_lets_underpowered_attack_fire()

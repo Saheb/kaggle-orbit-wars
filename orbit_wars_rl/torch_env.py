@@ -2208,13 +2208,14 @@ class VecTorchEnv:
             is_neutral_attack = use_target_decode & (target_owner < 0)
             if is_neutral_attack.any():
                 tgt_x = tgt[:, :, 2]; tgt_y = tgt[:, :, 3]
-                tgt_prod = tgt[:, :, 6]
                 # ETA from source to target (fleet speed depends on launched ship_count)
                 dist = torch.sqrt((src_x - tgt_x) ** 2 + (src_y - tgt_y) ** 2)
                 speed = _ship_speed(ship_count).clamp(min=1e-6)
                 eta = torch.ceil(dist / speed).clamp(min=1.0)           # (N, MAX_OWNED)
-                # Projected defense: current ships + production growth + enemy inbound
-                projected_defense = target_ships + tgt_prod * eta      # (N, MAX_OWNED)
+                # Projected defense = current garrison. Neutrals DON'T regrow (engine applies
+                # production only to owner != -1), so there is NO production×ETA term — adding
+                # one was phantom defense that vetoed ~all deterministic-decode launches.
+                projected_defense = target_ships                       # (N, MAX_OWNED)
                 # Enemy inbound: fleets (owner != us, owner >= 0) heading to the same
                 # target, arriving before or at our ETA. Friendly inbound (our fleets
                 # already en route) counts as added offense — subtract from the cost.

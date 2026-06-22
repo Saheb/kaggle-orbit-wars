@@ -337,7 +337,27 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
             "use target-decode. Pass target_decode=True (--target-decode)."
         )
 
-    return agent_fn
+    def _agent_fn_loud(obs):
+        # kaggle_environments runs the agent inside its own try/except: a decode exception is
+        # swallowed (the agent simply "makes no move"), which surfaces as a silent 0%/blank panel
+        # — indistinguishable from a real loss. That cost hours once (an undefined `fleets` in the
+        # sufficient-commit veto). Fail LOUD instead: dump the full traceback and hard-exit so a
+        # CODE BUG can never be mistaken for a 0% score. os._exit bypasses kaggle's except.
+        try:
+            return agent_fn(obs)
+        except Exception:
+            import sys
+            import traceback
+            sys.stderr.write(
+                "\n" + "!" * 78
+                + "\n!!! AGENT DECODE CRASHED — this is a CODE BUG, not a 0% result.\n"
+                + "!!! Aborting eval LOUDLY (kaggle would otherwise swallow it as 'no move').\n"
+                + "!" * 78 + "\n" + traceback.format_exc() + "!" * 78 + "\n"
+            )
+            sys.stderr.flush()
+            os._exit(1)
+
+    return _agent_fn_loud
 
 
 _CONV_MILESTONES = (16, 32, 50, 100)

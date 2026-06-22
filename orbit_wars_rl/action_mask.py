@@ -827,6 +827,7 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
     a 1-2 planet opening instead of expanding) and self-sabotages at inference.
     """
     planets = obs["planets"]
+    fleets = obs.get("fleets") or []   # needed by the sufficient-commit veto (inbound-aware)
     owned_indices = masks["owned_indices"].cpu().numpy()
     max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
     target_logits = target_logits.clone()
@@ -972,10 +973,11 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
         if (is_own_target and allow_reinforce and reinforce_garrison_floor > 0.0
                 and (planets[pidx][5] - ships) < reinforce_garrison_floor):
             continue
-        # Sufficient-commit parity (torch_env, arrival-aware): veto a NEUTRAL attack
-        # launch where (ships + friendly inbound arriving before us) can't beat the
-        # target's PROJECTED defense (current garrison + production×ETA + enemy inbound
-        # arriving before us). Enemy targets exempt (under-strength attacks can soften/feint).
+        # Sufficient-commit parity (torch_env): veto a NEUTRAL attack launch where
+        # (ships + friendly inbound arriving before us) can't beat the target's defense
+        # (current garrison + enemy inbound arriving before us). Neutrals DON'T regrow
+        # (engine applies production only to owner != -1) so there is NO production×ETA
+        # term. Enemy targets exempt (under-strength attacks can soften/feint).
         # Reinforces (own targets) untouched (garrison floor instead).
         is_neutral_target = int(planets[tidx][1]) < 0
         if is_neutral_target and sufficient_commit_factor > 0.0:
@@ -983,11 +985,11 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
             tgt = planets[tidx]
             dist = math.hypot(tgt[2] - src[2], tgt[3] - src[3])
             eta = max(1.0, math.ceil(dist / max(_fleet_speed(ships), 1e-6)))
-            projected_defense = tgt[5] + tgt[6] * eta
+            projected_defense = tgt[5]
             tgt_id = int(tgt[0])
             friendly_inbound = 0.0
             enemy_inbound = 0.0
-            for f in (fleets or []):
+            for f in fleets:
                 ft = _def_fleet_target(planets, f)
                 if ft is None or int(ft[0]) != tgt_id:
                     continue
