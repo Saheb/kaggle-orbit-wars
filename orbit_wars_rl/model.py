@@ -28,6 +28,13 @@ PHASE4_COMPAT_MISSING_KEYS = {
     "ship_k.weight", "ship_k.bias",
     "ship_scorer.0.weight", "ship_scorer.0.bias",
     "ship_scorer.2.weight", "ship_scorer.2.bias",
+    # COMA counterfactual Q-head (docs/q-head.md) — absent from every pre-Q-head
+    # checkpoint; registered so resume/eval/export don't abort on the missing keys.
+    "q_fire_embed.weight", "q_ship_embed.weight",
+    "q_tgt_proj.weight", "q_tgt_proj.bias",
+    "q_sa_mlp.weight", "q_sa_mlp.bias",
+    "q_fc.weight", "q_fc.bias",
+    "q_out.weight", "q_out.bias",
 }
 
 
@@ -146,6 +153,24 @@ class EntityTransformer(nn.Module):
         self.value_fc1 = nn.Linear(_vh_in, D)
         self.value_fc2 = nn.Linear(D, D // 2)
         self.value_out = nn.Linear(D // 2, 1)
+
+        # --- COMA counterfactual Q-head (docs/q-head.md) ----------------------
+        # Shape-twin of the value head with a per-slot ACTION stream. Each owned
+        # slot gets a state-action token  sa_i = q_sa_mlp([owned_enriched_i, a_emb_i])
+        # that BINDS the slot's action to its own state; the mean over valid slots
+        # is action_pool, and Q = q_out(gelu(q_fc([global_token, action_pool]))).
+        # The additive mean-pool makes a per-slot counterfactual a one-term delta
+        # (q_counterfactual). fire/idle are MARGINALIZED, not silenced, so idle slots
+        # get a gradient to START firing (idle gates target/ship off → idle = the
+        # idle fire-embed only). q_out zero-init → Q≈0 and A_i≈0 at step 0.
+        self.q_fire_embed = nn.Embedding(2, D)                 # idle(0) / fire(1)
+        self.q_ship_embed = nn.Embedding(self.num_ship_bins, D)
+        self.q_tgt_proj = nn.Linear(D, D)                      # projects the gathered target embedding
+        self.q_sa_mlp = nn.Linear(2 * D, D)                    # per-slot state-action token
+        self.q_fc = nn.Linear(2 * D, D)                        # twin of value_fc1
+        self.q_out = nn.Linear(D, 1)                           # twin of value_out
+        nn.init.zeros_(self.q_out.weight)
+        nn.init.zeros_(self.q_out.bias)
 
     def encode_state(self, planet_features, fleet_features, global_features,
                      planet_mask, fleet_mask, slot_valid=None, owned_indices=None,
@@ -384,6 +409,68 @@ class EntityTransformer(nn.Module):
             "_phase4_fire_residual": fire_residual,
             "_phase4_ship_residual": ship_residual,
         }
+
+    # --- COMA counterfactual Q-head ------------------------------------------
+    def _q_slot_tokens(self, owned_enriched, planet_emb_post, ship_bin, target_idx):
+        """Per-slot state-action tokens under FORCE-FIRE and FORCE-IDLE for every
+        slot, binding each slot's action to its own state. Returns (sa_fire, sa_idle),
+        each (B, MO, D). The target embedding is the GATHERED post-transformer planet
+        embedding (not an index lookup). Idle = the idle fire-embed only (target/ship
+        gated off), so 'idle' is a well-defined no-op rather than a removed slot."""
+        B, MO, D = owned_enriched.shape
+        Np = planet_emb_post.shape[1]
+        tgt_clamped = target_idx.long().clamp(0, Np - 1)                            # (B, MO)
+        tgt_emb = torch.gather(planet_emb_post, 1,
+                               tgt_clamped.unsqueeze(-1).expand(-1, -1, D))         # (B, MO, D)
+        ship_emb = self.q_ship_embed(ship_bin.long().clamp(0, self.num_ship_bins - 1))
+        a_emb_fire = self.q_fire_embed.weight[1] + self.q_tgt_proj(tgt_emb) + ship_emb
+        a_emb_idle = self.q_fire_embed.weight[0].view(1, 1, D).expand(B, MO, D)
+        sa_fire = self.q_sa_mlp(torch.cat([owned_enriched, a_emb_fire], dim=-1))    # (B, MO, D)
+        sa_idle = self.q_sa_mlp(torch.cat([owned_enriched, a_emb_idle], dim=-1))    # (B, MO, D)
+        return sa_fire, sa_idle
+
+    def _q_from_pool(self, global_token, action_pool):
+        return self.q_out(F.gelu(self.q_fc(torch.cat([global_token, action_pool], dim=-1)))).squeeze(-1)
+
+    def q_counterfactual(self, encoded, fire_bit, ship_bin, target_idx, slot_valid):
+        """COMA Q-head: Q(s,a) and the per-slot fire/idle counterfactuals via the
+        additive mean-pool delta. Returns a dict:
+           q_sa       (B,)      Q of the taken joint action
+           q_fire     (B, MO)   Q with slot i forced to fire (its sampled tgt/ship)
+           q_idle     (B, MO)   Q with slot i forced idle
+           q_all_idle (B,)      Q with every valid slot idle (global sensitivity probe)
+        The caller forms the COMA advantage
+           A_i = q_sa − (p_i·q_fire_i + (1−p_i)·q_idle_i),   p_i = sigmoid(fire_logit_i)
+        which on an idle slot is −p_i·(q_fire_i − q_idle_i) → pushes P(idle) down when
+        firing would help (the gradient the scalar-advantage surrogate is missing)."""
+        owned_enriched = encoded["owned_enriched"]            # (B, MO, D)
+        planet_emb_post = encoded["planet_emb"]               # (B, Np, D)
+        global_token = encoded["global_token"]                # (B, D)
+        B, MO, D = owned_enriched.shape
+        sv = slot_valid.float()                               # (B, MO)
+        n_valid = sv.sum(dim=1).clamp(min=1.0)                # (B,)
+
+        sa_fire, sa_idle = self._q_slot_tokens(owned_enriched, planet_emb_post, ship_bin, target_idx)
+        fired = (fire_bit > 0).unsqueeze(-1)                  # (B, MO, 1)
+        sa_taken = torch.where(fired, sa_fire, sa_idle)       # (B, MO, D)
+
+        action_pool = (sa_taken * sv.unsqueeze(-1)).sum(dim=1) / n_valid.unsqueeze(-1)   # (B, D)
+        q_sa = self._q_from_pool(global_token, action_pool)   # (B,)
+
+        # Additive mean-pool delta: swapping ONLY slot i changes the mean by
+        # sv_i·(sa_i^cf − sa_taken_i)/n_valid  (exact; invalid slots → 0 change).
+        coef = (sv / n_valid.unsqueeze(-1)).unsqueeze(-1)     # (B, MO, 1)
+        pool_fire = action_pool.unsqueeze(1) + coef * (sa_fire - sa_taken)   # (B, MO, D)
+        pool_idle = action_pool.unsqueeze(1) + coef * (sa_idle - sa_taken)   # (B, MO, D)
+        gt = global_token.unsqueeze(1).expand(-1, MO, -1).reshape(B * MO, D)
+        q_fire = self._q_from_pool(gt, pool_fire.reshape(B * MO, D)).view(B, MO)
+        q_idle = self._q_from_pool(gt, pool_idle.reshape(B * MO, D)).view(B, MO)
+
+        # Every valid slot idle — the Q(s,a) − Q(s, all-idle) global sensitivity probe.
+        pool_all_idle = (sa_idle * sv.unsqueeze(-1)).sum(dim=1) / n_valid.unsqueeze(-1)
+        q_all_idle = self._q_from_pool(global_token, pool_all_idle)
+
+        return {"q_sa": q_sa, "q_fire": q_fire, "q_idle": q_idle, "q_all_idle": q_all_idle}
 
     def load_state_dict(self, state_dict, strict=True):
         # Legacy checkpoints carry a now-removed angle head; drop those keys so

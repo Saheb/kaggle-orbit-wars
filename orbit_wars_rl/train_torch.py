@@ -1388,6 +1388,18 @@ def train(args):
             "old_values": flat["values"],
         }
 
+        # Offline Q-head gate (docs/q-head.md step 1): dump ONE real torch_env+GAE
+        # batch (returns carry the dense capture/prod-share/staging reward, not a
+        # kaggle-env terminal-only MC) and exit before any optimizer step. The
+        # q_head_offline_probe then trains a Q-only head on this and measures
+        # action-sensitivity. Run self-play (no external pool) — same reward mechanics.
+        if getattr(args, "dump_rollout_and_exit", None) and not critic_warmup_active:
+            torch.save({k: (v if not isinstance(v, dict)
+                            else {kk: vv for kk, vv in v.items()})
+                        for k, v in batch.items()}, args.dump_rollout_and_exit)
+            print(f"[dump-rollout] saved batch (TN={TN}) -> {args.dump_rollout_and_exit}", flush=True)
+            return
+
         # Minibatches: split TN into num_minibatches chunks. Build on CPU then
         # move each minibatch to GPU just-in-time inside PPOLearner.update.
         idx = torch.randperm(TN)
@@ -1898,6 +1910,9 @@ if __name__ == "__main__":
                         help="Split PPO update batch into this many minibatches "
                              "(increase if hitting CUDA OOM in attention)")
     parser.add_argument("--total-steps", type=int, default=10_000_000)
+    parser.add_argument("--dump-rollout-and-exit", type=str, default=None,
+                        help="Save ONE real torch_env+GAE rollout batch to this path and exit "
+                             "before any optimizer step (offline Q-head gate, docs/q-head.md).")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--resume", type=str, default="")
