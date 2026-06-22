@@ -1,7 +1,58 @@
 # Current Problem — the Force-Concentration Wall, diagnosed
 
-_Last updated: 2026-06-22 (later). Supersedes the scattered "wall" notes; this is the standing statement of
-what the wall is, what's ruled out, and where the fix has to come from._
+_Last updated: 2026-06-22 (CONCLUSION added). The CONCLUSION below is the standing statement; the sections
+under it are the investigation that led there, newest-first._
+
+## ⭐⭐ CONCLUSION (2026-06-22) — the wall is a CREDIT-ASSIGNMENT fixed point; the lever is COMA, not reward/data/decode
+
+**The wall is an escapable PPO fixed point in CREDIT ASSIGNMENT.** `ppo.py` puts a single scalar GAE
+advantage on the *summed* joint log-prob (`ppo.py:226` sums fire+ships+target over all slots; `ppo.py:243`
+`surr = ratio * advantages`, one scalar A). So every source-slot's fire is credited with the **whole-state**
+advantage, never its marginal contribution → `delta_V ≈ 0` on the spare-fire action → no gradient toward
+aggregating → the under-aggregation Nash. It is **not** reward (family exhausted), **not** data (family now
+exhausted, below), **not** decode/architecture (factored heads express cross-turn staging; the AR within-turn
+head was killed — winner within-turn floor-cross 1.6%). It is **value-side credit assignment.**
+
+**Idle-spare and retention are ONE fixed point.** V(s′) after a spare-fire-capture is only modestly above
+V(s) because the critic *correctly* expects **~53% of captures lost back** (`held@+15 = 47%` in losses). So
+the spare-fire's V-advantage is diluted to ~0 **by the policy's own retention failure** — the fire isn't
+priced because the follow-through is bad; the follow-through never improves because the fire isn't priced.
+`delta_V≈0` (idle-spare) and `held@+15=47%` (retention) are two faces of the same loop.
+
+**What's exhausted, with evidence:**
+- **REWARD** — PBRS, decmass, eliminate-to-win, expansion-coef, CONSOL, staging: all negative.
+- **DATA (curriculum / stronger opponent)** — the `delta_V` sweep (hlr 2M, `value_spare_diagnostic.py` vs the
+  producer ladder) gives `delta_V ≈ 0` across **h10 / h12 / h14** (passive→aggressive: −0.09 / −0.03 / −0.06)
+  while the critic stays **well-calibrated on outcome** (V|lost −0.13 → −0.16, *not* over-optimistic): it
+  prices the loss, just not the action. And the h14 *curriculum* already ran — **h14-WR dead flat 0.34–0.35
+  for 9.4M steps.** Two independent lines agree ⇒ data side exhausted. A stronger opponent (lb1166, …) is
+  low-EV: the wall is in the critic, **opponent-independent.**
+- **RETENTION / `--min-ship-bin 4`** — a bounded symptom-fix on the firing-*amount* population (distinct from
+  idle-spare). Blunt: the dominant ship0 bucket is under-reinforcement of threatened own planets, but of
+  those only **~23% are defendable-flips** where welding +25 saves the planet; **59% overkill** (held with a
+  trickle) + **18% hopeless**. The mask can't discriminate → over-commits 77% to capture 23%. Same value-flat
+  root; not the structural lever.
+
+**The lever (untried, un-falsified): COMA-style counterfactual credit assignment.** Keep the **joint
+surrogate** (the stable coupling); replace the scalar V-advantage baseline with **per-slot counterfactual
+advantages** `A_i = Q(s,a) − Q(s, a with source_i silenced)` — pricing each source's marginal contribution,
+exactly what `delta_V≈0` shows is missing.
+- **Why it ≠ the shelved per-slot/VDN work** (which → degenerate Nash): that decomposed the **value** (local
+  per-slot values → independent optimizers). COMA keeps **Q centralized/joint** (credit = marginal to the
+  *joint* outcome) and factorizes **only the baseline**. Centralized-Q vs local-value is the difference — the
+  untested combination.
+- **Needs:** a counterfactual **Q-head** (value-side arch change, NOT policy/decode); per-slot advantage in
+  GAE; per-slot surrogate in `ppo.py` (un-sum the joint log-prob).
+- **Caveats:** (a) *necessary, maybe not sufficient* — the recovered marginal is small (47% retention,
+  self-play mirror); COMA cleans the SNR, the bet is it **bootstraps** (better credit → fire more → hold more
+  → bigger signal). (b) *adaptation risk* — COMA is multi-*agent*; here it's a factored single-agent action
+  (16 slots, one forward pass) — the Q-head over the joint action space is the real engineering crux.
+  (c) *early read* — does per-slot `A_i` on spare-fire come back materially > 0, and does `held@+15` climb.
+
+**Tools (this session, in tree):** `value_spare_diagnostic.py` (delta_V sweep), `probe_aggregation.py` +
+`gpu_run_artifacts/multi_source_events.py` (won/lost crossed&held), `orbit_wars_rl/ship0_why.py` +
+`ship0_counterfactual.py` (ship0 mechanism). The target-owner and defendable/hopeless splits were inline
+one-offs (reproducible from the ship0 tools' logic).
 
 ## ⭐ 2026-06-22 (later) — CORRECTION: the wall is RETENTION/SUFFICIENCY, not pooling width
 
@@ -54,6 +105,10 @@ firing source to idle at decode** — it strictly upgrades probe→mass. It reve
 sources — the desired direction; tripwire = `launch_rate`→passive (idle).
 
 ### Corrected plan
+
+> ⚠️ DOWNGRADED by the CONCLUSION above. The defendable/hopeless split later showed `--min-ship-bin 4` is
+> **blunt** (helps ~23% of the reinforce bucket, over-commits 77%), and the `delta_V` sweep traced the root
+> to credit assignment, not retention sizing. min-ship-bin is at most ship0 hygiene now, not the lever.
 
 ship0, sufficiency, and the wall are **one phenomenon**: cheap claims aren't punished in symmetric self-play,
 so firing pressure leaks into 1-ship probes instead of cross-and-hold mass. **One coherent run:** resume the
