@@ -275,6 +275,7 @@ class VecTorchEnv:
         game_phase_features: bool = False,
         roi_enemy_deflate: bool = False,
         zero_roi_channels: bool = False,
+        pressure_precise_resolver: bool = False,
     ):
         self.num_envs = num_envs
         # Game-phase observation channels (Stage B): append 4 globals (dim 11->15). Must match
@@ -285,6 +286,11 @@ class VecTorchEnv:
         # features.compute_pairwise_features (parity test test_torch_env_features).
         self.roi_enemy_deflate = bool(roi_enemy_deflate)
         self.zero_roi_channels = bool(zero_roi_channels)
+        # Pressure channels: route fleet→planet attribution through the lead-aware swept-collision
+        # resolver (_fleet_target_idx, one fleet → one target) instead of the loose corridor that
+        # double-counts. Affects pairwise enemy_contest/friendly_contest/threat only (planet ch12/13
+        # stay on the corridor). Must match features.compute_pairwise (parity-tested).
+        self.pressure_precise_resolver = bool(pressure_precise_resolver)
         # Reinforcement: when True, own planets (except the launch source) are LEGAL
         # targets — ships arriving at a friendly planet add to its garrison (physics
         # already implemented in step()). EDA of top players: ~57% of fleets reinforce;
@@ -1449,6 +1455,21 @@ class VecTorchEnv:
         friendly_pressure = (f_ships.unsqueeze(1) * friend.float()).sum(dim=2)  # (N, P)
         enemy_pressure    = (f_ships.unsqueeze(1) * enemy.float()).sum(dim=2)
 
+        # Pressure-channel attribution: one fleet → its single lead-aware swept-collision target
+        # (vs the loose corridor `incoming` that double-counts). Used ONLY by the pairwise pressure
+        # channels (enemy_contest / friendly_contest / threat); planet ch12/13 above keep the
+        # corridor. Mirrors features._resolve_fleet_targets (parity-tested).
+        if self.pressure_precise_resolver:
+            # _fleet_target_idx runs over ALL self.fleets (256); the feature path caps to the first
+            # F (=max_fleets). Resolution is per-fleet (geometry only) so slicing is exact.
+            _f_tgt = self._fleet_target_idx()[:, :fleets.shape[1]]              # (N, F), -1 if none
+            _p_ar = torch.arange(x.shape[1], device=self.device).view(1, -1, 1)  # (1, P, 1)
+            incoming_pw = (_f_tgt.unsqueeze(1) == _p_ar) & fleet_alive.unsqueeze(1)  # (N, P, F)
+        else:
+            incoming_pw = incoming
+        friendly_pressure_pw = (f_ships.unsqueeze(1)
+                                * (incoming_pw & (f_owner.unsqueeze(1) == player)).float()).sum(dim=2)
+
         # Capture cost
         capture_cost = torch.where(
             is_neutral, ships + 1,
@@ -1711,12 +1732,12 @@ class VecTorchEnv:
         # enemy_contest[n, p] = total enemy fleet ships racing toward planet p in env n.
         # `incoming` (N, P, F) and enemy mask reuse tensors already computed above.
         enemy_fleet = (f_owner != player) & (f_owner >= 0) & fleet_alive   # (N, F)
-        enemy_contest = (f_ships.unsqueeze(1) * (incoming & enemy_fleet.unsqueeze(1)).float()).sum(dim=2)  # (N, P)
+        enemy_contest = (f_ships.unsqueeze(1) * (incoming_pw & enemy_fleet.unsqueeze(1)).float()).sum(dim=2)  # (N, P)
         # Threat timing (ch 20-21): ETA-profiled enemy pressure. enemy_contest (ch14) sums ALL
         # inbound enemy mass with no ETA; these add the WHEN. eta = Euclidean planet-fleet dist /
         # fleet speed (matches _fleet_target_idx eta_to_target, torch_env.py:1478). Mirrors
         # features.py compute_pairwise_features ch20-21 byte-for-byte.
-        enemy_inc = incoming & enemy_fleet.unsqueeze(1)                    # (N, P, F)
+        enemy_inc = incoming_pw & enemy_fleet.unsqueeze(1)                # (N, P, F)
         dist_pf = torch.sqrt((vx * vx + vy * vy).clamp(min=1e-9))          # (N, P, F)
         f_speed_pf = _ship_speed(f_ships).unsqueeze(1)                     # (N, 1, F)
         eta_pf = (dist_pf / f_speed_pf.clamp(min=1e-3)).clamp(min=1.0)     # (N, P, F)
@@ -1728,7 +1749,7 @@ class VecTorchEnv:
             planets=planets, planet_alive=planet_alive, P=P,
             owned_idx=owned_idx, slot_valid=slot_valid, player=player,
             enemy_contest=enemy_contest,
-            friendly_contest=friendly_pressure,   # (N, P): own ships already inbound per target
+            friendly_contest=friendly_pressure_pw,   # (N, P): own ships inbound per target (resolved)
             enemy_mass_soon=enemy_mass_soon,
             threat_imminence=threat_imminence,
         )

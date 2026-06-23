@@ -104,6 +104,66 @@ def set_zero_roi_channels(on: bool) -> None:
     _ZERO_ROI_CHANNELS = bool(on)
 
 
+# Pressure-channel target resolution. When OFF (default) the pairwise pressure channels
+# (enemy_contest ch14, friendly_contest→keepability/roi-deflation, enemy_mass_soon ch20,
+# threat_imminence ch21) attribute a fleet to EVERY planet in its loose corridor (perp<r+1.5,
+# launch heading, no orbital lead) — the deprecated ~85% heuristic. When ON, each fleet is
+# resolved to its SINGLE lead-aware swept-collision target (the 98.4% resolver the veto mask /
+# decisive-mass reward use, torch_env._fleet_target_idx). Persisted; eval mirrors via cfg.
+_PRESSURE_PRECISE_RESOLVER = os.environ.get("ORBIT_PRESSURE_PRECISE_RESOLVER") == "1"
+
+
+def set_pressure_precise_resolver(on: bool) -> None:
+    """Toggle precise fleet-target resolution for the pressure channels (eval/export after load)."""
+    global _PRESSURE_PRECISE_RESOLVER
+    _PRESSURE_PRECISE_RESOLVER = bool(on)
+
+
+def _resolve_fleet_targets(fx, fy, fcos, fsin, fspeed, px, py, pr, angvel):
+    """Per-fleet lead-aware swept-collision target index, (E,) int (-1 if it hits nothing).
+
+    Numpy mirror of torch_env._fleet_target_idx: project each candidate planet to its orbit
+    position at the fleet ETA (4 Newton iters), keep the min-ETA planet the heading reaches
+    within radius (perp < pr+0.5). All real planets are alive (orbit wars never destroys them),
+    so no alive mask is needed. Returns a one-target-per-fleet assignment (no double-counting)."""
+    E = fx.shape[0]
+    P = px.shape[0]
+    if E == 0 or P == 0:
+        return np.full(E, -1, dtype=np.int64)
+    orbit_r = np.sqrt((px - CENTER) ** 2 + (py - CENTER) ** 2)          # (P,)
+    static = (orbit_r + pr) >= ROTATION_RADIUS_LIMIT
+    phase0 = np.arctan2(py - CENTER, px - CENTER)                       # (P,)
+    fxc = fx[:, np.newaxis]; fyc = fy[:, np.newaxis]                    # (E,1)
+    spd = np.maximum(fspeed[:, np.newaxis], 1e-6)
+    eta = np.clip((np.sqrt((px[np.newaxis, :] - fxc) ** 2 + (py[np.newaxis, :] - fyc) ** 2)
+                   - pr[np.newaxis, :]) / spd, 0.0, None)               # (E,P)
+    for _ in range(4):                                                  # converge ETA vs the moving target
+        a = phase0[np.newaxis, :] + angvel * eta
+        lx = np.where(static[np.newaxis, :], px[np.newaxis, :], CENTER + orbit_r[np.newaxis, :] * np.cos(a))
+        ly = np.where(static[np.newaxis, :], py[np.newaxis, :], CENTER + orbit_r[np.newaxis, :] * np.sin(a))
+        eta = np.clip((np.sqrt((lx - fxc) ** 2 + (ly - fyc) ** 2) - pr[np.newaxis, :]) / spd, 0.0, None)
+    a = phase0[np.newaxis, :] + angvel * eta
+    lx = np.where(static[np.newaxis, :], px[np.newaxis, :], CENTER + orbit_r[np.newaxis, :] * np.cos(a))
+    ly = np.where(static[np.newaxis, :], py[np.newaxis, :], CENTER + orbit_r[np.newaxis, :] * np.sin(a))
+    vx = lx - fxc; vy = ly - fyc
+    along = vx * fcos[:, np.newaxis] + vy * fsin[:, np.newaxis]
+    perp = np.abs(vx * fsin[:, np.newaxis] - vy * fcos[:, np.newaxis])
+    candidate = (along > 0) & (perp < pr[np.newaxis, :] + 0.5)          # (E,P)
+    eta_masked = np.where(candidate, eta, np.inf)
+    best = np.argmin(eta_masked, axis=1)                               # (E,)
+    has = candidate.any(axis=1)
+    return np.where(has, best, -1).astype(np.int64)
+
+
+def _resolved_headed(fx, fy, fcos, fsin, fspeed, px, py, pr, angvel):
+    """One-hot (E,P) bool: fleet e attributed ONLY to its resolved target planet."""
+    res = _resolve_fleet_targets(fx, fy, fcos, fsin, fspeed, px, py, pr, angvel)
+    headed = np.zeros((fx.shape[0], px.shape[0]), dtype=bool)
+    valid = res >= 0
+    headed[np.nonzero(valid)[0], res[valid]] = True
+    return headed
+
+
 def game_phase_channels(step):
     """The 4 game-phase global channels from the integer game step:
     [phase_early (step<50), phase_mid (50<=step<100), phase_late (step>=100),
@@ -416,14 +476,18 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
             vy_ep = tgt_y_p[np.newaxis, :] - efy[:, np.newaxis]
             along_ep = vx_ep * efcos[:, np.newaxis] + vy_ep * efsin[:, np.newaxis]
             perp_ep  = np.abs(vx_ep * efsin[:, np.newaxis] - vy_ep * efcos[:, np.newaxis])
-            headed = (along_ep > 0) & (perp_ep < tgt_r_p[np.newaxis, :] + 1.5)
+            efspeed = _ship_speed_np(efships)                                            # (E,)
+            if _PRESSURE_PRECISE_RESOLVER:
+                headed = _resolved_headed(efx, efy, efcos, efsin, efspeed,
+                                          tgt_x_p, tgt_y_p, tgt_r_p, angular_velocity)
+            else:
+                headed = (along_ep > 0) & (perp_ep < tgt_r_p[np.newaxis, :] + 1.5)
             enemy_contest = (efships[:, np.newaxis] * headed).sum(axis=0).astype(np.float32)
             # Threat timing (ch 20-21): ETA-profile the inbound enemy mass. eta = Euclidean
             # planet-fleet dist / fleet speed (mirrors torch_env _fleet_target_idx eta + the
             # training path's threat computation byte-for-byte). ch14 sums ALL inbound mass;
             # these add the WHEN — the only urgency signal in the pairwise bundle.
             dist_ep = np.sqrt(vx_ep * vx_ep + vy_ep * vy_ep)                              # (E, n_p)
-            efspeed = _ship_speed_np(efships)                                            # (E,)
             eta_ep = np.clip(dist_ep / np.maximum(efspeed[:, np.newaxis], 1e-3), 1.0, None)  # (E, n_p)
             soon = headed & (eta_ep <= _THREAT_ETA_WINDOW)                               # (E, n_p)
             enemy_mass_soon = (efships[:, np.newaxis] * soon).sum(axis=0).astype(np.float32)
@@ -452,7 +516,12 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
             vy_fp = tgt_y_pf[np.newaxis, :] - ffy[:, np.newaxis]
             along_fp = vx_fp * ffcos[:, np.newaxis] + vy_fp * ffsin[:, np.newaxis]
             perp_fp  = np.abs(vx_fp * ffsin[:, np.newaxis] - vy_fp * ffcos[:, np.newaxis])
-            headed_f = (along_fp > 0) & (perp_fp < tgt_r_pf[np.newaxis, :] + 1.5)
+            if _PRESSURE_PRECISE_RESOLVER:
+                ffspeed = _ship_speed_np(ffships)
+                headed_f = _resolved_headed(ffx, ffy, ffcos, ffsin, ffspeed,
+                                            tgt_x_pf, tgt_y_pf, tgt_r_pf, angular_velocity)
+            else:
+                headed_f = (along_fp > 0) & (perp_fp < tgt_r_pf[np.newaxis, :] + 1.5)
             friendly_contest = (ffships[:, np.newaxis] * headed_f).sum(axis=0).astype(np.float32)
 
     pairwise = compute_pairwise_features(

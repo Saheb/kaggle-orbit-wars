@@ -15,7 +15,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from features import (extract_features, set_roi_enemy_deflate, set_zero_roi_channels)
+from features import (extract_features, set_roi_enemy_deflate, set_zero_roi_channels,
+                      set_pressure_precise_resolver)
 from action_mask import compute_action_masks
 from torch_env import VecTorchEnv, to_legacy_obs
 
@@ -142,6 +143,43 @@ def run_roi_flag_parity(num_envs: int = 4, after_steps: int = 30):
         assert ok, f"roi flag parity FAILED for {name}: max_ch12/13_diff={worst:.4f} zero_ok={zero_ok}"
 
 
+def run_pressure_resolver_parity(num_envs: int = 6, after_steps: int = 35):
+    """--pressure-precise-resolver: the numpy resolver (features._resolve_fleet_targets) must match
+    the torch resolver (torch_env._fleet_target_idx) so the pressure channels (ch14/19/20/21 + the
+    friendly-contest deflation of ch12/13) stay in train/eval parity. Compares ALL 22 pairwise
+    channels with the flag ON; any one fleet resolving differently flips enemy_contest by the fleet
+    mass and fails here. This is the parity gate for the swept-collision feature path."""
+    from torch_env import MAX_OWNED
+    import torch as _t
+
+    set_pressure_precise_resolver(True)
+    env = VecTorchEnv(num_envs=num_envs, num_players=2, device="cpu", pressure_precise_resolver=True)
+    env.reset(seeds=list(range(num_envs)))
+    for _ in range(after_steps):
+        env.step({0: _t.randint(0, 2, (num_envs, MAX_OWNED, 3)),
+                  1: _t.randint(0, 2, (num_envs, MAX_OWNED, 3))})
+    worst = 0.0
+    worst_ch = None
+    for player in (0, 1):
+        vec = env.get_features(player, max_planets=48, max_fleets=128)["pairwise_features"]
+        for i in range(num_envs):
+            obs = to_legacy_obs(env, env_idx=i, player=player)
+            ref = extract_features(obs, player, num_players=2, max_planets=48,
+                                   max_fleets=128)["pairwise_features"].numpy()
+            v = vec[i].numpy()
+            valid = (v[:, :, 9] > 0.5) & (ref[:, :, 9] > 0.5)
+            d = np.abs(v - ref) * valid[:, :, None]
+            if d.max() > worst:
+                worst = float(d.max())
+                worst_ch = int(np.unravel_index(d.argmax(), d.shape)[2])
+    set_pressure_precise_resolver(False)  # reset global for later tests
+    print(f"  pressure_precise_resolver: max_pairwise_diff={worst:.4f} worst_ch={worst_ch} "
+          f"[torch _fleet_target_idx == numpy _resolve_fleet_targets] {'OK' if worst < 0.05 else 'FAIL'}")
+    assert worst < 0.05, (
+        f"pressure-resolver parity FAILED: max_pairwise_diff={worst:.4f} on ch{worst_ch} — "
+        f"torch and numpy resolvers disagree on at least one fleet")
+
+
 def test_feature_parity():
     """pytest entry: asserts VecTorchEnv == extract_features (incl. all 22 pairwise channels)."""
     run_parity(num_envs=4, after_steps=30)
@@ -152,6 +190,11 @@ def test_roi_flag_parity():
     run_roi_flag_parity(num_envs=4, after_steps=30)
 
 
+def test_pressure_resolver_parity():
+    """pytest entry: asserts the precise-resolver pressure channels match across torch + numpy."""
+    run_pressure_resolver_parity(num_envs=6, after_steps=35)
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Feature extraction parity: VecTorchEnv.get_features() vs extract_features()")
@@ -160,3 +203,6 @@ if __name__ == "__main__":
     print("-" * 60)
     print("ROI-channel discipline parity (--roi-enemy-deflate / --zero-roi-channels)")
     run_roi_flag_parity(num_envs=4, after_steps=30)
+    print("-" * 60)
+    print("Pressure-resolver parity (--pressure-precise-resolver)")
+    run_pressure_resolver_parity(num_envs=6, after_steps=35)

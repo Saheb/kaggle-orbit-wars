@@ -293,6 +293,8 @@ set_game_phase_features({game_phase_features})
 # ROI-channel discipline: match how the ckpt trained ch12/13 (enemy-deflated / zeroed).
 set_roi_enemy_deflate({roi_enemy_deflate})
 set_zero_roi_channels({zero_roi_channels})
+# Pressure channels: match resolver vs corridor attribution the ckpt trained on.
+set_pressure_precise_resolver({pressure_precise_resolver})
 
 
 # --- Reverse-edge cooldown rule (inlined from reinforce_cooldown.py) ---
@@ -567,6 +569,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     game_phase_features = bool(_ckpt.get("config", {}).get("game_phase_features", False)) if isinstance(_ckpt, dict) else False
     roi_enemy_deflate = bool(_ckpt.get("config", {}).get("roi_enemy_deflate", False)) if isinstance(_ckpt, dict) else False
     zero_roi_channels = bool(_ckpt.get("config", {}).get("zero_roi_channels", False)) if isinstance(_ckpt, dict) else False
+    pressure_precise_resolver = bool(_ckpt.get("config", {}).get("pressure_precise_resolver", False)) if isinstance(_ckpt, dict) else False
     # Reverse-edge cooldown is persisted in the ckpt config (not a CLI flag here) → bake it so
     # the submission applies the SAME reinforce-ping-pong veto the policy trained+evaluated with.
     reverse_edge_cooldown = int(_ckpt.get("config", {}).get("reverse_edge_cooldown", 0)) if isinstance(_ckpt, dict) else 0
@@ -598,6 +601,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         game_phase_features=game_phase_features,
         roi_enemy_deflate=roi_enemy_deflate,
         zero_roi_channels=zero_roi_channels,
+        pressure_precise_resolver=pressure_precise_resolver,
         reinforce_gate_min_planets=reinforce_gate_min_planets,
         reinforce_forward_only=reinforce_forward_only,
         reinforce_garrison_floor=reinforce_garrison_floor,

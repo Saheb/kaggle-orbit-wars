@@ -36,6 +36,10 @@ class ModelConfig:
     # entirely. Persisted so eval/export emit the SAME features the ckpt trained on.
     roi_enemy_deflate: bool = False
     zero_roi_channels: bool = False
+    # Route the pairwise pressure channels (enemy_contest/friendly_contest/threat) through the
+    # lead-aware swept-collision resolver instead of the loose corridor that double-counts a fleet
+    # onto every planet in its path. Persisted so eval/export emit the SAME channels.
+    pressure_precise_resolver: bool = False
     entity_dim: int = 96
     num_heads: int = 4
     num_layers: int = 3

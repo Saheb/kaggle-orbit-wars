@@ -483,6 +483,8 @@ def train(args):
             cfg.model.roi_enemy_deflate = True  # resumed weights trained on enemy-deflated roi
         if bool(ckpt_cfg.get("zero_roi_channels", False)):
             cfg.model.zero_roi_channels = True  # resumed weights trained with roi ch12/13 zeroed
+        if bool(ckpt_cfg.get("pressure_precise_resolver", False)):
+            cfg.model.pressure_precise_resolver = True  # resumed weights trained on resolved pressure
         # Resume-path discipline parity: if the CLI left these at defaults, inherit
         # the checkpoint values so env/model wiring matches the source policy.
         if not args.allow_reinforce and bool(ckpt_cfg.get("allow_reinforce", False)):
@@ -531,6 +533,7 @@ def train(args):
     # ROI-channel discipline: on if the CLI asks OR a resumed ckpt trained with it.
     cfg.model.roi_enemy_deflate = cfg.model.roi_enemy_deflate or args.roi_enemy_deflate
     cfg.model.zero_roi_channels = cfg.model.zero_roi_channels or args.zero_roi_channels
+    cfg.model.pressure_precise_resolver = cfg.model.pressure_precise_resolver or args.pressure_precise_resolver
 
     env = VecTorchEnv(num_envs=args.num_envs, num_players=args.num_players,
                       device=device, episode_steps=500,
@@ -542,6 +545,7 @@ def train(args):
                       game_phase_features=cfg.model.game_phase_features,
                       roi_enemy_deflate=cfg.model.roi_enemy_deflate,
                       zero_roi_channels=cfg.model.zero_roi_channels,
+                      pressure_precise_resolver=cfg.model.pressure_precise_resolver,
                       reinforce_garrison_floor=args.reinforce_garrison_floor,
                       reinforce_cost=args.reinforce_cost,
                       reinforce_gate_min_planets=args.reinforce_gate_min_planets,
@@ -868,6 +872,7 @@ def train(args):
                     "game_phase_features": cfg.model.game_phase_features,
                     "roi_enemy_deflate": cfg.model.roi_enemy_deflate,
                     "zero_roi_channels": cfg.model.zero_roi_channels,
+                    "pressure_precise_resolver": cfg.model.pressure_precise_resolver,
                     "staging_shaping_coef": args.staging_shaping_coef,
                     "staging_topk": args.staging_topk,
                     "entropy_coef_fire": args.entropy_coef_fire,
@@ -2083,6 +2088,11 @@ if __name__ == "__main__":
                         help="Zero the roi_20/roi_50 channels (ch12/13) entirely — tests whether they "
                              "are redundant given reactive_roi_40 (ch17). Keeps dims; head weights on "
                              "12/13 receive zeros. Mutually exclusive in practice with --roi-enemy-deflate.")
+    parser.add_argument("--pressure-precise-resolver", action="store_true",
+                        help="Attribute each fleet to its SINGLE lead-aware swept-collision target "
+                             "(torch_env._fleet_target_idx) for the pairwise pressure channels "
+                             "(enemy_contest/friendly_contest/threat), instead of the loose corridor "
+                             "that double-counts a fleet onto every planet in its path. Checkpoint-compatible.")
     parser.add_argument("--ship-overflow-mode", choices=["drop", "clamp"], default="clamp",
                         help="What torch_env does when a launch asks for more ships than the source "
                              "garrison: 'clamp' (DEFAULT — send min(ask,src), the whole garrison, "
