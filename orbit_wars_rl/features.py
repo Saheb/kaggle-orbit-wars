@@ -79,6 +79,31 @@ def set_ablate_channels(channels) -> None:
     _ABLATE_CHANNELS = tuple(int(c) for c in channels)
 
 
+# ROI-deflation by ENEMY contest (ch12/13). The friendly-coverage deflation (below) zeroes a
+# target we are ALREADY taking; its enemy counterpart was missing, so roi_20/roi_50 kept
+# advertising a cheap-garrison neutral that an enemy fleet is about to capture first. When on,
+# deflate roi by enemy_coverage symmetric to the friendly term. Persisted per-checkpoint; eval
+# mirrors via cfg.model.roi_enemy_deflate (parity-tested in test_torch_env_features).
+_ROI_ENEMY_DEFLATE = os.environ.get("ORBIT_ROI_ENEMY_DEFLATE") == "1"
+# Zero the precomputed ROI channels (roi_20=12, roi_50=13) entirely — hypothesis that they are
+# redundant given reactive_roi_40 (ch17, which IS contest-aware) and only drag the target head
+# toward cheap-but-contested planets. Keeps the channel dims (checkpoint-compatible); the head's
+# learned weights on 12/13 just receive zeros.
+_ZERO_ROI_CHANNELS = os.environ.get("ORBIT_ZERO_ROI_CHANNELS") == "1"
+
+
+def set_roi_enemy_deflate(on: bool) -> None:
+    """Toggle enemy-contest deflation of roi_20/roi_50 (called by eval/export after load)."""
+    global _ROI_ENEMY_DEFLATE
+    _ROI_ENEMY_DEFLATE = bool(on)
+
+
+def set_zero_roi_channels(on: bool) -> None:
+    """Toggle zeroing of the roi_20/roi_50 channels (called by eval/export after load)."""
+    global _ZERO_ROI_CHANNELS
+    _ZERO_ROI_CHANNELS = bool(on)
+
+
 def game_phase_channels(step):
     """The 4 game-phase global channels from the integer game step:
     [phase_early (step<50), phase_mid (50<=step<100), phase_late (step>=100),
@@ -676,6 +701,18 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
                                 np.minimum(friendly_contest[:n_p] / safe_cap, 1.0), 0.0)
             roi_20 = roi_20 * (1.0 - coverage)
             roi_50 = roi_50 * (1.0 - coverage)
+
+        # Enemy-contest deflation (symmetric to the friendly term above): an enemy fleet racing
+        # for a cheap neutral makes its raw roi a trap — they capture first, then we crash into a
+        # grown garrison. Deflate roi by enemy_coverage = enemy_inbound / capture-cost.
+        if _ROI_ENEMY_DEFLATE and enemy_contest is not None:
+            enemy_coverage = np.where(tgt_owner != player,
+                                      np.minimum(enemy_contest[:n_p] / safe_cap, 1.0), 0.0)
+            roi_20 = roi_20 * (1.0 - enemy_coverage)
+            roi_50 = roi_50 * (1.0 - enemy_coverage)
+        if _ZERO_ROI_CHANNELS:
+            roi_20 = np.zeros_like(roi_20)
+            roi_50 = np.zeros_like(roi_50)
 
         enemy_contest_raw = enemy_contest[:n_p] if enemy_contest is not None else np.zeros(n_p, dtype=np.float32)
         friendly_contest_raw = friendly_contest[:n_p] if friendly_contest is not None else np.zeros(n_p, dtype=np.float32)

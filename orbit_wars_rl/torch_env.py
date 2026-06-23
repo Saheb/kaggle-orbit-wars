@@ -234,6 +234,7 @@ class VecTorchEnv:
         ship_overflow_mode: str = "clamp",   # matches eval (_ship_bin_to_count clamps); "drop"=legacy bug
         action_decode: str = "angle",
         win_margin_coeff: float = 0.0,
+        rank_reward_coef: float = 0.0,
         eliminate_to_win: bool = False,
         timeout_planet_coef: float = 0.0,
         shaping_coef: float = 0.0,
@@ -271,12 +272,20 @@ class VecTorchEnv:
         reinforce_forward_only: bool = False,
         reverse_edge_cooldown: int = 0,
         sufficient_commit_factor: float = 0.0,
+        redundant_target_factor: float = 0.0,
         game_phase_features: bool = False,
+        roi_enemy_deflate: bool = False,
+        zero_roi_channels: bool = False,
     ):
         self.num_envs = num_envs
         # Game-phase observation channels (Stage B): append 4 globals (dim 11->15). Must match
         # features.game_phase_channels (parity test feature_parity_gamephase_probe.py).
         self.game_phase_features = bool(game_phase_features)
+        # ROI-channel discipline (ch12/13). roi_enemy_deflate: deflate roi by enemy contest
+        # (mirror of friendly deflation). zero_roi_channels: zero ch12/13 entirely. Must match
+        # features.compute_pairwise_features (parity test test_torch_env_features).
+        self.roi_enemy_deflate = bool(roi_enemy_deflate)
+        self.zero_roi_channels = bool(zero_roi_channels)
         # Reinforcement: when True, own planets (except the launch source) are LEGAL
         # targets — ships arriving at a friendly planet add to its garrison (physics
         # already implemented in step()). EDA of top players: ~57% of fleets reinforce;
@@ -329,6 +338,10 @@ class VecTorchEnv:
         #   approximate for enemy planets (reinforce in transit). Pure training-time mask
         #   (no reward tax → no fire=0 Nash); the policy internalises it, parity at eval/export.
         self.sufficient_commit_factor = float(sufficient_commit_factor)
+        # REDUNDANT-TARGET MASK: veto a neutral attack whose in-flight friendly mass ALONE
+        # already clears the target → only reinforces an already-won capture. Training-time
+        # mask (policy learns to retarget; parity at eval). Static floor (reactive didn't help).
+        self.redundant_target_factor = float(redundant_target_factor)
         # reinforce_rate metric accumulators (N, num_players), allocated/zeroed per
         # rollout via reset_reinforce_stats(). None = not collecting (no overhead).
         self._reinforce_launch_count = None
@@ -379,6 +392,12 @@ class VecTorchEnv:
         # Terminal bonus for winners: +win_margin_coeff * (my_score / total_score).
         # 0.0 = pure ±1 reward (default, backward-compatible).
         self.win_margin_coeff = float(win_margin_coeff)
+        # Rank-based terminal reward (FFA): interpolate between flat ±1 and a linear
+        # rank map (rank 0 / winner → +1, rank P-1 / first-out → -1). At coef=1.0 a
+        # player eliminated early scores strictly worse than one who finished 2nd,
+        # instead of both getting a flat -1 — the graded FFA signal the binary
+        # most-ships reward lacks. Only active when P > 2 (no effect in 2p). 0 = off.
+        self.rank_reward_coef = float(rank_reward_coef)
         # Eliminate-to-win: a terminal win counts ONLY on an elimination (few_left).
         # Games that reach the step cap without an elimination are draws (reward 0 for
         # both), removing the "most ships wins at timeout" hoard-to-timeout attractor
@@ -1880,6 +1899,16 @@ class VecTorchEnv:
             roi_20 = roi_20 * (1.0 - coverage)
             roi_50 = roi_50 * (1.0 - coverage)
 
+        # Enemy-contest deflation (symmetric to the friendly term above): a cheap neutral an enemy
+        # fleet is racing for is a trap (they capture first, then grow). Mirrors features.py.
+        if self.roi_enemy_deflate and enemy_contest is not None:
+            ec_b = enemy_contest.unsqueeze(1).expand(-1, MO, -1)              # (N, MO, P)
+            enemy_coverage = torch.where(owner_exp != player,
+                                         (ec_b / safe_cap).clamp(max=1.0),
+                                         torch.zeros_like(safe_cap))
+            roi_20 = roi_20 * (1.0 - enemy_coverage)
+            roi_50 = roi_50 * (1.0 - enemy_coverage)
+
         # Enemy contest feature (ch 14): broadcast (N, P) → (N, MO, P)
         if enemy_contest is not None:
             contest_b = (enemy_contest / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1)
@@ -1946,6 +1975,10 @@ class VecTorchEnv:
             imminence_b = threat_imminence.unsqueeze(1).expand(-1, MO, -1)
         else:
             imminence_b = torch.zeros(N, MO, P, device=device)
+
+        if self.zero_roi_channels:
+            roi_20 = torch.zeros_like(roi_20)
+            roi_50 = torch.zeros_like(roi_50)
 
         # Stack channels
         out = torch.stack([
@@ -2203,8 +2236,8 @@ class VecTorchEnv:
         # arrival (current garrison + production×ETA + enemy inbound arriving before
         # us). Enemy targets are exempt — under-strength attacks on enemies can soften,
         # feint, or arrive as a second wave. Reinforces (own targets) are untouched.
-        if (self.sufficient_commit_factor > 0.0 and self.action_decode == "target"
-                and actions.shape[-1] >= 4):
+        if ((self.sufficient_commit_factor > 0.0 or self.redundant_target_factor > 0.0)
+                and self.action_decode == "target" and actions.shape[-1] >= 4):
             is_neutral_attack = use_target_decode & (target_owner < 0)
             if is_neutral_attack.any():
                 tgt_x = tgt[:, :, 2]; tgt_y = tgt[:, :, 3]
@@ -2242,10 +2275,18 @@ class VecTorchEnv:
                 valid = hits_tgt & arrives_before & fa.unsqueeze(1)    # (N, MAX_OWNED, F)
                 enemy_inbound = (f_ships.unsqueeze(1) * (valid & enemy_mask).float()).sum(dim=2)
                 friendly_inbound = (f_ships.unsqueeze(1) * (valid & friendly_mask).float()).sum(dim=2)
-                # Veto if (ship_count + friendly_inbound) <= projected_defense * factor
                 total_offense = ship_count + friendly_inbound
-                insufficient = is_neutral_attack & (total_offense <= projected_defense * self.sufficient_commit_factor)
-                can_fire = can_fire & ~insufficient
+                # SUFFICIENT-COMMIT: veto if (ship_count + friendly_inbound) can't beat the floor.
+                if self.sufficient_commit_factor > 0.0:
+                    insufficient = is_neutral_attack & (total_offense <= projected_defense * self.sufficient_commit_factor)
+                    can_fire = can_fire & ~insufficient
+                # REDUNDANT-TARGET: veto if IN-FLIGHT friendly mass ALONE already clears the target
+                # (garrison + enemy inbound) → this launch only reinforces an already-won capture, so
+                # the policy is pushed to retarget the spare to an un-taken neutral.
+                if self.redundant_target_factor > 0.0:
+                    redundant = is_neutral_attack & (
+                        friendly_inbound > (projected_defense + enemy_inbound) * self.redundant_target_factor)
+                    can_fire = can_fire & ~redundant
             else:
                 can_fire = can_fire  # no-op when no neutral attacks
 
@@ -2833,6 +2874,15 @@ class VecTorchEnv:
         # time step() returns it. Valid for envs that are newly-done THIS step.
         self._last_wins = wins
         rewards = torch.where(wins, torch.ones_like(scores), -torch.ones_like(scores))
+        # Rank-based terminal reward (FFA only): blend the flat ±1 with a linear rank
+        # map so finishing 2nd of 4 beats being eliminated first. rank[n,p] = #players
+        # with strictly higher score (0 = winner); rank_r maps 0→+1, P-1→-1. The raw
+        # winner mask (_last_wins) is unchanged — still max-score — so PFSP attribution
+        # is unaffected. Inert for P<=2 and coef=0.
+        if self.rank_reward_coef != 0.0 and P_ > 2:
+            rank = (scores.unsqueeze(2) < scores.unsqueeze(1)).float().sum(dim=2)  # (N, P)
+            rank_r = 1.0 - 2.0 * rank / float(max(P_ - 1, 1))
+            rewards = (1.0 - self.rank_reward_coef) * rewards + self.rank_reward_coef * rank_r
         # Optional win-margin bonus: winner gets +α*(my_score/total_score).
         # Losers stay at -1; coefficient 0 = pure ±1 (default).
         if self.win_margin_coeff != 0.0:

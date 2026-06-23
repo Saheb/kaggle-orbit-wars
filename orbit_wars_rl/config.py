@@ -31,6 +31,11 @@ class ModelConfig:
     # default so every existing 11-global checkpoint loads unchanged; the from-scratch run
     # sets it (load_checkpoint round-trips it via ckpt_cfg). Parity-safe (pure fn of step).
     game_phase_features: bool = False
+    # ROI-channel discipline (pairwise ch12/13). roi_enemy_deflate: also deflate roi_20/roi_50
+    # by enemy contest (mirror of the friendly-coverage term). zero_roi_channels: zero ch12/13
+    # entirely. Persisted so eval/export emit the SAME features the ckpt trained on.
+    roi_enemy_deflate: bool = False
+    zero_roi_channels: bool = False
     entity_dim: int = 96
     num_heads: int = 4
     num_layers: int = 3
@@ -61,6 +66,7 @@ class ModelConfig:
     reinforce_garrison_floor: float = 0.0
     reverse_edge_cooldown: int = 0
     sufficient_commit_factor: float = 0.0
+    redundant_target_factor: float = 0.0
     dropout: float = 0.0
     # Value head input width. 0 = auto (2*entity_dim, new concat head).
     # Set to entity_dim when loading pre-Phase-1 checkpoints (old mean-pool head).

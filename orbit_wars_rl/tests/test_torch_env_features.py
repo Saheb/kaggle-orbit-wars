@@ -15,7 +15,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from features import extract_features
+from features import (extract_features, set_roi_enemy_deflate, set_zero_roi_channels)
 from action_mask import compute_action_masks
 from torch_env import VecTorchEnv, to_legacy_obs
 
@@ -85,8 +85,46 @@ def run_parity(num_envs: int = 4, after_steps: int = 30):
         print(f"player={player}: total_err={total_err}  max_planet_diff={max_err:.4f}  worst={worst}")
 
 
+def run_roi_flag_parity(num_envs: int = 4, after_steps: int = 30):
+    """ROI-channel discipline (ch12/13): torch path (VecTorchEnv) must equal numpy path
+    (extract_features) under --roi-enemy-deflate and --zero-roi-channels, and zeroing must
+    actually zero both. Catches train/eval feature divergence on these flags."""
+    from torch_env import MAX_OWNED
+    import torch as _t
+
+    for name, env_kw, on, off in (
+        ("roi_enemy_deflate", dict(roi_enemy_deflate=True), set_roi_enemy_deflate, set_zero_roi_channels),
+        ("zero_roi_channels", dict(zero_roi_channels=True), set_zero_roi_channels, set_roi_enemy_deflate),
+    ):
+        on(True); off(False)
+        env = VecTorchEnv(num_envs=num_envs, num_players=2, device="cpu", **env_kw)
+        env.reset(seeds=list(range(num_envs)))
+        for _ in range(after_steps):
+            env.step({0: _t.randint(0, 2, (num_envs, MAX_OWNED, 3)),
+                      1: _t.randint(0, 2, (num_envs, MAX_OWNED, 3))})
+        worst = 0.0
+        zero_ok = True
+        for player in (0, 1):
+            vec = env.get_features(player, max_planets=48, max_fleets=128)["pairwise_features"]
+            for i in range(num_envs):
+                obs = to_legacy_obs(env, env_idx=i, player=player)
+                ref = extract_features(obs, player, num_players=2,
+                                       max_planets=48, max_fleets=128)["pairwise_features"]
+                v = vec[i, :, :, 12:14].numpy(); r = ref[:, :, 12:14].numpy()
+                worst = max(worst, float(np.abs(v - r).max()))
+                if name == "zero_roi_channels" and (np.abs(v).max() > 0 or np.abs(r).max() > 0):
+                    zero_ok = False
+        on(False)  # reset global so later tests/imports are unaffected
+        tag = "ch12/13 zeroed both paths" if name == "zero_roi_channels" else "torch==numpy"
+        status = "OK" if (worst < 0.02 and zero_ok) else "FAIL"
+        print(f"  {name}: max_ch12/13_diff={worst:.4f}  zero_ok={zero_ok}  [{tag}] {status}")
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Feature extraction parity: VecTorchEnv.get_features() vs extract_features()")
     print("=" * 60)
     run_parity(num_envs=4, after_steps=30)
+    print("-" * 60)
+    print("ROI-channel discipline parity (--roi-enemy-deflate / --zero-roi-channels)")
+    run_roi_flag_parity(num_envs=4, after_steps=30)

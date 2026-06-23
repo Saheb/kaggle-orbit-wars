@@ -86,9 +86,11 @@ stop_run() {
   if command -v tmux >/dev/null 2>&1; then
     tmux kill-session -t "watch_${RUN}_sync" 2>/dev/null || true
     tmux kill-session -t "watch_${RUN}_eval" 2>/dev/null || true
+    tmux kill-session -t "watch_${RUN}_ffaeval" 2>/dev/null || true
   fi
   pkill -f "run_watchers.sh _sync $RUN" 2>/dev/null || true
   pkill -f "run_watchers.sh _eval $RUN" 2>/dev/null || true
+  pkill -f "run_watchers.sh _ffaeval $RUN" 2>/dev/null || true
   echo "stopped watchers for run=$RUN"
 }
 
@@ -102,14 +104,20 @@ start_loops() {
     echo "$RUN $PLAT $TGT" > "$MARKER"
     rm -f "$(run_marker "$RUN")"
   fi
+  # FFA (4p) per-checkpoint eval loop — opt-in via FFA_EVAL=1 (persisted in .watch_env).
+  # For 4p runs the 2p Ajay _eval is only a retention tripwire; this is the real metric.
+  local FFA=""; [ -f "$LOGDIR/.watch_env" ] && FFA=$(. "$LOGDIR/.watch_env"; echo "$FFA_EVAL")
   if command -v tmux >/dev/null 2>&1; then
     tmux kill-session -t "watch_${RUN}_sync" 2>/dev/null || true
     tmux kill-session -t "watch_${RUN}_eval" 2>/dev/null || true
+    tmux kill-session -t "watch_${RUN}_ffaeval" 2>/dev/null || true
     tmux new-session -d -s "watch_${RUN}_sync" "bash '$SCRIPT_PATH' _sync '$RUN'"
     tmux new-session -d -s "watch_${RUN}_eval" "bash '$SCRIPT_PATH' _eval '$RUN'"
+    [ -n "$FFA" ] && tmux new-session -d -s "watch_${RUN}_ffaeval" "bash '$SCRIPT_PATH' _ffaeval '$RUN'"
   else
     nohup bash "$SCRIPT_PATH" _sync "$RUN" >>"$LOGDIR/watcher_sync.log" 2>&1 &
     nohup bash "$SCRIPT_PATH" _eval "$RUN" >>"$LOGDIR/watcher_eval.log" 2>&1 &
+    [ -n "$FFA" ] && nohup bash "$SCRIPT_PATH" _ffaeval "$RUN" >>"$LOGDIR/watcher_ffaeval.log" 2>&1 &
   fi
 }
 
@@ -156,6 +164,8 @@ REMOTE_CKPT_DIR='$RCKPT'
 OPP='$OPP'
 REINFORCE_MASKS='${REINFORCE_MASKS:---reinforce-gate-min-planets 2 --reinforce-garrison-floor 0}'
 EVAL_GATE_FROM_RUNNAME='${EVAL_GATE_FROM_RUNNAME:-}'
+FFA_EVAL='${FFA_EVAL:-}'
+FFA_EVAL_SEEDS='${FFA_EVAL_SEEDS:-16}'
 EOF
 }
 
@@ -263,6 +273,30 @@ _eval() {  # _eval <run> [opp_override]   (platform-independent — local files 
   echo "[eval] $RUN no longer active — exiting" >> "$ROOT/gpu_run_artifacts/$RUN/watchers.log"
 }
 
+_ffaeval() {  # _ffaeval <run>   (4p mixed-field WR per checkpoint; local files only)
+  local RUN="$1"; . "$ROOT/gpu_run_artifacts/$1/.watch_env"
+  local DIR="$ROOT/gpu_run_artifacts/$1/checkpoints"
+  local OUT="$ROOT/gpu_run_artifacts/$1/eval_ffa.csv"
+  local LOGDIR="$ROOT/gpu_run_artifacts/$1/eval_logs"; mkdir -p "$LOGDIR"; cd "$ROOT"
+  echo "[$(date -u +%FT%TZ)] ffaeval start run=$RUN seeds=${FFA_EVAL_SEEDS}" >> "$ROOT/gpu_run_artifacts/$RUN/watcher_ffaeval.log"
+  trap 'rc=$?; echo "[$(date -u +%FT%TZ)] ffaeval exit rc=$rc run=$RUN" >> "$ROOT/gpu_run_artifacts/$RUN/watcher_ffaeval.log"' EXIT
+  while _still_active "$RUN"; do
+    ckpt=""
+    while IFS= read -r cand; do
+      [ -n "$cand" ] || continue
+      grep -q ",$(basename "$cand")$" "$OUT" 2>/dev/null && continue
+      ckpt="$cand"; break
+    done < <(find "$DIR" -maxdepth 1 -name "torch_step_*${MATCH}*.pt" -mmin +2 2>/dev/null | sort -rV)
+    if [ -z "$ckpt" ]; then sleep "$POLL"; continue; fi
+    _still_active "$RUN" || break
+    base=$(basename "$ckpt"); elog="$LOGDIR/ffaeval_${base%.pt}.log"
+    $PY orbit_wars_rl/eval_ffa_checkpoint.py "$ckpt" \
+        --seeds "${FFA_EVAL_SEEDS:-16}" --csv "$OUT" > "$elog" 2>&1 || \
+        echo "[$(date -u +%FT%TZ)] ffaeval FAILED $base (see $elog)" >> "$ROOT/gpu_run_artifacts/$RUN/watcher_ffaeval.log"
+  done
+  echo "[ffaeval] $RUN no longer active — exiting" >> "$ROOT/gpu_run_artifacts/$RUN/watchers.log"
+}
+
 case "${1:-}" in
   start)
     RUN="${2:?usage: start <run> <platform> <target> [opp]}"; PLAT="${3:?need platform jarvis|gcp|custom}"
@@ -350,5 +384,6 @@ case "${1:-}" in
     ;;
   _sync)  _sync "$2" ;;
   _eval)  _eval "$2" "${3:-}" ;;
+  _ffaeval) _ffaeval "$2" ;;
   *) echo "usage: $0 {start|start-parallel <run> <platform> <target> [opp] | add-eval <run> <opp> [from-latest] | sync-once <run> | health <run> | stop-run <run> | stop | status}"; exit 1 ;;
 esac

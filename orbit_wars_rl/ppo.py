@@ -574,6 +574,7 @@ class PPOLearner:
                 "reverse_edge_cooldown": int(getattr(model_cfg, "reverse_edge_cooldown", 0)),
                 "reinforce_garrison_floor": float(getattr(model_cfg, "reinforce_garrison_floor", 0.0)),
                 "sufficient_commit_factor": float(getattr(model_cfg, "sufficient_commit_factor", 0.0)),
+                "redundant_target_factor": float(getattr(model_cfg, "redundant_target_factor", 0.0)),
                 # provenance: how the ckpt was trained (eval always clamps, so not an eval-contract field)
                 "ship_overflow_mode": str(getattr(model_cfg, "ship_overflow_mode", "drop")),
                 # reward-shaping provenance only; eval/export do not consume these.

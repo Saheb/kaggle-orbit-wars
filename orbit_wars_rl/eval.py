@@ -13,7 +13,8 @@ import numpy as np
 from config import Config
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, PHASE4_COMPAT_MISSING_KEYS
 from features import (extract_features, _ETA_PROBE_SPEED, set_game_phase_features,
-                      set_ablate_roi, set_ablate_channels, PAIRWISE_FEATURE_DIM)
+                      set_ablate_roi, set_ablate_channels, set_roi_enemy_deflate,
+                      set_zero_roi_channels, PAIRWISE_FEATURE_DIM)
 from action_mask import (compute_action_masks, actions_from_policy, actions_from_target_policy, _fleet_speed,
                          _ship_bin_to_count, _target_intercept_angle, MAX_OWNED_PLANETS)
 # Decisive-mass floor constants — IMPORTED from torch_env so the eval dm_* gap diagnostic uses the
@@ -90,6 +91,12 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     # trained on (11 vs 15). Set the module flag to match (off for all pre-Stage-B ckpts).
     cfg.model.game_phase_features = bool(ckpt_cfg.get("game_phase_features", False))
     set_game_phase_features(cfg.model.game_phase_features)
+    # ROI-channel discipline: eval's compute_pairwise_features must emit the SAME ch12/13 the
+    # ckpt trained on, else the target head sees a different roi than it learned.
+    cfg.model.roi_enemy_deflate = bool(ckpt_cfg.get("roi_enemy_deflate", False))
+    set_roi_enemy_deflate(cfg.model.roi_enemy_deflate)
+    cfg.model.zero_roi_channels = bool(ckpt_cfg.get("zero_roi_channels", False))
+    set_zero_roi_channels(cfg.model.zero_roi_channels)
     # Reinforce / sufficient-commit DISCIPLINE: persisted at train time so eval/export mask the
     # SAME way (else the policy self-sabotages). Absent in old ckpts → defaults (0/False) → those
     # still require CLI flags, as before. evaluate_checkpoint uses these unless CLI overrides.
@@ -98,6 +105,7 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     cfg.model.reverse_edge_cooldown = int(ckpt_cfg.get("reverse_edge_cooldown", 0))
     cfg.model.reinforce_garrison_floor = float(ckpt_cfg.get("reinforce_garrison_floor", 0.0))
     cfg.model.sufficient_commit_factor = float(ckpt_cfg.get("sufficient_commit_factor", 0.0))
+    cfg.model.redundant_target_factor = float(ckpt_cfg.get("redundant_target_factor", 0.0))
     cfg.model._discipline_persisted = ("reinforce_gate_min_planets" in ckpt_cfg)
     # provenance (inspectable; eval always clamps regardless of how training handled overflow)
     cfg.model.ship_overflow_mode = str(ckpt_cfg.get("ship_overflow_mode", "drop"))
@@ -228,6 +236,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                    fire_threshold: float = 0.5, sample: bool = False,
                    ship_bin_mode: str = "absolute",
                    target_decode: bool = False,
+                   num_players: int = 2,
                    target_sanity_penalty: float = 0.0,
                    reserve_frac: float = 0.0,
                    allow_reinforce: bool = False,
@@ -276,7 +285,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
             if step_now <= _cd["prev_step"]:
                 _cd["last"].clear()
             _cd["prev_step"] = step_now
-        features = extract_features(obs, player, num_players=2)
+        features = extract_features(obs, player, num_players=num_players)
         masks = compute_action_masks(obs, player)
 
         with torch.no_grad():
@@ -313,6 +322,8 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 reinforce_forward_only=getattr(model, "reinforce_forward_only", False),
                 reinforce_garrison_floor=getattr(model, "reinforce_garrison_floor", 0.0),
                 sufficient_commit_factor=getattr(model, "sufficient_commit_factor", 0.0),
+                redundant_target_factor=getattr(model, "redundant_target_factor", 0.0),
+                redundant_target_reactive=getattr(model, "redundant_target_reactive", False),
                 reverse_edge_cooldown=_cd_K,
                 cooldown_last=_cd["last"] if _cd_K > 0 else None,
                 cooldown_step=int(obs.get("step", 0)),
@@ -1985,7 +1996,8 @@ def evaluate_against_baseline(
                               defensive_reinforce_overfill=defensive_reinforce_overfill,
                               defensive_reinforce_stats=def_reinf_stats,
                               natural_head_audit_stats=natural_head_stats,
-                              natural_head_audit_beta=natural_head_audit_beta)
+                              natural_head_audit_beta=natural_head_audit_beta,
+                              num_players=num_players)
     opponents = [opponent] * (num_players - 1)
     agents = [agent_fn] + opponents
 
@@ -2419,6 +2431,8 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     model.reinforce_garrison_floor = float(reinforce_garrison_floor)
     # Sufficient-commit mask (attacks) — also MUST match training. Independent of reinforce.
     model.sufficient_commit_factor = float(sufficient_commit_factor)
+    # Redundant-target mask — auto-loaded from the checkpoint (parity with training).
+    model.redundant_target_factor = float(getattr(cfg.model, "redundant_target_factor", 0.0))
     if model.allow_reinforce:
         print(f"Reinforcement: ON (own planets are legal targets) | "
               f"gate>={model.reinforce_gate_min_planets} planets, "

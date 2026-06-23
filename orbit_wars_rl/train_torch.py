@@ -329,8 +329,8 @@ def train(args):
     print(f"Training on device: {device}")
     print(f"Parallel envs: {args.num_envs}")
     print(f"Rollout steps: {args.rollout_steps}")
-    print(f"Batch per update: {args.num_envs * args.rollout_steps * 2}  "
-          f"(T={args.rollout_steps} x N={args.num_envs} x P=2 players)")
+    print(f"Batch per update: {args.num_envs * args.rollout_steps * args.num_players}  "
+          f"(T={args.rollout_steps} x N={args.num_envs} x P={args.num_players} players)")
 
     torch.manual_seed(args.seed)
 
@@ -479,6 +479,10 @@ def train(args):
             cfg.model.phase4_residual_init_std = float(ckpt_cfg["phase4_residual_init_std"])
         if bool(ckpt_cfg.get("game_phase_features", False)):
             cfg.model.game_phase_features = True  # resumed weights are 15-global
+        if bool(ckpt_cfg.get("roi_enemy_deflate", False)):
+            cfg.model.roi_enemy_deflate = True  # resumed weights trained on enemy-deflated roi
+        if bool(ckpt_cfg.get("zero_roi_channels", False)):
+            cfg.model.zero_roi_channels = True  # resumed weights trained with roi ch12/13 zeroed
         # Resume-path discipline parity: if the CLI left these at defaults, inherit
         # the checkpoint values so env/model wiring matches the source policy.
         if not args.allow_reinforce and bool(ckpt_cfg.get("allow_reinforce", False)):
@@ -493,6 +497,8 @@ def train(args):
             args.reinforce_garrison_floor = float(ckpt_cfg["reinforce_garrison_floor"])
         if args.sufficient_commit_factor == 0.0 and "sufficient_commit_factor" in ckpt_cfg:
             args.sufficient_commit_factor = float(ckpt_cfg["sufficient_commit_factor"])
+        if args.redundant_target_factor == 0.0 and "redundant_target_factor" in ckpt_cfg:
+            args.redundant_target_factor = float(ckpt_cfg["redundant_target_factor"])
         del _ckpt_peek
 
     # CLI overrides checkpoint metadata. This lets a run deliberately mask bin
@@ -511,6 +517,7 @@ def train(args):
     cfg.model.reverse_edge_cooldown = args.reverse_edge_cooldown
     cfg.model.reinforce_garrison_floor = args.reinforce_garrison_floor
     cfg.model.sufficient_commit_factor = args.sufficient_commit_factor
+    cfg.model.redundant_target_factor = args.redundant_target_factor
     cfg.model.capture_utility_coef = args.capture_utility_coef
     cfg.model.capture_utility_window = args.capture_utility_window
     cfg.model.capture_idle_penalty = args.capture_idle_penalty
@@ -521,20 +528,27 @@ def train(args):
     cfg.model.game_phase_features = cfg.model.game_phase_features or args.game_phase_features
     if cfg.model.game_phase_features:
         cfg.model.global_feature_dim = 15
+    # ROI-channel discipline: on if the CLI asks OR a resumed ckpt trained with it.
+    cfg.model.roi_enemy_deflate = cfg.model.roi_enemy_deflate or args.roi_enemy_deflate
+    cfg.model.zero_roi_channels = cfg.model.zero_roi_channels or args.zero_roi_channels
 
-    env = VecTorchEnv(num_envs=args.num_envs, num_players=2,
+    env = VecTorchEnv(num_envs=args.num_envs, num_players=args.num_players,
                       device=device, episode_steps=500,
+                      rank_reward_coef=args.rank_reward_coef,
                       ship_bin_mode=cfg.model.ship_bin_mode,
                       ship_overflow_mode=args.ship_overflow_mode,
                       action_decode=args.action_decode,
                       allow_reinforce=args.allow_reinforce,
                       game_phase_features=cfg.model.game_phase_features,
+                      roi_enemy_deflate=cfg.model.roi_enemy_deflate,
+                      zero_roi_channels=cfg.model.zero_roi_channels,
                       reinforce_garrison_floor=args.reinforce_garrison_floor,
                       reinforce_cost=args.reinforce_cost,
                       reinforce_gate_min_planets=args.reinforce_gate_min_planets,
                       reinforce_forward_only=args.reinforce_forward_only,
                       reverse_edge_cooldown=args.reverse_edge_cooldown,
                       sufficient_commit_factor=args.sufficient_commit_factor,
+                      redundant_target_factor=args.redundant_target_factor,
                       win_margin_coeff=args.win_margin_coeff,
                       eliminate_to_win=args.eliminate_to_win,
                       timeout_planet_coef=args.timeout_planet_coef,
@@ -852,6 +866,8 @@ def train(args):
                     "resume": args.resume or "",
                     "ship_bin_mode": cfg.model.ship_bin_mode,
                     "game_phase_features": cfg.model.game_phase_features,
+                    "roi_enemy_deflate": cfg.model.roi_enemy_deflate,
+                    "zero_roi_channels": cfg.model.zero_roi_channels,
                     "staging_shaping_coef": args.staging_shaping_coef,
                     "staging_topk": args.staging_topk,
                     "entropy_coef_fire": args.entropy_coef_fire,
@@ -869,7 +885,14 @@ def train(args):
 
     rollout_T = args.rollout_steps
     N = args.num_envs
-    P = 2  # num players — both players' transitions are collected and used for PPO
+    P = args.num_players  # num players — every seat's transitions are collected for PPO
+    # 4p pool = HOMOGENEOUS self-snapshots: a pool env puts the learner in one seat and fills the
+    # other P-1 seats with ONE sampled member (the per-seat override + train-mask machinery below
+    # is generalized to all non-learner seats). External heuristics in 4p are NOT validated.
+    if P > 2 and args.pool_external_fraction > 0:
+        raise NotImplementedError(
+            "4p with EXTERNAL pool members is not validated — use --pool-mode self "
+            "(self-snapshots fill the 3 non-learner seats; that path IS wired/tested).")
 
     # Pre-allocate rollout buffers on CPU to keep GPU memory free for the model.
     # Shape leading dims: (T, N, P) so player 0 and player 1 each contribute a
@@ -1064,7 +1087,7 @@ def train(args):
             member = pool.sample(rng)
         if member is None:
             return False, None, 0
-        return True, member, rng.randint(0, 1)
+        return True, member, rng.randint(0, P - 1)
 
     if args.self_boost_planets > 0 and pool_active:
         raise NotImplementedError(
@@ -1190,9 +1213,13 @@ def train(args):
                 for e in range(N):
                     if not env_is_pool[e]:
                         continue
-                    os_ = 1 - env_seat[e]
-                    groups.setdefault((id(env_member[e]), os_),
-                                      [env_member[e], os_, []])[2].append(e)
+                    # Homogeneous fill: the sampled member plays EVERY non-learner seat
+                    # (P-1 seats in 4p; the single opponent seat in 2p).
+                    for os_ in range(P):
+                        if os_ == env_seat[e]:
+                            continue
+                        groups.setdefault((id(env_member[e]), os_),
+                                          [env_member[e], os_, []])[2].append(e)
                 for member, os_, ids in groups.values():
                     ids_t = torch.tensor(ids, device=env.device, dtype=torch.long)
                     opp_action, opp_cont = compute_pool_actions(
@@ -1265,8 +1292,8 @@ def train(args):
                         # Nash = fire from exactly threshold sources (not binary token-fire).
                         activity = n_fires.clamp(max=args.srcs_multi_threshold)
                         storage["rewards"][t, :, p] += args.fleet_activity_coef * activity
-            storage["dones"][t, :, 0].copy_(done, non_blocking=True)
-            storage["dones"][t, :, 1].copy_(done, non_blocking=True)
+            # done is shared across all seats of an env (game ends for everyone at once).
+            storage["dones"][t].copy_(done.unsqueeze(1).expand(N, P), non_blocking=True)
 
             # Log both seats so symmetry is visible at a glance — with P=2
             # training they should mirror (avg p0 ≈ -avg p1, both near 0).
@@ -1286,11 +1313,15 @@ def train(args):
                 last_wins = env._last_wins  # (N, P) bool, raw winner at the done step
                 for e in done_list:
                     if env_is_pool[e] and env_member[e] is not None:
-                        cur_seat = env_seat[e]; o_seat = 1 - cur_seat
-                        cur_w = bool(last_wins[e, cur_seat]); opp_w = bool(last_wins[e, o_seat])
-                        if cur_w and not opp_w:   pool.record_result(env_member[e], "win")
-                        elif opp_w and not cur_w: pool.record_result(env_member[e], "loss")
-                        else:                     pool.record_result(env_member[e], "draw")
+                        # Learner vs the snapshot field (member fills the other P-1 seats).
+                        # Result is from the LEARNER's perspective: learner won → "win";
+                        # a snapshot seat won → "loss"; nobody won (timeout draw) → "draw".
+                        cur_seat = env_seat[e]
+                        learner_won = bool(last_wins[e, cur_seat])
+                        field_won = bool(last_wins[e].any())
+                        if learner_won:   pool.record_result(env_member[e], "win")
+                        elif field_won:   pool.record_result(env_member[e], "loss")
+                        else:             pool.record_result(env_member[e], "draw")
                     env_is_pool[e], env_member[e], env_seat[e] = _draw_assignment(total_env_steps)
 
         # Bootstrap value at end of rollout — for both players
@@ -2044,6 +2075,14 @@ if __name__ == "__main__":
                         help="Append 4 game-phase global channels (phase one-hot early<50/mid/late + "
                              "normalized steps-to-next-comet-spawn); global feature dim 11->15. "
                              "Breaks 11-global checkpoint loading → from-scratch runs only (Stage B).")
+    parser.add_argument("--roi-enemy-deflate", action="store_true",
+                        help="Deflate roi_20/roi_50 (pairwise ch12/13) by enemy contest, symmetric "
+                             "to the existing friendly-coverage deflation. Stops the target head from "
+                             "chasing a cheap neutral an enemy fleet captures first. Checkpoint-compatible.")
+    parser.add_argument("--zero-roi-channels", action="store_true",
+                        help="Zero the roi_20/roi_50 channels (ch12/13) entirely — tests whether they "
+                             "are redundant given reactive_roi_40 (ch17). Keeps dims; head weights on "
+                             "12/13 receive zeros. Mutually exclusive in practice with --roi-enemy-deflate.")
     parser.add_argument("--ship-overflow-mode", choices=["drop", "clamp"], default="clamp",
                         help="What torch_env does when a launch asks for more ships than the source "
                              "garrison: 'clamp' (DEFAULT — send min(ask,src), the whole garrison, "
@@ -2059,6 +2098,19 @@ if __name__ == "__main__":
                              "strictly more than current defense); 0.6 = relaxed fallback; 0 = off. "
                              "Pure mask (no reward tax → no fire=0 Nash); internalised at inference. "
                              "Independent of --allow-reinforce (acts on attacks, not reinforces).")
+    parser.add_argument("--redundant-target-factor", type=float, default=0.0,
+                        help="REDUNDANT-TARGET MASK: veto a NEUTRAL attack whose IN-FLIGHT friendly "
+                             "mass alone already clears the target (garrison + enemy inbound) × this "
+                             "factor → the launch only reinforces an already-won capture, so the "
+                             "policy is pushed to retarget the spare. 1.0 = strict; 0 = off. Pure "
+                             "training-time mask (parity at eval/export). Static floor.")
+    parser.add_argument("--num-players", type=int, choices=[2, 4], default=2,
+                        help="Players per game. 4 = FFA self-play (every seat is the learning "
+                             "policy; --pool-fraction must be 0 — external 4p pool not yet wired).")
+    parser.add_argument("--rank-reward-coef", type=float, default=0.0,
+                        help="FFA rank-based terminal reward blend (P>2 only): interpolate flat ±1 "
+                             "with a linear rank map (winner +1 → first-out -1). 0 = pure ±1. "
+                             "Suggested 4p start: 0.5.")
     parser.add_argument("--win-margin-coeff", type=float, default=0.0,
                         help="Terminal bonus coefficient α: winner gets +1 + α*(my_score/total_score). "
                              "0 = pure ±1 reward (default). Suggested start: 0.5.")
