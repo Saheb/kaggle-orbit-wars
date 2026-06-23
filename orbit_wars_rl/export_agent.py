@@ -74,6 +74,9 @@ _REINFORCE_FORWARD_ONLY = {reinforce_forward_only}
 _REINFORCE_GARRISON_FLOOR = {reinforce_garrison_floor}
 # Sufficient-commit mask (ATTACKS) — also MUST match training. Independent of reinforce.
 _SUFFICIENT_COMMIT_FACTOR = {sufficient_commit_factor}
+# Path-obstruction mask (INFERENCE bugfix) — mask targets screened by an uncapturable planet so
+# the head retargets. Independent of training; safe on any checkpoint.
+_PATH_OBSTRUCTION_MASK = {path_obstruction_mask}
 # Reverse-edge reinforce cooldown (MUST match training; auto-loaded from ckpt). 0 = off.
 _REVERSE_EDGE_COOLDOWN = {reverse_edge_cooldown}
 
@@ -374,6 +377,7 @@ def agent(obs, cfg=None):
             reinforce_forward_only=_REINFORCE_FORWARD_ONLY,
             reinforce_garrison_floor=_REINFORCE_GARRISON_FLOOR,
             sufficient_commit_factor=_SUFFICIENT_COMMIT_FACTOR,
+            path_obstruction_mask=_PATH_OBSTRUCTION_MASK,
             reverse_edge_cooldown=_REVERSE_EDGE_COOLDOWN,
             cooldown_last=_CD["last"] if _REVERSE_EDGE_COOLDOWN > 0 else None,
             cooldown_step=int(obs.get("step", 0)),
@@ -525,7 +529,8 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
                  reinforce_gate_min_planets: int = None,
                  reinforce_forward_only: bool = None,
                  reinforce_garrison_floor: float = None,
-                 sufficient_commit_factor: float = None):
+                 sufficient_commit_factor: float = None,
+                 path_obstruction_mask: bool = False):
     model = load_model(checkpoint_path, cfg)
     # Discipline masks: explicit arg overrides; else use what the checkpoint was trained with
     # (load_model populated cfg.model via _apply_checkpoint_model_config). For OLD reinforce ckpts
@@ -573,6 +578,10 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     zero_roi_channels = bool(_ckpt.get("config", {}).get("zero_roi_channels", False)) if isinstance(_ckpt, dict) else False
     pressure_precise_resolver = bool(_ckpt.get("config", {}).get("pressure_precise_resolver", False)) if isinstance(_ckpt, dict) else False
     threat_eta_surface = bool(_ckpt.get("config", {}).get("threat_eta_surface", False)) if isinstance(_ckpt, dict) else False
+    # Path-obstruction mask: bake if the run trained with it (persisted) OR the CLI flag is set
+    # (inference-only enablement on a checkpoint that didn't train with it — safe either way).
+    path_obstruction_mask = bool(path_obstruction_mask) or (
+        bool(_ckpt.get("config", {}).get("path_obstruction_mask", False)) if isinstance(_ckpt, dict) else False)
     # Reverse-edge cooldown is persisted in the ckpt config (not a CLI flag here) → bake it so
     # the submission applies the SAME reinforce-ping-pong veto the policy trained+evaluated with.
     reverse_edge_cooldown = int(_ckpt.get("config", {}).get("reverse_edge_cooldown", 0)) if isinstance(_ckpt, dict) else 0
@@ -610,6 +619,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         reinforce_forward_only=reinforce_forward_only,
         reinforce_garrison_floor=reinforce_garrison_floor,
         sufficient_commit_factor=sufficient_commit_factor,
+        path_obstruction_mask=path_obstruction_mask,
         reverse_edge_cooldown=reverse_edge_cooldown,
         params_b64=params_b64,
         features_code=features_code,
@@ -624,6 +634,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     print(f"  Param bytes (base64): {len(params_b64):,}")
     print(f"  Fire threshold: {fire_threshold}")
     print(f"  Target decode: {target_decode}")
+    print(f"  Path-obstruction mask: {'ON' if path_obstruction_mask else 'off'}")
     print(f"  File size: {os.path.getsize(output_path) / 1024:.1f} KB")
 
     # --- Sanity eval: play the EXPORTED file vs zach to catch export bugs ---
@@ -694,6 +705,10 @@ if __name__ == "__main__":
     parser.add_argument("--reinforce-garrison-floor", type=float, default=None)
     # Sufficient-commit mask (ATTACKS). MUST match training (p2rev6 = 1.0). 0 = off.
     parser.add_argument("--sufficient-commit-factor", type=float, default=None)
+    parser.add_argument("--path-obstruction-mask", action="store_true",
+                        help="INFERENCE bugfix: bake the path-obstruction target mask into the "
+                             "submission (mask launches screened by an uncapturable planet so the "
+                             "head retargets). Independent of training; safe on any checkpoint.")
     args = parser.parse_args()
 
     cfg = Config()
@@ -704,4 +719,5 @@ if __name__ == "__main__":
                  reinforce_gate_min_planets=args.reinforce_gate_min_planets,
                  reinforce_forward_only=args.reinforce_forward_only,
                  reinforce_garrison_floor=args.reinforce_garrison_floor,
-                 sufficient_commit_factor=args.sufficient_commit_factor)
+                 sufficient_commit_factor=args.sufficient_commit_factor,
+                 path_obstruction_mask=args.path_obstruction_mask)

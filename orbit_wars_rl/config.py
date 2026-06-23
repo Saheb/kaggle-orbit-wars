@@ -75,6 +75,7 @@ class ModelConfig:
     reverse_edge_cooldown: int = 0
     sufficient_commit_factor: float = 0.0
     redundant_target_factor: float = 0.0
+    path_obstruction_mask: bool = False
     dropout: float = 0.0
     # Value head input width. 0 = auto (2*entity_dim, new concat head).
     # Set to entity_dim when loading pre-Phase-1 checkpoints (old mean-pool head).

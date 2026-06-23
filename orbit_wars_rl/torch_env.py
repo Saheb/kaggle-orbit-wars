@@ -272,6 +272,7 @@ class VecTorchEnv:
         reverse_edge_cooldown: int = 0,
         sufficient_commit_factor: float = 0.0,
         redundant_target_factor: float = 0.0,
+        path_obstruction_mask: bool = False,
         game_phase_features: bool = False,
         roi_enemy_deflate: bool = False,
         zero_roi_channels: bool = False,
@@ -352,6 +353,11 @@ class VecTorchEnv:
         # already clears the target → only reinforces an already-won capture. Training-time
         # mask (policy learns to retarget; parity at eval). Static floor (reactive didn't help).
         self.redundant_target_factor = float(redundant_target_factor)
+        # PATH-OBSTRUCTION MASK: veto a launch whose straight path is screened by an uncapturable
+        # planet (the fleet dies on the screen before reaching the target). Training-time veto
+        # (policy learns to avoid screened targets); eval RETARGETS pre-argmax (same split as
+        # redundant_target). Mirrors action_mask._path_obstruction_blocked.
+        self.path_obstruction_mask = bool(path_obstruction_mask)
         # reinforce_rate metric accumulators (N, num_players), allocated/zeroed per
         # rollout via reset_reinforce_stats(). None = not collecting (no overhead).
         self._reinforce_launch_count = None
@@ -2326,6 +2332,40 @@ class VecTorchEnv:
                     can_fire = can_fire & ~redundant
             else:
                 can_fire = can_fire  # no-op when no neutral attacks
+
+        # PATH-OBSTRUCTION MASK: veto a launch whose straight path is screened by an
+        # uncapturable planet (the fleet collides with it before reaching the intended
+        # target). Training-time VETO; eval RETARGETS pre-argmax (action_mask.
+        # _path_obstruction_blocked) — same train/eval split as redundant_target. Criterion:
+        # a non-own, alive planet strictly between source and target, within its radius, whose
+        # capture cost exceeds the source garrison (can't be cleared even at full commit).
+        if (self.path_obstruction_mask and self.action_decode == "target"
+                and actions.shape[-1] >= 4):
+            Pn = self.planets.shape[1]
+            tgt_x = tgt[:, :, 2]; tgt_y = tgt[:, :, 3]                 # (N, MO)
+            src_g = src[:, :, 5]                                       # source garrison (max send)
+            sdx = tgt_x - src_x; sdy = tgt_y - src_y                   # (N, MO)
+            seg2 = (sdx * sdx + sdy * sdy).clamp(min=1e-9)
+            bx = self.planets[:, :, 2].unsqueeze(1)                    # (N, 1, P)
+            by = self.planets[:, :, 3].unsqueeze(1)
+            brad = self.planets[:, :, 4].unsqueeze(1)
+            bown = self.planets[:, :, 1].long().unsqueeze(1)
+            bsh = self.planets[:, :, 5].unsqueeze(1)
+            bpr = self.planets[:, :, 6].unsqueeze(1)
+            balive = self.planet_alive.unsqueeze(1)                    # (N, 1, P)
+            relx = bx - src_x.unsqueeze(2); rely = by - src_y.unsqueeze(2)   # (N, MO, P)
+            proj = (relx * sdx.unsqueeze(2) + rely * sdy.unsqueeze(2)) / seg2.unsqueeze(2)
+            cxp = src_x.unsqueeze(2) + proj * sdx.unsqueeze(2)
+            cyp = src_y.unsqueeze(2) + proj * sdy.unsqueeze(2)
+            perp = torch.sqrt((cxp - bx) ** 2 + (cyp - by) ** 2)       # (N, MO, P)
+            pidx = torch.arange(Pn, device=self.device).view(1, 1, Pn)
+            not_src = pidx != owned_idx.unsqueeze(2)
+            not_tgt = pidx != target_idx.unsqueeze(2)
+            cost = torch.where(bown < 0, bsh + 1.0, bsh + bpr * 3.0 + 1.0)   # (N, 1, P)
+            uncap = cost > src_g.unsqueeze(2)
+            is_blk = ((proj > 0.02) & (proj < 0.98) & (perp < brad)
+                      & not_src & not_tgt & (bown != owner_id) & balive & uncap)
+            can_fire = can_fire & ~is_blk.any(dim=2)
 
         # Compute launch positions (just outside planet radius along angle)
         start_x = src_x + torch.cos(angle) * (src_r + 0.1)

@@ -503,6 +503,8 @@ def train(args):
             args.sufficient_commit_factor = float(ckpt_cfg["sufficient_commit_factor"])
         if args.redundant_target_factor == 0.0 and "redundant_target_factor" in ckpt_cfg:
             args.redundant_target_factor = float(ckpt_cfg["redundant_target_factor"])
+        if not args.path_obstruction_mask and bool(ckpt_cfg.get("path_obstruction_mask", False)):
+            args.path_obstruction_mask = True
         del _ckpt_peek
 
     # CLI overrides checkpoint metadata. This lets a run deliberately mask bin
@@ -522,6 +524,7 @@ def train(args):
     cfg.model.reinforce_garrison_floor = args.reinforce_garrison_floor
     cfg.model.sufficient_commit_factor = args.sufficient_commit_factor
     cfg.model.redundant_target_factor = args.redundant_target_factor
+    cfg.model.path_obstruction_mask = args.path_obstruction_mask
     cfg.model.capture_utility_coef = args.capture_utility_coef
     cfg.model.capture_utility_window = args.capture_utility_window
     cfg.model.capture_idle_penalty = args.capture_idle_penalty
@@ -557,6 +560,7 @@ def train(args):
                       reverse_edge_cooldown=args.reverse_edge_cooldown,
                       sufficient_commit_factor=args.sufficient_commit_factor,
                       redundant_target_factor=args.redundant_target_factor,
+                      path_obstruction_mask=args.path_obstruction_mask,
                       win_margin_coeff=args.win_margin_coeff,
                       eliminate_to_win=args.eliminate_to_win,
                       timeout_planet_coef=args.timeout_planet_coef,
@@ -2123,6 +2127,11 @@ if __name__ == "__main__":
                              "factor → the launch only reinforces an already-won capture, so the "
                              "policy is pushed to retarget the spare. 1.0 = strict; 0 = off. Pure "
                              "training-time mask (parity at eval/export). Static floor.")
+    parser.add_argument("--path-obstruction-mask", action="store_true",
+                        help="PATH-OBSTRUCTION MASK: veto a launch whose straight path is screened "
+                             "by an uncapturable planet (the fleet dies on the screen before "
+                             "reaching the target). Policy learns to avoid screened targets; eval "
+                             "RETARGETS pre-argmax. Checkpoint-compatible; persisted + eval/export-synced.")
     parser.add_argument("--num-players", type=int, choices=[2, 4], default=2,
                         help="Players per game. 4 = FFA self-play (every seat is the learning "
                              "policy; --pool-fraction must be 0 — external 4p pool not yet wired).")

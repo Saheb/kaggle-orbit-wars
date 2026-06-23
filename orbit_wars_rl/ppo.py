@@ -575,6 +575,7 @@ class PPOLearner:
                 "reinforce_garrison_floor": float(getattr(model_cfg, "reinforce_garrison_floor", 0.0)),
                 "sufficient_commit_factor": float(getattr(model_cfg, "sufficient_commit_factor", 0.0)),
                 "redundant_target_factor": float(getattr(model_cfg, "redundant_target_factor", 0.0)),
+                "path_obstruction_mask": bool(getattr(model_cfg, "path_obstruction_mask", False)),
                 # FEATURE-discipline — eval & export must emit the SAME ch12/13/pressure/threat
                 # features the ckpt trained on, or the policy sees a different input than it learned.
                 # (This is the dict that actually lands in torch_step_*.pt — the only one loaders read.)

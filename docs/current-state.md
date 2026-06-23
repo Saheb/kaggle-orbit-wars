@@ -5,42 +5,56 @@ diagnosis) and [`eval_box.md`](eval_box.md) (the GCP eval box). Newest at top.
 
 ---
 
-## ⭐ ACTIVE: phantom-neutral-production fix — 3 parallel Jarvis runs (baseline + roi-deflate + staging)
+## ⭐ ACTIVE: 4 parallel Jarvis runs — phantom-fix tree, testing 3 structural levers
 
-**Root cause (this session):** replays `submission_analysis/81498718.json` (+ `81501661`) — we
-barely launched (1/218 steps in 81498718), idling a growing garrison while small **rotating**
-neutrals (16/18 ships, prod-1) sat untaken. Diagnosis = **phantom neutral production**: the
-pairwise capture-cost/ROI features projected `ships_at_arrival = ships + prod·eta` for *every*
-target, but the engine applies production only to `owner != -1` — **neutrals don't regrow**. So a
-16-ship prod-1 neutral was priced as ~24–43 effective ships (worse the longer the intercept — i.e.
-exactly the slow/far rotating neutrals), making cheap neutrals read as bad ROI → the target head
-deprioritized them and/or under-shipped them into the sufficient-commit veto.
+All four resume the **presres1 lineage at 0.5M** (cleaner than 1.0M/1.5M, which spray late) except
+stgpr2; all on the phantom-fixed tree, A100-80GB spot, fresh pool, 10M, resolver+gate2+
+sufficient-commit 1.0+reverse-edge 3+first-strike 2×+game-phase+externals producer_v2+deb.
 
-**Fix (committed-pending, 2 files, parity-matched):** zero `prod·eta` for neutral targets in
-- `features.py` `compute_pairwise_features` (inference, ch10/11/12/13/17), and
-- `torch_env.py` `_compute_pairwise` (training, same channels) **and** the decisive-mass/staging
-  `floor` (`_decisive_mass_fields`) — the staging potential is neutral-only, so the phantom also
-  under-credited staging toward cheap neutrals in the **reward**.
-
-`test_torch_env_features.py` parity 4/4 (train↔eval byte-identical preserved). **Counterfactual**
-(old presres1 1.5M + fix, no retrain): Ajay 54.3% → **43.4%** with launch_rate flat — i.e. the
-frozen policy was *fit to* the phantom encoding, so the fix only pays off via **retraining**
-(confirms the 3 runs below, not evidence against the fix).
-
-**3 runs — all on the phantom-fixed tree, A100-80GB spot, fresh pool, 10M:**
-
-| run | instance | resume | delta vs ckpt | role | destroy |
+| run | instance | base | delta vs ckpt | lever | destroy |
 |---|---|---|---|---|---|
-| `presfix1` | 432608 | presres1 @1.5M (54.3%) | phantom-fix **only** | **clean baseline / control** | `jl destroy 432608 --yes` |
-| `roidef1` | 432600 | presres1 @1.5M (54.3%) | phantom-fix **+ `--roi-enemy-deflate`** | roi-deflate arm | `jl destroy 432600 --yes` |
-| `stgpr2` | 432594 | stgpr1 @0.5M (57.4%, best-WR) | phantom-fix (staging lineage) | staging arm | `jl destroy 432594 --yes` |
+| `presfix1` (v2) | 432650 | presres1 0.5M | phantom + **`--min-ship-bin 4`** | late-spray fix | `jl destroy 432650 --yes` |
+| `pathobs1` | 432641 | presres1 0.5M | phantom + **path-obstruction veto** | screened-target fix | `jl destroy 432641 --yes` |
+| `roidef1` | 432600 | presres1 1.5M | phantom + `--roi-enemy-deflate` | roi-deflate | `jl destroy 432600 --yes` |
+| `stgpr2` | 432594 | stgpr1 0.5M | phantom (staging 0.2/topk2, LR 5e-5) | staging | `jl destroy 432594 --yes` |
 
-All: resolver (already in ckpt), gate2, sufficient-commit 1.0, reverse-edge 3, first-strike 2×,
-game-phase, externals producer_v2+deb. presfix1/roidef1 LR 1e-4 (presres1 config, NO staging);
-stgpr2 LR 5e-5 + `--staging-shaping-coef 0.2 --staging-topk 2`. **Reads:** `presfix1` = does the
-fix alone beat 54.3% once retrained; `roidef1 − presfix1` = roi-deflate's marginal effect (clean,
-identical base/config); `stgpr2` = the fix on the best-WR staging lineage (separate base, not
-directly comparable to the presres1 pair). Scripts in `gpu_run_artifacts/{presfix1,roidef1,stgpr2}/`.
+presfix1 LR 1e-4. **Reads:** presfix1 v2 & pathobs1 share the 0.5M+phantom base → side-by-side of
+the two structural fixes; roidef1 = roi-deflate on 1.5M; stgpr2 = staging lineage. (Earlier a 0.5M
+phantom-only control `presfix05` was scoped then dropped — diffuse aggregate signal; we read the
+fixes targeted, not via a control. presfix1's old 1.5M phantom-only run was restarted into v2;
+artifacts archived `gpu_run_artifacts/presfix1/_old_1.5M/`.)
+
+### Lever 1 — phantom-neutral-production (FIXED, in all 4 runs)
+Replays `81498718`/`81501661`: barely launched (1/218), idling while cheap rotating neutrals sat
+untaken. Cause: pairwise capture-cost/ROI projected `ships_at_arrival = ships + prod·eta` for
+*every* target, but **neutrals don't regrow** (engine applies prod only to owner≠−1) → a 16-ship
+prod-1 neutral priced as ~24–43 ships, read as bad ROI. **Fix** (2 files, parity 4/4): zero
+`prod·eta` for neutrals in `features.py compute_pairwise_features` (ch10/11/12/13/17) + `torch_env
+_compute_pairwise` **and** the decisive-mass/staging `floor` (neutral-only staging reward).
+Counterfactual (frozen presres1 1.5M + fix): 54.3%→43.4% (OOD; fix pays off via retrain). Committed
+`1117944`.
+
+### Lever 2 — path obstruction (screened targets) — INFERENCE fix shipped, training in `pathobs1`
+Replay `81509243` (lost): home is a low-prod corner planet; its one cheap neutral (P19, 11 ships)
+is **screened by an 86-ship neutral (P11) on the straight path**. Aim is correct, engine is correct
+— the fleet hits P11 (swept-collision) and dies; P19 never taken; never expand; eliminated step 99.
+**Not a math bug — a missing feature** (no planet-in-path signal; only the sun-cross flag exists).
+**Fix:** `action_mask._path_obstruction_blocked` — pre-argmax mask of (source,target) pairs whose
+path is screened by an uncapturable planet (cost > source garrison) → eval RETARGETS to a reachable
+planet; training VETOES (torch_env `_apply_actions`), same split as redundant_target. Flag
+`--path-obstruction-mask` (default off; eval/export auto-load from ckpt). Decode-mask eval on frozen
+presres1 1.5M: 43.4%→**44.9%**, launch_rate 0.222→0.237 (small + safe; effect diffuse since screened
+boards are a minority). `tests/test_path_obstruction.py` (6) + smoke pass. Training-internalised
+version live in `pathobs1`.
+
+### Lever 3 — late-game ship0 collapse (1-ship spray) → `--min-ship-bin 4` in `presfix1` v2
+stgpr2 1.5M eval: tight efficient opening (`<50` cap/atk 0.55, planets@50 9, ship0 0%) then
+**81% of launches >100st are 1-ship probes** (ship_bin 0, n=384k) — incl. WON games. WON drag to
+**332st median** by attrition instead of closing; LOST end early (131st) by snowball. So the spray
+is *downstream* of the 50% ceiling (the ceiling is the early out-massing wall, `outmassed 93%`),
+but it caps decisiveness/retention (`peel-rate WON 0.62`). `min_ship_bin` was wired but unused
+(all runs =0). `presfix1` v2 tests `--min-ship-bin 4` (bans 1–4 ship launches). Watch ship0
+`late>=100` →~0 and WON game-len ↓.
 
 ### Superseded: roi-deflation + pressure-resolver A/B (`roidefl2` / `roideflpr1`) — DEAD
 
@@ -102,20 +116,21 @@ into training). `--redundant-target-factor` is in the codebase (config/ppo/torch
 
 - **GCP box** `orbit-wars-eval` (n2-standard-32, asia-south1-a) — sharded Ajay panels ~4 min.
   Bills ~$1.55/hr: `gcloud compute instances delete orbit-wars-eval --zone=asia-south1-a` when done.
-- **`auto_eval_loop` daemon** (local) now tracks `stgpr2` + `roidef1` + `presfix1`, evals each new
-  checkpoint on the box, appends `gpu_run_artifacts/<run>/eval_ajay_1200.csv`. **Box code re-synced
-  2026-06-23 with the phantom-neutral-production fix** (`features.py` + `torch_env.py`) — required
-  so the box evals the fixed-tree checkpoints with code matching their training (else the 54→43
-  OOD swing). Box `checkpoints/` dirs pre-created for all three. Start/stop: [`eval_box.md`](eval_box.md) §7.
-  **Local `_sync` watchers** kept (land checkpoints); local `_eval` watchers **killed** (slow).
+- **`auto_eval_loop` daemon** (local) tracks all 4 live runs (`stgpr2`+`roidef1`+`presfix1`+
+  `pathobs1`), evals each new checkpoint on the box, appends `gpu_run_artifacts/<run>/eval_ajay_1200.csv`.
+  **Box code re-synced 2026-06-23 with the phantom-fix AND the path-obstruction code** (`features.py`
+  + `torch_env.py` + `action_mask.py` + `eval.py` path_obstruction auto-load) — required so the box
+  evals fixed-tree + `path_obstruction_mask=True` checkpoints with code matching training (the
+  path-obstruction code is default-off/backward-compatible, so it doesn't disturb the other runs).
+  Box `checkpoints/` dirs pre-created for all 4. Start/stop: [`eval_box.md`](eval_box.md) §7.
+  **Local `_sync` watchers** kept; local `_eval` watchers **killed** (slow).
 - **Gotcha:** box needs `gpu_run_artifacts/<run>/checkpoints/` pre-created or the daemon's rsync
-  fails (mkdir won't make nested parents) — done for stgpr2/roidef1/presfix1. **Persist gotcha:** a
-  run launched before its flag's persist line lands won't round-trip the flag → eval runs the wrong
-  feature regime (bit roidefl1). The current 3 runs all verified `PERSIST_FIX_PRESENT` (ppo.py
-  cfg_blob fix), so resolver/roi flags round-trip and the box auto-loads them per checkpoint.
-- **One box = one code regime:** the box now runs the *fixed* tree, so it can only correctly eval
-  fixed-tree runs. Pre-fix runs (stgpr1/presres3) were dropped from tracking — their instances are
-  already gone.
+  fails (mkdir won't make nested parents). **Persist gotcha:** a run launched before its flag's
+  persist line lands won't round-trip the flag → eval runs the wrong feature regime (bit roidefl1).
+  All 4 runs verified `PERSIST_FIX_PRESENT` (ppo.py cfg_blob fix); flags (resolver/roi/path-
+  obstruction/min-ship-bin) round-trip and the box auto-loads them per checkpoint.
+- **One box = one code regime:** the box runs the *fixed* tree (now incl. path-obstruction), so it
+  can only correctly eval that regime. Pre-fix runs (stgpr1/presres3) dropped — instances gone.
 
 ---
 
@@ -151,9 +166,10 @@ Ajay to ~2%** — abandoned; producer dominates 4p (won 100% vs the RL agents in
 ## Cleanup checklist (when done)
 
 ```bash
-jl destroy 432608 --yes     # presfix1 (phantom-fix baseline)
-jl destroy 432600 --yes     # roidef1  (phantom-fix + roi-deflate)
-jl destroy 432594 --yes     # stgpr2   (phantom-fix, staging lineage)
+jl destroy 432650 --yes     # presfix1 v2 (phantom + min-ship-bin 4)
+jl destroy 432641 --yes     # pathobs1    (phantom + path-obstruction)
+jl destroy 432600 --yes     # roidef1     (phantom + roi-deflate)
+jl destroy 432594 --yes     # stgpr2      (phantom, staging lineage)
 pkill -f auto_eval_loop.sh                                  # stop daemon
 bash gpu_run_artifacts/run_watchers.sh stop                 # stop _sync watchers
 gcloud compute instances delete orbit-wars-eval --zone=asia-south1-a   # eval box
