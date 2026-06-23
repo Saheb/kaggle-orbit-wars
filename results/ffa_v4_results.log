@@ -1,0 +1,11 @@
+[21:43:31] FFA[v4]: K=16 x S=4 = 64 seeds = 256 games  field=[producer_v4=producer_v4.py ajay=opponents/candidate_ajay_1200.py deb=opponents/candidate_debatreya_1300.py stgpr1_05=agent_stgpr1_05.py]
+============================================================
+FFA mixed-field panel (merged) — 256 games
+============================================================
+agent                 win-rate    mean place
+ajay            101/256 ( 39.5%)      1.68
+deb             62/256 ( 24.2%)      1.82
+producer_v4     59/256 ( 23.0%)      1.77
+stgpr1_05       34/256 ( 13.3%)      2.02
+(win-rate = 1st-place share, the FFA LB metric; mean place 1=best 4=worst)
+FFA_PANEL_DONE

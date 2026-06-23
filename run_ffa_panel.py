@@ -18,6 +18,7 @@ env directly (they must be self-contained — producer/roman need their orbit_li
 sibling, already in place).
 """
 import argparse
+import json
 import os
 import sys
 
@@ -74,6 +75,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("agents", nargs=4, help="4× label=path.py")
     ap.add_argument("--seeds", type=int, default=32, help="seeds; 4 games each (seat rotation)")
+    ap.add_argument("--seed-start", type=int, default=0, help="first seed (for sharding disjoint blocks)")
+    ap.add_argument("--dump", default="", help="if set, write JSON {labels,wins,place_sum,games} for merging")
     args = ap.parse_args()
 
     labels, paths = [], []
@@ -91,7 +94,7 @@ def main():
     games = 0
     env = ke.make("orbit_wars")
 
-    for seed in range(args.seeds):
+    for seed in range(args.seed_start, args.seed_start + args.seeds):
         for shift in range(4):
             # cyclic rotation: agent i sits in seat (i+shift) % 4
             lineup_idx = [(i - shift) % 4 for i in range(4)]   # seat -> agent index
@@ -122,6 +125,10 @@ def main():
     for l in sorted(labels, key=lambda x: -wins[x]):
         print(f"{l:<16}{wins[l]}/{games} ({100*wins[l]/games:>4.1f}%){place_sum[l]/games:>10.2f}")
     print("(win-rate = 1st-place share, the FFA LB metric; mean place 1=best 4=worst)")
+
+    if args.dump:
+        with open(args.dump, "w") as f:
+            json.dump({"labels": labels, "wins": wins, "place_sum": place_sum, "games": games}, f)
 
 
 if __name__ == "__main__":

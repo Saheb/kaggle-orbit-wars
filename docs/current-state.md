@@ -5,6 +5,72 @@ diagnosis) and [`eval_box.md`](eval_box.md) (the GCP eval box). Newest at top.
 
 ---
 
+## ✅ FINAL EVAL + SUBMIT 2026-06-24 — 2 subs uploaded, 4p switched to ajay
+
+Final eval-and-submit session (separate from the bug-fix batch below). **The two bug fixes
+(phantom-neutral-production + path-obstruction) are banked in code but did NOT make it into a
+competition agent** — every retrain (`presfix1`/`pathobs1`/`stgpr2`) drifted back into the spray
+Nash within ~2M (batch note below). So the two final submissions are from the **pre-bugfix
+lineage** (presres1 carries the resolver fix #1/#1b only; stgpr1 is the staging lineage).
+
+**Submitted — both daily slots, both 4p → ajay (NOT producer_v4):**
+
+| Sub | 2p agent | 2p vs Ajay / Deb-1300 (256g, 0 draws) | 4p |
+|---|---|---|---|
+| 53991660 | presres1 0.5M "decisive" | 53.9% / 51.6% | ajay |
+| 53991662 | stgpr1 0.5M "spray" | 57.4% / 59.4% | ajay |
+
+stgpr1's higher WR is spray/churn-inflated (play-quality caveat, not a cert defect). Build dirs
+`submission_build/{submission_presres05,submission_stgpr1}/`; isolated-tarball (2p 6/6 + 4p 6/6 vs
+no-op) + direct routing test (2p→neural / 4p→ffa / step-reset→neural) pass. Tables +
+raw logs: `results/eval_results.md` + `results/{cert,ffa}_results.log`. Log: `docs/submissions.md`.
+
+**4p slot = ajay, validated against BOTH producers** (256-game FFA panels, `run_ffa_panel.py`,
+seat-rotated, win-rate = 1st-place share = the LB metric):
+
+| field | ajay | producer_v2 | producer_v4 | deb | stgpr1_05 |
+|---|---|---|---|---|---|
+| v2 panel | **39.1%** | 28.1% | — | 14.1% | 18.8% |
+| v4 panel | **39.5%** | — | 23.0% | 24.2% | 13.3% |
+
+ajay wins decisively in both (stable ~39%); **producer_v4 (23.0%) ≈ deb, no better than v2** — so
+the prior 4p choice (producer_v4) was beatable. ajay ≡ producer_v2 **minus** its only code diff,
+the ETA-aware reinforcement-risk gate → ajay grabs contestable captures the producers veto, and
+the producers' caution costs them the FFA territory race. **2p strength ≠ 4p** (deb strongest in
+2p, near-worst in 4p). Our 2p neural agent runs in 4p but places 3rd–4th → heuristic is the right
+4p choice.
+
+**Eval box `orbit-wars-eval` — DELETED 2026-06-24** after this session (it had been reused/recreated
+for the certs + FFA panels above; the cleanup-✓ checklist at the bottom referred to an earlier
+teardown). All results synced to `results/` before deletion. $0 ongoing spend.
+
+### ⛔ Inference-only bugfix test: path-obstruction mask on the FROZEN agent = −2pp (do NOT ship without retrain)
+
+Tested whether the path-obstruction fix (the one fix that's an *action mask*, not an observation
+change, so in principle shippable onto a frozen agent) helps the **submitted presres1 0.5M** with
+**no retrain**. Rigorous paired A/B on a fresh box: **prephantom code** (cherry-picked path-obstruction
+ONTO `8f78555`, phantom fix deliberately OUT so the ckpt sees its trained features) + the
+**resolver-correct backfilled ckpt**. Same 256 seeds, only `--path-obstruction-mask` differs.
+
+Paired A/B vs Ajay (same 256 seeds, baseline validates by exactly reproducing each submitted agent;
+only `--path-obstruction-mask` differs). **Tested BOTH submitted 2p agents:**
+
+| agent (0.5M) vs Ajay | baseline | + `--path-obstruction-mask` | delta | signature |
+|---|---|---|---|---|
+| **presres1** "decisive" | **138/256 (53.9%)** ✓exact | **133/256 (52.0%)** | **−5 games (−1.9pp)** | seat 0 identical (70=70), all loss seat 1 (68→63) |
+| **stgpr1** "spray" | **147/256 (57.4%)** ✓exact | **143/256 (55.9%)** | **−4 games (−1.5pp)** | seat 0 identical (68=68), all loss seat 1 (79→75) |
+
+**Both net-NEGATIVE, ~−1.5 to −2pp, same signature** (seat 0 byte-identical → damage is exactly the
+screened boards the mask retargets). **Conclusion: applying the bugfix at inference only is
+net-negative on both lineages** — even an action-mask fix is OOD when the agent never trained with
+the veto; the policy chose those "doomed" launches for learned reasons and force-retargeting them
+loses more than the doomed launches cost. The doc's earlier **+1.5pp was on the 1.5M ckpt stacked on
+the phantom fix; it did NOT transfer.** So **both bugfixes genuinely required a retrain to cash in —
+there is no inference-time shortcut** (now measured on both agents, not assumed). Did not resubmit;
+the two locked-in subs stand.
+
+---
+
 ## ⛔ BATCH CONCLUDED 2026-06-24 — all runs down, $0 spend (only the local stgpr1 panel still running)
 
 The phantom-fix-tree batch (stgpr2 / presfix1 / pathobs1 / roidef1) is **over**, with a clean
@@ -173,7 +239,7 @@ into training). `--redundant-target-factor` is in the codebase (config/ppo/torch
 
 ---
 
-## Submission state (Kaggle)
+## Submission state (Kaggle) — ⚠️ SUPERSEDED by the FINAL EVAL + SUBMIT section at top (4p is now ajay, not producer_v4)
 
 `submission_2p4p/` dispatches by player count: **2p → neural** (phase4fs 7.34M), **4p →
 `producer_v4.py`** (Producer Hybrid v4, FFA leader-guard 0.035 + target-prod 0.08). Last two

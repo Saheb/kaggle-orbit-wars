@@ -1,0 +1,13 @@
+[20:39:52] cert presres_05  K=30  agent=agent_presres_05.py
+[20:41:55] CERT presres_05 vs Ajay: 138W 118L 0D  /  256 games  ->  WR 53.9%
+[20:42:23] cert stgpr1_05  K=30  agent=agent_stgpr1_05.py
+[20:45:46] CERT stgpr1_05 vs Ajay: 147W 109L 0D  /  256 games  ->  WR 57.4%
+[20:45:46] cert presres_15  K=30  agent=agent_presres_15.py
+[20:48:06] CERT presres_15 vs Ajay: 139W 117L 0D  /  256 games  ->  WR 54.3%
+[20:55:32] cert presres_05_deb  K=30  agent=agent_presres_05.py  opp=candidate_debatreya_1300
+[20:57:39] CERT presres_05_deb vs candidate_debatreya_1300: 132W 124L 0D  /  256 games  ->  WR 51.6%
+[20:57:39] cert stgpr1_05_deb  K=30  agent=agent_stgpr1_05.py  opp=candidate_debatreya_1300
+[21:01:05] CERT stgpr1_05_deb vs candidate_debatreya_1300: 152W 104L 0D  /  256 games  ->  WR 59.4%
+[21:01:05] cert presres_15_deb  K=30  agent=agent_presres_15.py  opp=candidate_debatreya_1300
+[21:03:16] CERT presres_15_deb vs candidate_debatreya_1300: 136W 120L 0D  /  256 games  ->  WR 53.1%
+DEB_CHAIN_DONE

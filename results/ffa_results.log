@@ -1,0 +1,11 @@
+[21:11:53] FFA sharded: K=16 x S=4 = 64 seeds = 256 games  field=[producer_v2 ajay deb stgpr1_05]
+============================================================
+FFA mixed-field panel (merged) — 256 games
+============================================================
+agent                 win-rate    mean place
+ajay            100/256 ( 39.1%)      1.64
+producer_v2     72/256 ( 28.1%)      1.73
+stgpr1_05       48/256 ( 18.8%)      1.81
+deb             36/256 ( 14.1%)      1.88
+(win-rate = 1st-place share, the FFA LB metric; mean place 1=best 4=worst)
+FFA_PANEL_DONE

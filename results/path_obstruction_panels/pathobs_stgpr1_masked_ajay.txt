@@ -1,0 +1,116 @@
+
+==============================================================================
+Panel eval vs opponents/candidate_ajay_1200.py
+==============================================================================
+Overall:   143/256  (55.9%)
+  seat 0:  68/128  (53.1%)
+  seat 1:  75/128  (58.6%)
+  asymmetry (seat0 − seat1): -5.5pp
+Conversion: caps/game 55.3  atk-launch/game 213.8  cap/atk-launch 0.258 (open<50 0.551  mid50-100 0.582)  ships/cap 202  reinf_share 0.80
+  planets@16/32/50/100 2/5/8/10  end 15.1   churn 3.66 (1.68/100st, mean-len 217)
+  game-len  median WON 239st (143g)  ·  LOST 135st (113g)   [long WON = stall-and-win/attrition; short = decisive snowball]
+     WON(143g) 2/5/8/13  cap/atk open<50 0.55 mid50-100 0.57 (whole 0.23)
+     LOST(113g) 2/5/7/5  cap/atk open<50 0.55 mid50-100 0.61 (whole 0.60)
+
+  retention  peel-rate 0.71 (10046/14149 caps lost)  median-hold 16st
+     WON(143g) peel-rate 0.66 hold 15st  |  LOST(113g) peel-rate 0.99 hold 18st   (read WON; peel-rate→1 on elimination)
+  hold-loss  out-massed 90% · abandoned 5% · too-late 3% · other 2%   garr@cap 60→@loss 15 vs enemy-inbound 42   [out-massed = enemy fleet > our garrison = force-concentration gap]
+  hold-floor (garr+friendly_in)/(enemy_in+β·reach+1) β=2.2, threatened own [under%(ratio<1)/p50]
+     by phase <50/50-100/>=100  84%/0.40 (n3387)  82%/0.38 (n24031)  76%/0.39 (n38544)
+     by age-after-capture 0-5/6-15/16+  72%/0.41 (n15887)  82%/0.33 (n16334)  79%/0.42 (n31790)   [under% high at 0-5 = fail immediately (route defense too slow); at 16+ = logistics/churn]
+  reinforce-triage  ships→ safe 91% cheap-save 6% exp-save 1% HOPELESS 2%  (β=2.2)
+     reinforce mass on LOST planets 18% (to-saved 82%)  ·  of LOST planets: cheap-save-MISSED 0% hopeless(ok-to-drop) 96%
+     captured-only nonterminal LOST: cheap-save-MISSED 0% hopeless(ok-to-drop) 96% (n9603)
+     hopeless-loss events: reinforced 49% abandoned 51% (n9506); ship-waste 1762477 (95% of to-lost mass)
+     lost≤10/20/30st after reinforce 3%/5%/6% of reinforce mass  ·  safe-reinf≤30 utility attack/frontline/idle 46%/3%/50%
+     capture-born class safe/cheap/exp/hopeless 72%/11%/5%/13%; nonterminal lost-rate by birth 62%/74%/75%/95%
+     WON/LOST hopeless-reinf-share 2%/35%  to-lost 17%/99%
+   [born-hopeless high = capture quality/follow-up issue; safe-idle high = staging/churn, not useful defense]
+  outmassed by planets@32  <=4: outmassed 89% WR 57% (n126)  5: outmassed 90% WR 47% (n51)  >=6: outmassed 90% WR 59% (n79)   [>=6 ~ <=4 (outmassed -1%, WR +2%) → opening expansion NOT the lever; wall is downstream]
+  decisive-mass  gap 0.28  cross 0.50  overkill 5.30  near-miss 0.10  target-steps/game 279.3  (beta 2.2)
+     by phase <50/50-100/>=100 (gap/cross/p50)  0.33/0.24/0.65  0.20/0.47/0.95  0.30/0.53/1.15   [enemy-target only; effectively the CONTESTED bucket. gap DOWN + cross UP = assembling to the capture floor]
+  decisive-mass CONTESTED  gap 0.28  cross 0.50  overkill 5.30  near-miss 0.10  target-steps/game 279.3   (enemy targets only; same floor as decmass reward)
+     by phase <50/50-100/>=100 (gap/cross/p50)  0.33/0.24/0.65  0.20/0.47/0.95  0.30/0.53/1.15   [this is the wall-facing bucket; compare against NEUTRAL to separate land-grab from contested conversion]
+  decisive-mass NEUTRAL  gap 0.18  cross 0.74  target-steps/game 128.6   (floor = static garrison; the opening land-grab)
+     by phase <50/50-100/>=100 (gap/cross/p50)  0.00/0.98/1.46  0.01/0.96/2.50  0.32/0.55/1.18   [cross = sent enough to TAKE the neutral; low <50 cross = undercommit in the land-grab]
+  failed-attack decomposition  early<50 fail 23%(825/3520) [single 0%/wsrc 1%/agg 7%/unaff 8%/suff 5%/red 79%]  mid50-100 fail 26%(1610/6234) [single 0%/wsrc 4%/agg 17%/unaff 3%/suff 11%/red 64%]  late>=100 fail 74%(33476/44989) [single 2%/wsrc 1%/agg 0%/unaff 0%/suff 1%/red 95%]
+     WON  early<50 fail 22%(467/2080) [single 0%/wsrc 1%/agg 4%/unaff 3%/suff 3%/red 89%]  mid50-100 fail 26%(1146/4425) [single 0%/wsrc 3%/agg 9%/unaff 1%/suff 9%/red 78%]  late>=100 fail 75%(33371/44566) [single 2%/wsrc 1%/agg 0%/unaff 0%/suff 1%/red 95%]
+     LOST early<50 fail 25%(358/1440) [single 0%/wsrc 1%/agg 12%/unaff 14%/suff 7%/red 66%]  mid50-100 fail 26%(464/1809) [single 0%/wsrc 7%/agg 37%/unaff 9%/suff 17%/red 30%]  late>=100 fail 25%(105/423) [single 2%/wsrc 8%/agg 45%/unaff 17%/suff 7%/red 22%]
+     [single=chosen source had enough but undersent; wsrc=another source had enough; agg=needed multiple sources; unaff=owned mass below floor; suff=sent enough but still failed; red=already covered before launch]
+  failed-attack agg2 reachable-drainable  early<50 46% raw-agg (28/61), 3% failures  mid50-100 55% raw-agg (151/277), 9% failures  late>=100 60% raw-agg (53/89), 0% failures
+     WON  early<50 28% raw-agg (5/18), 1% failures  mid50-100 51% raw-agg (53/104), 5% failures  late>=100 60% raw-agg (25/42), 0% failures
+     LOST early<50 53% raw-agg (23/43), 6% failures  mid50-100 57% raw-agg (98/173), 21% failures  late>=100 60% raw-agg (28/47), 27% failures
+     [agg2 narrows raw agg: drainable owned-source spare that can arrive by attack eta+10; still an estimate, but closer to the AR-actionable coordination ceiling]
+  launch-waste<50  redundant 0.05 (WG 0.59)  underkill 0.05 (WG 0.05)   [⚠ underkill NON-discriminating: winners also ~0.40. THE signal = open<50 cap/atk above]
+   [ref:winner  cap/atk whole 0.53 · open<50 0.51 · mid50-100 0.47 · planets 2/6/9/10 · reinf 0.30]
+  fire-rate  launch_rate 0.382  fire_frac 0.41   [ref:Isaiah 0.036 / 0.17]
+     WON(143g) lr 0.420 ff 0.43  |  LOST(113g) lr 0.073 ff 0.25   (read WON; ff inflates on losses)
+  hoard  garr_frac@ 0.52/0.47/0.46/0.50  ships/planet@ 12/17/23/35   [ref:Isaiah garr_frac 0.50/0.51/0.54/0.87  ships/planet 11/15/22/60]
+  reinf by empire size  1:0.00(366)  2:0.03(485)  3:0.09(502)  4-6:0.32(2914)  7-9:0.47(5577)  10-12:0.47(5974)  13+:0.82(254782)   [ref:ramp @1:0.01 @2:0.10 @3:0.19 @9-12:0.30 @13+:0.34-0.61]
+  reinf by step  <50:0.31  50-100:0.48  >100:0.82   [ref:winner <50:0.29 · 50-100:0.41 · >100:0.31]
+  reinf direction  fwd 43%  rear 46%  (n=206180)   [ref:winner fwd ~57% · rear ~26%]
+  reinf ping-pong  recip<=1/2/3st 0.02/0.04/0.05 of 215857 reinf (9937 within 3st; by phase 9/63/9865)   [A->B then B->A = waste loop; rank1 <0.01, NOT caught by same-turn mutex]
+  reinf by phase  n 1615/5657/208585 (<50/50-100/>100)  fwd-enemy 0.84/0.76/0.44 [rank1 0.77/0.50/0.48]
+     centroid-out 0.58/0.54/0.43 [rank1 0.83/0.69/0.70]  target-front-top3 0.61/0.32/0.09 [rank1 0.81/0.34/0.27]
+  reinf fwd-enemy by size  <=20/21-50/51+ 0.46/0.61/0.50  (n 148819/10429/46932)   [rank1 <=20:0.42 51-100:0.71]
+  ship0 1-ship-probe by phase  early<50 0%(mean36,n5136)  mid50-100 0%(mean59,n11895)  late>=100 30%(mean47,n259677)
+     WON  early<50 0%(mean37,n3090)  mid50-100 0%(mean61,n8803)  late>=100 30%(mean47,n258964)
+     LOST early<50 0%(mean34,n2046)  mid50-100 0%(mean52,n3092)  late>=100 0%(mean62,n713)
+  attack target near-vs-far  early<50 nearest 26% ratio 1.81 dom 38%(n3520)  mid50-100 nearest 29% ratio 1.92 dom 33%(n6234)  late>=100 nearest 44% ratio 1.86 dom 36%(n44989)
+     WON  early<50 nearest 28% ratio 1.78 dom 36%(n2080)  mid50-100 nearest 30% ratio 1.90 dom 32%(n4425)  late>=100 nearest 44% ratio 1.86 dom 36%(n44566)
+     LOST early<50 nearest 24% ratio 1.86 dom 41%(n1440)  mid50-100 nearest 27% ratio 1.96 dom 36%(n1809)  late>=100 nearest 28% ratio 1.84 dom 34%(n423)
+     [nearest%=chose closest enemy/neutral; ratio=chosen/nearest dist; dom%=passed up a CLOSER-AND-RICHER target (value-aware defect, no production excuse). WON≈LOST dom => systematic; LOST≫WON => losing-state artifact]
+  attack target holdable-ROI rank  early<50 best 44% top3 67%(n3520)  mid50-100 best 33% top3 54%(n6234)  late>=100 best 38% top3 67%(n43794)
+     WON  early<50 best 44% top3 67%(n2080)  mid50-100 best 34% top3 55%(n4425)  late>=100 best 38% top3 67%(n43371)
+     LOST early<50 best 42% top3 67%(n1440)  mid50-100 best 33% top3 51%(n1809)  late>=100 best 33% top3 50%(n423)
+     [best%=chose top holdable-ROI target (value priced w/ reactive peel = decisive-mass floor); top3=within 3. LOST best%≪WON => value-aware selection IS the lever; WON≈LOST => systematic but not outcome-relevant]
+
+Per archetype  (8 games each = 4 seeds × 2 seats):
+  archetype                                             WR       s0/s1       mat
+  med_high_prod__mostly_static__big_static          100.0%   100/100      6043
+  high_prod__mixed_static__big_static               100.0%   100/100      7888
+  med_high_prod__mostly_rotating__big_rotating       87.5%   100/ 75      4439
+  high_prod__mixed_static__big_rotating              87.5%    75/100      5893
+  med_low_prod__mixed_static__big_static             75.0%    50/100      5000
+  high_prod__mostly_static__big_static               75.0%    75/ 75      5683
+  high_prod__mostly_static__big_rotating             75.0%    75/ 75      4650
+  low_prod__mostly_static__big_static                62.5%    50/ 75      2326
+  low_prod__mixed_static__big_static                 62.5%    50/ 75      2557
+  low_prod__mixed_rotating__big_static               62.5%    75/ 50      2122
+  med_low_prod__mostly_static__big_static            62.5%    75/ 50      2576
+  med_low_prod__mostly_static__big_rotating          62.5%    50/ 75      4699
+  med_low_prod__mixed_rotating__big_rotating         62.5%    75/ 50      4564
+  high_prod__mostly_rotating__big_static             62.5%    50/ 75      3194
+  high_prod__mostly_rotating__big_rotating           62.5%    50/ 75      3490
+  low_prod__mostly_static__big_rotating              50.0%    25/ 75      1067
+  low_prod__mostly_rotating__big_static              50.0%    50/ 50      1887
+  med_low_prod__mixed_rotating__big_static           50.0%    50/ 50      3124
+  med_low_prod__mostly_rotating__big_static          50.0%    25/ 75      1444
+  med_low_prod__mostly_rotating__big_rotating        50.0%    50/ 50      3522
+  med_high_prod__mostly_static__big_rotating         50.0%    50/ 50      4491
+  med_high_prod__mixed_rotating__big_rotating        50.0%    50/ 50      3588
+  high_prod__mixed_rotating__big_static              50.0%    25/ 75      3379
+  low_prod__mixed_rotating__big_rotating             37.5%    25/ 50      1922
+  med_high_prod__mixed_static__big_static            37.5%    25/ 50      2745
+  med_high_prod__mixed_static__big_rotating          37.5%    50/ 25      1561
+  med_high_prod__mixed_rotating__big_static          37.5%    50/ 25      1452
+  med_high_prod__mostly_rotating__big_static         37.5%    50/ 25      2226
+  low_prod__mixed_static__big_rotating               25.0%    25/ 25      2621
+  low_prod__mostly_rotating__big_rotating            25.0%    50/  0      1178
+  med_low_prod__mixed_static__big_rotating           25.0%    25/ 25      2033
+  high_prod__mixed_rotating__big_rotating            25.0%    25/ 25      2098
+
+Best:  med_high_prod__mostly_static__big_static  (100.0%)
+Worst: low_prod__mixed_static__big_rotating  (25.0%)
+Spread: 75.0pp
+
+──────────────────────────────────────────────────────────────────────────────
+⭐ TIERED METRIC SUMMARY  (priority order; values duplicated from above — docs/metrics.md)
+──────────────────────────────────────────────────────────────────────────────
+  T1 ARBITER   win-rate 55.9% (143/256)   ← only signal that sees absolute regression
+  T2 THE WALL  out-massed 90% (want ↓ = wall breaking)   decisive-mass gap 0.28 / cross 0.50 (gap↓ cross↑ = concentrating)
+               hold-floor @age0-5 under 72% (↓; capture-then-lose wall)   open<50 cap/atk WON 0.55 (ref .51)   planets@50 WON 8 (ref 9)
+               reinf@<50 0.31 (ref .29 = stage the attack early)
+  T3 TRIPWIRE  launch_rate 0.382 (→0 passive)   fire_frac WON 0.43 (→1 carpet-bomb)   ship0 28% (high = 1-ship collapse)
+  colour only  game-len WON 239st  (symptom of the root, NOT a gate — don't bribe with speed_coef)
+──────────────────────────────────────────────────────────────────────────────
