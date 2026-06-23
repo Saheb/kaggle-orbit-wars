@@ -485,6 +485,8 @@ def train(args):
             cfg.model.zero_roi_channels = True  # resumed weights trained with roi ch12/13 zeroed
         if bool(ckpt_cfg.get("pressure_precise_resolver", False)):
             cfg.model.pressure_precise_resolver = True  # resumed weights trained on resolved pressure
+        if bool(ckpt_cfg.get("threat_eta_surface", False)):
+            cfg.model.threat_eta_surface = True  # resumed weights trained on surface threat ETA
         # Resume-path discipline parity: if the CLI left these at defaults, inherit
         # the checkpoint values so env/model wiring matches the source policy.
         if not args.allow_reinforce and bool(ckpt_cfg.get("allow_reinforce", False)):
@@ -534,6 +536,7 @@ def train(args):
     cfg.model.roi_enemy_deflate = cfg.model.roi_enemy_deflate or args.roi_enemy_deflate
     cfg.model.zero_roi_channels = cfg.model.zero_roi_channels or args.zero_roi_channels
     cfg.model.pressure_precise_resolver = cfg.model.pressure_precise_resolver or args.pressure_precise_resolver
+    cfg.model.threat_eta_surface = cfg.model.threat_eta_surface or args.threat_eta_surface
 
     env = VecTorchEnv(num_envs=args.num_envs, num_players=args.num_players,
                       device=device, episode_steps=500,
@@ -546,6 +549,7 @@ def train(args):
                       roi_enemy_deflate=cfg.model.roi_enemy_deflate,
                       zero_roi_channels=cfg.model.zero_roi_channels,
                       pressure_precise_resolver=cfg.model.pressure_precise_resolver,
+                      threat_eta_surface=cfg.model.threat_eta_surface,
                       reinforce_garrison_floor=args.reinforce_garrison_floor,
                       reinforce_cost=args.reinforce_cost,
                       reinforce_gate_min_planets=args.reinforce_gate_min_planets,
@@ -873,6 +877,7 @@ def train(args):
                     "roi_enemy_deflate": cfg.model.roi_enemy_deflate,
                     "zero_roi_channels": cfg.model.zero_roi_channels,
                     "pressure_precise_resolver": cfg.model.pressure_precise_resolver,
+                    "threat_eta_surface": cfg.model.threat_eta_surface,
                     "staging_shaping_coef": args.staging_shaping_coef,
                     "staging_topk": args.staging_topk,
                     "entropy_coef_fire": args.entropy_coef_fire,
@@ -2093,6 +2098,10 @@ if __name__ == "__main__":
                              "(torch_env._fleet_target_idx) for the pairwise pressure channels "
                              "(enemy_contest/friendly_contest/threat), instead of the loose corridor "
                              "that double-counts a fleet onto every planet in its path. Checkpoint-compatible.")
+    parser.add_argument("--threat-eta-surface", action="store_true",
+                        help="Measure threat ETA (ch20 enemy_mass_soon / ch21 threat_imminence) to the "
+                             "planet SURFACE (dist−radius, the resolver convention) instead of the "
+                             "center, which reads ~½ step under-urgent. Checkpoint-compatible.")
     parser.add_argument("--ship-overflow-mode", choices=["drop", "clamp"], default="clamp",
                         help="What torch_env does when a launch asks for more ships than the source "
                              "garrison: 'clamp' (DEFAULT — send min(ask,src), the whole garrison, "

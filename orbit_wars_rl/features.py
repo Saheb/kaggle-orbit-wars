@@ -119,6 +119,19 @@ def set_pressure_precise_resolver(on: bool) -> None:
     _PRESSURE_PRECISE_RESOLVER = bool(on)
 
 
+# Threat-ETA convention (ch20 enemy_mass_soon / ch21 threat_imminence). When OFF (default) the
+# threat ETA is measured to the planet CENTER (Euclidean fleet→planet dist / speed). When ON it is
+# measured to the planet SURFACE (dist − radius), matching the resolver's _fleet_target_idx /
+# _resolve_fleet_targets eta — the center version reads ~½ step under-urgent. Persisted; eval mirrors.
+_THREAT_ETA_SURFACE = os.environ.get("ORBIT_THREAT_ETA_SURFACE") == "1"
+
+
+def set_threat_eta_surface(on: bool) -> None:
+    """Toggle surface (dist−radius) threat ETA for ch20/21 (called by eval/export after load)."""
+    global _THREAT_ETA_SURFACE
+    _THREAT_ETA_SURFACE = bool(on)
+
+
 def _resolve_fleet_targets(fx, fy, fcos, fsin, fspeed, px, py, pr, angvel):
     """Per-fleet lead-aware swept-collision target index, (E,) int (-1 if it hits nothing).
 
@@ -500,11 +513,14 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
             else:
                 headed = (along_ep > 0) & (perp_ep < tgt_r_p[np.newaxis, :] + 1.5)
             enemy_contest = (efships[:, np.newaxis] * headed).sum(axis=0).astype(np.float32)
-            # Threat timing (ch 20-21): ETA-profile the inbound enemy mass. eta = Euclidean
-            # planet-fleet dist / fleet speed (mirrors torch_env _fleet_target_idx eta + the
-            # training path's threat computation byte-for-byte). ch14 sums ALL inbound mass;
-            # these add the WHEN — the only urgency signal in the pairwise bundle.
+            # Threat timing (ch 20-21): ETA-profile the inbound enemy mass. eta = planet-fleet dist
+            # / fleet speed (mirrors torch_env _fleet_target_idx eta + the training path's threat
+            # computation byte-for-byte). ch14 sums ALL inbound mass; these add the WHEN — the only
+            # urgency signal in the pairwise bundle. _THREAT_ETA_SURFACE: subtract the planet radius
+            # so ETA is to the SURFACE (the resolver convention), not the under-urgent center.
             dist_ep = np.sqrt(vx_ep * vx_ep + vy_ep * vy_ep)                              # (E, n_p)
+            if _THREAT_ETA_SURFACE:
+                dist_ep = np.clip(dist_ep - tgt_r_p[np.newaxis, :], 0.0, None)
             eta_ep = np.clip(dist_ep / np.maximum(efspeed[:, np.newaxis], 1e-3), 1.0, None)  # (E, n_p)
             soon = headed & (eta_ep <= _THREAT_ETA_WINDOW)                               # (E, n_p)
             enemy_mass_soon = (efships[:, np.newaxis] * soon).sum(axis=0).astype(np.float32)

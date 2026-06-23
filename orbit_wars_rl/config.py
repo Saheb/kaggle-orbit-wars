@@ -40,6 +40,10 @@ class ModelConfig:
     # lead-aware swept-collision resolver instead of the loose corridor that double-counts a fleet
     # onto every planet in its path. Persisted so eval/export emit the SAME channels.
     pressure_precise_resolver: bool = False
+    # Threat-ETA (ch20 enemy_mass_soon / ch21 threat_imminence): measure fleet arrival to the planet
+    # SURFACE (dist − radius), matching the resolver's _fleet_target_idx convention, instead of the
+    # planet CENTER (which reads ~½ step under-urgent). Persisted so eval/export match training.
+    threat_eta_surface: bool = False
     entity_dim: int = 96
     num_heads: int = 4
     num_layers: int = 3

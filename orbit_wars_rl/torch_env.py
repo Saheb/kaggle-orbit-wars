@@ -276,6 +276,7 @@ class VecTorchEnv:
         roi_enemy_deflate: bool = False,
         zero_roi_channels: bool = False,
         pressure_precise_resolver: bool = False,
+        threat_eta_surface: bool = False,
     ):
         self.num_envs = num_envs
         # Game-phase observation channels (Stage B): append 4 globals (dim 11->15). Must match
@@ -288,9 +289,13 @@ class VecTorchEnv:
         self.zero_roi_channels = bool(zero_roi_channels)
         # Pressure channels: route fleet→planet attribution through the lead-aware swept-collision
         # resolver (_fleet_target_idx, one fleet → one target) instead of the loose corridor that
-        # double-counts. Affects pairwise enemy_contest/friendly_contest/threat only (planet ch12/13
-        # stay on the corridor). Must match features.compute_pairwise (parity-tested).
+        # double-counts. Affects pairwise enemy_contest/friendly_contest/threat AND planet ch12/13
+        # (friendly/enemy pressure). Must match features.compute_pairwise (parity-tested).
         self.pressure_precise_resolver = bool(pressure_precise_resolver)
+        # Threat-ETA convention (ch20/21): measure enemy fleet arrival to the planet SURFACE
+        # (dist − radius, the resolver convention) instead of the under-urgent center. Must match
+        # features.compute_pairwise_features (parity-tested).
+        self.threat_eta_surface = bool(threat_eta_surface)
         # Reinforcement: when True, own planets (except the launch source) are LEGAL
         # targets — ships arriving at a friendly planet add to its garrison (physics
         # already implemented in step()). EDA of top players: ~57% of fleets reinforce;
@@ -1740,6 +1745,9 @@ class VecTorchEnv:
         # features.py compute_pairwise_features ch20-21 byte-for-byte.
         enemy_inc = incoming_pw & enemy_fleet.unsqueeze(1)                # (N, P, F)
         dist_pf = torch.sqrt((vx * vx + vy * vy).clamp(min=1e-9))          # (N, P, F)
+        if self.threat_eta_surface:
+            # ETA to the SURFACE (resolver convention), not the under-urgent center.
+            dist_pf = (dist_pf - r.unsqueeze(2)).clamp(min=0.0)
         f_speed_pf = _ship_speed(f_ships).unsqueeze(1)                     # (N, 1, F)
         eta_pf = (dist_pf / f_speed_pf.clamp(min=1e-3)).clamp(min=1.0)     # (N, P, F)
         soon = enemy_inc & (eta_pf <= _THREAT_ETA_WINDOW)                  # (N, P, F)

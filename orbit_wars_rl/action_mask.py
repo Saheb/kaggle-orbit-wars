@@ -942,6 +942,47 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
             penalty=float(target_sanity_penalty),
         )
 
+    if sufficient_commit_factor > 0.0 and not sample:
+        # Target-decode is top-1. If the top neutral is under-sized and we only veto
+        # post hoc, the slot idles even when rank-2/rank-3 neutrals are valid. Mask
+        # insufficient neutral targets before argmax so decode can fall through.
+        for slot in range(min(masks["owned_count"], target_logits.shape[1])):
+            pidx = int(owned_indices[slot])
+            if pidx >= len(planets):
+                continue
+            src = planets[pidx]
+            for tidx, tgt in enumerate(planets[:target_logits.shape[-1]]):
+                if int(tgt[1]) >= 0:
+                    continue
+                ship_bin = int(torch.argmax(ship_logits_target[0, slot, tidx]).item())
+                ships = _ship_bin_to_count(ship_bin, int(max_ships[slot]), mode=ship_bin_mode)
+                if reserve_frac > 0.0:
+                    ships = min(ships, int(src[5] * (1.0 - reserve_frac)))
+                if ships <= 0 or src[5] < ships:
+                    target_logits[:, slot, tidx] = -1e9
+                    continue
+                dist = math.hypot(tgt[2] - src[2], tgt[3] - src[3])
+                eta = max(1.0, math.ceil(dist / max(_fleet_speed(ships), 1e-6)))
+                projected_defense = tgt[5]
+                tgt_id = int(tgt[0])
+                friendly_inbound = 0.0
+                enemy_inbound = 0.0
+                for f in fleets:
+                    ft = _def_fleet_target(planets, f)
+                    if ft is None or int(ft[0]) != tgt_id:
+                        continue
+                    f_speed = max(_fleet_speed(int(f[6])), 1e-6)
+                    f_dist = math.hypot(tgt[2] - f[2], tgt[3] - f[3])
+                    f_eta = f_dist / f_speed
+                    if f_eta <= eta:
+                        if int(f[1]) == player:
+                            friendly_inbound += f[6]
+                        elif int(f[1]) >= 0:
+                            enemy_inbound += f[6]
+                projected_defense += enemy_inbound
+                if (ships + friendly_inbound) <= projected_defense * sufficient_commit_factor:
+                    target_logits[:, slot, tidx] = -1e9
+
     if sample:
         target_dist = torch.distributions.Categorical(logits=target_logits)
         target_indices = target_dist.sample().cpu().numpy().squeeze(0)

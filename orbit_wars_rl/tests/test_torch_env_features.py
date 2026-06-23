@@ -16,7 +16,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from features import (extract_features, set_roi_enemy_deflate, set_zero_roi_channels,
-                      set_pressure_precise_resolver)
+                      set_pressure_precise_resolver, set_threat_eta_surface)
 from action_mask import compute_action_masks
 from torch_env import VecTorchEnv, to_legacy_obs
 
@@ -193,6 +193,51 @@ def run_pressure_resolver_parity(num_envs: int = 6, after_steps: int = 35):
         f"planet ch12/13 (friendly/enemy pressure) diverge between torch and numpy under the resolver")
 
 
+def run_threat_eta_surface_parity(num_envs: int = 6, after_steps: int = 35):
+    """--threat-eta-surface: ch20 (enemy_mass_soon) / ch21 (threat_imminence) measure fleet arrival
+    to the planet SURFACE (dist−radius) instead of the center. The numpy (features.py) and torch
+    (torch_env.py) paths must apply the −radius identically, or ch20/21 drift between train and eval.
+    Asserts all 22 pairwise channels match with the flag ON, and that the flag actually MOVES ch21
+    vs the center version (so a no-op can't pass silently)."""
+    from torch_env import MAX_OWNED
+    import torch as _t
+
+    def _pairwise(surface):
+        set_threat_eta_surface(surface)
+        env = VecTorchEnv(num_envs=num_envs, num_players=2, device="cpu", threat_eta_surface=surface)
+        env.reset(seeds=list(range(num_envs)))
+        for _ in range(after_steps):
+            env.step({0: _t.randint(0, 2, (num_envs, MAX_OWNED, 3)),
+                      1: _t.randint(0, 2, (num_envs, MAX_OWNED, 3))})
+        worst = 0.0; worst_ch = None; ch21_sum = 0.0
+        for player in (0, 1):
+            vec = env.get_features(player, max_planets=48, max_fleets=128)["pairwise_features"]
+            for i in range(num_envs):
+                obs = to_legacy_obs(env, env_idx=i, player=player)
+                ref = extract_features(obs, player, num_players=2, max_planets=48,
+                                       max_fleets=128)["pairwise_features"].numpy()
+                v = vec[i].numpy()
+                valid = (v[:, :, 9] > 0.5) & (ref[:, :, 9] > 0.5)
+                d = np.abs(v - ref) * valid[:, :, None]
+                if d.max() > worst:
+                    worst = float(d.max()); worst_ch = int(np.unravel_index(d.argmax(), d.shape)[2])
+                ch21_sum += float((v[:, :, 21] * valid).sum())
+        return worst, worst_ch, ch21_sum
+
+    worst_on, ch_on, ch21_on = _pairwise(True)
+    _, _, ch21_off = _pairwise(False)
+    set_threat_eta_surface(False)  # reset global for later tests
+    moved = abs(ch21_on - ch21_off) > 1e-4
+    print(f"  threat_eta_surface: max_pairwise_diff={worst_on:.4f} worst_ch={ch_on} "
+          f"ch21_sum surface={ch21_on:.3f} center={ch21_off:.3f} moved={moved} "
+          f"{'OK' if worst_on < 0.05 and moved else 'FAIL'}")
+    assert worst_on < 0.05, (
+        f"threat-eta-surface parity FAILED: max_pairwise_diff={worst_on:.4f} on ch{ch_on} — "
+        f"torch and numpy disagree on the surface (dist−radius) threat ETA")
+    assert moved, ("threat-eta-surface is a NO-OP: ch21 identical surface vs center — "
+                   "the −radius term is not being applied")
+
+
 def test_feature_parity():
     """pytest entry: asserts VecTorchEnv == extract_features (incl. all 22 pairwise channels)."""
     run_parity(num_envs=4, after_steps=30)
@@ -208,6 +253,11 @@ def test_pressure_resolver_parity():
     run_pressure_resolver_parity(num_envs=6, after_steps=35)
 
 
+def test_threat_eta_surface_parity():
+    """pytest entry: asserts the surface threat-ETA (ch20/21) matches across torch + numpy."""
+    run_threat_eta_surface_parity(num_envs=6, after_steps=35)
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Feature extraction parity: VecTorchEnv.get_features() vs extract_features()")
@@ -219,3 +269,6 @@ if __name__ == "__main__":
     print("-" * 60)
     print("Pressure-resolver parity (--pressure-precise-resolver)")
     run_pressure_resolver_parity(num_envs=6, after_steps=35)
+    print("-" * 60)
+    print("Threat-ETA surface parity (--threat-eta-surface)")
+    run_threat_eta_surface_parity(num_envs=6, after_steps=35)

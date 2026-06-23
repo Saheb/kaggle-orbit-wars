@@ -14,7 +14,8 @@ from config import Config
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, PHASE4_COMPAT_MISSING_KEYS
 from features import (extract_features, _ETA_PROBE_SPEED, set_game_phase_features,
                       set_ablate_roi, set_ablate_channels, set_roi_enemy_deflate,
-                      set_zero_roi_channels, set_pressure_precise_resolver, PAIRWISE_FEATURE_DIM)
+                      set_zero_roi_channels, set_pressure_precise_resolver,
+                      set_threat_eta_surface, PAIRWISE_FEATURE_DIM)
 from action_mask import (compute_action_masks, actions_from_policy, actions_from_target_policy, _fleet_speed,
                          _ship_bin_to_count, _target_intercept_angle, MAX_OWNED_PLANETS)
 # Decisive-mass floor constants — IMPORTED from torch_env so the eval dm_* gap diagnostic uses the
@@ -99,6 +100,8 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     set_zero_roi_channels(cfg.model.zero_roi_channels)
     cfg.model.pressure_precise_resolver = bool(ckpt_cfg.get("pressure_precise_resolver", False))
     set_pressure_precise_resolver(cfg.model.pressure_precise_resolver)
+    cfg.model.threat_eta_surface = bool(ckpt_cfg.get("threat_eta_surface", False))
+    set_threat_eta_surface(cfg.model.threat_eta_surface)
     # Reinforce / sufficient-commit DISCIPLINE: persisted at train time so eval/export mask the
     # SAME way (else the policy self-sabotages). Absent in old ckpts → defaults (0/False) → those
     # still require CLI flags, as before. evaluate_checkpoint uses these unless CLI overrides.

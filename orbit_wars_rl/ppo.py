@@ -575,6 +575,13 @@ class PPOLearner:
                 "reinforce_garrison_floor": float(getattr(model_cfg, "reinforce_garrison_floor", 0.0)),
                 "sufficient_commit_factor": float(getattr(model_cfg, "sufficient_commit_factor", 0.0)),
                 "redundant_target_factor": float(getattr(model_cfg, "redundant_target_factor", 0.0)),
+                # FEATURE-discipline — eval & export must emit the SAME ch12/13/pressure/threat
+                # features the ckpt trained on, or the policy sees a different input than it learned.
+                # (This is the dict that actually lands in torch_step_*.pt — the only one loaders read.)
+                "roi_enemy_deflate": bool(getattr(model_cfg, "roi_enemy_deflate", False)),
+                "zero_roi_channels": bool(getattr(model_cfg, "zero_roi_channels", False)),
+                "pressure_precise_resolver": bool(getattr(model_cfg, "pressure_precise_resolver", False)),
+                "threat_eta_surface": bool(getattr(model_cfg, "threat_eta_surface", False)),
                 # provenance: how the ckpt was trained (eval always clamps, so not an eval-contract field)
                 "ship_overflow_mode": str(getattr(model_cfg, "ship_overflow_mode", "drop")),
                 # reward-shaping provenance only; eval/export do not consume these.

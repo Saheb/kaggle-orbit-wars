@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 
 from torch_env import VecTorchEnv, SHIP_COUNTS
+from action_mask import compute_action_masks, actions_from_target_policy
 
 SRC, TGT = 0, 1            # planet indices: source (mine) and the attack target
 DEF = 30                  # target defense; SHIP_COUNTS[16]=30 (== def), [17]=35 (> def)
@@ -84,6 +85,56 @@ def test_off_lets_underpowered_attack_fire():
     # factor 0.0 (off): the same ships==defense attack fires -> proves the flag blocks it.
     te = _board(0.0)
     assert _fire(te, BIN_EQ) == 100.0 - SHIP_COUNTS[BIN_EQ], "with mask off the attack must fire"
+
+
+def test_target_decode_falls_through_to_sufficient_small_neutral():
+    """Regression for top-1 target decode + post-hoc veto idling.
+
+    The preferred neutral needs 63 ships but this slot's ship head chooses 35 for it,
+    so sufficient-commit must mask that target before argmax and select the lower
+    ranked clearable small neutral instead.
+    """
+    obs = {
+        "player_id": 0,
+        "step": 0,
+        "ship_speed": 6.0,
+        "angular_velocity": 0.0,
+        "planets": [
+            [0, 0, 30.0, 50.0, 3.0, 100.0, 1.0],
+            [1, -1, 70.0, 50.0, 3.0, 63.0, 1.0],
+            [2, -1, 50.0, 70.0, 3.0, 18.0, 1.0],
+        ],
+        "fleets": [],
+    }
+    masks = compute_action_masks(obs, player=0)
+    slots = masks["slot_valid"].shape[1]
+    n_planets = len(obs["planets"])
+    n_bins = len(SHIP_COUNTS)
+
+    fire_logits = torch.full((1, slots, n_planets), -20.0)
+    target_logits = torch.full((1, slots, n_planets), -20.0)
+    ship_logits = torch.full((1, slots, n_planets, n_bins), -20.0)
+
+    target_logits[0, 0, 1] = 10.0  # top target, but under-committed
+    target_logits[0, 0, 2] = 9.0   # fallback target, sufficient
+    fire_logits[0, 0, 1] = 10.0
+    fire_logits[0, 0, 2] = 10.0
+    ship_logits[0, 0, 1, 17] = 10.0  # 35 ships <= 63 neutral defense -> mask
+    ship_logits[0, 0, 2, 13] = 10.0  # 19 ships > 18 neutral defense -> fire
+
+    moves = actions_from_target_policy(
+        fire_logits,
+        target_logits,
+        ship_logits,
+        masks,
+        obs,
+        player=0,
+        sufficient_commit_factor=1.0,
+    )
+
+    assert len(moves) == 1
+    assert moves[0][0] == 0
+    assert moves[0][2] == SHIP_COUNTS[13]
 
 
 if __name__ == "__main__":
