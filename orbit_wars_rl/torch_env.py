@@ -1159,7 +1159,11 @@ class VecTorchEnv:
                                      torch.zeros_like(decay)).sum(dim=1)      # (N, P_tgt)
             rho = ((eta - _DM_ETA_FREE) / _DM_ETA_SCALE).clamp(0.0, 1.0)
             mass[:, :, pl] = m
-            floor[:, :, pl] = (garr + prod * eta + inbound
+            # NEUTRALS DON'T REGROW (engine applies production only to owner != -1) -> no prod
+            # accrual during flight. The staging potential is neutral-only, so the phantom term
+            # under-credited staging toward cheap neutrals. Enemy targets keep prod*eta.
+            prod_floor = torch.where(owner == -1, torch.zeros_like(prod), prod)
+            floor[:, :, pl] = (garr + prod_floor * eta + inbound
                                + self.decisive_mass_beta * rho * enemy_mass + _DM_OVERHEAD)
             eta_out[:, :, pl] = eta
             is_enemy[:, :, pl] = alive & (owner != pl) & (owner >= 0)
@@ -1893,7 +1897,11 @@ class VecTorchEnv:
 
         # Ships-at-arrival features (ch 10-11)
         ships_b = ships_t.expand(-1, MO, -1)                     # (N, MO, P)
-        ships_at_arr = (ships_b + prod_b * 5.0 * eta).clamp(max=500.0) / 200.0
+        # NEUTRALS DON'T REGROW (engine applies production only to owner != -1) -> no prod
+        # accrual during flight. Phantom neutral production priced cheap rotating neutrals as
+        # far more expensive than they are. Mirrors features.py compute_pairwise_features.
+        prod_growth = torch.where(owner_t == -1, torch.zeros_like(prod_b), prod_b * 5.0 * eta)
+        ships_at_arr = (ships_b + prod_growth).clamp(max=500.0) / 200.0
         cap_cost = torch.where(
             owner_t == -1,
             ships_t + 1.0,

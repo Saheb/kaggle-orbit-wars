@@ -778,7 +778,11 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
 
         # Projected ships at arrival: current ships + production accrued during ETA.
         # Tells the model how hard this planet will be to capture by the time we get there.
-        ships_at_arrival = np.minimum(tgt_ships + tgt_prod * eta, 500.0)
+        # NEUTRALS DON'T REGROW (engine applies production only to owner != -1), so they
+        # accrue NO ships during flight — adding prod*eta to them was phantom production that
+        # priced cheap rotating neutrals as far more expensive than they are.
+        prod_growth = np.where(tgt_owner == -1, 0.0, tgt_prod * eta)
+        ships_at_arrival = np.minimum(tgt_ships + prod_growth, 500.0)
         # Capture gap: how much harder (positive) or easier (negative) vs right now.
         cap_gap = ships_at_arrival - tgt_cap_cost
 
