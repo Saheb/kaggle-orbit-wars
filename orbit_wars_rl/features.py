@@ -244,6 +244,20 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
     fleet_owner = np.array([f[1] for f in fleets[:n_fleets]], dtype=np.int32)
     fleet_ships_arr = np.array([f[6] for f in fleets[:n_fleets]], dtype=np.float32)
 
+    # Planet ch12/13 attribution. With the resolver ON, attribute each fleet to its single
+    # lead-aware swept-collision target (mirrors torch_env incoming_pw); OFF keeps the loose
+    # corridor in the loop below. Resolved once over ALL fleets × planets → per-fleet target
+    # array-index (matches the loop's planet index i since both index planets[:max_planets]).
+    pp_resolved_tgt = None
+    if _PRESSURE_PRECISE_RESOLVER and n_fleets > 0 and n_planets > 0:
+        _n_pp = min(n_planets, max_planets)
+        _pp_px = np.array([planets[j][2] for j in range(_n_pp)], dtype=np.float32)
+        _pp_py = np.array([planets[j][3] for j in range(_n_pp)], dtype=np.float32)
+        _pp_pr = np.array([planets[j][4] for j in range(_n_pp)], dtype=np.float32)
+        pp_resolved_tgt = _resolve_fleet_targets(
+            fleet_x, fleet_y, fleet_cos, fleet_sin, _ship_speed_np(fleet_ships_arr),
+            _pp_px, _pp_py, _pp_pr, angular_velocity)             # (n_fleets,) target idx, -1 none
+
     # Pre-compute owned planet positions for connectivity features (vectorised)
     owned_pos = [(p[2], p[3]) for p in planets[:max_planets] if p[1] == player]
     if owned_pos:
@@ -287,11 +301,14 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         friendly_pressure = 0.0
         enemy_pressure = 0.0
         if n_fleets > 0:
-            vx = x - fleet_x
-            vy = y - fleet_y
-            along = vx * fleet_cos + vy * fleet_sin
-            perp = np.abs(vx * fleet_sin - vy * fleet_cos)
-            incoming = (along > 0) & (perp < radius + 1.5)
+            if pp_resolved_tgt is not None:
+                incoming = (pp_resolved_tgt == i)
+            else:
+                vx = x - fleet_x
+                vy = y - fleet_y
+                along = vx * fleet_cos + vy * fleet_sin
+                perp = np.abs(vx * fleet_sin - vy * fleet_cos)
+                incoming = (along > 0) & (perp < radius + 1.5)
             friendly_pressure = float(np.sum(fleet_ships_arr[incoming & (fleet_owner == player)]))
             enemy_pressure = float(np.sum(fleet_ships_arr[incoming & (fleet_owner != player) & (fleet_owner >= 0)]))
 

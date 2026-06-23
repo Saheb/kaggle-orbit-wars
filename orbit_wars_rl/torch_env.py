@@ -1450,15 +1450,11 @@ class VecTorchEnv:
         perp  = torch.abs(vx * fsin.unsqueeze(1) - vy * fcos.unsqueeze(1))
         incoming = (along > 0) & (perp < r.unsqueeze(2) + 1.5) & fleet_alive.unsqueeze(1)
 
-        friend = incoming & (f_owner.unsqueeze(1) == player)
-        enemy  = incoming & (f_owner.unsqueeze(1) != player) & (f_owner.unsqueeze(1) >= 0)
-        friendly_pressure = (f_ships.unsqueeze(1) * friend.float()).sum(dim=2)  # (N, P)
-        enemy_pressure    = (f_ships.unsqueeze(1) * enemy.float()).sum(dim=2)
-
         # Pressure-channel attribution: one fleet → its single lead-aware swept-collision target
-        # (vs the loose corridor `incoming` that double-counts). Used ONLY by the pairwise pressure
-        # channels (enemy_contest / friendly_contest / threat); planet ch12/13 above keep the
-        # corridor. Mirrors features._resolve_fleet_targets (parity-tested).
+        # (vs the loose corridor `incoming` that double-counts). With the resolver ON it feeds BOTH
+        # the planet pressure channels (ch12/13 below) and the pairwise pressure channels
+        # (enemy_contest / friendly_contest / threat); with it OFF both keep the corridor. Mirrors
+        # features._resolve_fleet_targets (parity-tested).
         if self.pressure_precise_resolver:
             # _fleet_target_idx runs over ALL self.fleets (256); the feature path caps to the first
             # F (=max_fleets). Resolution is per-fleet (geometry only) so slicing is exact.
@@ -1467,8 +1463,13 @@ class VecTorchEnv:
             incoming_pw = (_f_tgt.unsqueeze(1) == _p_ar) & fleet_alive.unsqueeze(1)  # (N, P, F)
         else:
             incoming_pw = incoming
-        friendly_pressure_pw = (f_ships.unsqueeze(1)
-                                * (incoming_pw & (f_owner.unsqueeze(1) == player)).float()).sum(dim=2)
+
+        # Planet ch12/13: friendly / enemy inbound mass per planet, attributed via incoming_pw.
+        friend = incoming_pw & (f_owner.unsqueeze(1) == player)
+        enemy  = incoming_pw & (f_owner.unsqueeze(1) != player) & (f_owner.unsqueeze(1) >= 0)
+        friendly_pressure = (f_ships.unsqueeze(1) * friend.float()).sum(dim=2)  # (N, P)
+        enemy_pressure    = (f_ships.unsqueeze(1) * enemy.float()).sum(dim=2)
+        friendly_pressure_pw = friendly_pressure  # pairwise friendly_contest reuses the same attribution
 
         # Capture cost
         capture_cost = torch.where(

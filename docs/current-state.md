@@ -5,70 +5,83 @@ diagnosis) and [`eval_box.md`](eval_box.md) (the GCP eval box). Newest at top.
 
 ---
 
-## ⭐ ACTIVE: redundant-target veto A/B (two parallel Jarvis runs)
+## ⭐ ACTIVE: roi-deflation + pressure-resolver A/B (two parallel Jarvis runs)
 
-**Hypothesis:** the 2p agent wastes fleets *redundantly reinforcing already-won captures*
-(a planet whose in-flight friendly mass already clears it) instead of taking a new neutral —
-the "capital efficiency" leak. A **redundant-target mask** vetoes such launches so the policy
-retargets the spare.
+**Lineage:** root cause in replay `submission_analysis/81454632.json` (we LOST as player 1) —
+the **target head chases cheap-but-contested neutrals** into second-arrival traps (our 32 ships
+fired at a far 8-ship neutral the enemy captured first, crashed into 41 defenders, took nothing;
+a near 31-ship clean neutral our 32 would have taken sat untouched). Diagnosis: the pairwise
+`roi_20/roi_50` channels (ch12/13) are deflated by *friendly* inbound only, **never enemy
+contest** — so a cheap neutral an enemy fleet captures first reads as identically attractive
+(+1.00) to a clean win. The contest-aware channels (ch17 reactive_roi, ch19 keepability, ch14/20/21)
+all flag it correctly; the head leans on the raw-cheapness roi instead. Two fixes built behind
+flags (default off, persisted + eval/export-synced like game-phase):
+- `--roi-enemy-deflate` — deflate roi_20/50 by enemy contest (mirror of the friendly term).
+- `--zero-roi-channels` — zero ch12/13 entirely (test redundancy given reactive_roi_40 ch17).
 
-**Two runs, identical config except the one flag** (clean A/B):
+**First A/B (`roidefl1` deflate / `roizero1` zero) — PREEMPTED at 1.57M** (spot). roidefl1 tracked
+Ajay 41.8/49.2/46.1% over 0.5/1.0/1.57M; roizero1 ~41%. ⚠️ **those roidefl1 numbers are suspect** —
+the checkpoint config didn't persist `roi_enemy_deflate` (launched just before the persist line
+landed), so eval ran with deflation OFF on a deflation-ON policy (train/eval mismatch).
+**Backfilled `roi_enemy_deflate=True` into the 3 ckpts + re-evaling correctly locally** (latest→back):
+`gpu_run_artifacts/roidefl1/local_eval_correct_summary.txt`. roizero1 dropped.
 
-| run | instance | IP | delta vs the other | destroy |
+**Current A/B — both resume `roidefl1@1.57M`, differ by ONE flag:**
+
+| run | instance | IP | delta | destroy |
 |---|---|---|---|---|
-| `phase4fs2` | 432127 | 217.18.55.81 | **no veto** (baseline) | `jl destroy 432127 --yes` |
-| `phase4fs_rv` | 432208 | 217.18.55.102 | **`--redundant-target-factor 1.0`** | `jl destroy 432208 --yes` |
+| `roidefl2` | 432364 | 217.18.55.81 | `--roi-enemy-deflate` (resolver OFF) | `jl destroy 432364 --yes` |
+| `roideflpr1` | 432365 | 217.18.55.120 | deflate **+ `--pressure-precise-resolver`** | `jl destroy 432365 --yes` |
 
-Both: resume base 4fs **7.34M** (Ajay peak 49.6%), externals **producer_v2 + deb** (fresh pool),
-**LR 1e-4 (2×)**, 10M steps, A100-80GB spot. Launchers + run scripts in
-`gpu_run_artifacts/{phase4fs2,phase4fs_rv}/`.
+Both: --roi-enemy-deflate, externals producer_v2+deb, LR 1e-4, gate2, sufficient-commit 1.0,
+game-phase, 10M, A100-80GB spot. **Read = roideflpr1 − roidefl2** = the resolver fix's marginal
+effect on the deflate arm. Tripwire: Ajay must not drop. Scripts in
+`gpu_run_artifacts/{roidefl2,roideflpr1}/`.
 
-### Ajay WR so far (256-game box panels, matched steps)
+---
 
-| step | `phase4fs2` (no veto) | `phase4fs_rv` (veto) |
+## Feature-accuracy audit (2026-06-23) — train/eval consistency
+
+Swept the feature surface (features.py numpy ↔ torch_env.py torch). **All 22 pairwise channels
+verified byte-identical across both paths** (no numpy↔torch divergence); the bug class is
+"feature models the world wrong, but *consistently*" (so the model trained on it and the parity
+test stayed green).
+
+| # | finding | status |
 |---|---|---|
-| 0.5M | 51.6 | — |
-| 1.05M | — | 44.5 |
-| **1.57M** | **41.4** | **45.3** ← veto +3.9pp |
-| 2.1M | 43.4 | (running) |
-| 4.2M | 39.8 | — |
-| 4.7M | 45.3 | — |
-| 5.2M | 43.0 | — |
+| 1 | **Pressure channels (ch14 enemy_contest / ch19 keepability / ch20 enemy_mass_soon / ch21 threat_imminence) used the deprecated ~85% loose corridor** (perp<r+1.5, launch heading, no orbital lead, double-counts a fleet onto every planet in its path) vs the 98.4% `_fleet_target_idx` resolver the veto/reward already use | **FIXED** behind `--pressure-precise-resolver` (live in roideflpr1). Removes ~42% phantom over-count in enemy_contest; parity 0.0000 (numpy `_resolve_fleet_targets` == torch). |
+| 1b | **Planet-level pressure features ch12/13** (`friendly_pressure` / `enemy_pressure`) STILL use the corridor — left out of #1 to keep the blast radius tight (they're train/eval-consistent, both paths corridor, so no parity break). For full consistency, fold them under the SAME `--pressure-precise-resolver` flag. | **FIXED** — ch12/13 now route through `incoming_pw` (torch) / `_resolve_fleet_targets` (numpy) under the existing flag; no new flag/wiring/dim change. Measured: corridor→resolver drops ch12/13 abs-sum ~42%/25% (same over-count as #1); planet parity 0.0000 (now hard-asserted in `run_pressure_resolver_parity`). |
+| 2 | **Phantom neutral production** — roi/cap-cost adds `prod·eta` to neutrals, which don't regrow (confirmed: 4 neutrals flat 31 ships for 18 steps in the replay) | **queued** (feature change → retrain; interacts with #1 + roi; raises far-neutral ROI) |
+| 3 | **Threat-ETA uses planet center not surface** (omits `−pr` that the resolver uses) → threat reads ~½ step under-urgent | **queued** (minor; consistent train/eval) |
+| 4 | **`SHIP_COUNTS`/`NUM_SHIP_BINS`/`FRACTION_BIN_VALUES` hand-triplicated** across action_mask/model/torch_env (identical now, silent landmine) | **FIXED** — single source in action_mask, derived elsewhere |
+| 5 | **Pairwise parity test only asserted *planet* feats** — the 22 pairwise channels (where #1/#2 live) were untested | **FIXED** — all 22 channels + roi flags + resolver now hard-asserted in `tests/test_torch_env_features.py` (pytest-collected) |
 
-**Early read (noisy, ~1 SE):** `phase4fs_rv` tracks *at or above* `phase4fs2` at matched steps —
-directionally consistent with the head-to-head edge. **Caveat:** *both* runs dipped below the
-49.6% baseline into the low-40s — the 2× LR + producer_v2 curriculum causes an early dip
-(adaptation or **win-starvation** — producer_v2 may be too hard, [[feedback_win_starvation]]).
-The A/B signal is the *relative* fs_rv−fs2 gap; if both keep sliding, the curriculum/LR is the
-culprit, not the veto. Training health: clip ~0.37 (high but EV ~0.88 / KL ~0.02 / estop 0 =
-benign adaptation under 2× LR).
+#1/#4/#5 committed (`72b20ba`, `80244cb`). #2/#3 to stack on whichever roi arm wins as a bundled
+"feature-accuracy pass". All flags are checkpoint-compatible (no dim change), default-off,
+persisted + eval/export-synced.
 
-### The veto, decode-only (what motivated the training fold)
+**#1b — DONE (gated under the existing `pressure_precise_resolver` flag, no new flag):**
+- **torch** `torch_env.py` get_features: moved the `incoming_pw` block above `friend`/`enemy` and
+  derived `friendly_pressure`/`enemy_pressure` (planet ch12/13) from it; `friendly_pressure_pw`
+  now just aliases `friendly_pressure` (same attribution). Corridor preserved when flag off.
+- **numpy** `features.py`: precompute `_resolve_fleet_targets(...)` ONCE before the planet loop →
+  per-fleet target array-index; in the loop `incoming = (pp_resolved_tgt == i)` when the flag is
+  on, else the corridor. (Planet array index `i` == resolver target index since both index
+  `planets[:max_planets]`.)
+- **parity** `tests/test_torch_env_features.py`: `run_pressure_resolver_parity` now also diffs the
+  full **planet** feature vector under the flag (`max_planet_diff`, hard-asserted) — ch12/13 locked
+  alongside the pairwise channels. `3 passed`; planet diff 0.0000.
+- **wiring**: none — reuses the persisted `pressure_precise_resolver` config + eval/export sync.
+- Verified: corridor→resolver drops ch12/13 abs-sum ~42%/25% (the same phantom over-count as #1);
+  checkpoint-compatible, default-off. Lands consistency: no more two-ways-to-measure-the-same-thing
+  in one feature vector. (Not yet committed — local edits.)
 
-Tested as an **inference-time** target-logit mask first (redirects, doesn't drop). Results
-(256-game panels in `gpu_run_artifacts/redundant_veto_ab/`):
+### Prior thread (concluded): redundant-target veto A/B
 
-| variant | vs Ajay | h2h vs no-veto |
-|---|---|---|
-| baseline | **49.6%** | — |
-| static-floor veto | 46.1% | **53.5%** |
-| reactive-floor veto | 45.3% | 53.1% |
-
-Decode-only: **−3.5pp vs Ajay but +3pp head-to-head** (both floors). The Ajay loss is the
-**train/eval mismatch** (policy never trained under the mask → its committed fleets get
-overridden). Reactive floor (adds `β·ρ·reachable_enemy_mass`) masks a strict *subset* → less
-effect, no better → **static floor chosen** for the training fold. Hence: fold into **training**
-so the policy adapts (this A/B).
-
-### Implementation (folded into training behind a flag)
-
-`--redundant-target-factor` (default 0 = off, everything else unchanged). 5-file change:
-`config.py` (ModelConfig field) · `ppo.py` (persist to ckpt config) · `torch_env.py`
-(`_apply_actions` `can_fire` veto, mirrors `sufficient_commit`; static floor =
-`friendly_inbound > (garrison + enemy_inbound)·factor`) · `train_torch.py` (CLI + auto-load +
-env) · `eval.py` (auto-load from ckpt for parity). Verified: 22 existing mask tests pass +
-new `tests/test_redundant_target.py` (3 pass). Decode path also still env-gated via
-`OW_REDUNDANT_TGT_FACTOR` / `OW_REDUNDANT_REACTIVE` (the A/B harness).
+`phase4fs2` (432127, no veto) / `phase4fs_rv` (432208, `--redundant-target-factor 1.0`) — both
+dead (preempted). Decode-only test was −3.5pp vs Ajay but +3pp h2h (train/eval mismatch → folded
+into training). `--redundant-target-factor` is in the codebase (config/ppo/torch_env/train/eval +
+`tests/test_redundant_target.py`). Superseded by the roi-deflation thread above.
 
 ---
 
@@ -76,15 +89,19 @@ new `tests/test_redundant_target.py` (3 pass). Decode path also still env-gated 
 
 - **GCP box** `orbit-wars-eval` (n2-standard-32, asia-south1-a) — sharded Ajay panels ~4 min.
   Bills ~$1.55/hr: `gcloud compute instances delete orbit-wars-eval --zone=asia-south1-a` when done.
-- **`auto_eval_loop` daemon** (local, pid varies) tracks `phase4fs2:fs2` + `phase4fs_rv:rv` +
-  `roidefl1:roidefl1` + `roizero1:roizero1` (the two roi-channel arms, 2026-06-23),
-  evals each new checkpoint on the box, appends `gpu_run_artifacts/<run>/eval_ajay_1200.csv`.
-  NB: box code re-synced 2026-06-23 for the roi-flag eval auto-load (`set_roi_enemy_deflate`/
-  `set_zero_roi_channels`) — older box snapshots would eval the roi runs without the transform.
-  Start/stop: see [`eval_box.md`](eval_box.md) §7. **Local `_sync` watchers** kept (land
-  checkpoints); local `_eval` watchers **killed** (the slow 68-min local panels).
-- **Gotcha fixed:** box needs `gpu_run_artifacts/<run>/checkpoints/` pre-created or the daemon's
-  rsync fails (mkdir won't make nested parents).
+- **`auto_eval_loop` daemon** (local, pid varies) now tracks `roidefl2:roidefl2` +
+  `roideflpr1:roideflpr1`, evals each new checkpoint on the box, appends
+  `gpu_run_artifacts/<run>/eval_ajay_1200.csv`. **Box code re-synced 2026-06-23 for BOTH the
+  roi-flag and the pressure-resolver eval auto-load** (`set_roi_enemy_deflate` /
+  `set_pressure_precise_resolver` / `_resolve_fleet_targets`) — older box snapshots would eval
+  roideflpr1 without the resolver transform. Start/stop: [`eval_box.md`](eval_box.md) §7.
+  **Local `_sync` watchers** kept (land checkpoints); local `_eval` watchers **killed** (slow).
+- **roidefl1 correct re-eval (one-off, local):** `/tmp/roidefl1_local_eval.sh` runs full panels
+  latest→back on the backfilled ckpts → `gpu_run_artifacts/roidefl1/local_eval_correct_summary.txt`.
+- **Gotcha:** box needs `gpu_run_artifacts/<run>/checkpoints/` pre-created or the daemon's rsync
+  fails (mkdir won't make nested parents). **Persist gotcha:** a run launched before its flag's
+  persist line lands won't round-trip the flag → eval runs the wrong feature regime (this bit
+  roidefl1; backfill the ckpt config or pass the flag explicitly).
 
 ---
 
@@ -120,9 +137,10 @@ Ajay to ~2%** — abandoned; producer dominates 4p (won 100% vs the RL agents in
 ## Cleanup checklist (when done)
 
 ```bash
-jl destroy 432127 --yes     # phase4fs2
-jl destroy 432208 --yes     # phase4fs_rv
+jl destroy 432364 --yes     # roidefl2 (deflate)
+jl destroy 432365 --yes     # roideflpr1 (deflate + pressure-resolver)
 pkill -f auto_eval_loop.sh                                  # stop daemon
+pkill -f roidefl1_local_eval.sh                             # stop local roidefl1 re-eval loop
 bash gpu_run_artifacts/run_watchers.sh stop                 # stop _sync watchers
 gcloud compute instances delete orbit-wars-eval --zone=asia-south1-a   # eval box
 ```

@@ -147,7 +147,8 @@ def run_pressure_resolver_parity(num_envs: int = 6, after_steps: int = 35):
     """--pressure-precise-resolver: the numpy resolver (features._resolve_fleet_targets) must match
     the torch resolver (torch_env._fleet_target_idx) so the pressure channels (ch14/19/20/21 + the
     friendly-contest deflation of ch12/13) stay in train/eval parity. Compares ALL 22 pairwise
-    channels with the flag ON; any one fleet resolving differently flips enemy_contest by the fleet
+    channels AND the planet features (the resolver now also drives planet ch12/13 friendly/enemy
+    pressure) with the flag ON; any one fleet resolving differently flips enemy_contest by the fleet
     mass and fails here. This is the parity gate for the swept-collision feature path."""
     from torch_env import MAX_OWNED
     import torch as _t
@@ -160,24 +161,36 @@ def run_pressure_resolver_parity(num_envs: int = 6, after_steps: int = 35):
                   1: _t.randint(0, 2, (num_envs, MAX_OWNED, 3))})
     worst = 0.0
     worst_ch = None
+    worst_planet = 0.0
     for player in (0, 1):
-        vec = env.get_features(player, max_planets=48, max_fleets=128)["pairwise_features"]
+        vfeats = env.get_features(player, max_planets=48, max_fleets=128)
+        vec = vfeats["pairwise_features"]
+        vec_pf = vfeats["planet_features"]
         for i in range(num_envs):
             obs = to_legacy_obs(env, env_idx=i, player=player)
-            ref = extract_features(obs, player, num_players=2, max_planets=48,
-                                   max_fleets=128)["pairwise_features"].numpy()
+            rfeats = extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128)
+            ref = rfeats["pairwise_features"].numpy()
             v = vec[i].numpy()
             valid = (v[:, :, 9] > 0.5) & (ref[:, :, 9] > 0.5)
             d = np.abs(v - ref) * valid[:, :, None]
             if d.max() > worst:
                 worst = float(d.max())
                 worst_ch = int(np.unravel_index(d.argmax(), d.shape)[2])
+            # Planet features: ch12/13 (friendly/enemy pressure) now resolver-driven. Assert the
+            # full planet vector so the planet path can't silently drift from the pairwise one.
+            pd = np.abs(vec_pf[i].numpy() - rfeats["planet_features"].numpy())
+            worst_planet = max(worst_planet, float(pd.max()))
     set_pressure_precise_resolver(False)  # reset global for later tests
     print(f"  pressure_precise_resolver: max_pairwise_diff={worst:.4f} worst_ch={worst_ch} "
-          f"[torch _fleet_target_idx == numpy _resolve_fleet_targets] {'OK' if worst < 0.05 else 'FAIL'}")
+          f"max_planet_diff={worst_planet:.4f} "
+          f"[torch _fleet_target_idx == numpy _resolve_fleet_targets] "
+          f"{'OK' if max(worst, worst_planet) < 0.05 else 'FAIL'}")
     assert worst < 0.05, (
         f"pressure-resolver parity FAILED: max_pairwise_diff={worst:.4f} on ch{worst_ch} — "
         f"torch and numpy resolvers disagree on at least one fleet")
+    assert worst_planet < 0.05, (
+        f"pressure-resolver PLANET parity FAILED: max_planet_diff={worst_planet:.4f} — "
+        f"planet ch12/13 (friendly/enemy pressure) diverge between torch and numpy under the resolver")
 
 
 def test_feature_parity():
