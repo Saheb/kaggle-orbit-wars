@@ -1238,6 +1238,9 @@ def actions_from_sampled_policy(fire_action, angle_action, ship_action, masks, o
     return moves
 
 
+# SINGLE SOURCE OF TRUTH for the ship-bin action space. model.py and torch_env.py import these
+# (NUM_SHIP_BINS = len(SHIP_COUNTS)); export_agent.py inlines this module body, so they must stay
+# defined here (not imported) for the standalone kaggle agent. Do NOT re-copy these elsewhere.
 SHIP_COUNTS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 19, 22, 26, 30, 35, 42, 50, 60, 72, 86, 102, 122, 145, 173, 206, 245, 290, 350, 420]
 # Fraction-bin values for ship_bin_mode="fraction" (10 bins on (0,1]):
 # bin i → (i+1)/10 fraction of source's max_ships.

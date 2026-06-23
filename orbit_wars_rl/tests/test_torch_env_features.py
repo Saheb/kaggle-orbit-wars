@@ -56,6 +56,24 @@ def run_parity(num_envs: int = 4, after_steps: int = 30):
                     max_err = m
                     worst = ("planet", i, np.unravel_index(diff.argmax(), diff.shape))
 
+            # Compare ALL 22 pairwise channels (torch _compute_pairwise vs numpy
+            # compute_pairwise_features). Only entries valid in BOTH paths (ch9 flag) — invalid
+            # (slot,target) cells are zeroed and can differ in padding. This is the surface where
+            # the phantom-production / corridor inconsistencies live; lock it so it can't drift.
+            if "pairwise_features" in ref:
+                pw_v = vec_feats["pairwise_features"][i].numpy()
+                pw_r = ref["pairwise_features"].numpy()
+                valid = (pw_v[:, :, 9] > 0.5) & (pw_r[:, :, 9] > 0.5)
+                pdiff = np.abs(pw_v - pw_r) * valid[:, :, None]
+                perr = (pdiff > 0.05).sum()
+                if perr > 0:
+                    total_err += perr
+                    m = pdiff.max()
+                    if m > max_err:
+                        max_err = m
+                        ch = int(np.unravel_index(pdiff.argmax(), pdiff.shape)[2])
+                        worst = ("pairwise", i, f"ch{ch}")
+
             # Fleet features
             ff_v = vec_feats["fleet_features"][i].numpy()
             ff_r = ref["fleet_features"].numpy()
@@ -82,7 +100,10 @@ def run_parity(num_envs: int = 4, after_steps: int = 30):
                 total_err += 1
                 print(f"  player={player} env={i}: owned_count v={oc_v} r={oc_r}")
 
-        print(f"player={player}: total_err={total_err}  max_planet_diff={max_err:.4f}  worst={worst}")
+        print(f"player={player}: total_err={total_err}  max_diff={max_err:.4f}  worst={worst}")
+        assert total_err == 0, (
+            f"feature parity FAILED for player={player}: {total_err} cells diverge "
+            f"(max_diff={max_err:.4f}, worst={worst}) between VecTorchEnv and extract_features")
 
 
 def run_roi_flag_parity(num_envs: int = 4, after_steps: int = 30):
@@ -116,8 +137,19 @@ def run_roi_flag_parity(num_envs: int = 4, after_steps: int = 30):
                     zero_ok = False
         on(False)  # reset global so later tests/imports are unaffected
         tag = "ch12/13 zeroed both paths" if name == "zero_roi_channels" else "torch==numpy"
-        status = "OK" if (worst < 0.02 and zero_ok) else "FAIL"
-        print(f"  {name}: max_ch12/13_diff={worst:.4f}  zero_ok={zero_ok}  [{tag}] {status}")
+        ok = (worst < 0.02 and zero_ok)
+        print(f"  {name}: max_ch12/13_diff={worst:.4f}  zero_ok={zero_ok}  [{tag}] {'OK' if ok else 'FAIL'}")
+        assert ok, f"roi flag parity FAILED for {name}: max_ch12/13_diff={worst:.4f} zero_ok={zero_ok}"
+
+
+def test_feature_parity():
+    """pytest entry: asserts VecTorchEnv == extract_features (incl. all 22 pairwise channels)."""
+    run_parity(num_envs=4, after_steps=30)
+
+
+def test_roi_flag_parity():
+    """pytest entry: asserts roi-deflate / zero-roi flags match across torch + numpy paths."""
+    run_roi_flag_parity(num_envs=4, after_steps=30)
 
 
 if __name__ == "__main__":
