@@ -532,3 +532,29 @@ shared:  out-massed%, dm<50 cross, planets@16/32/50/100, held-out Ajay
    `--checkpoint` runs the oracle/noop self-validation.
 7. From-scratch BC → PPO. **Run the Step-6 gate on the BC'd policy (hard stop) before PPO**, then
    the promotion gate (§11) before any `wave_head`.
+
+   **2026-06-21 — target-resolution label fix + all-wins BC seed rebuild (in progress).**
+   The launch→target resolver used to assign every teacher launch its target-head label AND its
+   save/attack `kind` (`bc._find_target_planet_index`, imported by every builder) was the OLD
+   min-angular-error matcher that also projected orbits from the absolute `step` (= 0 in Jake
+   replays) → **target ~56% correct, kind ~76%**. The deployed seed was thus trained to aim at the
+   wrong planet ~44% of the time, and the `--no-save-quality-filter`/save-quality curation ran on a
+   ~24%-wrong save/attack tag. FIXED to the **lead-aware swept-collision** resolver (project each
+   candidate to its orbit position at the fleet ETA, keep the min-ETA planet the heading reaches
+   within radius — mirrors the aimer; step-agnostic). Ported into `bc.py` (labels) AND `eval.py`
+   (`_lead_collision_target`/`_dm_fleet_target`/`game_conversion`, metrics) AND
+   `torch_env._fleet_target_idx` (decisive-mass reward/features). ⚠️ the torch_env change alters the
+   reward/feature distribution → a decmass PPO run needs a fresh SPS check. Validation: new
+   `tests/test_fleet_target_lead.py` (vec==scalar parity) + `tests/test_target_resolution_groundtruth.py`
+   (simulates each launch with the ENGINE's own `swept_pair_hit`): bc==eval agree on **100%** of
+   launches, **~2× the old accuracy** (90% on near/clear launches; residual is continuous-vs-discrete
+   tie-break on cluttered paths), matching the 95.7% real-replay figure. See
+   project_target_resolution_metric_bug.
+   - **Seed rebuild:** the Jake replay-action BC warmstart (the Step-7 seed; distinct from the §7
+     wave-planner labels) rebuilt on the FIXED labels from **all 442 Jake wins** (not just the 313
+     decisive), recipe `--mode winner --game-phase-features --no-save-quality-filter` (filters OFF;
+     gate2/cooldown3 kept = decode contract). → **33,035 samples** (pairwise 24×48×41, global-15),
+     fire rate 13.09% → **`--fire-pos-weight 6.64`**. Train: `bc.py … --allow-reinforce
+     --reinforce-gate-min-planets 2 --reverse-edge-cooldown 3 --sufficient-commit-factor 0` (no-veto
+     per §10.5/§11). Running on a Jarvis A100-80GB (id 430926); early metrics healthy (target top1
+     ~0.87, Phase-A gate passing). Gate/val + vs-random sanity TBD on completion.
