@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from analyze_producer_action_ranking import ActionCandidate
+from producer_action_ranking import ActionCandidate
 from orbit_wars_rl.scripts.build_ajay_action_preferences import _negative_candidates
 
 

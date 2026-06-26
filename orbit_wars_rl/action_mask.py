@@ -1224,7 +1224,7 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
 
 
 def _enumerate_sane_target_candidates(obs: dict) -> dict:
-    from orbit_wars_rl.analyze_producer_action_ranking import _enumerate_attack_candidates
+    from orbit_wars_rl.producer_action_ranking import _enumerate_attack_candidates
 
     return _enumerate_attack_candidates(obs)
 

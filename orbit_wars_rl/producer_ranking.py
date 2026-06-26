@@ -14,7 +14,7 @@ Primary use: check whether our failure is mostly:
 
 Example:
   source /Users/saheb/home/.venv/bin/activate
-  python orbit_wars_rl/analyze_producer_ranking.py \
+  python orbit_wars_rl/producer_ranking.py \
     --checkpoint gpu_run_artifacts/jarvis/checkpoints/torch_step_5242880_rev36_20260605_024319.pt \
     --replay-dir /tmp/ajay_seed_replays \
     --player-slot 0 \

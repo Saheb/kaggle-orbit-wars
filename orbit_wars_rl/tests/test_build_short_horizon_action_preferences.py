@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from analyze_producer_action_ranking import ActionCandidate
+from producer_action_ranking import ActionCandidate
 import orbit_wars_rl.scripts.build_short_horizon_action_preferences as short_horizon
 
 

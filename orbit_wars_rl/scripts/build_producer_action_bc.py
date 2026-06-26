@@ -26,8 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from orbit_wars_rl.analyze_producer_action_ranking import _enumerate_attack_candidates
-from orbit_wars_rl.analyze_producer_ranking import infer_player_slot
+from orbit_wars_rl.producer_action_ranking import _enumerate_attack_candidates
+from orbit_wars_rl.producer_ranking import infer_player_slot
 from orbit_wars_rl.audit_submission_targets import normalize_obs, resolve_replay_paths
 from orbit_wars_rl.bc import _find_ship_bin, trajectory_to_training_sample
 

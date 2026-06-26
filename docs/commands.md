@@ -130,7 +130,7 @@ method test like VDN):
 ```bash
 source /Users/saheb/home/.venv/bin/activate
 
-python orbit_wars_rl/analyze_producer_ranking.py \
+python orbit_wars_rl/producer_ranking.py \
   --checkpoint gpu_run_artifacts/jarvis/checkpoints/<checkpoint>.pt \
   --replay-dir /tmp/ajay_seed_replays \
   --player-slot 0 \
@@ -154,7 +154,7 @@ Use it to check whether failures come from:
 ```bash
 source /Users/saheb/home/.venv/bin/activate
 
-python orbit_wars_rl/analyze_producer_action_ranking.py \
+python orbit_wars_rl/producer_action_ranking.py \
   --replay-dir /tmp/ajay_seed_replays \
   --player-slot 0 \
   --step-limit 40 \

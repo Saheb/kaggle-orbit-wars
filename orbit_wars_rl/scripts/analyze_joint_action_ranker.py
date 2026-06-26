@@ -14,12 +14,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from orbit_wars_rl.action_mask import compute_action_masks
-from orbit_wars_rl.analyze_producer_action_ranking import (
+from orbit_wars_rl.producer_action_ranking import (
     _enumerate_attack_candidates,
     _score_replay_move,
     action_extra_features,
 )
-from orbit_wars_rl.analyze_producer_ranking import infer_player_slot
+from orbit_wars_rl.producer_ranking import infer_player_slot
 from orbit_wars_rl.audit_submission_targets import normalize_obs, resolve_replay_paths
 from orbit_wars_rl.config import Config
 from orbit_wars_rl.features import extract_features
