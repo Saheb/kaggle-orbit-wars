@@ -173,7 +173,7 @@ This compares replay launches against Producer-best **whole actions**:
 ```bash
 source /Users/saheb/home/.venv/bin/activate
 
-python orbit_wars_rl/build_producer_target_bc.py \
+python -m orbit_wars_rl.research.build_producer_target_bc \
   --replay-dir /tmp/sub53359633_eps \
   --player-name Saheb \
   --step-limit 40 \
@@ -444,7 +444,7 @@ PY
 Use this as the default daily workflow after a submission has enough episodes.
 
 ```bash
-orbit_wars_rl/.venv/bin/python orbit_wars_rl/review_submission_targets.py \
+orbit_wars_rl/.venv/bin/python -m orbit_wars_rl.research.review_submission_targets \
   --submission-id 53359633 \
   --checkpoint seed_checkpoints/rev31_31M_resume.pt \
   --player-name Saheb
@@ -463,14 +463,14 @@ Outputs go to:
 Useful flags:
 ```bash
 # only 2-player losses
-orbit_wars_rl/.venv/bin/python orbit_wars_rl/review_submission_targets.py \
+orbit_wars_rl/.venv/bin/python -m orbit_wars_rl.research.review_submission_targets \
   --submission-id 53359633 \
   --checkpoint seed_checkpoints/rev31_31M_resume.pt \
   --player-name Saheb \
   --only-two-player
 
 # cap review size and focus on the opening
-orbit_wars_rl/.venv/bin/python orbit_wars_rl/review_submission_targets.py \
+orbit_wars_rl/.venv/bin/python -m orbit_wars_rl.research.review_submission_targets \
   --submission-id 53359633 \
   --checkpoint seed_checkpoints/rev31_31M_resume.pt \
   --player-name Saheb \
@@ -536,7 +536,7 @@ for a fixed opponent/seed slice, audit them, and print checkpoint-to-checkpoint
 tempo metrics in one command.
 
 ```bash
-orbit_wars_rl/.venv/bin/python orbit_wars_rl/compare_tempo_checkpoints.py \
+orbit_wars_rl/.venv/bin/python -m orbit_wars_rl.research.compare_tempo_checkpoints \
   --checkpoints \
     gpu_run_artifacts/jarvis_rev33/checkpoints/torch_step_1572864_rev33_20260604_144227.pt \
     gpu_run_artifacts/jarvis_rev33/checkpoints/torch_step_3145728_rev33_20260604_144227.pt \
@@ -580,7 +580,7 @@ It can also mix in the earlier target-relabel failure dataset so the resulting
 auxiliary BC still carries the tempo-target correction.
 
 ```bash
-orbit_wars_rl/.venv/bin/python orbit_wars_rl/build_conversion_bc.py \
+orbit_wars_rl/.venv/bin/python -m orbit_wars_rl.research.build_conversion_bc \
   --teacher-replay-dir /tmp/orbit_episodes \
   --teacher-agent "Isaiah @ Tufa Labs" \
   --teacher-agent "Hober Malloc" \
@@ -697,11 +697,11 @@ python -m pytest orbit_wars_rl/tests/ -x -q
 | `orbit_wars_rl/opponent_pool.py` | Self-play pool + PFSP sampling |
 | `orbit_wars_rl/export_agent.py` | Export checkpoint → submission .py |
 | `orbit_wars_rl/bc.py` | BC loss (lazily imported by ppo.py when --il-lambda set) |
-| `orbit_wars_rl/build_producer_target_bc.py` | Build producer-labeled target-only BC dataset from replay launches |
-| `orbit_wars_rl/build_conversion_bc.py` | Build conversion-focused BC dataset (fast-capture teacher + failure relabels) |
-| `orbit_wars_rl/compare_tempo_checkpoints.py` | Compare first-capture/conversion metrics across checkpoints on fixed Ajay seeds |
-| `orbit_wars_rl/eval_joint_opening.py` | Opening-only live prototype: joint action scorer picks early moves, base policy handles the rest |
-| `orbit_wars_rl/step_firep.py` | Compare FireP at steps 0-3 across multiple checkpoints (opening aggression) |
+| `orbit_wars_rl/research/build_producer_target_bc.py` | Build producer-labeled target-only BC dataset from replay launches |
+| `orbit_wars_rl/research/build_conversion_bc.py` | Build conversion-focused BC dataset (fast-capture teacher + failure relabels) |
+| `orbit_wars_rl/research/compare_tempo_checkpoints.py` | Compare first-capture/conversion metrics across checkpoints on fixed Ajay seeds |
+| `orbit_wars_rl/research/eval_joint_opening.py` | Opening-only live prototype: joint action scorer picks early moves, base policy handles the rest |
+| `orbit_wars_rl/research/step_firep.py` | Compare FireP at steps 0-3 across multiple checkpoints (opening aggression) |
 | `opponents/orbit_lite/` | Ajay/Producer dependency — intercept aiming, fleet routing (must be present) |
 | `orbit_wars_rl/env.py` | Old kaggle_environments wrapper (used by validate_training + tests) |
 | `orbit_wars_rl/eval_panel.py` | 128-seed stratified panel used inside eval.py |
@@ -745,12 +745,12 @@ return 403 and are skipped, so `--last-days` is always safe to run.
 
 ```bash
 # Download the last 14 days' top-100 two-player games into a worktree dir (no analysis):
-/Users/saheb/home/.venv/bin/python orbit_wars_rl/fetch_analyze_top_replays.py \
+/Users/saheb/home/.venv/bin/python -m orbit_wars_rl.research.fetch_analyze_top_replays \
   --last-days 14 --n-per-day 100 --agent-count 2 \
   --out-dir gpu_run_artifacts/ar_stage1/replays
 
 # Specific dates instead of recent N:
-/Users/saheb/home/.venv/bin/python orbit_wars_rl/fetch_analyze_top_replays.py \
+/Users/saheb/home/.venv/bin/python -m orbit_wars_rl.research.fetch_analyze_top_replays \
   --dates 2026-06-17 2026-06-18 --n-per-day 100 --agent-count 2 --out-dir <dir>
 
 # Add --analyze to also run the winner behavioural characterisation; --no-download to

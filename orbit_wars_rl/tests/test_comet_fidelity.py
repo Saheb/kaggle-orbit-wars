@@ -8,7 +8,7 @@ match every step until the game's natural end.
 
 Run: orbit_wars_rl/.venv/bin/python -m orbit_wars_rl.tests.test_comet_fidelity
 """
-import orbit_wars_rl.sim_gap_probe as P
+import orbit_wars_rl.research.sim_gap_probe as P
 
 HAMMER = "opponents/orbit-wars-heuristic-bots/14_main_k_v2_lb1152_LAST_HEURISTIC.py"
 HAMMER2 = "opponents/orbit-wars-heuristic-bots/11_v14_1n_lb1138_doom_evac_mega_hammer.py"

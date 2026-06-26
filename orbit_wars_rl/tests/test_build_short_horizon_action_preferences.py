@@ -8,7 +8,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from analyze_producer_action_ranking import ActionCandidate
-import build_short_horizon_action_preferences as short_horizon
+import orbit_wars_rl.research.build_short_horizon_action_preferences as short_horizon
+
 
 
 def _cand(source_id: int, target_id: int, ships: int, score: float) -> ActionCandidate:

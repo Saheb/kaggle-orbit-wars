@@ -85,11 +85,14 @@ orbit_wars_rl/          ← ALL active RL code lives here
   opponent_pool.py      ← self-play pool + PFSP
   config.py             ← ModelConfig / PPOConfig
   action_mask.py        ← action masking for eval
-  bc.py / bc_frac.py    ← behaviour cloning (used to create warmstart)
-  compare_tempo_checkpoints.py  ← conversion metrics vs Ajay across checkpoints
-  build_conversion_bc.py        ← build conversion-focused BC dataset
-  step_firep.py                 ← compare FireP at steps 0-3 across checkpoints
+  bc.py                 ← behaviour cloning (used to create warmstart)
+  eval_panel.py         ← stratified community-panel eval (used by eval.py)
   tests/                ← unit tests
+  research/             ← one-off analysis/probe/audit/BC-builder scripts (~80)
+                          NOT the core pipeline. Run via module mode from repo root:
+                          `python -m orbit_wars_rl.research.<name> --help`
+                          (e.g. hold_autopsy, expansion_probe, probe_aggregation,
+                           compare_tempo_checkpoints, build_conversion_bc, step_firep)
 
 opponents/                 ← eval + training opponents
   candidate_hellburner.py

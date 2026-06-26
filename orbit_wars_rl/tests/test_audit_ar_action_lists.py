@@ -1,6 +1,6 @@
 from collections import Counter
 
-from orbit_wars_rl.audit_ar_action_lists import _merge_stats, _phase
+from orbit_wars_rl.research.audit_ar_action_lists import _merge_stats, _phase
 
 
 def test_phase_bucket_skips_all_bucket():

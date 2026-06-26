@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from build_conversion_bc import _capture_cost, _max_sendable_ships
+from orbit_wars_rl.research.build_conversion_bc import _capture_cost, _max_sendable_ships
 
 
 def test_max_sendable_ships_uses_full_source_count():
