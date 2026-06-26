@@ -39,6 +39,7 @@ kernels/
 build/
 main_submitted.py
 pytorch_docs/
+train_trends.png
 *.DS_Store
 
 opponents/*
