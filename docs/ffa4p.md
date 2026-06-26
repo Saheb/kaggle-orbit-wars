@@ -48,7 +48,7 @@ on a provisioned GPU box via the existing `launch.sh`-style wrapper. Key flags:
 `--num-players 4 --pool-fraction 0 --rank-reward-coef 0.5`, resume the 7.34M peak, `num-envs
 2048` (4 seats = 2× forward/step + 2× buffer; raise if the box has headroom).
 
-## FFA mixed-field baseline (2026-06-23, `run_ffa_panel.py`, 128 games)
+## FFA mixed-field baseline (2026-06-23, `scripts/run_ffa_panel.py`, 128 games)
 
 Field = neural (phase4fs_stg 2p) + producer_v2 + roman_v4 + hellburner, 32 seeds × 4 seat
 rotations. Win-rate = 1st-place share (the FFA LB metric):

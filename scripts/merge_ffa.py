@@ -1,5 +1,5 @@
-"""Merge per-shard JSON dumps from run_ffa_panel.py --dump into one ranking.
-Usage: merge_ffa.py shard0.json shard1.json ..."""
+"""Merge per-shard JSON dumps from scripts/run_ffa_panel.py --dump into one ranking.
+Usage: scripts/merge_ffa.py shard0.json shard1.json ..."""
 import json
 import sys
 

@@ -25,7 +25,7 @@ stgpr1's higher WR is spray/churn-inflated (play-quality caveat, not a cert defe
 no-op) + direct routing test (2p→neural / 4p→ffa / step-reset→neural) pass. Tables +
 raw logs: `results/eval_results.md` + `results/{cert,ffa}_results.log`. Log: `docs/submissions.md`.
 
-**4p slot = ajay, validated against BOTH producers** (256-game FFA panels, `run_ffa_panel.py`,
+**4p slot = ajay, validated against BOTH producers** (256-game FFA panels, `scripts/run_ffa_panel.py`,
 seat-rotated, win-rate = 1st-place share = the LB metric):
 
 | field | ajay | producer_v2 | producer_v4 | deb | stgpr1_05 |

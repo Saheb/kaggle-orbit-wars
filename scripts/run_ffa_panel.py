@@ -7,7 +7,7 @@ matchup composition fixed. Reports each agent's win-rate (1st place = the +1 rew
 the LB-relevant FFA metric — you only gain rating by winning) and mean placement.
 
 Usage:
-  python3 run_ffa_panel.py --seeds 32 \
+  python3 scripts/run_ffa_panel.py --seeds 32 \
     neural=submission_2p4p/neural_agent.py \
     producer_v2=opponents/candidate_producer_v2.py \
     roman_v4=opponents/romantamrazov/roman_agent.py \
@@ -25,7 +25,8 @@ import sys
 import kaggle_environments as ke
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, "orbit_wars_rl"))
+_REPO = os.path.dirname(_HERE)  # scripts/ -> repo root
+sys.path.insert(0, os.path.join(_REPO, "orbit_wars_rl"))
 
 
 def _resolve(path):
