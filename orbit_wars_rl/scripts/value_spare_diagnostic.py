@@ -49,8 +49,8 @@ from kaggle_environments import make
 
 import orbit_wars_rl.eval as E
 
-from orbit_wars_rl.research.transition_autopsy import _load_model, _obs_to_dict
-from orbit_wars_rl.research.expansion_autopsy import _classify_neutrals  # noqa: F401  (parity-validated floor)
+from orbit_wars_rl.scripts.transition_autopsy import _load_model, _obs_to_dict
+from orbit_wars_rl.scripts.expansion_autopsy import _classify_neutrals  # noqa: F401  (parity-validated floor)
 from orbit_wars_rl.action_mask import compute_action_masks, _head_threat_maps, _ship_bin_to_count
 from orbit_wars_rl.features import extract_features
 
@@ -573,7 +573,7 @@ def run(ckpt_path, opponent, n_seeds, seed_set, output_path, shaping_coef=None):
     device = torch.device("cpu")
     allow_reinforce = bool(getattr(model, "allow_reinforce", False))
 
-    from orbit_wars_rl.research.expansion_autopsy import _seed_list
+    from orbit_wars_rl.scripts.expansion_autopsy import _seed_list
     seeds = _seed_list(seed_set, n_seeds)
     print(f"seed_set={seed_set}  {len(seeds)} seeds x2 seats = {len(seeds)*2} games  vs {opponent}",
           flush=True)

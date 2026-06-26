@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from analyze_producer_action_ranking import ActionCandidate
-from orbit_wars_rl.research.build_ajay_action_preferences import _negative_candidates
+from orbit_wars_rl.scripts.build_ajay_action_preferences import _negative_candidates
 
 
 def _cand(source_id: int, target_id: int, ships: int, score: float) -> ActionCandidate:

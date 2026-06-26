@@ -24,7 +24,7 @@ for _path in (ROOT, PKG):
         sys.path.insert(0, str(_path))
 
 from kaggle_environments import make  # noqa: E402
-from orbit_wars_rl.research.compare_tempo_checkpoints import build_agent  # noqa: E402
+from orbit_wars_rl.scripts.compare_tempo_checkpoints import build_agent  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:

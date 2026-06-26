@@ -17,7 +17,7 @@ if REPO_ROOT not in sys.path:
 
 from orbit_wars_rl.config import Config
 from orbit_wars_rl.eval import load_checkpoint
-from orbit_wars_rl.research.joint_action_ranker import JointActionRanker
+from orbit_wars_rl.scripts.joint_action_ranker import JointActionRanker
 from orbit_wars_rl.model import EntityTransformer
 
 

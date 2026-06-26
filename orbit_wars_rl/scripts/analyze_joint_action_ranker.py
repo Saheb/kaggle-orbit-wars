@@ -23,7 +23,7 @@ from orbit_wars_rl.analyze_producer_ranking import infer_player_slot
 from orbit_wars_rl.audit_submission_targets import normalize_obs, resolve_replay_paths
 from orbit_wars_rl.config import Config
 from orbit_wars_rl.features import extract_features
-from orbit_wars_rl.research.joint_action_ranker import JointActionRanker
+from orbit_wars_rl.scripts.joint_action_ranker import JointActionRanker
 from orbit_wars_rl.model import EntityTransformer
 
 

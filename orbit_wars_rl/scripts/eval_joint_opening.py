@@ -25,7 +25,7 @@ from orbit_wars_rl.action_mask import (
     actions_from_target_policy,
     compute_action_masks,
 )
-from orbit_wars_rl.research.analyze_joint_action_ranker import _action_extra, _find_ship_bin, _load_joint
+from orbit_wars_rl.scripts.analyze_joint_action_ranker import _action_extra, _find_ship_bin, _load_joint
 from orbit_wars_rl.analyze_producer_action_ranking import _enumerate_attack_candidates, _score_replay_move
 from orbit_wars_rl.config import Config
 from orbit_wars_rl.eval import build_agent_fn, load_checkpoint

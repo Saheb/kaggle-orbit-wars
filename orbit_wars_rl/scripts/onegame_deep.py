@@ -6,7 +6,7 @@ import json
 import os
 
 from kaggle_environments import make
-from orbit_wars_rl.research.onegame_load import load_faithful_agent
+from orbit_wars_rl.scripts.onegame_load import load_faithful_agent
 from orbit_wars_rl.eval import _dm_fleet_target, _friendly_inbound
 
 try:

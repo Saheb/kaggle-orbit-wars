@@ -34,7 +34,7 @@ from kaggle_environments import make
 
 import orbit_wars_rl.eval as E
 
-from orbit_wars_rl.research.transition_autopsy import _load_model, _obs_to_dict
+from orbit_wars_rl.scripts.transition_autopsy import _load_model, _obs_to_dict
 
 SAMPLES = [10, 20, 30, 40, 50]
 

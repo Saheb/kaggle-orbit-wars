@@ -1,4 +1,4 @@
-# research/ — one-off analysis & tooling
+# scripts/ — one-off analysis & tooling
 
 Scripts here are **not** part of the core train/eval pipeline (that lives one level up in
 `orbit_wars_rl/`). They are diagnostics, probes, audits and dataset builders written for
@@ -7,7 +7,7 @@ specific investigations — kept for reference and reproducibility.
 Run any of them as a module from the repo root:
 
 ```bash
-python -m orbit_wars_rl.research.<name> --help
+python -m orbit_wars_rl.scripts.<name> --help
 ```
 
 79 scripts, grouped by purpose:

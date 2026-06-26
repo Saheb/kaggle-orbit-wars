@@ -33,10 +33,10 @@ from kaggle_environments import make
 
 import orbit_wars_rl.eval as E
 
-from orbit_wars_rl.research.transition_autopsy import _load_model, _obs_to_dict
+from orbit_wars_rl.scripts.transition_autopsy import _load_model, _obs_to_dict
 from orbit_wars_rl.features import extract_features
 from orbit_wars_rl.action_mask import compute_action_masks, _target_intercept_angle, MAX_OWNED_PLANETS
-from orbit_wars_rl.research.value_spare_diagnostic import _spare_sources_for_neutral, STEP_LO, STEP_HI
+from orbit_wars_rl.scripts.value_spare_diagnostic import _spare_sources_for_neutral, STEP_LO, STEP_HI
 
 
 def _policy_moves(model, obs, device, ship_bin_mode, allow_reinforce):
@@ -238,7 +238,7 @@ def main():
     allow_reinforce = bool(getattr(model, "allow_reinforce", False))
     device = torch.device("cpu")
 
-    from orbit_wars_rl.research.expansion_autopsy import _seed_list
+    from orbit_wars_rl.scripts.expansion_autopsy import _seed_list
     seeds = _seed_list("random", args.seeds)
     print(f"playing {len(seeds)*2*2} games ({len(seeds)} seeds x 2 seats x baseline+overlay) "
           f"vs {args.opponent}, window [{args.step_lo},{args.step_hi}]", flush=True)

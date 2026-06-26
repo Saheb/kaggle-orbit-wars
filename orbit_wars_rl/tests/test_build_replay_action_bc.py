@@ -13,7 +13,7 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from bc import bc_loss
-from orbit_wars_rl.research.build_replay_action_bc import _dedupe_by_source, _passes_filters, _winner_seat
+from orbit_wars_rl.scripts.build_replay_action_bc import _dedupe_by_source, _passes_filters, _winner_seat
 
 
 def _args(**overrides):

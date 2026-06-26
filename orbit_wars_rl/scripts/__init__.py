@@ -1,7 +1,7 @@
 """One-off research, analysis, probe, audit and dataset-builder scripts.
 
 Not part of the core train/eval pipeline. Run as modules from the repo root, e.g.
-    python -m orbit_wars_rl.research.hold_autopsy --help
+    python -m orbit_wars_rl.scripts.hold_autopsy --help
 
 These scripts import the core pipeline as ``orbit_wars_rl.<module>``. The core
 modules in turn use sibling imports (e.g. ``from config import Config``), which

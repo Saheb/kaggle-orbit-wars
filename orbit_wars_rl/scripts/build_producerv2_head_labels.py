@@ -26,7 +26,7 @@ from orbit_wars_rl.action_mask import compute_action_masks, _def_rank, _def_ship
 from orbit_wars_rl.bc import _find_ship_bin, _find_target_planet_index
 from orbit_wars_rl.eval import build_agent_fn
 from orbit_wars_rl.features import extract_features, set_game_phase_features
-from orbit_wars_rl.research.validate_head_audit_candidates import (
+from orbit_wars_rl.scripts.validate_head_audit_candidates import (
     _copy_obs,
     _load_model,
     _producer_by_source,

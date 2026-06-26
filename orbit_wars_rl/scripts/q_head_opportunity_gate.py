@@ -33,13 +33,13 @@ from kaggle_environments import make
 
 import orbit_wars_rl.eval as E
 
-from orbit_wars_rl.research.transition_autopsy import _load_model, _obs_to_dict
+from orbit_wars_rl.scripts.transition_autopsy import _load_model, _obs_to_dict
 from orbit_wars_rl.features import extract_features
 from orbit_wars_rl.action_mask import compute_action_masks
-from orbit_wars_rl.research.value_spare_diagnostic import (
+from orbit_wars_rl.scripts.value_spare_diagnostic import (
     _spare_sources_for_neutral, _decode_slot_targets, STEP_LO, STEP_HI, _mean, _stderr,
 )
-from orbit_wars_rl.research.q_head_offline_probe import load_rollout, split_train_val, train_q_head
+from orbit_wars_rl.scripts.q_head_offline_probe import load_rollout, split_train_val, train_q_head
 
 
 def _decode_action_tensors(outputs, masks, obs, player, allow_reinforce, device):
@@ -225,7 +225,7 @@ def main():
     print(f"training Q-head on dumped rollout (TN={batch['returns'].shape[0]})", flush=True)
     train_q_head(model, batch, train_idx, val_idx, epochs=args.epochs)
 
-    from orbit_wars_rl.research.expansion_autopsy import _seed_list
+    from orbit_wars_rl.scripts.expansion_autopsy import _seed_list
     seeds = _seed_list("random", args.seeds)
     print(f"\nplaying {len(seeds)*2} games vs {args.opponent}", flush=True)
     all_rows = []

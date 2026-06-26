@@ -5,7 +5,7 @@ Surfaces: undercommit (sent < defense-at-arrival), wasted ships, wrong-target fi
 import argparse
 import math
 from kaggle_environments import make
-from orbit_wars_rl.research.onegame_load import load_faithful_agent
+from orbit_wars_rl.scripts.onegame_load import load_faithful_agent
 from orbit_wars_rl.eval import _dm_fleet_target
 from orbit_wars_rl.features import extract_features
 

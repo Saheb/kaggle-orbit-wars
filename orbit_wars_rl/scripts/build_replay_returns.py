@@ -26,7 +26,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent))
 from collections import Counter
 
-from orbit_wars_rl.research.build_replay_action_bc import (
+from orbit_wars_rl.scripts.build_replay_action_bc import (
     _iter_paths, _winner_seat, _copy_replay_obs, _context, _decode_move,
     _dedupe_by_source, trajectory_to_training_sample,
 )

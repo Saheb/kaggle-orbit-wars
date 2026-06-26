@@ -2,7 +2,7 @@
 our agent at seat 0 vs Ajay, to pick the most decisive loss for a single-game deep dive."""
 import argparse
 from kaggle_environments import make
-from orbit_wars_rl.research.onegame_load import load_faithful_agent
+from orbit_wars_rl.scripts.onegame_load import load_faithful_agent
 
 
 def totals(planets, fleets, seat):

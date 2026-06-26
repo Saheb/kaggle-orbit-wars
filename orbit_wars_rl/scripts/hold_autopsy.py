@@ -20,7 +20,7 @@ from collections import Counter
 from kaggle_environments import make
 
 from orbit_wars_rl.eval import _friendly_inbound
-from orbit_wars_rl.research.expansion_probe import load_ckpt_agent
+from orbit_wars_rl.scripts.expansion_probe import load_ckpt_agent
 
 
 def autopsy_game(steps, seat, enemy):

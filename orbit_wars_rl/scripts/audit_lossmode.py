@@ -24,7 +24,7 @@ from collections import Counter
 from kaggle_environments import make
 
 from orbit_wars_rl.eval import _friendly_inbound, _reachable_drainable_attack_mass, _dm_fleet_target, _ship_speed_py
-from orbit_wars_rl.research.expansion_probe import load_ckpt_agent
+from orbit_wars_rl.scripts.expansion_probe import load_ckpt_agent
 
 
 def _enemy_eta_to(planets, fleets, tgt, enemy):

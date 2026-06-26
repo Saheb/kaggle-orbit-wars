@@ -20,7 +20,7 @@ from pathlib import Path
 from collections import Counter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from orbit_wars_rl.research.build_replay_action_bc import _winner_seat  # noqa: E402
+from orbit_wars_rl.scripts.build_replay_action_bc import _winner_seat  # noqa: E402
 
 
 def _material(planets, seat):

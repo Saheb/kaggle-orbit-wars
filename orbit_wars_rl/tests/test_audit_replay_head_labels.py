@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from orbit_wars_rl.research.audit_replay_head_labels import (
+from orbit_wars_rl.scripts.audit_replay_head_labels import (
     _copy_replay_obs,
     _project_action,
     _same_source_nearest_baseline,
