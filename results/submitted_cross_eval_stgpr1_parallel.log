@@ -1,0 +1,23 @@
+=== stgpr1 remaining panels (parallel) started Thu Jun 25 20:36:31 IST 2026 ===
+launched h1166_peak (pid 48358)
+launched h1043_simple (pid 48361)
+launched self_rev38 (pid 48364)
+launched self_rev53b (pid 48367)
+launched self_rev31 (pid 48370)
+launched self_rev32b (pid 48373)
+launched pool_lb1152 (pid 48376)
+launched pool_lb1138 (pid 48379)
+launched pool_lb1084 (pid 48382)
+waiting on 9 panels...
+
+opponent        overall     seat0     seat1      asym
+h1166_peak        93.8%     93.8%     93.8%    +0.0pp
+h1043_simple      98.4%     97.7%     99.2%    -1.6pp
+self_rev38        96.5%     93.8%     99.2%    -5.5pp
+self_rev53b       91.0%     89.8%     92.2%    -2.3pp
+self_rev31        94.5%     94.5%     94.5%    +0.0pp
+self_rev32b       96.9%     96.9%     96.9%    +0.0pp
+pool_lb1152       91.0%     90.6%     91.4%    -0.8pp
+pool_lb1138       90.6%     90.6%     90.6%    +0.0pp
+pool_lb1084       97.7%     97.7%     97.7%    +0.0pp
+=== done Thu Jun 25 23:15:03 IST 2026 ===

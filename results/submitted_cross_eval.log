@@ -1,0 +1,20 @@
+=== submitted-agent cross-eval (256-game both-seats panels) started Thu Jun 25 15:06:28 IST 2026 ===
+
+########## agent=presres1_05  ckpt=torch_step_524288_presres1_20260623_115802.pt ##########
+opponent        overall     seat0     seat1      asym
+zach              99.6%    100.0%     99.2%    +0.8pp
+hellburner        97.3%     98.4%     96.1%    +2.3pp
+h1166_peak        89.5%     91.4%     87.5%    +3.9pp
+h1043_simple      98.4%     99.2%     97.7%    +1.6pp
+self_rev38        94.1%     93.8%     94.5%    -0.8pp
+self_rev53b       91.0%     90.6%     91.4%    -0.8pp
+self_rev31        93.0%     91.4%     94.5%    -3.1pp
+self_rev32b       93.0%     93.0%     93.0%    +0.0pp
+pool_lb1152       88.3%     89.8%     86.7%    +3.1pp
+pool_lb1138       85.5%     87.5%     83.6%    +3.9pp
+pool_lb1084       95.7%     97.7%     93.8%    +3.9pp
+
+########## agent=stgpr1_05  ckpt=torch_step_524288_stgpr1_20260623_133835.pt ##########
+opponent        overall     seat0     seat1      asym
+zach              99.6%     99.2%    100.0%    -0.8pp
+hellburner        98.0%     98.4%     97.7%    +0.8pp

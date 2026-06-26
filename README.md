@@ -1,30 +1,105 @@
 # Orbit Wars — RL Training Project
 
-Self-play RL agent for the [Orbit Wars Kaggle competition](https://www.kaggle.com/competitions/orbit-wars).
+A self-play RL agent for the [Orbit Wars Kaggle competition](https://www.kaggle.com/competitions/orbit-wars).
+Players send fleets to capture orbiting planets; most ships at turn 500 wins (full rules in
+[Game Specification](#game-specification) below).
 
-## Quick navigation
+The agent is an entity-transformer policy trained with PPO self-play on a vectorised GPU env, warm-started
+from behaviour cloning of top-leaderboard replays. The hard part has never been *capturing* planets — it's
+**holding** them against forward-projecting planner opponents. Most of the work below is the search for a
+training signal that produces retention instead of spray-and-churn.
+
+## Phases
+
+Each phase is one structural attack on that holding problem. Reward/mask deltas live in `docs/training.md`;
+these docs cover the architecture- and dynamics-level changes.
+
+| Phase | Idea | Design doc |
+|-------|------|------------|
+| **Phase 2** | Teach **reinforcement** (sending ships to your *own* planets) as a native, empire-size-gated behaviour — the #1 skill gap vs the top tier. Fresh run, redesigned reward + one new action mask. | [`docs/phase2.md`](docs/phase2.md) |
+| **Phase 3** | Fix the **self-play drift / cycling** that no reward knob touched, via a ratcheted teacher-KL anchor + opponent league (Toad Brigade / Isaiah Pressman recipe). Changes the *training dynamics*, not the reward. | [`docs/phase3.md`](docs/phase3.md) |
+| **Phase 4** | **Per-target conditioning** for the fire/ship heads (architecture change). Makes all three action heads read the same `[q_slot, k_target, pairwise]` inputs so ship can size to `garrison+1` and fire can see `enemy_contest`. | [`docs/phase4.md`](docs/phase4.md) |
+
+The standing diagnosis that ties them together — **what the wall actually is** — lives in
+[`docs/current_problem.md`](docs/current_problem.md): the long-assumed "out-massing wall" turned out to be a
+measurement ghost; the real axis is **peel-rate / retention** (holding a higher fraction of *your* captures
+than the opponent holds of theirs), and the open lever is **capital efficiency**.
+
+## Results
+
+Final pre-submission eval of the best exported agents (2026-06-24, 256-game panels on the GCP eval box,
+0 draws across all panels). Full tables + raw logs in [`results/eval_results.md`](results/eval_results.md).
+
+**2p head-to-head win rate** (256 games = 128 seeds × 2 seats):
+
+| Agent | vs Ajay (~1200 LB) | vs Debatreya (~1300 LB) |
+|---|---|---|
+| `stgpr1` 0.5M (spray) | **57.4%** | **59.4%** |
+| `presres1` 1.5M (~1000 LB ref) | 54.3% | 53.1% |
+| `presres1` 0.5M (decisive) | 53.9% | 51.6% |
+
+> `stgpr1`'s higher WR is consistent with its spray/churn style, which inflates head-to-head WR without
+> reflecting cleaner positional play — a caveat for interpretation, not a cert problem.
+
+**4p FFA mixed-field** (seat-rotated, win-rate = 1st-place share = the LB metric):
+
+| Agent | Win-rate | Mean place |
+|---|---|---|
+| `ajay` | **39.1%** | **1.64** |
+| `producer_v2` (prior 4p incumbent) | 28.1% | 1.73 |
+| `stgpr1` (our 2p neural agent) | 18.8% | 1.81 |
+| `deb` | 14.1% | 1.88 |
+
+Verdict held against both producer variants → **4p slot = `ajay`** (a heuristic), since 2p strength does
+not predict 4p and our 2p-trained neural agent only places 3rd–4th there.
+
+**Cross-eval vs the held-out opponent set** — both submitted agents against public heuristics *and*
+our own past-best checkpoints (full 256-game both-seats panels, same as the certs):
+
+| Opponent | `presres1` (decisive) | `stgpr1` (spray) |
+|---|---|---|
+| zach | 99.6% | 99.6% |
+| hellburner | 97.3% | 98.0% |
+| h1043 (lb1043) | 98.4% | 98.4% |
+| h1166 (lb1166 peak) | 89.5% | 93.8% |
+| pool_lb1084 / lb1138 / lb1152 | 95.7 / 85.5 / 88.3% | 97.7 / 90.6 / 91.0% |
+| past selves rev38 / rev53b / rev31 / rev32b | 94 / 91 / 93 / 93% | 97 / 91 / 95 / 97% |
+
+Both sweep the held-out set — every public heuristic (85–99%) and every prior self (91–97%) — clear
+absolute progress with no forgetting, seats near-symmetric (|asym| ≤ 5.5pp). `stgpr1` edges ahead on
+most opponents, but that's the same spray/churn WR-inflation, not cleaner play. Full per-seat table +
+the historical `corrpack3e` panel + the N=6 diversity matrix: [`results/eval_results.md`](results/eval_results.md).
+
+## Current state
+
+Snapshot in [`docs/current-state.md`](docs/current-state.md); standing diagnosis in
+[`docs/current_problem.md`](docs/current_problem.md).
+
+- **Two agents submitted** (2026-06-24, both daily slots): `presres1` 0.5M "decisive" and `stgpr1` 0.5M
+  "spray", each routing 2p → neural agent, 4p → `ajay`. See [`docs/submissions.md`](docs/submissions.md).
+- **Two bug fixes banked in code but not in a competition agent**: phantom-neutral-production and
+  path-obstruction. Every retrain (`presfix1`/`pathobs1`/`stgpr2`) drifted back into the spray Nash within
+  ~2M steps, and applying the fixes at inference-only on a frozen agent measured net-negative (~−1.5 to
+  −2pp) — both genuinely need a retrain to cash in.
+- **Key open finding**: phantom-fix / `--min-ship-bin` / path-obstruction-veto are all the *wrong lever
+  class* — they clean the opening, then self-play retrains the agent back into flooding + non-holding. The
+  next move is **structural** (an opponent/curriculum that punishes spray and forces holding), steered by
+  `launch_rate → ~0.04` / `peel↓` / `hold↑` rather than by spray-inflated Ajay WR.
+
+## Repo navigation
 
 | Where | What |
 |-------|------|
-| `docs/training.md` | Current training state, full run history, what's been tried |
-| `docs/commands.md` | Copy-paste commands for eval, monitoring, EC2, launch |
-| `docs/aws_runbook.md` | EC2 setup, hyperparameter notes, gotchas |
-| `docs/GCP_RUNBOOK.md` | GCP fallback (for when AWS credits run out) |
-| `docs/JARVIS_RUNBOOK.md` | Jarvis Labs GPU setup, CLI commands, lifecycle |
+| `orbit_wars_rl/` | All active RL code (training, env, model, eval, export) |
+| `opponents/` | Eval + training opponents (Ajay, Zach, Debatreya, producers; `orbit_lite/` dep) |
+| `results/` | Final eval panels + raw cert/FFA logs |
+| `seed_checkpoints/` | Resume points uploaded to training instances |
+| `docs/commands.md` | Copy-paste command reference (start here for ops) |
+| `docs/training.md` | Full run history + key config |
+| `docs/submissions.md` | Submission log with Kaggle IDs and checkpoint paths |
+| `docs/GCP_RUNBOOK.md` · `docs/JARVIS_RUNBOOK.md` | GPU instance launch / monitor / teardown |
 | `CLAUDE.md` | Agent operating rules (hard constraints for Claude Code) |
-| `orbit_wars_rl/` | All active RL code |
-| `opponents/` | Eval opponents (HB, Zach, Suneet) |
-| `seed_checkpoints/` | Resume points for training runs |
 | `gpu_run_artifacts/` | Training scripts, watchers, synced checkpoints (gitignored) |
-
-## Current best
-
-| Checkpoint | HB | Zach | Suneet |
-|---|---|---|---|
-| `torch_step_1015808_20260526_141208` (old arch) | **55.5%** | 74.2% | 80.1% |
-| `torch_step_6094848_20260529_160908` (Phase 1) | 38.7% | 54.3% | 61.7% |
-
-Target: >75% on all three simultaneously.
 
 ---
 
