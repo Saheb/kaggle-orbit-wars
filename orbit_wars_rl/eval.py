@@ -54,8 +54,6 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
         if n != cfg.model.num_angle_bins:
             cfg.model.num_angle_bins = n
 
-    if "min_ship_bin" in ckpt_cfg:
-        cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
     if "ship_bin_mode" in ckpt_cfg:
         cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
 
@@ -107,8 +105,6 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     cfg.model.reverse_edge_cooldown = int(ckpt_cfg.get("reverse_edge_cooldown", 0))
     cfg.model.reinforce_garrison_floor = float(ckpt_cfg.get("reinforce_garrison_floor", 0.0))
     cfg.model.sufficient_commit_factor = float(ckpt_cfg.get("sufficient_commit_factor", 0.0))
-    cfg.model.redundant_target_factor = float(ckpt_cfg.get("redundant_target_factor", 0.0))
-    cfg.model.path_obstruction_mask = bool(ckpt_cfg.get("path_obstruction_mask", False))
     cfg.model._discipline_persisted = ("reinforce_gate_min_planets" in ckpt_cfg)
     # provenance (inspectable; eval always clamps regardless of how training handled overflow)
     cfg.model.ship_overflow_mode = str(ckpt_cfg.get("ship_overflow_mode", "drop"))
@@ -325,9 +321,6 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 reinforce_forward_only=getattr(model, "reinforce_forward_only", False),
                 reinforce_garrison_floor=getattr(model, "reinforce_garrison_floor", 0.0),
                 sufficient_commit_factor=getattr(model, "sufficient_commit_factor", 0.0),
-                path_obstruction_mask=getattr(model, "path_obstruction_mask", False),
-                redundant_target_factor=getattr(model, "redundant_target_factor", 0.0),
-                redundant_target_reactive=getattr(model, "redundant_target_reactive", False),
                 reverse_edge_cooldown=_cd_K,
                 cooldown_last=_cd["last"] if _cd_K > 0 else None,
                 cooldown_step=int(obs.get("step", 0)),
@@ -2365,7 +2358,6 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         reinforce_forward_only: bool = None,
                         reinforce_garrison_floor: float = None,
                         sufficient_commit_factor: float = None,
-                        path_obstruction_mask: bool = False,
                         defensive_reinforce_k: int = 0,
                         defensive_reinforce_beta: float = 2.2,
                         defensive_reinforce_max_targets: int = 1,
@@ -2436,15 +2428,6 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     model.reinforce_garrison_floor = float(reinforce_garrison_floor)
     # Sufficient-commit mask (attacks) — also MUST match training. Independent of reinforce.
     model.sufficient_commit_factor = float(sufficient_commit_factor)
-    # Redundant-target mask — auto-loaded from the checkpoint (parity with training).
-    model.redundant_target_factor = float(getattr(cfg.model, "redundant_target_factor", 0.0))
-    # Path-obstruction mask — INFERENCE bugfix (default off), enable via --path-obstruction-mask.
-    # Independent of training: masks launches screened by an uncapturable planet so the head
-    # retargets to a reachable planet instead of dumping ships into the screen.
-    model.path_obstruction_mask = bool(path_obstruction_mask) or bool(getattr(cfg.model, "path_obstruction_mask", False))
-    if model.path_obstruction_mask:
-        print("Path-obstruction mask: ON | mask targets screened by an uncapturable planet "
-              "(pre-argmax retarget)")
     if model.allow_reinforce:
         print(f"Reinforcement: ON (own planets are legal targets) | "
               f"gate>={model.reinforce_gate_min_planets} planets, "
@@ -2572,10 +2555,6 @@ if __name__ == "__main__":
     parser.add_argument("--sufficient-commit-factor", type=float, default=None,
                         help="Sufficient-commit parity: veto an attack whose ships <= target "
                              "defense × this factor. Default=auto-load from ckpt (1.0 = strict).")
-    parser.add_argument("--path-obstruction-mask", action="store_true",
-                        help="INFERENCE bugfix: mask launch targets screened by an uncapturable "
-                             "planet (the fleet would die on the screen) so the head retargets to "
-                             "a reachable planet. Independent of training; safe on any checkpoint.")
     parser.add_argument("--decisive-mass-beta", type=float, default=_DM_BETA,
                         help="Reactive-margin weight for the decisive-mass GAP diagnostic floor "
                              "(beta*rho(eta)*reachable_enemy_mass). Default 2.2 (= training default). "
@@ -2655,7 +2634,6 @@ if __name__ == "__main__":
         reinforce_forward_only=args.reinforce_forward_only,
         reinforce_garrison_floor=args.reinforce_garrison_floor,
         sufficient_commit_factor=args.sufficient_commit_factor,
-        path_obstruction_mask=args.path_obstruction_mask,
         defensive_reinforce_k=args.defensive_reinforce_k,
         defensive_reinforce_beta=(args.decisive_mass_beta if args.defensive_reinforce_beta is None
                                   else args.defensive_reinforce_beta),

@@ -62,7 +62,6 @@ _GLOBAL_DIM = {global_feature_dim}
 _MAX_PLANETS = 48
 _MAX_FLEETS = 128
 _PAIRWISE_DIM = {pairwise_feature_dim}
-_MIN_SHIP_BIN = {min_ship_bin}
 _FIRE_THRESHOLD = {fire_threshold}
 _SHIP_BIN_MODE = {ship_bin_mode}
 _TARGET_DECODE = {target_decode}
@@ -74,9 +73,6 @@ _REINFORCE_FORWARD_ONLY = {reinforce_forward_only}
 _REINFORCE_GARRISON_FLOOR = {reinforce_garrison_floor}
 # Sufficient-commit mask (ATTACKS) — also MUST match training. Independent of reinforce.
 _SUFFICIENT_COMMIT_FACTOR = {sufficient_commit_factor}
-# Path-obstruction mask (INFERENCE bugfix) — mask targets screened by an uncapturable planet so
-# the head retargets. Independent of training; safe on any checkpoint.
-_PATH_OBSTRUCTION_MASK = {path_obstruction_mask}
 # Reverse-edge reinforce cooldown (MUST match training; auto-loaded from ckpt). 0 = off.
 _REVERSE_EDGE_COOLDOWN = {reverse_edge_cooldown}
 
@@ -230,9 +226,6 @@ class _Model(nn.Module):
             sl = sl.clone()
             fl[..., :n_p] = fl[..., :n_p] + fire_resid
             sl[..., :n_p, :] = sl[..., :n_p, :] + ship_resid
-        if _MIN_SHIP_BIN > 0:
-            sl = sl.clone()
-            sl[..., :_MIN_SHIP_BIN] = -100.0
         if target_logits is None:
             target_logits = self.target_head(oe)
         if pm is not None:
@@ -367,7 +360,6 @@ def agent(obs, cfg=None):
             reinforce_forward_only=_REINFORCE_FORWARD_ONLY,
             reinforce_garrison_floor=_REINFORCE_GARRISON_FLOOR,
             sufficient_commit_factor=_SUFFICIENT_COMMIT_FACTOR,
-            path_obstruction_mask=_PATH_OBSTRUCTION_MASK,
             reverse_edge_cooldown=_REVERSE_EDGE_COOLDOWN,
             cooldown_last=_CD["last"] if _REVERSE_EDGE_COOLDOWN > 0 else None,
             cooldown_step=int(obs.get("step", 0)),
@@ -470,8 +462,6 @@ def _apply_checkpoint_model_config(checkpoint, cfg: Config) -> dict:
     elif isinstance(state_dict, dict) and "ship_head.weight" in state_dict:
         cfg.model.num_ship_bins = int(state_dict["ship_head.weight"].shape[0])
 
-    if "min_ship_bin" in ckpt_cfg:
-        cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
     if "ship_bin_mode" in ckpt_cfg:
         cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
     # Blessed feature config guard (2026-07 cleanup): the inlined extractor hard-codes
@@ -533,8 +523,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
                  reinforce_gate_min_planets: int = None,
                  reinforce_forward_only: bool = None,
                  reinforce_garrison_floor: float = None,
-                 sufficient_commit_factor: float = None,
-                 path_obstruction_mask: bool = False):
+                 sufficient_commit_factor: float = None):
     model = load_model(checkpoint_path, cfg)
     # Discipline masks: explicit arg overrides; else use what the checkpoint was trained with
     # (load_model populated cfg.model via _apply_checkpoint_model_config). For OLD reinforce ckpts
@@ -577,10 +566,6 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     # the policy was trained (baked into the checkpoint config by ppo.state_dict).
     _ckpt = _load_checkpoint(checkpoint_path)
     allow_reinforce = bool(_ckpt.get("config", {}).get("allow_reinforce", False)) if isinstance(_ckpt, dict) else False
-    # Path-obstruction mask: bake if the run trained with it (persisted) OR the CLI flag is set
-    # (inference-only enablement on a checkpoint that didn't train with it — safe either way).
-    path_obstruction_mask = bool(path_obstruction_mask) or (
-        bool(_ckpt.get("config", {}).get("path_obstruction_mask", False)) if isinstance(_ckpt, dict) else False)
     # Reverse-edge cooldown is persisted in the ckpt config (not a CLI flag here) → bake it so
     # the submission applies the SAME reinforce-ping-pong veto the policy trained+evaluated with.
     reverse_edge_cooldown = int(_ckpt.get("config", {}).get("reverse_edge_cooldown", 0)) if isinstance(_ckpt, dict) else 0
@@ -604,7 +589,6 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         fleet_feature_dim=m.fleet_feature_dim,
         global_feature_dim=m.global_feature_dim,
         pairwise_feature_dim=m.pairwise_feature_dim,
-        min_ship_bin=m.min_ship_bin,
         fire_threshold=fire_threshold,
         ship_bin_mode=repr(m.ship_bin_mode),
         target_decode=target_decode,
@@ -613,7 +597,6 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         reinforce_forward_only=reinforce_forward_only,
         reinforce_garrison_floor=reinforce_garrison_floor,
         sufficient_commit_factor=sufficient_commit_factor,
-        path_obstruction_mask=path_obstruction_mask,
         reverse_edge_cooldown=reverse_edge_cooldown,
         params_b64=params_b64,
         features_code=features_code,
@@ -628,7 +611,6 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     print(f"  Param bytes (base64): {len(params_b64):,}")
     print(f"  Fire threshold: {fire_threshold}")
     print(f"  Target decode: {target_decode}")
-    print(f"  Path-obstruction mask: {'ON' if path_obstruction_mask else 'off'}")
     print(f"  File size: {os.path.getsize(output_path) / 1024:.1f} KB")
 
     # --- Sanity eval: play the EXPORTED file vs zach to catch export bugs ---
@@ -699,10 +681,6 @@ if __name__ == "__main__":
     parser.add_argument("--reinforce-garrison-floor", type=float, default=None)
     # Sufficient-commit mask (ATTACKS). MUST match training (p2rev6 = 1.0). 0 = off.
     parser.add_argument("--sufficient-commit-factor", type=float, default=None)
-    parser.add_argument("--path-obstruction-mask", action="store_true",
-                        help="INFERENCE bugfix: bake the path-obstruction target mask into the "
-                             "submission (mask launches screened by an uncapturable planet so the "
-                             "head retargets). Independent of training; safe on any checkpoint.")
     args = parser.parse_args()
 
     cfg = Config()
@@ -713,5 +691,4 @@ if __name__ == "__main__":
                  reinforce_gate_min_planets=args.reinforce_gate_min_planets,
                  reinforce_forward_only=args.reinforce_forward_only,
                  reinforce_garrison_floor=args.reinforce_garrison_floor,
-                 sufficient_commit_factor=args.sufficient_commit_factor,
-                 path_obstruction_mask=args.path_obstruction_mask)
+                 sufficient_commit_factor=args.sufficient_commit_factor)

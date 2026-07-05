@@ -347,10 +347,6 @@ class PPOLearner:
                     )
                 if ship_prior is not None and ship_residual is not None:
                     valid_targets_bins = target_valid.unsqueeze(-1) & slot_valid_2d.unsqueeze(-1).unsqueeze(-1)
-                    min_ship_bin = int(getattr(self.model.cfg, "min_ship_bin", 0))
-                    if min_ship_bin > 0:
-                        valid_targets_bins = valid_targets_bins.clone()
-                        valid_targets_bins[..., :min_ship_bin] = False
                     valid_targets_bins_f = valid_targets_bins.float()
                     vtb_sum = valid_targets_bins_f.sum().clamp(min=1.0)
                     ship_prior_rms = (((ship_prior * valid_targets_bins_f) ** 2).sum() / vtb_sum).sqrt()
@@ -554,13 +550,12 @@ class PPOLearner:
 
     def state_dict(self):
         # Save model-arch config alongside weights so loaders can rebuild the
-        # right shape (num_ship_bins for fraction-head, min_ship_bin for mask).
+        # right shape (num_ship_bins for fraction-head).
         model_cfg = getattr(self.cfg, "model", None)
         cfg_blob = {}
         if model_cfg is not None:
             cfg_blob = {
                 "num_ship_bins": int(getattr(model_cfg, "num_ship_bins", 32)),
-                "min_ship_bin": int(getattr(model_cfg, "min_ship_bin", 0)),
                 "pairwise_feature_dim": int(getattr(model_cfg, "pairwise_feature_dim", 0)),
                 "ship_bin_mode": str(getattr(model_cfg, "ship_bin_mode", "absolute")),
                 "action_decode": str(getattr(model_cfg, "action_decode", "angle")),
@@ -577,14 +572,8 @@ class PPOLearner:
                 "reverse_edge_cooldown": int(getattr(model_cfg, "reverse_edge_cooldown", 0)),
                 "reinforce_garrison_floor": float(getattr(model_cfg, "reinforce_garrison_floor", 0.0)),
                 "sufficient_commit_factor": float(getattr(model_cfg, "sufficient_commit_factor", 0.0)),
-                "redundant_target_factor": float(getattr(model_cfg, "redundant_target_factor", 0.0)),
-                "path_obstruction_mask": bool(getattr(model_cfg, "path_obstruction_mask", False)),
                 # provenance: how the ckpt was trained (eval always clamps, so not an eval-contract field)
                 "ship_overflow_mode": str(getattr(model_cfg, "ship_overflow_mode", "drop")),
-                # reward-shaping provenance only; eval/export do not consume these.
-                "capture_utility_coef": float(getattr(model_cfg, "capture_utility_coef", 0.0)),
-                "capture_utility_window": int(getattr(model_cfg, "capture_utility_window", 30)),
-                "capture_idle_penalty": float(getattr(model_cfg, "capture_idle_penalty", 0.0)),
                 "phase4_residual_init_std": float(getattr(model_cfg, "phase4_residual_init_std", 0.0)),
             }
         return {

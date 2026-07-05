@@ -140,12 +140,18 @@ archive/                   ← dead code, old logs (ignore unless archaeology)
 ### Key training flags
 | Flag | Purpose |
 |------|---------|
-| `--ssdr-frac 0.3` | SSDR: 30% of self-play resets grant opponent 1-2 extra planets |
-| `--ssdr-max-steps 2` | Max extra planets granted to opponent in SSDR |
-| `--min-ship-bin 4` | Ban bins 0-3 (1-4 ships) to prevent degenerate 1-ship probing |
 | `--first-strike-steps 50` | Double capture reward for t<50 (was the LB record fix) |
+| `--early-capture-coef 0.3` | Delta-capture shaping (exp decay + 10% floor; blessed runs used 0.3) |
+| `--expansion-coef 0.03` / `--win-margin-coeff 0.5` | Blessed-run economy shaping + terminal margin bonus |
+| `--staging-shaping-coef 0.2` | PBRS staging toward neutrals (stgpr1 "spray" arm only) |
 | `--pool-pfsp-min-games 30` | Prevents PFSP death-spiral |
 | `--pool-external-fraction` | Fraction of pool samples to external opponents |
+
+C4 cleanup (2026-07-05): the training loop is pruned to the levers the blessed runs used.
+Removed (recover from git tag `pre-cleanup-2026-07`): SSDR, min-ship-bin, decisive-mass +
+dm_* diag, scenario curriculum, handicap/self-boost, neutral-garrison scale, prod-share,
+consolidation, capture-utility, speed/rank/shaping/defense coefs, eliminate-to-win,
+timeout-planet, redundant-target, path-obstruction.
 
 ---
 
@@ -193,11 +199,11 @@ them from git tag `pre-cleanup-2026-07`. Of the preserved final artifacts, only
 ## Key Lessons
 
 1. **Zach panel is saturated** (~88-89%) — use Ajay as the primary signal. Ajay uses `orbit_lite` for targeting; our agent also uses orbital intercept — the gap is conversion timing, not routing.
-2. **SSDR** (asymmetric planet starts) improves Ajay from 0.8% → 3.1% but improvement is transient — self-play Nash reforms after ~2M steps regardless of pool mask gating.
-3. **ship0 collapse** — agent learns to send 1-ship probes when behind. Fix: `--min-ship-bin 4`. Does NOT fix the underlying SSDR regression.
+2. **SSDR** (asymmetric planet starts) improves Ajay from 0.8% → 3.1% but improvement is transient — self-play Nash reforms after ~2M steps regardless of pool mask gating. *(Lever removed in C4 — revive from `pre-cleanup-2026-07` if needed.)*
+3. **ship0 collapse** — agent learns to send 1-ship probes when behind. Fix was `--min-ship-bin 4` *(removed in C4; the blessed lineage doesn't exhibit it)*. Does NOT fix the underlying SSDR regression.
 4. **First Strike** (`--first-strike-steps 50 --first-strike-mult 2.0`) fixed opening paralysis and scored 918.8 LB. It's a reward shaping band-aid, not a structural fix.
 5. **BC aux at bc-coef=0.05** — too small to move the needle but can disrupt conversion (Rev34: us_first_cap 14→136 after 1M).
-6. **Pool mask gating** — SSDR should only apply to self-play envs, not pool envs. Call `env.set_ssdr_mask(mask)` each rollout. Slows regression but doesn't stop it.
+6. **Pool mask gating** — SSDR should only apply to self-play envs, not pool envs (was `env.set_ssdr_mask`; removed in C4 with SSDR). Slows regression but doesn't stop it.
 7. **PFSP death-spiral**: small N games → noisy wr → never sampled. Fix: `--pool-pfsp-min-games 30`.
 8. **LR=0.000025** is the mature-run rate (halved twice). Use LR=0.0001 for fresh BC warmstarts.
 9. **BC warmstart from partial/diagnostic checkpoints** causes clip_frac=0 (frozen policy). Always use a strong PPO checkpoint as `--resume`, BC aux via `--bc-samples`.

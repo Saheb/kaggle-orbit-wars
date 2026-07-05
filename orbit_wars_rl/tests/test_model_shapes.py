@@ -256,27 +256,6 @@ def test_residual_small_init_wakes_output_layer():
     print("test_residual_small_init_wakes_output_layer: PASS")
 
 
-def test_non_pairwise_min_ship_bin_masks_without_expand_view_crash():
-    """Legacy non-pairwise path should tolerate min_ship_bin masking."""
-    cfg = ModelConfig(pairwise_feature_dim=0, min_ship_bin=2)
-    model = EntityTransformer(cfg)
-    model.eval()
-
-    B, N_p, N_f = 1, 6, 3
-    planet_features = torch.randn(B, N_p, cfg.planet_feature_dim)
-    fleet_features = torch.randn(B, N_f, cfg.fleet_feature_dim)
-    global_features = torch.randn(B, cfg.global_feature_dim)
-    planet_mask = torch.ones(B, N_p, dtype=torch.bool)
-    fleet_mask = torch.ones(B, N_f, dtype=torch.bool)
-
-    with torch.no_grad():
-        out = model(planet_features, fleet_features, global_features, planet_mask, fleet_mask)
-
-    assert out["ship_logits"].shape == (B, cfg.max_owned_planets, cfg.max_planets, NUM_SHIP_BINS)
-    assert torch.all(out["ship_logits"][..., :2] <= -100.0)
-    print("test_non_pairwise_min_ship_bin_masks_without_expand_view_crash: PASS")
-
-
 def test_end_to_end_obs_to_actions():
     """Full pipeline: obs → features → masks → model → action shapes."""
     obs = _make_obs()

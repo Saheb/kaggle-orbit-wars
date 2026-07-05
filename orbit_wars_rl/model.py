@@ -352,15 +352,6 @@ class EntityTransformer(nn.Module):
             ship_residual[..., :N_p, :] = ship_resid_live
             fire_logits[..., :N_p] = fire_logits[..., :N_p] + fire_resid_live
             ship_logits[..., :N_p, :] = ship_logits[..., :N_p, :] + ship_resid_live
-        # min_ship_bin: bins below this are masked to -inf so they're never
-        # sampled / argmaxed. For the fraction head (10 bins on [0.1, 1.0]),
-        # setting min_ship_bin=1 removes the "10%-of-source" trap that PPO
-        # collapses to in cold-start self-play (every prior run hit ship0>0.5
-        # by iter 6-7 regardless of LR or IL/BC anchor strength).
-        min_ship_bin = int(getattr(self.cfg, "min_ship_bin", 0))
-        if min_ship_bin > 0:
-            ship_logits = ship_logits.clone()
-            ship_logits[..., :min_ship_bin] = -100.0
         if target_logits is None:
             target_logits = self.target_head(owned_entities)  # (B, max_owned, max_planets)
         # Mask out invalid planet slots (padded) so target softmax only sees real planets

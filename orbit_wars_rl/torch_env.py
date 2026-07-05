@@ -56,18 +56,6 @@ _VALUE_HORIZON = 40.0   # capped production-value lookahead for target value / k
 # reinforce_cooldown.NEVER so the train mask and the eval/export canonical rule agree.
 _REINF_CD_NEVER = -(1 << 30)
 
-_SCENARIO_OFF = 0
-_SCENARIO_AGG_ATTACK = 1
-_SCENARIO_STAGE_ATTACK = 2
-_SCENARIO_HOLD_UNDER_PEEL = 3
-_SCENARIO_NAME_TO_ID = {
-    "off": _SCENARIO_OFF,
-    "agg_attack": _SCENARIO_AGG_ATTACK,
-    "stage_attack": _SCENARIO_STAGE_ATTACK,
-    "hold_under_peel": _SCENARIO_HOLD_UNDER_PEEL,
-}
-_SCENARIO_MIXED = "mixed"
-
 # Tensor sizes (worst-case bounds from kaggle env)
 MAX_PLANETS = 48
 MAX_FLEETS = 256
@@ -233,37 +221,14 @@ class VecTorchEnv:
         ship_overflow_mode: str = "clamp",   # matches eval (_ship_bin_to_count clamps); "drop"=legacy bug
         action_decode: str = "angle",
         win_margin_coeff: float = 0.0,
-        rank_reward_coef: float = 0.0,
-        eliminate_to_win: bool = False,
-        timeout_planet_coef: float = 0.0,
-        shaping_coef: float = 0.0,
         expansion_coef: float = 0.0,
-        defense_coef: float = 0.0,
         early_capture_coef: float = 0.0,
-        prod_share_coef: float = 0.0,
         early_capture_steps: int = 100,
         first_strike_steps: int = 0,
         first_strike_mult: float = 2.0,
-        speed_coef: float = 0.0,
-        consolidation_coef: float = 0.0,
-        consolidation_steps: int = 40,
-        capture_utility_coef: float = 0.0,
-        capture_utility_window: int = 30,
-        capture_idle_penalty: float = 0.0,
-        decisive_mass_coef: float = 0.0,
-        decisive_mass_beta: float = _DM_BETA,
-        decisive_diag: bool = False,
         staging_shaping_coef: float = 0.0,
         staging_topk: int = 2,
         staging_gamma: float = 0.995,
-        handicap_frac: float = 0.0,
-        handicap_ships: int = 5,
-        ssdr_frac: float = 0.0,
-        ssdr_max_steps: int = 20,
-        neutral_garrison_scale: float = 1.0,
-        scenario_curriculum: str = "off",
-        scenario_fraction: float = 0.0,
-        scenario_deadline: int = 20,
         allow_reinforce: bool = False,
         reinforce_garrison_floor: float = 0.0,
         reinforce_cost: float = 0.0,
@@ -271,8 +236,6 @@ class VecTorchEnv:
         reinforce_forward_only: bool = False,
         reverse_edge_cooldown: int = 0,
         sufficient_commit_factor: float = 0.0,
-        redundant_target_factor: float = 0.0,
-        path_obstruction_mask: bool = False,
     ):
         self.num_envs = num_envs
         # Blessed feature config (2026-07 cleanup): game-phase globals (dim 15) always on;
@@ -332,15 +295,6 @@ class VecTorchEnv:
         #   approximate for enemy planets (reinforce in transit). Pure training-time mask
         #   (no reward tax → no fire=0 Nash); the policy internalises it, parity at eval/export.
         self.sufficient_commit_factor = float(sufficient_commit_factor)
-        # REDUNDANT-TARGET MASK: veto a neutral attack whose in-flight friendly mass ALONE
-        # already clears the target → only reinforces an already-won capture. Training-time
-        # mask (policy learns to retarget; parity at eval). Static floor (reactive didn't help).
-        self.redundant_target_factor = float(redundant_target_factor)
-        # PATH-OBSTRUCTION MASK: veto a launch whose straight path is screened by an uncapturable
-        # planet (the fleet dies on the screen before reaching the target). Training-time veto
-        # (policy learns to avoid screened targets); eval RETARGETS pre-argmax (same split as
-        # redundant_target). Mirrors action_mask._path_obstruction_blocked.
-        self.path_obstruction_mask = bool(path_obstruction_mask)
         # reinforce_rate metric accumulators (N, num_players), allocated/zeroed per
         # rollout via reset_reinforce_stats(). None = not collecting (no overhead).
         self._reinforce_launch_count = None
@@ -358,8 +312,6 @@ class VecTorchEnv:
         self._emitted_step = None      # (N, num_players, 3) launches that created a fleet (emitted)
         self._slotstarve_step = None   # (N, num_players, 3) can_fire dropped: fleet storage full
         self._last_wins = None         # (N, num_players) bool: raw winner mask from the last _check_done
-        self._last_scenario_id = None  # (N,) long: scenario that just terminated, 0 otherwise
-        self._last_scenario_success = None  # (N,) bool: advantaged player won the scenario terminal
         self._obs_trunc = None         # (num_players,) get_features calls with live fleets > obs cap
         self._obs_calls = None         # (num_players,) get_features calls total (denom)
         # richer truncation severity (how much mass is hidden, not just whether any is):
@@ -391,94 +343,21 @@ class VecTorchEnv:
         # Terminal bonus for winners: +win_margin_coeff * (my_score / total_score).
         # 0.0 = pure ±1 reward (default, backward-compatible).
         self.win_margin_coeff = float(win_margin_coeff)
-        # Rank-based terminal reward (FFA): interpolate between flat ±1 and a linear
-        # rank map (rank 0 / winner → +1, rank P-1 / first-out → -1). At coef=1.0 a
-        # player eliminated early scores strictly worse than one who finished 2nd,
-        # instead of both getting a flat -1 — the graded FFA signal the binary
-        # most-ships reward lacks. Only active when P > 2 (no effect in 2p). 0 = off.
-        self.rank_reward_coef = float(rank_reward_coef)
-        # Eliminate-to-win: a terminal win counts ONLY on an elimination (few_left).
-        # Games that reach the step cap without an elimination are draws (reward 0 for
-        # both), removing the "most ships wins at timeout" hoard-to-timeout attractor
-        # that keeps self-play in the under-mass Nash. project_force_concentration_wall.
-        # False = legacy ±1 most-ships-wins (default, backward-compatible).
-        self.eliminate_to_win = bool(eliminate_to_win)
-        # Timeout resolved by PLANET dominance (only with eliminate_to_win): instead of a
-        # draw (0/0), a no-elimination timeout pays timeout_planet_coef * planet-share margin
-        # in [-1,1] (zero-sum). Fixes BOTH the most-ships hoard attractor (ships don't win) AND
-        # the draw-neutral STARVATION (graded signal when you can't eliminate) — rewards the
-        # expansion+retention race that is the wall's root. project_undermass_by_choice.
-        # 0.0 = legacy draw (backward-compatible). Keep < 1.0 so elimination (±1) stays best.
-        self.timeout_planet_coef = float(timeout_planet_coef)
-        self.shaping_coef = float(shaping_coef)
         # Expansion shaping: potential-based reward on OWNED PRODUCTION (sum of
         # planet production rates owned). Unlike material (ships), production only
         # changes when planets change hands — so a passive hoarder gets 0 from it
         # (avoids the rev8 material-shaping trap). Rewards winning the planet/economy
         # race that decides snowball games. 0.0 = off (default).
         self.expansion_coef = float(expansion_coef)
-        # Defense shaping: per-step penalty for losing owned production (consolidation
-        # incentive — rewards HOLDING planets, complements expansion's GRAB). 0.0 = off.
-        self.defense_coef = float(defense_coef)
         # Early capture shaping: per-step bonus for each net new planet owned above
         # starting count (1), decayed linearly from 1.0→0.0 over early_capture_steps.
         # Gives gradient signal for the opening probe that the terminal reward cannot see.
         # Coeff math: sum(coeff*(1-t/100), t=4..100) ≈ 97*0.48*coeff per planet captured
         # at step 3. Keep cumulative bonus ≤ 10-15% of terminal win → coeff 0.002-0.003.
         self.early_capture_coef = float(early_capture_coef)
-        # Production-share capture reward (the unified term). Symmetric, capture-time-ANCHORED,
-        # value-weighted by share of total board production: r = coef·decay(t_cap)·Δ(prod/total).
-        # Capturing pays +coef·decay(now)·(prod/total); losing pays −coef·decay(t_cap)·(prod/total)
-        # with the SAME anchor → capture-then-lose nets 0 (no tennis farm; losing drives holding).
-        # Absolute (no opponent subtraction → mirror-safe) and bounded (≤1.1·coef → loss always
-        # negative under pure ±1 terminal). Replaces early_capture(count)+expansion(prod-lead).
-        self.prod_share_coef = float(prod_share_coef)
         self.first_strike_steps = int(first_strike_steps)
         self.first_strike_mult = float(first_strike_mult)
         self.early_capture_steps = int(early_capture_steps)
-        # Time-to-victory velocity bonus: winners get an extra reward scaled by how early
-        # they won. reward_win = 1.0 + (episode_steps - T) / episode_steps * speed_coef.
-        # A win at step 150 of 500 earns +0.70*speed_coef extra vs +0.02*speed_coef at 490.
-        # Creates constant pressure to close games fast; grinding passive wins penalised.
-        # speed_coef=0.5 means a step-0 win scores 1.5, a timeout win scores ~1.0.
-        # Keep ≤ 0.5 so a slow win still beats a fast loss.
-        self.speed_coef = float(speed_coef)
-        # Consolidation bonus (force-concentration lever, 2026-06-15): a ONE-TIME +coef when a
-        # NET-NEW captured planet SURVIVES consolidation_steps. Unlike defense_coef (per-step
-        # penalty for losing production → hoard-to-avoid → FLOOD), this is success-GATED (paid
-        # only when a capture sticks), EVENT-based + capped (one-time → can't farm by sitting),
-        # and NEW-captures-only (home/initial excluded) → rewards expand-AND-consolidate, not
-        # blanket hoarding. Prices "commit enough to hold" → concentration. See
-        # project_force_concentration_wall; KILL if reinforce-rate/garr floods like defense_coef.
-        self.consolidation_coef = float(consolidation_coef)
-        self.consolidation_steps = int(consolidation_steps)
-        # Capture follow-through reward (project_capture_quality): the triage diagnostic showed
-        # the wall is not "reinforce more"; captured planets are often born/left unproductive.
-        # A net-new capture gets one window to prove utility: either it launches an ATTACK from
-        # that planet, or it is still one of the holder's top-3 frontline planets at window end.
-        # Optional idle penalty prices captures that do neither. Off by default.
-        self.capture_utility_coef = float(capture_utility_coef)
-        self.capture_utility_window = int(capture_utility_window)
-        self.capture_idle_penalty = float(capture_idle_penalty)
-        self.capture_utility_active = (
-            self.capture_utility_coef != 0.0 or self.capture_idle_penalty != 0.0
-        )
-        # Lever A — decisive-mass reward: +coef once when our INFLIGHT force converging on an
-        # ENEMY target first reaches the capture floor (projected defenders + 3-turn reaction +
-        # overhead — deb's capture_floor). Board-grounded, NOT outcome-tied → injects the force-
-        # concentration gradient symmetric self-play structurally cannot price (the wall: we get
-        # out-massed ~2.3x, planets@50=6 invariant). One credit per crossing (capped, no over-mass
-        # scaling); re-arms when no longer sufficient. project_force_concentration_wall. 0.0 = off.
-        self.decisive_mass_coef = float(decisive_mass_coef)
-        # Weight on producer_v2's reactive-reinforcement margin (beta*rho(eta)*enemy_mass). v2
-        # uses 2.2 (planner-conservative); for a TRAINING reward a high beta makes crossings rare
-        # (sparse signal) — lower it if `decis` stays ~0 on the resumed (trained) policy.
-        self.decisive_mass_beta = float(decisive_mass_beta)
-        # Decisive-mass GAP diagnostic: measure how far our inflight attacks fall short of the
-        # capture floor (dm_gap/dm_cross/...) using the EXACT reward floor, EVEN when the reward
-        # itself is off (decisive_mass_coef=0) — tells us whether the policy is moving toward the
-        # decmass target vs only improving adjacent competence. project_force_concentration_wall.
-        self.decisive_diag = bool(decisive_diag)
         # PBRS staging shaping (project_undermass_by_choice): potential-based reward that injects a
         # DIRECTED gradient for the idle fire head to STAGE inflight toward NEUTRAL captures.
         # Φ = top-k Σ min(1, our_inflight/capture_floor) over neutral targets; r += coef·(γΦ' − Φ).
@@ -489,61 +368,6 @@ class VecTorchEnv:
         self.prev_staging_phi = None         # (N, num_players) — allocated in reset()
         self._staging_phi_acc = 0.0          # rollout mean Φ accumulator — reset_reinforce_stats()
         self._staging_phi_n = 0
-        self.prev_decisive_suff = None       # (N, P, num_players) bool — allocated in reset()
-        self._decisive_credit = None         # (N, num_players) diag accumulator — reset_reinforce_stats()
-        # dm_* phase-split (early<50 / mid50-100 / late>=100) accumulators — reset_reinforce_stats()
-        self._dm_targets = None              # (N, num_players, 3) enemy targets w/ our inflight mass>0
-        self._dm_cross = None                # of those, mass >= floor
-        self._dm_ratio_sum = None            # sum mass/floor over targets
-        self._dm_gap_sum = None              # sum max(0,floor-mass)/floor over targets
-        self._dm_overkill_sum = None         # sum mass/floor over CROSSED targets (denom = _dm_cross)
-        self._dm_nearmiss = None             # of targets, ratio in [0.75, 1.0)
-        # Handicap curriculum: fraction of games where player 0 starts with fewer ships.
-        # Forces the agent to practise fighting from behind — the bimodal collapse state
-        # that pure symmetric self-play never generates enough gradient for.
-        self.handicap_frac = float(handicap_frac)
-        self.handicap_ships = int(handicap_ships)
-        # Start-State Domain Randomisation (SSDR): with probability ssdr_frac,
-        # fast-forward a freshly-reset env by U(1, ssdr_max_steps) random steps
-        # before handing it to the learner. Both players take random actions during
-        # the warmup so the learner wakes up in a messy, asymmetric mid-game state.
-        # This shatters the symmetric-start passive Nash equilibrium.
-        self.ssdr_frac = float(ssdr_frac)
-        self.ssdr_max_steps = int(ssdr_max_steps)  # now = max extra planets granted to opponent
-        # Neutral garrison scale (board-curriculum): multiply neutral planet ships by
-        # this factor at reset, symmetrically (both players face the same board). >1.0
-        # makes captures expensive → single-source can't capture → must aggregate
-        # multiple sources (concentration). Applied BEFORE home assignment so home
-        # planets (overwritten to 10 ships) are unaffected. Training-only; eval/LB
-        # use default boards (scale 1.0) — the transfer test is whether the
-        # concentration habit carries to normal-garrison boards.
-        self.neutral_garrison_scale = float(neutral_garrison_scale)
-        if scenario_curriculum not in _SCENARIO_NAME_TO_ID and scenario_curriculum != _SCENARIO_MIXED:
-            raise ValueError(f"unknown scenario_curriculum={scenario_curriculum!r}")
-        self.scenario_curriculum = scenario_curriculum
-        self.scenario_fraction = float(scenario_fraction)
-        self.scenario_deadline = int(scenario_deadline)
-        self.scenario_id = None          # (N,) long; 0 = normal generated board
-        self.scenario_adv_player = None  # (N,) long; player whose tactic is being tested
-        self.scenario_target = None      # (N,) long; focal target planet index
-        self.scenario_done_step = None   # (N,) long; scenario deadline
-        # Asymmetric Planet SSDR: with probability ssdr_frac, grant opponent 1..ssdr_max_steps
-        # extra neutral planets at reset. No random play, no fleet explosion.
-        # Breaks symmetric-start Nash cleanly.
-        #
-        # ssdr_self_only_mask: bool tensor (N,) set by training loop each rollout.
-        # True = self-play env (SSDR active), False = pool env (symmetric start).
-        # If None, SSDR applies to all envs.
-        self._ssdr_self_mask: torch.Tensor | None = None  # set via set_ssdr_mask()
-
-        # Self-boost (handicapped-real-planner curriculum): the INVERSE of SSDR — grant
-        # OUR seat (_self_boost_seat) _self_boost_k extra neutral planets at reset, in the
-        # envs flagged by _self_boost_mask (the pool/planner envs). The training loop tapers
-        # k -> 0 so a strong pool planner (deb) is beatable early (win-gradient for holding)
-        # then weans off the head-start. Set via set_self_boost(); inert when k<=0.
-        self._self_boost_k = 0
-        self._self_boost_seat = 0
-        self._self_boost_mask: torch.Tensor | None = None
 
         # State tensors — allocated in reset()
         self.planets: torch.Tensor = None       # (N, P, 7)
@@ -558,12 +382,8 @@ class VecTorchEnv:
         self._comet_xy = None                       # (N, T+1, 4, 2) precomputed comet positions
         self.done: torch.Tensor = None              # (N,) bool
         self.rewards: torch.Tensor = None           # (N, num_players) float
-        self.prev_material: torch.Tensor = None     # (N, num_players) float
         self.prev_production: torch.Tensor = None   # (N, num_players) float — owned production for expansion shaping
         self.prev_owned: torch.Tensor = None        # (N, num_players) float — owned planet count for delta-capture shaping
-        self.prev_planet_owner: torch.Tensor = None  # (N, P) long — per-planet owner last step (prod-share term)
-        self.capture_time: torch.Tensor = None       # (N, P) long — step the current owner acquired each planet
-        self.total_board_prod: torch.Tensor = None   # (N,) float — Σ production of all planets at reset (normalizer)
         # Seeds (per-env) so we can deterministically auto-reset
         self.seeds: list[int] = []
 
@@ -572,176 +392,6 @@ class VecTorchEnv:
         self._planet_orbital_r: torch.Tensor = None      # (N, P) float
         self._planet_is_orbiting: torch.Tensor = None    # (N, P) bool
 
-    def set_ssdr_mask(self, self_play_mask: torch.Tensor) -> None:
-        """Mark which envs are self-play (SSDR active) vs pool (symmetric start).
-
-        Call once per rollout from the training loop when pool assignments change:
-            env.set_ssdr_mask(torch.arange(N) < N_self)  # first N_self = self-play
-
-        If never called, SSDR applies to all envs (original behaviour).
-        """
-        self._ssdr_self_mask = self_play_mask.bool().cpu()
-
-    def set_self_boost(self, k: int, seat: int, env_mask: torch.Tensor | None) -> None:
-        """Grant OUR seat `seat` `k` extra neutral planets at reset in envs where env_mask
-        is True (handicapped-real-planner curriculum). Call once per rollout; k tapers to 0."""
-        self._self_boost_k = int(k)
-        self._self_boost_seat = int(seat)
-        self._self_boost_mask = env_mask.bool().cpu() if env_mask is not None else None
-
-    def _maybe_self_boost(self, pad, n: int, base: int, env_i: int) -> None:
-        """Inverse of SSDR: give OUR seat extra neutral planets in boosted (pool) envs."""
-        if self._self_boost_k <= 0 or self._self_boost_mask is None:
-            return
-        if not bool(self._self_boost_mask[env_i]):
-            return
-        seat = self._self_boost_seat
-        neutral_idx = [i for i in range(n)
-                       if pad[i, 1] == -1 and i != base and i != base + 3]
-        random.shuffle(neutral_idx)
-        for ni in neutral_idx[:self._self_boost_k]:
-            pad[ni, 1] = seat
-            pad[ni, 5] = max(10, int(pad[ni, 6] * 3))
-
-    def _ssdr_active_for(self, env_i: int) -> bool:
-        """Return True if SSDR should apply to env index env_i."""
-        if self.ssdr_frac <= 0.0:
-            return False
-        if self._ssdr_self_mask is None:
-            return True  # no mask set → apply to all
-        return bool(self._ssdr_self_mask[env_i].item())
-
-    def _scale_neutrals(self, pad: np.ndarray, n: int) -> None:
-        if self.neutral_garrison_scale <= 1.0:
-            return
-        for i in range(n):
-            if pad[i, 1] == -1:
-                pad[i, 5] = float(int(pad[i, 5] * self.neutral_garrison_scale))
-
-    def _choose_scenario(self, rng: random.Random) -> int:
-        if self.scenario_fraction <= 0.0 or rng.random() >= self.scenario_fraction:
-            return _SCENARIO_OFF
-        if self.scenario_curriculum == _SCENARIO_MIXED:
-            # Attack-side lessons are the main intended pressure; defensive peel
-            # remains in the mix, but at lower weight.
-            return rng.choice([
-                _SCENARIO_AGG_ATTACK,
-                _SCENARIO_STAGE_ATTACK,
-                _SCENARIO_AGG_ATTACK,
-                _SCENARIO_STAGE_ATTACK,
-                _SCENARIO_HOLD_UNDER_PEEL,
-            ])
-        return _SCENARIO_NAME_TO_ID[self.scenario_curriculum]
-
-    def _apply_scenario(
-        self,
-        pad: np.ndarray,
-        alive: np.ndarray,
-        rng: random.Random,
-    ) -> tuple[int, int, int, int]:
-        """Install a tiny concentration scenario in one env.
-
-        The scenarios are deliberately small. They are not meant to mimic full games;
-        they create a short terminal lesson where the advantaged player wins only by
-        concentrating or staging enough mass on the focal target.
-        """
-        scenario_id = self._choose_scenario(rng)
-        if scenario_id == _SCENARIO_OFF:
-            return _SCENARIO_OFF, 0, -1, 0
-
-        adv = rng.randint(0, 1)
-        opp = 1 - adv
-        mirror = adv == 1
-
-        def mx(x: float) -> float:
-            return 100.0 - x if mirror else x
-
-        pad[:, :] = 0.0
-        pad[:, 1] = -1.0
-        alive[:] = False
-
-        def planet(idx: int, owner: int, x: float, y: float,
-                   ships: float, prod: float, radius: float = 2.2) -> None:
-            pad[idx] = [idx, owner, mx(x), y, radius, ships, prod]
-            alive[idx] = True
-
-        target = 2
-        deadline = self.scenario_deadline if self.scenario_deadline > 0 else 20
-
-        if scenario_id == _SCENARIO_AGG_ATTACK:
-            # No single advantaged source can take the neutral target; two sources can.
-            # If the target is not taken by the deadline, the larger opponent economy wins.
-            planet(0, adv, 28.0, 63.0, 55.0, 2.0)
-            planet(1, adv, 28.0, 77.0, 55.0, 2.0)
-            planet(target, -1, 50.0, 70.0, 80.0, 5.0)
-            planet(3, opp, 84.0, 70.0, 130.0, 4.0)
-            planet(4, opp, 76.0, 84.0, 35.0, 1.0)
-            planet(5, adv, 16.0, 70.0, 25.0, 1.0)
-        elif scenario_id == _SCENARIO_STAGE_ATTACK:
-            # A prior friendly fleet is already committed but stops short. The winning
-            # move is to add one more source to the same target before the deadline.
-            planet(0, adv, 30.0, 70.0, 45.0, 2.0)
-            planet(1, adv, 31.0, 82.0, 42.0, 2.0)
-            planet(target, -1, 50.0, 70.0, 75.0, 5.0)
-            planet(3, opp, 84.0, 70.0, 125.0, 4.0)
-            planet(4, opp, 76.0, 84.0, 35.0, 1.0)
-            planet(5, adv, 17.0, 70.0, 25.0, 1.0)
-        elif scenario_id == _SCENARIO_HOLD_UNDER_PEEL:
-            # The focal planet starts ours but thin; an enemy peel is inbound. The
-            # winning move is defensive concentration from both nearby sources.
-            planet(0, adv, 38.0, 64.0, 45.0, 2.0)
-            planet(1, adv, 38.0, 76.0, 45.0, 2.0)
-            planet(target, adv, 50.0, 70.0, 15.0, 5.0)
-            planet(3, opp, 84.0, 70.0, 125.0, 4.0)
-            planet(4, opp, 75.0, 84.0, 40.0, 1.0)
-            planet(5, adv, 28.0, 70.0, 20.0, 1.0)
-        else:
-            raise AssertionError(f"unhandled scenario id {scenario_id}")
-
-        return scenario_id, adv, target, deadline
-
-    def _scenario_fleet_seed(self, env_i: int) -> None:
-        """Seed existing inbound fleets for scenarios that test staged/defensive follow-up."""
-        sid = int(self.scenario_id[env_i].item()) if self.scenario_id is not None else _SCENARIO_OFF
-        if sid not in (_SCENARIO_STAGE_ATTACK, _SCENARIO_HOLD_UNDER_PEEL):
-            return
-        adv = int(self.scenario_adv_player[env_i].item())
-        opp = 1 - adv
-        target = int(self.scenario_target[env_i].item())
-        if sid == _SCENARIO_STAGE_ATTACK:
-            owner, ships, src_pid = adv, 45.0, 0
-            x = 30.0 if adv == 0 else 70.0
-            y = 70.0
-        else:
-            owner, ships, src_pid = opp, 130.0, 3
-            # Keep the peel already committed, but not so close that an immediate
-            # correct reinforce cannot arrive first.
-            x = 84.0 if adv == 0 else 16.0
-            y = 70.0
-
-        # Seeded scenario fleets must use the same intercept aimer as normal
-        # launches. Straight current-position aim can harmlessly miss an orbiting
-        # target and invalidate the lesson.
-        src_x = torch.tensor([[x]], dtype=torch.float32, device=self.device)
-        src_y = torch.tensor([[y]], dtype=torch.float32, device=self.device)
-        src_r = torch.zeros((1, 1), dtype=torch.float32, device=self.device)
-        ship_count = torch.tensor([[ships]], dtype=torch.float32, device=self.device)
-        target_idx = torch.tensor([[target]], dtype=torch.long, device=self.device)
-        angle = float(self._target_intercept_angle(src_x, src_y, src_r, ship_count, target_idx)[0, 0].item())
-        src_px = float(self.planets[env_i, src_pid, 2].item())
-        src_py = float(self.planets[env_i, src_pid, 3].item())
-        src_pr = float(self.planets[env_i, src_pid, 4].item())
-        start_x = src_px + math.cos(angle) * (src_pr + 0.1)
-        start_y = src_py + math.sin(angle) * (src_pr + 0.1)
-        self.fleets[env_i, 0, 0] = 0.0
-        self.fleets[env_i, 0, 1] = float(owner)
-        self.fleets[env_i, 0, 2] = start_x
-        self.fleets[env_i, 0, 3] = start_y
-        self.fleets[env_i, 0, 4] = angle
-        self.fleets[env_i, 0, 5] = float(src_pid)
-        self.fleets[env_i, 0, 6] = ships
-        self.fleet_alive[env_i, 0] = True
-        self.next_fleet_id[env_i] = 1
 
     # ---------------------------------------------------------------------
     # Reset — generates N games using the kaggle env's seed-based generator,
@@ -760,10 +410,6 @@ class VecTorchEnv:
         planets_list = []
         planet_alive_list = []
         angular_velocities = []
-        scenario_ids = []
-        scenario_adv = []
-        scenario_targets = []
-        scenario_deadlines = []
 
         for seed_idx, seed in enumerate(seeds):
             init_rng = random.Random(seed)
@@ -775,10 +421,6 @@ class VecTorchEnv:
             pad = np.zeros((MAX_PLANETS, 7), dtype=np.float32)
             for i, p in enumerate(raw_planets):
                 pad[i] = p
-            # Board-curriculum: scale neutral garrison symmetrically. Applied BEFORE
-            # home assignment (next block overwrites home planets' ships to 10), so
-            # only the neutrals that REMAIN neutral after assignment are scaled.
-            self._scale_neutrals(pad, n)
             planets_list.append(pad)
 
             alive = np.zeros(MAX_PLANETS, dtype=bool)
@@ -790,25 +432,8 @@ class VecTorchEnv:
                 home_group = init_rng.randint(0, num_groups - 1)
                 base = home_group * 4
                 if self.num_players == 2:
-                    p0_ships = (self.handicap_ships
-                                if self.handicap_frac > 0 and random.random() < self.handicap_frac
-                                else 10)
-                    pad[base, 1] = 0;     pad[base, 5] = p0_ships
+                    pad[base, 1] = 0;     pad[base, 5] = 10
                     pad[base + 3, 1] = 1; pad[base + 3, 5] = 10
-                    # SSDR: grant opponent 1..ssdr_max_steps extra neutral planets
-                    # Only applies to self-play envs (not pool envs) per mask.
-                    if self._ssdr_active_for(seed_idx) and random.random() < self.ssdr_frac:
-                        k = random.randint(1, max(1, self.ssdr_max_steps))
-                        # find neutral planets (owner=-1, alive) excluding home slots
-                        neutral_idx = [i for i in range(n)
-                                       if pad[i, 1] == -1 and i != base and i != base + 3]
-                        random.shuffle(neutral_idx)
-                        for ni in neutral_idx[:k]:
-                            prod = pad[ni, 6]
-                            pad[ni, 1] = 1  # give to opponent
-                            pad[ni, 5] = max(10, int(prod * 3))  # realistic ships
-                    # Self-boost (handicapped-real-planner): grant OUR seat extra planets
-                    self._maybe_self_boost(pad, n, base, seed_idx)
                 elif self.num_players == 4:
                     for j in range(4):
                         pad[base + j, 1] = j; pad[base + j, 5] = 10
@@ -817,13 +442,6 @@ class VecTorchEnv:
 
             # Mark unused slots as neutral (-1)
             pad[n:, 1] = -1
-            sid, adv, tgt, deadline = self._apply_scenario(
-                pad, alive, random.Random(f"orbit-wars-scenario-{seed}")
-            )
-            scenario_ids.append(sid)
-            scenario_adv.append(adv)
-            scenario_targets.append(tgt)
-            scenario_deadlines.append(deadline)
             planet_alive_list.append(alive)
 
         planets_np = np.stack(planets_list, axis=0)
@@ -840,52 +458,15 @@ class VecTorchEnv:
         self.done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.rewards = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         self.seeds = list(seeds)
-        self.scenario_id = torch.tensor(scenario_ids, dtype=torch.long, device=self.device)
-        self.scenario_adv_player = torch.tensor(scenario_adv, dtype=torch.long, device=self.device)
-        self.scenario_target = torch.tensor(scenario_targets, dtype=torch.long, device=self.device)
-        self.scenario_done_step = torch.tensor(scenario_deadlines, dtype=torch.long, device=self.device)
-        self._last_scenario_id = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self._last_scenario_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         self._precompute_orbital_params()
         self._init_comets()
-        for env_i in range(self.num_envs):
-            self._scenario_fleet_seed(env_i)
-        self.prev_material = self._compute_material()
         self.prev_production = self._compute_production()
         owner_p = self.planets[:, :, 1].long()
         self.prev_owned = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         for pl in range(self.num_players):
             self.prev_owned[:, pl] = ((owner_p == pl) & self.planet_alive).float().sum(dim=1)
-        # Prod-share term state. Initial ownership is pre-existing state, not a capture: holding
-        # a home pays nothing, while losing it is a negative delta anchored at t=0.
-        self.prev_planet_owner = torch.where(
-            self.planet_alive,
-            owner_p,
-            torch.full_like(owner_p, -1),
-        )
-        self.capture_time = torch.zeros(self.num_envs, self.planets.shape[1],
-                                        dtype=torch.long, device=self.device)
-        self.total_board_prod = self._prod_share_total_board_prod()
-        # Consolidation-bonus per-planet state (only used when consolidation_coef != 0): track,
-        # per planet, the owner being held + how long since this holding episode began, whether
-        # it began as a CAPTURE (initial owners are NOT captures), and whether already credited.
         P = self.planets.shape[1]
-        self.cap_owner = owner_p.clone()                                              # (N, P)
-        self.cap_age = torch.zeros(self.num_envs, P, dtype=torch.long, device=self.device)
-        self.cap_credited = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
-        self.cap_is_capture = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
-        # Capture-utility state mirrors cap_* but tracks whether the current holding episode has
-        # used the captured planet as an attack source within the utility window.
-        self.cu_owner = owner_p.clone()
-        self.cu_age = torch.zeros(self.num_envs, P, dtype=torch.long, device=self.device)
-        self.cu_credited = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
-        self.cu_is_capture = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
-        self.cu_used_attack = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
-        # Lever A: per (env, planet, player) "inflight force already sufficient to take this
-        # enemy planet" — so the bonus fires only on the crossing (assembly), not every step.
-        self.prev_decisive_suff = torch.zeros(
-            self.num_envs, P, self.num_players, dtype=torch.bool, device=self.device)
         # PBRS staging: Φ of the previous state. Fresh boards have no inflight → Φ(s_0)=0.
         self.prev_staging_phi = torch.zeros(
             self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
@@ -896,144 +477,6 @@ class VecTorchEnv:
                 (self.num_envs, self.num_players, P, P), _REINF_CD_NEVER,
                 dtype=torch.long, device=self.device)
         return self._state_dict()
-
-    def _compute_material(self) -> torch.Tensor:
-        owner_p = self.planets[:, :, 1].long()
-        owner_f = self.fleets[:, :, 1].long()
-        ships_p = self.planets[:, :, 5] * self.planet_alive.float()
-        ships_f = self.fleets[:, :, 6] * self.fleet_alive.float()
-        material = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
-        for pl in range(self.num_players):
-            material[:, pl] = (
-                ((owner_p == pl).float() * ships_p).sum(dim=1)
-                + ((owner_f == pl).float() * ships_f).sum(dim=1)
-            )
-        return material
-
-    def _prod_share_regular_alive(self) -> torch.Tensor:
-        regular = torch.arange(self.planets.shape[1], device=self.device) < COMET_SLOT_START
-        return self.planet_alive & regular.unsqueeze(0)
-
-    def _prod_share_total_board_prod(self) -> torch.Tensor:
-        return (self.planets[:, :, 6] * self._prod_share_regular_alive().float()).sum(dim=1).clamp(min=1.0)
-
-    def _prod_share_bonus(self, terminal_rewards: torch.Tensor) -> torch.Tensor:
-        """Unified capture reward: symmetric, capture-time-ANCHORED, value-weighted by share of
-        total board production, excluding transient comet slots from both numerator and denominator.
-        For each player pl and each regular planet whose owner CHANGED this step:
-            gain (captured by pl) : +coef · decay(NOW)        · prod/total_board
-            loss (lost from pl)   : −coef · decay(capture_time) · prod/total_board   (same anchor)
-        so a capture and its eventual loss cancel exactly (no tennis farm; losing drives holding).
-        Mutates capture_time (changed planets -> now) and prev_planet_owner (dead slots -> -1)."""
-        owner_now = self.planets[:, :, 1].long()                          # (N, P)
-        prod_p = self.planets[:, :, 6]                                    # (N, P)
-        regular_alive = self._prod_share_regular_alive()
-        changed = (owner_now != self.prev_planet_owner) & regular_alive
-        decay_now = (torch.exp(-2.5 * self.step_count.float() / self.episode_steps) + 0.10).unsqueeze(1)
-        decay_cap = torch.exp(-2.5 * self.capture_time.float() / self.episode_steps) + 0.10
-        share = prod_p / self.total_board_prod.unsqueeze(1)               # (N, P) fraction of regular economy
-        for pl in range(self.num_players):
-            gain = (changed & (owner_now == pl)).float() * decay_now * share
-            loss = (changed & (self.prev_planet_owner == pl)).float() * decay_cap * share
-            terminal_rewards[:, pl] = terminal_rewards[:, pl] + self.prod_share_coef * (gain - loss).sum(dim=1)
-        step_b = self.step_count.long().unsqueeze(1).expand_as(self.capture_time)
-        self.capture_time = torch.where(changed, step_b, self.capture_time)
-        self.prev_planet_owner = torch.where(self.planet_alive, owner_now,
-                                             torch.full_like(owner_now, -1))
-        return terminal_rewards
-
-    def _consolidation_bonus(self, terminal_rewards: torch.Tensor) -> torch.Tensor:
-        """One-time +consolidation_coef per NET-NEW captured planet that survives
-        consolidation_steps. Drives the consolidation state machine (cap_owner/age/credited/
-        is_capture) from the CURRENT planet owners and credits the holder. See __init__ note."""
-        cur_owner = self.planets[:, :, 1].long()                       # (N, P)
-        changed = cur_owner != self.cap_owner
-        # reset the holding episode on any ownership change; else age it one step
-        self.cap_age = torch.where(changed, torch.zeros_like(self.cap_age), self.cap_age + 1)
-        self.cap_credited = self.cap_credited & ~changed
-        # a mid-episode change to a real player = a capture (initial owners never "change")
-        self.cap_is_capture = torch.where(changed, cur_owner >= 0, self.cap_is_capture)
-        self.cap_owner = cur_owner
-        ready = (self.cap_is_capture & (self.cap_age >= self.consolidation_steps)
-                 & ~self.cap_credited & (cur_owner >= 0) & self.planet_alive)
-        if ready.any():
-            for pl in range(self.num_players):
-                cnt = (ready & (cur_owner == pl)).float().sum(dim=1)    # (N,) planets consolidated
-                terminal_rewards[:, pl] = terminal_rewards[:, pl] + self.consolidation_coef * cnt
-            self.cap_credited = self.cap_credited | ready
-        return terminal_rewards
-
-    def _capture_frontline_mask(self, cur_owner: torch.Tensor) -> torch.Tensor:
-        """Top-3 owned planets nearest to any enemy planet for each player/env."""
-        P = cur_owner.shape[1]
-        x = self.planets[:, :, 2]
-        y = self.planets[:, :, 3]
-        alive = self.planet_alive
-        dx = x.unsqueeze(2) - x.unsqueeze(1)
-        dy = y.unsqueeze(2) - y.unsqueeze(1)
-        dist = torch.sqrt(dx * dx + dy * dy + 1e-6)                 # (N, P, P)
-        frontline = torch.zeros(self.num_envs, P, dtype=torch.bool, device=self.device)
-        big = torch.full((self.num_envs, P), 1e9, dtype=torch.float32, device=self.device)
-        k = min(3, P)
-        for pl in range(self.num_players):
-            mine = (cur_owner == pl) & alive
-            enemy = (cur_owner >= 0) & (cur_owner != pl) & alive
-            enemy_any = enemy.any(dim=1, keepdim=True)
-            nearest_enemy = torch.where(enemy.unsqueeze(1), dist, 1e9).min(dim=2).values
-            scores = torch.where(mine & enemy_any, nearest_enemy, big)
-            idx = torch.topk(scores, k, dim=1, largest=False).indices
-            picked = torch.zeros_like(frontline)
-            picked.scatter_(1, idx, True)
-            picked &= scores < 1e9
-            frontline |= picked & mine
-        return frontline
-
-    def _capture_utility_bonus(self, terminal_rewards: torch.Tensor) -> torch.Tensor:
-        """One-time reward/penalty for whether a net-new capture becomes useful within K steps."""
-        # First credit attack utility against the PRE-change holder. Actions launch before combat;
-        # if the source is lost on the same tick, the attack still happened and should be credited.
-        attack_ready = (
-            self.cu_is_capture
-            & self.cu_used_attack
-            & ~self.cu_credited
-            & (self.cu_owner >= 0)
-            & self.planet_alive
-        )
-        if attack_ready.any():
-            for pl in range(self.num_players):
-                cnt = (attack_ready & (self.cu_owner == pl)).float().sum(dim=1)
-                terminal_rewards[:, pl] = terminal_rewards[:, pl] + self.capture_utility_coef * cnt
-            self.cu_credited = self.cu_credited | attack_ready
-
-        cur_owner = self.planets[:, :, 1].long()
-        changed = cur_owner != self.cu_owner
-        self.cu_age = torch.where(changed, torch.zeros_like(self.cu_age), self.cu_age + 1)
-        self.cu_credited = self.cu_credited & ~changed
-        self.cu_is_capture = torch.where(changed, cur_owner >= 0, self.cu_is_capture)
-        self.cu_used_attack = self.cu_used_attack & ~changed
-        self.cu_owner = cur_owner
-
-        window_ready = (
-            self.cu_is_capture
-            & ~self.cu_credited
-            & (self.cu_age >= self.capture_utility_window)
-            & (cur_owner >= 0)
-            & self.planet_alive
-        )
-        if window_ready.any():
-            frontline = self._capture_frontline_mask(cur_owner)
-            useful = window_ready & frontline
-            idle = window_ready & ~frontline
-            for pl in range(self.num_players):
-                useful_cnt = (useful & (cur_owner == pl)).float().sum(dim=1)
-                idle_cnt = (idle & (cur_owner == pl)).float().sum(dim=1)
-                terminal_rewards[:, pl] = (
-                    terminal_rewards[:, pl]
-                    + self.capture_utility_coef * useful_cnt
-                    - self.capture_idle_penalty * idle_cnt
-                )
-            self.cu_credited = self.cu_credited | window_ready
-        return terminal_rewards
 
     def _fleet_target_idx(self) -> torch.Tensor:
         """Lead-aware swept-collision target planet index per fleet, (N, F), or -1 if it hits nothing.
@@ -1048,8 +491,8 @@ class VecTorchEnv:
         Scalar mirror: eval._dm_fleet_target / _lead_collision_target, validated at 98.4% vs the true
         swept-collision on replay (the old along/perp-r+2 nearest-distance heuristic was ~85% — it
         ignored orbital lead and over-loosely matched). Player-independent (geometry only). Feeds the
-        decisive-mass reward + diagnostic via _decisive_mass_fields; dead fleets are masked by the
-        caller (valid_f). project_force_concentration_wall."""
+        capture-floor machinery via _decisive_mass_fields (staging potential, sufficient-commit
+        veto); dead fleets are masked by the caller (valid_f)."""
         fx = self.fleets[:, :, 2].unsqueeze(2)                          # (N, F, 1)
         fy = self.fleets[:, :, 3].unsqueeze(2)
         fang = self.fleets[:, :, 4]
@@ -1085,9 +528,8 @@ class VecTorchEnv:
 
     def _decisive_mass_fields(self):
         """Per-(N,P,num_players) inflight mass, capture floor, max-ETA and is_enemy mask — the
-        EXACT quantities producer_v2's capture floor uses. Shared by the Lever-A reward
-        (_decisive_mass_bonus) and the dm_* gap diagnostic (_accumulate_decisive_diag) so the two
-        can never drift. project_force_concentration_wall.
+        EXACT quantities producer_v2's capture floor uses. Consumed by the PBRS staging
+        potential (_staging_potential).
 
         floor_t = garrison + prod*eta + enemy_inbound_now      (projected defenders at arrival)
                 + beta*rho(eta)*reachable_enemy_mass           (v2's reactive-reinforcement margin)
@@ -1153,7 +595,7 @@ class VecTorchEnv:
             # under-credited staging toward cheap neutrals. Enemy targets keep prod*eta.
             prod_floor = torch.where(owner == -1, torch.zeros_like(prod), prod)
             floor[:, :, pl] = (garr + prod_floor * eta + inbound
-                               + self.decisive_mass_beta * rho * enemy_mass + _DM_OVERHEAD)
+                               + _DM_BETA * rho * enemy_mass + _DM_OVERHEAD)
             eta_out[:, :, pl] = eta
             is_enemy[:, :, pl] = alive & (owner != pl) & (owner >= 0)
         return mass, floor, eta_out, is_enemy
@@ -1173,49 +615,6 @@ class VecTorchEnv:
         k = min(self.staging_topk, ratio.shape[1])
         phi = ratio.topk(k, dim=1).values.sum(dim=1)                 # (N, players): top-k per player
         return phi
-
-    def _decisive_mass_bonus(self, terminal_rewards: torch.Tensor, fields=None) -> torch.Tensor:
-        """Lever A: +decisive_mass_coef the step our inflight force converging on an ENEMY target
-        first reaches producer_v2's capture floor (one credit per crossing, no over-mass scaling;
-        prev_decisive_suff re-arms when mass drops below floor / the planet stops being enemy).
-        `fields` = a precomputed (mass, floor, eta, is_enemy) from _decisive_mass_fields() so
-        step() shares one computation with the diagnostic; None → compute fresh."""
-        mass, floor, _eta, is_enemy = fields if fields is not None else self._decisive_mass_fields()
-        for pl in range(self.num_players):
-            suff = is_enemy[:, :, pl] & (mass[:, :, pl] >= floor[:, :, pl])
-            crossing = suff & ~self.prev_decisive_suff[:, :, pl]
-            cnt = crossing.float().sum(dim=1)
-            terminal_rewards[:, pl] = terminal_rewards[:, pl] + self.decisive_mass_coef * cnt
-            self.prev_decisive_suff[:, :, pl] = suff
-            if self._decisive_credit is not None:
-                self._decisive_credit[:, pl] += cnt
-        return terminal_rewards
-
-    def _accumulate_decisive_diag(self, mass, floor, eta, is_enemy):
-        """Phase-split dm_* GAP diagnostic from the EXACT reward floor (decisive_diag). Per
-        (env, player): targets = enemy planets with our inflight mass>0; ratio = mass/floor;
-        cross = ratio>=1; gap = max(0,1-ratio); near-miss = ratio in [0.75,1); overkill = ratio
-        on crossed. Reward-side OFF is fine — this reads whether the policy moves toward the
-        decmass target regardless. project_force_concentration_wall."""
-        sc = self.step_count.float()                                   # (N,)
-        w = torch.stack([(sc < 50).float(),
-                         ((sc >= 50) & (sc < 100)).float(),
-                         (sc >= 100).float()], dim=1)                  # (N, 3) phase one-hot
-        fl = floor.clamp(min=1e-6)
-        ratio = mass / fl                                              # (N, P, players)
-        gap = (fl - mass).clamp(min=0.0) / fl
-        crossed = (mass >= floor).float()
-        nearmiss = ((ratio >= 0.75) & (ratio < 1.0)).float()
-        att = (is_enemy & (mass > 0)).float()                         # attacked enemy targets
-        we = w.unsqueeze(1)                                            # (N, 1, 3) → over players
-        def acc(per_target):                                          # (N,P,players) → (N,players,3)
-            return (att * per_target).sum(dim=1).unsqueeze(-1) * we
-        self._dm_targets += att.sum(dim=1).unsqueeze(-1) * we
-        self._dm_cross += acc(crossed)
-        self._dm_ratio_sum += acc(ratio)
-        self._dm_gap_sum += acc(gap)
-        self._dm_overkill_sum += acc(crossed * ratio)
-        self._dm_nearmiss += acc(nearmiss)
 
     def _compute_production(self) -> torch.Tensor:
         """Total production rate of planets owned by each player. (N, num_players)"""
@@ -2232,7 +1631,7 @@ class VecTorchEnv:
         # arrival (current garrison + production×ETA + enemy inbound arriving before
         # us). Enemy targets are exempt — under-strength attacks on enemies can soften,
         # feint, or arrive as a second wave. Reinforces (own targets) are untouched.
-        if ((self.sufficient_commit_factor > 0.0 or self.redundant_target_factor > 0.0)
+        if (self.sufficient_commit_factor > 0.0
                 and self.action_decode == "target" and actions.shape[-1] >= 4):
             is_neutral_attack = use_target_decode & (target_owner < 0)
             if is_neutral_attack.any():
@@ -2273,52 +1672,8 @@ class VecTorchEnv:
                 friendly_inbound = (f_ships.unsqueeze(1) * (valid & friendly_mask).float()).sum(dim=2)
                 total_offense = ship_count + friendly_inbound
                 # SUFFICIENT-COMMIT: veto if (ship_count + friendly_inbound) can't beat the floor.
-                if self.sufficient_commit_factor > 0.0:
-                    insufficient = is_neutral_attack & (total_offense <= projected_defense * self.sufficient_commit_factor)
-                    can_fire = can_fire & ~insufficient
-                # REDUNDANT-TARGET: veto if IN-FLIGHT friendly mass ALONE already clears the target
-                # (garrison + enemy inbound) → this launch only reinforces an already-won capture, so
-                # the policy is pushed to retarget the spare to an un-taken neutral.
-                if self.redundant_target_factor > 0.0:
-                    redundant = is_neutral_attack & (
-                        friendly_inbound > (projected_defense + enemy_inbound) * self.redundant_target_factor)
-                    can_fire = can_fire & ~redundant
-            else:
-                can_fire = can_fire  # no-op when no neutral attacks
-
-        # PATH-OBSTRUCTION MASK: veto a launch whose straight path is screened by an
-        # uncapturable planet (the fleet collides with it before reaching the intended
-        # target). Training-time VETO; eval RETARGETS pre-argmax (action_mask.
-        # _path_obstruction_blocked) — same train/eval split as redundant_target. Criterion:
-        # a non-own, alive planet strictly between source and target, within its radius, whose
-        # capture cost exceeds the source garrison (can't be cleared even at full commit).
-        if (self.path_obstruction_mask and self.action_decode == "target"
-                and actions.shape[-1] >= 4):
-            Pn = self.planets.shape[1]
-            tgt_x = tgt[:, :, 2]; tgt_y = tgt[:, :, 3]                 # (N, MO)
-            src_g = src[:, :, 5]                                       # source garrison (max send)
-            sdx = tgt_x - src_x; sdy = tgt_y - src_y                   # (N, MO)
-            seg2 = (sdx * sdx + sdy * sdy).clamp(min=1e-9)
-            bx = self.planets[:, :, 2].unsqueeze(1)                    # (N, 1, P)
-            by = self.planets[:, :, 3].unsqueeze(1)
-            brad = self.planets[:, :, 4].unsqueeze(1)
-            bown = self.planets[:, :, 1].long().unsqueeze(1)
-            bsh = self.planets[:, :, 5].unsqueeze(1)
-            bpr = self.planets[:, :, 6].unsqueeze(1)
-            balive = self.planet_alive.unsqueeze(1)                    # (N, 1, P)
-            relx = bx - src_x.unsqueeze(2); rely = by - src_y.unsqueeze(2)   # (N, MO, P)
-            proj = (relx * sdx.unsqueeze(2) + rely * sdy.unsqueeze(2)) / seg2.unsqueeze(2)
-            cxp = src_x.unsqueeze(2) + proj * sdx.unsqueeze(2)
-            cyp = src_y.unsqueeze(2) + proj * sdy.unsqueeze(2)
-            perp = torch.sqrt((cxp - bx) ** 2 + (cyp - by) ** 2)       # (N, MO, P)
-            pidx = torch.arange(Pn, device=self.device).view(1, 1, Pn)
-            not_src = pidx != owned_idx.unsqueeze(2)
-            not_tgt = pidx != target_idx.unsqueeze(2)
-            cost = torch.where(bown < 0, bsh + 1.0, bsh + bpr * 3.0 + 1.0)   # (N, 1, P)
-            uncap = cost > src_g.unsqueeze(2)
-            is_blk = ((proj > 0.02) & (proj < 0.98) & (perp < brad)
-                      & not_src & not_tgt & (bown != owner_id) & balive & uncap)
-            can_fire = can_fire & ~is_blk.any(dim=2)
+                insufficient = is_neutral_attack & (total_offense <= projected_defense * self.sufficient_commit_factor)
+                can_fire = can_fire & ~insufficient
 
         # Compute launch positions (just outside planet radius along angle)
         start_x = src_x + torch.cos(angle) * (src_r + 0.1)
@@ -2365,17 +1720,6 @@ class VecTorchEnv:
             self._slotstarve_step[:, owner_id, 0] += _ss * _v0
             self._slotstarve_step[:, owner_id, 1] += _ss * _v1
             self._slotstarve_step[:, owner_id, 2] += _ss * _v2
-
-        # Capture-utility reward: mark newly captured planets that became useful by
-        # launching a REAL emitted attack (not reinforce, not vetoed, not slot-starved).
-        if (self.capture_utility_active and self.action_decode == "target"
-                and actions.shape[-1] >= 4):
-            emitted_attack = target_valid & use_target_decode & (target_owner != owner_id)
-            for slot in range(emitted_attack.shape[1]):
-                m = emitted_attack[:, slot]
-                if bool(m.any()):
-                    ni = m.nonzero(as_tuple=True)[0]
-                    self.cu_used_attack[ni, owned_idx[ni, slot]] = True
 
         # Per-env IDs for new fleets: next_fleet_id + 0, 1, 2, ... within env.
         new_id_within_env = (target_valid.long().cumsum(dim=1) - 1).clamp(min=0)
@@ -2425,20 +1769,6 @@ class VecTorchEnv:
         self._obs_total_ships = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
         self._obs_trunc_enemy_ships = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
         self._obs_total_enemy_ships = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
-        # Lever A: count of decisive-mass crossings credited this rollout (per env, per player).
-        self._decisive_credit = torch.zeros(
-            self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
-        # dm_* GAP diagnostic: phase-split (early/mid/late) per-(env,player) sums over the rollout,
-        # accumulated every step (when decisive_diag) from the EXACT reward floor so the diag and
-        # the Lever-A reward can never drift. Read train_frac-weighted in train_torch.
-        z3 = lambda: torch.zeros(self.num_envs, self.num_players, 3,
-                                 dtype=torch.float32, device=self.device)
-        self._dm_targets = z3()
-        self._dm_cross = z3()
-        self._dm_ratio_sum = z3()
-        self._dm_gap_sum = z3()
-        self._dm_overkill_sum = z3()
-        self._dm_nearmiss = z3()
         self._staging_phi_acc = 0.0
         self._staging_phi_n = 0
 
@@ -2661,40 +1991,19 @@ class VecTorchEnv:
 
         # 11. Termination + reward (terminal_rewards is non-zero only for newly-done envs)
         terminal_rewards, done = self._check_done()
-        if self.shaping_coef != 0.0:
-            material = self._compute_material()
-            material_delta = material - self.prev_material
-            if self.num_players == 2:
-                delta = material_delta[:, 0] - material_delta[:, 1]
-                shaping_rewards = torch.stack([delta, -delta], dim=1)
-            else:
-                others = material_delta.sum(dim=1, keepdim=True) - material_delta
-                shaping_rewards = material_delta - others / max(self.num_players - 1, 1)
-            shaping_rewards = self.shaping_coef * torch.tanh(shaping_rewards / 50.0)
-            terminal_rewards = terminal_rewards + shaping_rewards
-            self.prev_material = material
         # Expansion shaping: potential-based reward on the change in owned-production
         # lead. Dense per-step signal for winning the planet/economy race (the thing
         # that decides snowball games). Telescopes, so passive play nets ~0.
-        # Defense shaping: per-step PENALTY for losing owned production (a planet
-        # captured from us). Targets the consolidation gap — agent grabs planets but
-        # won't hold/reinforce them (reinforce_rate ~0.05). Asymmetric: only the
-        # negative (loss) side, so it rewards HOLDING, distinct from expansion's GRAB.
-        if self.expansion_coef != 0.0 or self.defense_coef != 0.0:
+        if self.expansion_coef != 0.0:
             production = self._compute_production()
             prod_delta = production - self.prev_production
-            if self.expansion_coef != 0.0:
-                if self.num_players == 2:
-                    d = prod_delta[:, 0] - prod_delta[:, 1]
-                    expansion_rewards = torch.stack([d, -d], dim=1)
-                else:
-                    others = prod_delta.sum(dim=1, keepdim=True) - prod_delta
-                    expansion_rewards = prod_delta - others / max(self.num_players - 1, 1)
-                terminal_rewards = terminal_rewards + self.expansion_coef * expansion_rewards
-            if self.defense_coef != 0.0:
-                # penalize each player's own production lost this step (clamp to losses)
-                prod_lost = (-prod_delta).clamp(min=0.0)   # (N, num_players)
-                terminal_rewards = terminal_rewards - self.defense_coef * prod_lost
+            if self.num_players == 2:
+                d = prod_delta[:, 0] - prod_delta[:, 1]
+                expansion_rewards = torch.stack([d, -d], dim=1)
+            else:
+                others = prod_delta.sum(dim=1, keepdim=True) - prod_delta
+                expansion_rewards = prod_delta - others / max(self.num_players - 1, 1)
+            terminal_rewards = terminal_rewards + self.expansion_coef * expansion_rewards
         # Delta-capture shaping: time-decayed reward for CAPTURING planets (delta in owned
         # count), NOT for holding them. Fires as a spike when a planet changes hands.
         # Rev30 capture reward: symmetric delta + exponential decay with permanent floor.
@@ -2739,35 +2048,18 @@ class VecTorchEnv:
                 effective_coef = self.early_capture_coef * decay  # (N,)
             terminal_rewards = terminal_rewards + effective_coef.unsqueeze(1) * ec_rewards
             self.prev_owned = owned
-        # Production-share capture reward (unified term): symmetric, capture-time-anchored,
-        # value-weighted. r[pl] = coef · Σ_planets [ Δown(pl)·decay_anchor · prod/total_board ].
-        # gain anchored to NOW (decay at current step), loss anchored to the LOSING owner's
-        # capture_time → a capture and its eventual loss cancel exactly (no farm; drives holding).
-        if self.prod_share_coef != 0.0:
-            terminal_rewards = self._prod_share_bonus(terminal_rewards)
-        # Consolidation bonus: ONE-TIME +coef when a net-new CAPTURED planet survives K steps.
-        if self.consolidation_coef != 0.0:
-            terminal_rewards = self._consolidation_bonus(terminal_rewards)
-        if self.capture_utility_active:
-            terminal_rewards = self._capture_utility_bonus(terminal_rewards)
-        if self.decisive_mass_coef != 0.0 or self.decisive_diag or self.staging_shaping_coef != 0.0:
-            dm_fields = self._decisive_mass_fields()
-            if self.decisive_mass_coef != 0.0:
-                terminal_rewards = self._decisive_mass_bonus(terminal_rewards, dm_fields)
-            if self.decisive_diag and self._dm_targets is not None:
-                self._accumulate_decisive_diag(*dm_fields)
-            if self.staging_shaping_coef != 0.0:
-                # PBRS: r += coef·(γΦ(s') − Φ(s)). Φ(s') from the post-step pre-reset state.
-                # Terminal Φ(s')=0 (absorbing) on done envs so the potential collapses cleanly.
-                phi_now = self._staging_potential(dm_fields)         # (N, players)
-                gamma_phi = torch.where(done.unsqueeze(1),
-                                        torch.zeros_like(phi_now),
-                                        self.staging_gamma * phi_now)
-                terminal_rewards = terminal_rewards + self.staging_shaping_coef * (
-                    gamma_phi - self.prev_staging_phi)
-                self.prev_staging_phi = phi_now                      # done envs fixed post-reset
-                self._staging_phi_acc += float(phi_now.mean().item())
-                self._staging_phi_n += 1
+        if self.staging_shaping_coef != 0.0:
+            # PBRS: r += coef·(γΦ(s') − Φ(s)). Φ(s') from the post-step pre-reset state.
+            # Terminal Φ(s')=0 (absorbing) on done envs so the potential collapses cleanly.
+            phi_now = self._staging_potential(self._decisive_mass_fields())   # (N, players)
+            gamma_phi = torch.where(done.unsqueeze(1),
+                                    torch.zeros_like(phi_now),
+                                    self.staging_gamma * phi_now)
+            terminal_rewards = terminal_rewards + self.staging_shaping_coef * (
+                gamma_phi - self.prev_staging_phi)
+            self.prev_staging_phi = phi_now                      # done envs fixed post-reset
+            self._staging_phi_acc += float(phi_now.mean().item())
+            self._staging_phi_n += 1
         # Reinforcement transit cost (#2): price the ships each player sent to its own
         # planets this step. Costless reinforcement floods (rev56, ~30× launch volume);
         # this prunes the wasteful tail. Calibrate reinforce_cost so reinforce_rate
@@ -2779,43 +2071,12 @@ class VecTorchEnv:
             self._auto_reset(done)
         # Refresh prev_production / prev_owned AFTER auto-reset so done envs telescope
         # from their fresh post-reset state (avoids spurious spike on episode boundary).
-        if self.expansion_coef != 0.0 or self.defense_coef != 0.0:
+        if self.expansion_coef != 0.0:
             self.prev_production = self._compute_production()
         if self.early_capture_coef != 0.0 and done.any():
             ec_owner = self.planets[:, :, 1].long()
             for pl in range(self.num_players):
                 self.prev_owned[done, pl] = ((ec_owner[done] == pl) & self.planet_alive[done]).float().sum(dim=1)
-        # Re-arm prod-share state for the fresh post-reset boards: initial ownership is already held
-        # state, capture_time=0, recompute the fixed regular-planet normalizer.
-        if self.prod_share_coef != 0.0 and done.any():
-            ps_owner = self.planets[:, :, 1].long()
-            self.prev_planet_owner[done] = torch.where(
-                self.planet_alive[done],
-                ps_owner[done],
-                torch.full_like(ps_owner[done], -1),
-            )
-            self.capture_time[done] = 0
-            self.total_board_prod[done] = self._prod_share_total_board_prod()[done]
-        # Reset consolidation state for done envs to their fresh post-reset ownership (initial
-        # owners are NOT captures), so the bonus telescopes cleanly across the episode boundary.
-        if self.consolidation_coef != 0.0 and done.any():
-            fresh_owner = self.planets[:, :, 1].long()
-            self.cap_owner[done] = fresh_owner[done]
-            self.cap_age[done] = 0
-            self.cap_credited[done] = False
-            self.cap_is_capture[done] = False
-        if self.capture_utility_active and done.any():
-            fresh_owner = self.planets[:, :, 1].long()
-            self.cu_owner[done] = fresh_owner[done]
-            self.cu_age[done] = 0
-            self.cu_credited[done] = False
-            self.cu_is_capture[done] = False
-            self.cu_used_attack[done] = False
-        # Re-arm the decisive-mass crossing detector for done envs: fresh boards have no
-        # fleets (mass=0), so terminal-step sufficiency must NOT carry over — else a decisive
-        # opening launch landing on a previously-armed index would be suppressed (uncredited).
-        if self.decisive_mass_coef != 0.0 and done.any():
-            self.prev_decisive_suff[done] = False
         # PBRS staging: fresh post-reset boards have no inflight → Φ=0; reset prev so the next step's
         # γΦ(s')−Φ(s) telescopes from 0 (no spurious spike across the episode boundary).
         if self.staging_shaping_coef != 0.0 and done.any():
@@ -2855,34 +2116,7 @@ class VecTorchEnv:
 
         time_up = self.step_count >= (self.episode_steps - 1)
         few_left = n_alive <= 1
-        scenario_success = torch.zeros(N, dtype=torch.bool, device=self.device)
-        scenario_failure = torch.zeros(N, dtype=torch.bool, device=self.device)
-        if self.scenario_id is not None:
-            scenario_active = self.scenario_id != _SCENARIO_OFF
-            target_idx = self.scenario_target.clamp(0, self.planets.shape[1] - 1)
-            target_owner = owner_p.gather(1, target_idx.view(-1, 1)).squeeze(1)
-            adv = self.scenario_adv_player
-            deadline = self.step_count >= self.scenario_done_step.clamp(min=1)
-            attack_scenario = (
-                (self.scenario_id == _SCENARIO_AGG_ATTACK)
-                | (self.scenario_id == _SCENARIO_STAGE_ATTACK)
-            )
-            hold_scenario = self.scenario_id == _SCENARIO_HOLD_UNDER_PEEL
-            scenario_success = scenario_active & (
-                (attack_scenario & (target_owner == adv))
-                | (hold_scenario & deadline & (target_owner == adv))
-            )
-            scenario_failure = scenario_active & (
-                (attack_scenario & deadline & (target_owner != adv))
-                | (hold_scenario & (target_owner != adv))
-            )
-        scenario_done = (scenario_success | scenario_failure) & ~self.done
-        newly_done = (time_up | few_left | scenario_done) & ~self.done
-        if self._last_scenario_id is not None:
-            self._last_scenario_id.zero_()
-            self._last_scenario_success.zero_()
-            self._last_scenario_id[scenario_done] = self.scenario_id[scenario_done]
-            self._last_scenario_success[scenario_done] = scenario_success[scenario_done]
+        newly_done = (time_up | few_left) & ~self.done
 
         # Scores: ships on owned planets + ships in fleets, per player.
         scores = torch.zeros(N, P_, dtype=torch.float32, device=self.device)
@@ -2894,25 +2128,12 @@ class VecTorchEnv:
             scores[:, pl] = sp.sum(dim=1) + sf.sum(dim=1)
         max_score, _ = scores.max(dim=1, keepdim=True)  # (N, 1)
         wins = (scores == max_score) & (max_score > 0)
-        if self.eliminate_to_win:
-            # A win only counts on an elimination; a timeout without one is a draw (set to
-            # 0 below). The dense prod_share shaping still supplies an in-episode gradient.
-            wins = wins & few_left.unsqueeze(1)
         # Expose the RAW winner mask (pre-shaping/bonus) so callers (PFSP result
         # attribution) don't have to infer win/loss from the shaped reward tensor —
-        # which already carries material/expansion/early-capture/etc. shaping by the
+        # which already carries expansion/early-capture/etc. shaping by the
         # time step() returns it. Valid for envs that are newly-done THIS step.
         self._last_wins = wins
         rewards = torch.where(wins, torch.ones_like(scores), -torch.ones_like(scores))
-        # Rank-based terminal reward (FFA only): blend the flat ±1 with a linear rank
-        # map so finishing 2nd of 4 beats being eliminated first. rank[n,p] = #players
-        # with strictly higher score (0 = winner); rank_r maps 0→+1, P-1→-1. The raw
-        # winner mask (_last_wins) is unchanged — still max-score — so PFSP attribution
-        # is unaffected. Inert for P<=2 and coef=0.
-        if self.rank_reward_coef != 0.0 and P_ > 2:
-            rank = (scores.unsqueeze(2) < scores.unsqueeze(1)).float().sum(dim=2)  # (N, P)
-            rank_r = 1.0 - 2.0 * rank / float(max(P_ - 1, 1))
-            rewards = (1.0 - self.rank_reward_coef) * rewards + self.rank_reward_coef * rank_r
         # Optional win-margin bonus: winner gets +α*(my_score/total_score).
         # Losers stay at -1; coefficient 0 = pure ±1 (default).
         if self.win_margin_coeff != 0.0:
@@ -2920,54 +2141,6 @@ class VecTorchEnv:
             margin = scores / total_score          # (N, P) fraction in [0, 1]
             bonus = self.win_margin_coeff * margin
             rewards = torch.where(wins, rewards + bonus, rewards)
-        # Time-to-victory velocity bonus: winners get extra reward for winning early.
-        # reward_win += (episode_steps - T) / episode_steps * speed_coef
-        # Gradient constantly pressures the agent to close games faster.
-        if self.speed_coef != 0.0:
-            # step_count is (N,) — clamp to episode_steps to handle edge cases
-            t = self.step_count.float().clamp(max=self.episode_steps)
-            velocity = (self.episode_steps - t) / self.episode_steps  # (N,) in [0, 1]
-            speed_bonus = self.speed_coef * velocity.unsqueeze(1)     # (N, 1)
-            rewards = torch.where(wins, rewards + speed_bonus, rewards)
-        if scenario_done.any():
-            env_idx = torch.where(scenario_done)[0]
-            rewards[env_idx] = -1.0
-            adv_idx = self.scenario_adv_player[env_idx]
-            opp_idx = 1 - adv_idx
-            succ = scenario_success[env_idx]
-            rewards[env_idx, adv_idx] = torch.where(
-                succ, torch.ones_like(rewards[env_idx, adv_idx]), -torch.ones_like(rewards[env_idx, adv_idx])
-            )
-            rewards[env_idx, opp_idx] = torch.where(
-                succ, -torch.ones_like(rewards[env_idx, opp_idx]), torch.ones_like(rewards[env_idx, opp_idx])
-            )
-            self._last_wins[env_idx] = False
-            self._last_wins[env_idx, adv_idx] = succ
-            self._last_wins[env_idx, opp_idx] = ~succ
-        if self.eliminate_to_win:
-            # Newly-done, non-scenario envs with no elimination winner.
-            draw = (~self._last_wins.any(dim=1)) & newly_done & ~scenario_done
-            if self.timeout_planet_coef > 0.0 and draw.any():
-                # Resolve by PLANET dominance instead of a flat draw: the player holding more
-                # planets at the cap is credited, reward = coef * planet-share margin in [-1,1]
-                # (zero-sum). Removes the most-ships hoard win AND the draw-neutral starvation;
-                # rewards expansion+retention (the wall root). Ties (equal planets) stay 0/0.
-                planet_counts = torch.zeros(N, P_, dtype=torch.float32, device=self.device)
-                for pl in range(P_):
-                    planet_counts[:, pl] = ((owner_p == pl) & self.planet_alive).sum(dim=1).float()
-                total_p = planet_counts.sum(dim=1, keepdim=True).clamp(min=1.0)
-                planet_margin = (2.0 * planet_counts - total_p) / total_p   # (N,P) in [-1,1], zero-sum
-                graded = self.timeout_planet_coef * planet_margin
-                rewards = torch.where(draw.unsqueeze(1), graded, rewards)
-                # Credit the strict planet-leader (>half) as the PFSP winner; ties leave no winner.
-                lead_count, lead_idx = planet_counts.max(dim=1)
-                strict_lead = draw & (2.0 * lead_count > total_p.squeeze(1))
-                if strict_lead.any():
-                    rows = torch.where(strict_lead)[0]
-                    self._last_wins[rows] = False
-                    self._last_wins[rows, lead_idx[rows]] = True
-            else:
-                rewards[draw] = 0.0
         # Only return rewards for newly-done envs; zero otherwise
         rewards = rewards * newly_done.unsqueeze(1).float()
         self.rewards = torch.where(newly_done.unsqueeze(1), rewards, self.rewards)
@@ -2978,67 +2151,6 @@ class VecTorchEnv:
     # Auto-reset: pick new seeds for done envs and regenerate their state.
     # Keeps the running training loop simple — no need for caller-side resets.
     # ---------------------------------------------------------------------
-
-    def _ssdr_warmup(self, env_indices: list):
-        """Fast-forward a random subset of envs by 1..ssdr_max_steps random steps.
-
-        Both players fire randomly so the learner wakes in a messy, asymmetric
-        mid-game state — shattering the symmetric-start passive Nash.
-        Called after reset() and after each auto-reset.
-        """
-        if not env_indices or self.ssdr_frac <= 0.0 or self._ssdr_active:
-            return
-        self._ssdr_active = True
-        try:
-            self._ssdr_warmup_inner(env_indices)
-        finally:
-            self._ssdr_active = False
-
-    def _ssdr_warmup_inner(self, env_indices: list):
-        # Pick which envs get warmed up this time
-        warmup_envs = [i for i in env_indices if random.random() < self.ssdr_frac]
-        if not warmup_envs:
-            return
-
-        # For each chosen env, sample how many steps to fast-forward
-        steps_per_env = {i: random.randint(1, self.ssdr_max_steps) for i in warmup_envs}
-        max_steps = max(steps_per_env.values())
-
-        # Mask: which envs still need more warmup steps at each timestep t
-        warmup_set = set(warmup_envs)
-        # Build fire mask: 1 for warmup envs, 0 for non-warmup (they get no-op)
-        warmup_mask = torch.tensor(
-            [1 if i in warmup_set else 0 for i in range(self.num_envs)],
-            dtype=torch.long, device=self.device
-        ).unsqueeze(1)  # (N, 1)
-
-        for t in range(max_steps):
-            # Only fire for envs that still have warmup steps remaining
-            active_mask = torch.tensor(
-                [1 if (i in warmup_set and t < steps_per_env[i]) else 0
-                 for i in range(self.num_envs)],
-                dtype=torch.long, device=self.device
-            ).unsqueeze(1)  # (N, 1)
-
-            actions = {}
-            for pid in range(self.num_players):
-                _, slot_valid = self.owned_indices_for(pid)
-                fire = (torch.rand(self.num_envs, MAX_OWNED, device=self.device) < 0.6).long()
-                fire = fire * slot_valid.long() * active_mask  # zero fire for non-warmup envs
-                angle_bin = torch.randint(0, NUM_ANGLE_BINS, (self.num_envs, MAX_OWNED), device=self.device)
-                ship_bin = torch.randint(10, 15, (self.num_envs, MAX_OWNED), device=self.device)
-                actions[pid] = torch.stack([fire, angle_bin, ship_bin], dim=-1)
-
-            self.step(actions)
-
-        # After warmup: reset step_count to 0 for non-warmup envs (physics advanced
-        # but no fleets launched — equivalent to a different random orbital offset)
-        for i in range(self.num_envs):
-            if i not in warmup_set:
-                self.step_count[i] = 0
-        # Also reset step_count to actual warmup length for warmup envs
-        for i, n in steps_per_env.items():
-            self.step_count[i] = n
 
     def _auto_reset(self, done_mask: torch.Tensor):
         """Re-generate state for envs where done_mask is True."""
@@ -3055,7 +2167,6 @@ class VecTorchEnv:
             pad = np.zeros((MAX_PLANETS, 7), dtype=np.float32)
             for i, p in enumerate(raw_planets):
                 pad[i] = p
-            self._scale_neutrals(pad, n)
             alive = np.zeros(MAX_PLANETS, dtype=bool)
             alive[:n] = True
             num_groups = n // 4
@@ -3065,34 +2176,16 @@ class VecTorchEnv:
                 if self.num_players == 2:
                     pad[base, 1] = 0;     pad[base, 5] = 10
                     pad[base + 3, 1] = 1; pad[base + 3, 5] = 10
-                    # SSDR asymmetric planet assignment — self-play envs only
-                    if self._ssdr_active_for(env_i) and random.random() < self.ssdr_frac:
-                        k = random.randint(1, max(1, self.ssdr_max_steps))
-                        neutral_idx = [i for i in range(n)
-                                       if pad[i, 1] == -1 and i != base and i != base + 3]
-                        random.shuffle(neutral_idx)
-                        for ni in neutral_idx[:k]:
-                            pad[ni, 1] = 1
-                            pad[ni, 5] = max(10, int(pad[ni, 6] * 3))
-                    # Self-boost (handicapped-real-planner): grant OUR seat extra planets
-                    self._maybe_self_boost(pad, n, base, env_i)
                 elif self.num_players == 4:
                     for j in range(4):
                         pad[base + j, 1] = j; pad[base + j, 5] = 10
             pad[n:, 1] = -1
-            sid, adv, tgt, deadline = self._apply_scenario(
-                pad, alive, random.Random(f"orbit-wars-scenario-{seed}")
-            )
 
             self.planets[env_i] = torch.from_numpy(pad).to(self.device)
             self.init_planets[env_i] = self.planets[env_i].clone()
             self.planet_alive[env_i] = torch.from_numpy(alive).to(self.device)
             self.fleets[env_i] = 0
             self.fleet_alive[env_i] = False
-            self.scenario_id[env_i] = sid
-            self.scenario_adv_player[env_i] = adv
-            self.scenario_target[env_i] = tgt
-            self.scenario_done_step[env_i] = deadline
             self.step_count[env_i] = 0
             self.angular_velocity[env_i] = ang_vel
             self.next_fleet_id[env_i] = 0
@@ -3103,9 +2196,6 @@ class VecTorchEnv:
         # Reset the comet schedule for the reset envs (new seeds → recomputed lazily).
         if done_idx:
             self._init_comets(done_idx)
-            for env_i in done_idx:
-                self._scenario_fleet_seed(env_i)
-        self.prev_material[done_mask] = self._compute_material()[done_mask]
 
 
 # -------------------------------------------------------------------------

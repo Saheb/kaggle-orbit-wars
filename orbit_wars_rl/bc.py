@@ -410,7 +410,6 @@ def _save_bc_checkpoint(model: EntityTransformer, cfg, save_path: str):
             "action_decode":  "target",
             "ship_bin_mode":  cfg.model.ship_bin_mode,
             "num_ship_bins":  cfg.model.num_ship_bins,
-            "min_ship_bin":   cfg.model.min_ship_bin,
             "pairwise_feature_dim": cfg.model.pairwise_feature_dim,
             # Blessed feature semantics (2026-07 cleanup): always 15-global + precise resolver.
             "game_phase_features": True,

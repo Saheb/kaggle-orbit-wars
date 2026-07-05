@@ -398,56 +398,13 @@ def train(args):
         print(f"SUFFICIENT-COMMIT MASK: veto attack launches with ships <= target_defense × "
               f"{args.sufficient_commit_factor} (force concentration; mask, no Nash risk)")
     print(f"Win margin coeff: {args.win_margin_coeff}")
-    print(f"Eliminate-to-win: {args.eliminate_to_win} "
-          f"(timeout = {'planet-margin x'+str(args.timeout_planet_coef) if args.timeout_planet_coef>0 else 'draw'} when on)")
-    print(f"Shaping coeff: {args.shaping_coef}")
     print(f"Expansion coeff: {args.expansion_coef}")
-    print(f"Defense coeff: {args.defense_coef}")
     print(f"Early capture coeff: {args.early_capture_coef} (decay over {args.early_capture_steps} steps)")
-    print(f"Production-share coeff: {args.prod_share_coef}")
-    if args.prod_share_coef != 0.0:
-        other_reward_knobs = [
-            ("win_margin_coeff", args.win_margin_coeff),
-            ("shaping_coef", args.shaping_coef),
-            ("expansion_coef", args.expansion_coef),
-            ("defense_coef", args.defense_coef),
-            ("early_capture_coef", args.early_capture_coef),
-            ("speed_coef", args.speed_coef),
-            ("consolidation_coef", args.consolidation_coef),
-            ("capture_utility_coef", args.capture_utility_coef),
-            ("capture_idle_penalty", args.capture_idle_penalty),
-            ("decisive_mass_coef", args.decisive_mass_coef),
-            ("staging_shaping_coef", args.staging_shaping_coef),
-        ]
-        active_reward_knobs = [name for name, value in other_reward_knobs if value != 0.0]
-        if active_reward_knobs:
-            print("WARNING: --prod-share-coef is active together with other reward knobs: "
-                  + ", ".join(active_reward_knobs))
     if args.early_capture_anneal_frac > 0.0:
         print(f"Early capture ANNEAL: cosine {args.early_capture_coef}→0 over "
               f"{args.early_capture_anneal_frac * args.total_steps:,.0f} steps "
               f"(frac {args.early_capture_anneal_frac}), then 0")
     print(f"First Strike: {args.first_strike_mult}x for t<{args.first_strike_steps} steps" if args.first_strike_steps > 0 else "First Strike: off")
-    print(f"Speed coeff: {args.speed_coef}")
-    if args.consolidation_coef != 0:
-        print(f"Consolidation bonus: {args.consolidation_coef} per net-new capture HELD {args.consolidation_steps} steps (force-concentration lever)")
-    if args.capture_utility_coef != 0 or args.capture_idle_penalty != 0:
-        print(f"Capture-utility reward: +{args.capture_utility_coef} when a net-new capture "
-              f"attacks or remains frontline within {args.capture_utility_window} steps; "
-              f"idle penalty={args.capture_idle_penalty}")
-    if args.decisive_mass_coef != 0:
-        print(f"Decisive-mass bonus (Lever A): {args.decisive_mass_coef} per inflight strike reaching producer_v2's ENEMY capture floor (reactive-margin beta={args.decisive_mass_beta}) — force-concentration signal")
-    if args.handicap_frac > 0:
-        print(f"Handicap: {args.handicap_frac*100:.0f}% of games start with {args.handicap_ships} ships (vs normal 10)")
-    if args.ssdr_frac > 0:
-        print(f"SSDR: {args.ssdr_frac*100:.0f}% of resets grant opponent 1..{args.ssdr_max_steps} extra planets (asymmetric start)")
-    if args.neutral_garrison_scale > 1.0:
-        print(f"Neutral garrison scale: {args.neutral_garrison_scale:.1f}x (board-curriculum: "
-              f"expensive neutrals force multi-source concentration; symmetric, both players)")
-    if args.scenario_curriculum != "off" and args.scenario_fraction > 0.0:
-        print(f"Scenario curriculum: {args.scenario_curriculum} "
-              f"on {args.scenario_fraction*100:.1f}% of resets, "
-              f"deadline={args.scenario_deadline}")
     if args.srcs_multi_penalty > 0.0:
         print(f"srcs_multi penalty: coef={args.srcs_multi_penalty}, threshold={args.srcs_multi_threshold}, "
               f"decay_frac={args.srcs_multi_penalty_decay_frac} "
@@ -456,7 +413,7 @@ def train(args):
         print(f"fleet_activity reward: coef={args.fleet_activity_coef} (per step any planet fires)")
 
     # Honor model-config fields saved in the checkpoint (num_ship_bins,
-    # ship_bin_mode, min_ship_bin) BEFORE creating env or model.
+    # ship_bin_mode) BEFORE creating env or model.
     if args.resume:
         _ckpt_peek = torch.load(args.resume, map_location="cpu", weights_only=False)
         ckpt_cfg = _ckpt_peek.get("config", {}) if isinstance(_ckpt_peek, dict) else {}
@@ -473,8 +430,6 @@ def train(args):
         if "ship_bin_mode" in ckpt_cfg:
             cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
             print(f"Checkpoint declares ship_bin_mode={cfg.model.ship_bin_mode}")
-        if "min_ship_bin" in ckpt_cfg:
-            cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
         if "phase4_residual_init_std" in ckpt_cfg:
             cfg.model.phase4_residual_init_std = float(ckpt_cfg["phase4_residual_init_std"])
         # Blessed feature config guard (2026-07 cleanup): feature semantics are hard-coded
@@ -505,16 +460,8 @@ def train(args):
             args.reinforce_garrison_floor = float(ckpt_cfg["reinforce_garrison_floor"])
         if args.sufficient_commit_factor == 0.0 and "sufficient_commit_factor" in ckpt_cfg:
             args.sufficient_commit_factor = float(ckpt_cfg["sufficient_commit_factor"])
-        if args.redundant_target_factor == 0.0 and "redundant_target_factor" in ckpt_cfg:
-            args.redundant_target_factor = float(ckpt_cfg["redundant_target_factor"])
-        if not args.path_obstruction_mask and bool(ckpt_cfg.get("path_obstruction_mask", False)):
-            args.path_obstruction_mask = True
         del _ckpt_peek
 
-    # CLI overrides checkpoint metadata. This lets a run deliberately mask bin
-    # 0 when resuming from a BC checkpoint saved with min_ship_bin=0.
-    if args.min_ship_bin is not None:
-        cfg.model.min_ship_bin = args.min_ship_bin
     if args.phase4_residual_init_std is not None:
         cfg.model.phase4_residual_init_std = args.phase4_residual_init_std
     cfg.model.action_decode = args.action_decode
@@ -527,17 +474,11 @@ def train(args):
     cfg.model.reverse_edge_cooldown = args.reverse_edge_cooldown
     cfg.model.reinforce_garrison_floor = args.reinforce_garrison_floor
     cfg.model.sufficient_commit_factor = args.sufficient_commit_factor
-    cfg.model.redundant_target_factor = args.redundant_target_factor
-    cfg.model.path_obstruction_mask = args.path_obstruction_mask
-    cfg.model.capture_utility_coef = args.capture_utility_coef
-    cfg.model.capture_utility_window = args.capture_utility_window
-    cfg.model.capture_idle_penalty = args.capture_idle_penalty
     # PROVENANCE only (eval always clamps via _ship_bin_to_count, so this doesn't change the eval
     # contract) — but record how the ckpt was trained (drop vs clamp) so it's never ambiguous.
     cfg.model.ship_overflow_mode = args.ship_overflow_mode
     env = VecTorchEnv(num_envs=args.num_envs, num_players=args.num_players,
                       device=device, episode_steps=500,
-                      rank_reward_coef=args.rank_reward_coef,
                       ship_bin_mode=cfg.model.ship_bin_mode,
                       ship_overflow_mode=args.ship_overflow_mode,
                       action_decode=args.action_decode,
@@ -548,39 +489,15 @@ def train(args):
                       reinforce_forward_only=args.reinforce_forward_only,
                       reverse_edge_cooldown=args.reverse_edge_cooldown,
                       sufficient_commit_factor=args.sufficient_commit_factor,
-                      redundant_target_factor=args.redundant_target_factor,
-                      path_obstruction_mask=args.path_obstruction_mask,
                       win_margin_coeff=args.win_margin_coeff,
-                      eliminate_to_win=args.eliminate_to_win,
-                      timeout_planet_coef=args.timeout_planet_coef,
-                      shaping_coef=args.shaping_coef,
                       expansion_coef=args.expansion_coef,
-                      defense_coef=args.defense_coef,
                       early_capture_coef=args.early_capture_coef,
-                      prod_share_coef=args.prod_share_coef,
                       early_capture_steps=args.early_capture_steps,
                       first_strike_steps=args.first_strike_steps,
                       first_strike_mult=args.first_strike_mult,
-                      speed_coef=args.speed_coef,
-                      consolidation_coef=args.consolidation_coef,
-                      consolidation_steps=args.consolidation_steps,
-                      capture_utility_coef=args.capture_utility_coef,
-                      capture_utility_window=args.capture_utility_window,
-                      capture_idle_penalty=args.capture_idle_penalty,
-                      decisive_mass_coef=args.decisive_mass_coef,
-                      decisive_mass_beta=args.decisive_mass_beta,
-                      decisive_diag=args.decisive_diag,
                       staging_shaping_coef=args.staging_shaping_coef,
                       staging_topk=args.staging_topk,
-                      staging_gamma=cfg.ppo.gamma,
-                      handicap_frac=args.handicap_frac,
-                      handicap_ships=args.handicap_ships,
-                      ssdr_frac=args.ssdr_frac,
-                      ssdr_max_steps=args.ssdr_max_steps,
-                      neutral_garrison_scale=args.neutral_garrison_scale,
-                      scenario_curriculum=args.scenario_curriculum,
-                      scenario_fraction=args.scenario_fraction,
-                      scenario_deadline=args.scenario_deadline)
+                      staging_gamma=cfg.ppo.gamma)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
 
     model = EntityTransformer(cfg.model).to(device)
@@ -854,15 +771,8 @@ def train(args):
                     "srcs_multi_penalty": args.srcs_multi_penalty,
                     "srcs_multi_threshold": args.srcs_multi_threshold,
                     "fleet_activity_coef": args.fleet_activity_coef,
-                    "capture_utility_coef": args.capture_utility_coef,
-                    "capture_utility_window": args.capture_utility_window,
-                    "capture_idle_penalty": args.capture_idle_penalty,
-                    "prod_share_coef": args.prod_share_coef,
                     "il_lambda": cfg.ppo.il_lambda,
                     "win_margin_coeff": args.win_margin_coeff,
-                    "eliminate_to_win": args.eliminate_to_win,
-                    "timeout_planet_coef": args.timeout_planet_coef,
-                    "speed_coef": args.speed_coef,
                     "action_decode": args.action_decode,
                     "resume": args.resume or "",
                     "ship_bin_mode": cfg.model.ship_bin_mode,
@@ -1065,8 +975,6 @@ def train(args):
     # done step — contaminating PFSP attribution and injecting mid-game controller swaps.
     # Now each env's assignment is sticky for the life of its episode; result is credited
     # to THAT assignment with the raw (pre-shaping) winner.
-    # NOTE: SSDR is supported per-env (self-play mask); self-boost (handicap, parked) is
-    # NOT yet ported to per-episode seats and is guarded out below.
     pool_active = pool is not None and len(pool) > 0 and args.pool_fraction > 0
 
     def _draw_assignment(steps_now: int):
@@ -1088,23 +996,6 @@ def train(args):
             return False, None, 0
         return True, member, rng.randint(0, P - 1)
 
-    if args.self_boost_planets > 0 and pool_active:
-        raise NotImplementedError(
-            "self-boost (handicap) is not ported to per-episode pool assignment "
-            "(needs per-env boosted seat); it is parked-negative — relaunch without it.")
-    if env.ssdr_frac > 0.0 and pool_active:
-        # SSDR asymmetry is applied at env.step()'s auto-reset using the SSDR mask set at
-        # rollout start (= ~env_is_pool), but a per-episode reassignment is drawn AFTER that
-        # reset — so a reassigned POOL env can inherit an SSDR-asymmetric board, violating the
-        # "pool envs get clean symmetric starts" contract. Proper fix = pre-draw each env's
-        # NEXT-episode pool-ness and set the SSDR mask from it BEFORE stepping (so the board
-        # matches the new episode). Inert for the current lineage (ssdr_frac=0); error loudly
-        # rather than silently feed asymmetric boards to frozen pool opponents.
-        raise NotImplementedError(
-            "SSDR (ssdr_frac>0) + per-episode pool assignment is not yet aligned: a reassigned "
-            "pool env can inherit an SSDR-asymmetric board (the mask lags the reassignment). "
-            "Use ssdr_frac=0, or implement pre-drawn next-episode pool-ness for the SSDR mask.")
-
     # Persistent per-env assignment (Python lists; N is small). Drawn at startup; an
     # env's slot is refreshed only when that env resets (handled in the step loop).
     env_is_pool = [False] * N
@@ -1116,14 +1007,8 @@ def train(args):
     while total_env_steps < args.total_steps:
         # --- Per-EPISODE opponent assignment --------------------------------
         # env_is_pool / env_member / env_seat are sticky per episode (drawn on reset,
-        # see the step loop). Here we just publish the per-env self-play mask for SSDR
-        # (pool envs get clean symmetric starts; self-play envs get SSDR) from the
-        # CURRENT assignment. N_pool is now just a diagnostic count, not a slice.
+        # see the step loop). N_pool is just a diagnostic count, not a slice.
         N_pool = sum(env_is_pool)
-        # Inform env which envs are self-play (SSDR active) vs pool (symmetric).
-        if env.ssdr_frac > 0.0:
-            self_mask = torch.tensor([not ip for ip in env_is_pool], dtype=torch.bool)
-            env.set_ssdr_mask(self_mask)
         # Training-wide anneal of early_capture_coef → 0 (dense→sparse shaping).
         # Cosine from the base coef at step 0 to 0 at frac*total_steps, then stays 0.
         # env.step() reads self.early_capture_coef fresh each step, so mutating the
@@ -1155,8 +1040,6 @@ def train(args):
         ms_infl = {m: torch.zeros((), device=env.device) for m in _MS}
         ms_plan = {m: torch.zeros((), device=env.device) for m in _MS}
         ms_n    = {m: torch.zeros((), device=env.device) for m in _MS}
-        scenario_done_count = 0.0
-        scenario_success_count = 0.0
 
         # --- Rollout collection (no grad) -----------------------------------
         # Per-rollout wall-time breakdown (SPS patch A): attributes main-thread time to
@@ -1244,11 +1127,6 @@ def train(args):
             _t_es = time.perf_counter()
             state, rewards, done = env.step(actions_per_player, angle_overrides=angle_overrides)
             _t_acc["estep"] += time.perf_counter() - _t_es
-            if getattr(env, "_last_scenario_id", None) is not None:
-                scen_done = done & (env._last_scenario_id != 0)
-                if scen_done.any():
-                    scenario_done_count += float(scen_done.sum().item())
-                    scenario_success_count += float(env._last_scenario_success[scen_done].float().sum().item())
             # Hoard milestones: when an env is at episode-step 16/32/50/100, accumulate
             # player-0 garrison (parked), in-flight, and owned-planet counts for that env.
             ownp = env.planets[:, :, 1].long()                            # (N, P) owner
@@ -1481,9 +1359,6 @@ def train(args):
                                      bc_batch=bc_batch)
         _t_acc["upd"] += time.perf_counter() - _t_upd
         metrics.update(ms_metrics)
-        if scenario_done_count > 0:
-            metrics["scenario_count"] = scenario_done_count
-            metrics["scenario_success_rate"] = scenario_success_count / scenario_done_count
         # train_mask time-fraction per (env,player): under per-episode assignment a slot's
         # learning-ness can flip mid-rollout (env resets pool<->self / seat), so the env's
         # rollout-SUMMED diagnostic accumulators below are weighted by the FRACTION of steps
@@ -1541,35 +1416,6 @@ def train(args):
                 # ENEMY omitted ship mass ÷ all enemy ship mass — the obs256 decider (is the
                 # hidden mass the OPPONENT's, e.g. an inbound strike we can't see?).
                 metrics["obs_trunc_enemy_ship_frac"] = float(env._obs_trunc_enemy_ships.sum().item()) / max(float(env._obs_total_enemy_ships.sum().item()), 1.0)
-            if getattr(env, "_decisive_credit", None) is not None:
-                # Lever A: avg decisive-mass crossings per (env,seat) this rollout, current policy.
-                tm2 = tmu.squeeze(-1)                                  # (N, players) to match _decisive_credit
-                metrics["decisive_strikes"] = float((env._decisive_credit * tm2).sum().item()) / max(float(tm2.sum().item()), 1.0)
-            # dm_* GAP diagnostic: of the current policy's attacked enemy targets, how close does
-            # the assembled inflight mass get to producer_v2's capture floor (the decmass target)?
-            # All quantities are the EXACT reward floor (torch_env._decisive_mass_fields). gap DOWN +
-            # cross UP = the policy is concentrating force; flat while WR climbs = adjacent competence.
-            if args.decisive_diag and getattr(env, "_dm_targets", None) is not None:
-                tg = (env._dm_targets * tmu).sum(dim=(0, 1))          # (3,) phase: e/m/l
-                cr = (env._dm_cross * tmu).sum(dim=(0, 1))
-                rs = (env._dm_ratio_sum * tmu).sum(dim=(0, 1))
-                gp = (env._dm_gap_sum * tmu).sum(dim=(0, 1))
-                ok = (env._dm_overkill_sum * tmu).sum(dim=(0, 1))
-                nm = (env._dm_nearmiss * tmu).sum(dim=(0, 1))
-                tg_tot = tg.sum().clamp(min=1.0)
-                cr_tot = cr.sum().clamp(min=1.0)
-                for i, ph in enumerate(("e", "m", "l")):
-                    d = tg[i].clamp(min=1.0)
-                    metrics[f"dm_gap_{ph}"] = float((gp[i] / d).item())
-                    metrics[f"dm_cross_{ph}"] = float((cr[i] / d).item())
-                metrics["dm_gap"] = float((gp.sum() / tg_tot).item())
-                metrics["dm_cross"] = float((cr.sum() / tg_tot).item())
-                metrics["dm_ratio"] = float((rs.sum() / tg_tot).item())
-                metrics["dm_overkill"] = float((ok.sum() / cr_tot).item())   # mean ratio on crossed
-                metrics["dm_nearmiss"] = float((nm.sum() / tg_tot).item())
-                # mean attacked enemy targets per controlled env-step (assembly breadth)
-                slotsteps = float(train_frac.sum().item()) * storage["train_mask"].shape[0]
-                metrics["dm_tgt"] = float(tg.sum().item()) / max(slotsteps, 1.0)
         with torch.no_grad():
             metrics["old_value_mean"] = float(flat["values"].mean().item())
             metrics["old_value_std"] = float(flat["values"].std(unbiased=False).item())
@@ -1700,15 +1546,12 @@ def train(args):
                     f"obstrunc {metrics.get('obs_trunc_rate',0):.3f} "
                     f"(fleet {metrics.get('obs_trunc_fleet_frac',0):.3f} ship {metrics.get('obs_trunc_ship_frac',0):.3f} "
                     f"enemyship {metrics.get('obs_trunc_enemy_ship_frac',0):.3f}) | "
-                    f"decis {metrics.get('decisive_strikes',0):.2f} | "
                     f"{reinfstr}"
                     f"H_ship {metrics.get('ship_entropy', 0):.2f} "
                     f"H_tgt {metrics.get('target_entropy', 0):.2f} | "
                     f"Vμ {metrics.get('old_value_mean', 0):+.2f} Rμ {metrics.get('return_mean', 0):+.2f} "
                     f"Rσ {metrics.get('return_std', 0):.2f} Aσ {metrics.get('adv_std', 0):.2f} | "
                     f"rewμ {metrics.get('reward_mean', 0):+.4f} rewNZ {metrics.get('reward_nonzero', 0):.3f} | "
-                    f"scen {metrics.get('scenario_success_rate', 0):.2f}/"
-                    f"{metrics.get('scenario_count', 0):.0f} | "
                     f"featσ p/f/g/pw {metrics.get('planet_feat_std', 0):.2f}/"
                     f"{metrics.get('fleet_feat_std', 0):.2f}/"
                     f"{metrics.get('global_feat_std', 0):.2f}/"
@@ -1741,18 +1584,6 @@ def train(args):
                     f"out {metrics.get('phase4_fire_resid_out_norm', 0):.3f}/"
                     f"{metrics.get('phase4_ship_resid_out_norm', 0):.3f}"
                 )
-                # dm | decisive-mass GAP: are our inflight attacks reaching producer_v2's capture
-                # floor? gap DOWN + cross UP = concentrating force toward the decmass target.
-                if args.decisive_diag:
-                    print(
-                        f"   dm   | gap <50/50-100/>100 {metrics.get('dm_gap_e',0):.2f}/"
-                        f"{metrics.get('dm_gap_m',0):.2f}/{metrics.get('dm_gap_l',0):.2f} "
-                        f"| cross {metrics.get('dm_cross_e',0):.2f}/{metrics.get('dm_cross_m',0):.2f}/"
-                        f"{metrics.get('dm_cross_l',0):.2f} | ratio {metrics.get('dm_ratio',0):.2f} "
-                        f"overkill {metrics.get('dm_overkill',0):.2f} "
-                        f"nearmiss {metrics.get('dm_nearmiss',0):.2f} "
-                        f"tgt/step {metrics.get('dm_tgt',0):.2f}"
-                    )
                 if args.log_timing:
                     # SPS patch A: per-rollout wall-time breakdown (where the per-step tax is).
                     _tt = sum(_t_acc.values()) or 1.0
@@ -1830,18 +1661,9 @@ def train(args):
                     # Reward stats
                     "reward/mean": metrics.get("reward_mean", 0),
                     "reward/nonzero_frac": metrics.get("reward_nonzero", 0),
-                    "scenario/success_rate": metrics.get("scenario_success_rate", 0),
-                    "scenario/count": metrics.get("scenario_count", 0),
                     # IL (zero when not active)
                     "il/kl": metrics.get("il_kl", 0),
                     "il/coef": metrics.get("il_coef", 0),
-                    # decisive-mass GAP diagnostic (force concentration toward producer_v2's floor)
-                    "dm/gap": metrics.get("dm_gap", 0),
-                    "dm/cross": metrics.get("dm_cross", 0),
-                    "dm/ratio": metrics.get("dm_ratio", 0),
-                    "dm/overkill": metrics.get("dm_overkill", 0),
-                    "dm/nearmiss": metrics.get("dm_nearmiss", 0),
-                    "dm/tgt_per_step": metrics.get("dm_tgt", 0),
                     # PBRS staging potential (is the agent staging toward neutrals?)
                     "staging/phi": metrics.get("staging_phi", 0),
                 }, step=total_env_steps)
@@ -2011,10 +1833,6 @@ if __name__ == "__main__":
     parser.add_argument("--bc-samples", type=str, default="",
                         help="Path to .pkl of teacher samples (produced by "
                              "extract_teacher_samples.py or bc_frac.py cache).")
-    parser.add_argument("--min-ship-bin", type=int, default=None,
-                        help="Mask ship bins < this index to -inf (never sampled). "
-                             "For fraction-head 10-bin model, set 1 to remove the "
-                             "10%%-of-source bin that PPO collapses to in cold-start.")
     parser.add_argument("--action-decode", choices=["angle", "target"], default="angle",
                         help="Direction component executed during PPO rollouts. "
                              "angle keeps the legacy free angle-bin action; target "
@@ -2085,64 +1903,23 @@ if __name__ == "__main__":
                              "strictly more than current defense); 0.6 = relaxed fallback; 0 = off. "
                              "Pure mask (no reward tax → no fire=0 Nash); internalised at inference. "
                              "Independent of --allow-reinforce (acts on attacks, not reinforces).")
-    parser.add_argument("--redundant-target-factor", type=float, default=0.0,
-                        help="REDUNDANT-TARGET MASK: veto a NEUTRAL attack whose IN-FLIGHT friendly "
-                             "mass alone already clears the target (garrison + enemy inbound) × this "
-                             "factor → the launch only reinforces an already-won capture, so the "
-                             "policy is pushed to retarget the spare. 1.0 = strict; 0 = off. Pure "
-                             "training-time mask (parity at eval/export). Static floor.")
-    parser.add_argument("--path-obstruction-mask", action="store_true",
-                        help="PATH-OBSTRUCTION MASK: veto a launch whose straight path is screened "
-                             "by an uncapturable planet (the fleet dies on the screen before "
-                             "reaching the target). Policy learns to avoid screened targets; eval "
-                             "RETARGETS pre-argmax. Checkpoint-compatible; persisted + eval/export-synced.")
     parser.add_argument("--num-players", type=int, choices=[2, 4], default=2,
                         help="Players per game. 4 = FFA self-play (every seat is the learning "
                              "policy; --pool-fraction must be 0 — external 4p pool not yet wired).")
-    parser.add_argument("--rank-reward-coef", type=float, default=0.0,
-                        help="FFA rank-based terminal reward blend (P>2 only): interpolate flat ±1 "
-                             "with a linear rank map (winner +1 → first-out -1). 0 = pure ±1. "
-                             "Suggested 4p start: 0.5.")
     parser.add_argument("--win-margin-coeff", type=float, default=0.0,
                         help="Terminal bonus coefficient α: winner gets +1 + α*(my_score/total_score). "
                              "0 = pure ±1 reward (default). Suggested start: 0.5.")
-    parser.add_argument("--shaping-coef", type=float, default=0.0,
-                        help="Per-step material-delta shaping coefficient. "
-                             "0 = off. Suggested diagnostic start: 0.03. "
-                             "NOTE: rewards passive ship accumulation — failed in rev8.")
     parser.add_argument("--expansion-coef", type=float, default=0.0,
                         help="Potential-based shaping on owned-production lead "
-                             "(planet/economy race). Unlike --shaping-coef, passive "
-                             "play nets ~0 (production only changes on capture). "
-                             "0 = off. rev14 expansion fix; suggested start: 0.01.")
-    parser.add_argument("--defense-coef", type=float, default=0.0,
-                        help="Per-step penalty for losing owned production (a planet "
-                             "captured from us). Consolidation/defense incentive — rewards "
-                             "HOLDING planets, complements --expansion-coef's GRAB. "
-                             "0 = off. rev15 defense lever; suggested start: 0.02.")
+                             "(planet/economy race). Passive play nets ~0 (production "
+                             "only changes on capture). 0 = off. rev14 expansion fix; "
+                             "suggested start: 0.01.")
     parser.add_argument("--early-capture-coef", type=float, default=0.0,
                         help="Spike reward for CAPTURING a planet (delta in owned count), decayed "
                              "linearly to 0 over --early-capture-steps (default 400). Active through "
                              "mid-game so GAE 18-step horizon can see captures throughout, not just "
                              "the opening. Coeff math: one capture event ≈ coeff × decay_at_t; "
                              "keep ≤10%% of terminal win → range 0.05-0.10. 0 = off.")
-    parser.add_argument("--prod-share-coef", type=float, default=0.0,
-                        help="Unified production-share capture reward coefficient. Rewards ownership "
-                             "deltas by planet production share, anchored to capture time: gain pays "
-                             "+coef*decay(now)*prod/total, loss pays -coef*decay(capture_time)*prod/total. "
-                             "Initial homes are pre-existing state, so holding them pays no dense reward. "
-                             "Use as the cleanup replacement for early_capture/expansion/defense shaping.")
-    parser.add_argument("--eliminate-to-win", action="store_true",
-                        help="A terminal win counts ONLY on an elimination; a timeout without one is a "
-                             "draw (reward 0 for both). Removes the most-ships-wins-at-timeout hoarding "
-                             "attractor that pins self-play in the under-mass Nash. Pair with dense "
-                             "prod-share shaping for the in-episode gradient. Default off (legacy ±1).")
-    parser.add_argument("--timeout-planet-coef", type=float, default=0.0,
-                        help="With --eliminate-to-win: resolve a no-elimination timeout by PLANET "
-                             "dominance instead of a 0/0 draw. Reward = coef * planet-share margin in "
-                             "[-1,1] (zero-sum); strict planet-leader credited as the PFSP winner. Fixes "
-                             "the draw-neutral STARVATION while keeping the anti-hoard property (ships "
-                             "don't win). Keep < 1.0 so an elimination (±1) stays strictly best. 0=draw.")
     parser.add_argument("--early-capture-steps", type=int, default=400,
                         help="Step at which the delta-capture decay reaches zero. Default 400.")
     parser.add_argument("--early-capture-anneal-frac", type=float, default=0.0,
@@ -2158,47 +1935,6 @@ if __name__ == "__main__":
     parser.add_argument("--first-strike-mult", type=float, default=2.0,
                         help="Multiplier applied to capture reward for t < --first-strike-steps. "
                              "Default 2.0 (doubles the capture reward in the opening).")
-    parser.add_argument("--speed-coef", type=float, default=0.0,
-                        help="Terminal time-to-victory bonus coefficient. Winners get "
-                             "+((episode_steps - termination_step) / episode_steps) * coef, "
-                             "so early eliminations are worth more than timeout/grind wins. "
-                             "0 = off. Suggested start: 0.3-0.5.")
-    parser.add_argument("--consolidation-coef", type=float, default=0.0,
-                        help="Force-concentration lever: ONE-TIME bonus when a NET-NEW captured "
-                             "planet survives --consolidation-steps (success-gated → prices "
-                             "'commit enough to HOLD' without defense_coef's flood). 0 = off. "
-                             "Calibrate ≤10-15%% of terminal win (~6-10 sticky caps/game → 0.015-0.02).")
-    parser.add_argument("--consolidation-steps", type=int, default=40,
-                        help="Steps a captured planet must be held to earn --consolidation-coef "
-                             "(autopsy median churn-loss ~20 → 40 = 2x clears the churn band).")
-    parser.add_argument("--capture-utility-coef", type=float, default=0.0,
-                        help="Capture follow-through reward: ONE-TIME bonus when a net-new captured "
-                             "planet proves useful within --capture-utility-window by launching an "
-                             "attack from that planet, or by still being one of the holder's top-3 "
-                             "frontline planets at window end. Targets the capture-born/idle-safe "
-                             "diagnostic: capture -> use/convert tempo, not capture -> sit/peel. "
-                             "0 = off. Start small, e.g. 0.03-0.06.")
-    parser.add_argument("--capture-utility-window", type=int, default=30,
-                        help="Steps after a net-new capture during which it can earn "
-                             "--capture-utility-coef. Matches the eval utility<=30 diagnostic.")
-    parser.add_argument("--capture-idle-penalty", type=float, default=0.0,
-                        help="Optional ONE-TIME penalty at --capture-utility-window for a net-new "
-                             "capture that neither launched an attack nor remained frontline. "
-                             "0 = no penalty; prefer small values if enabled.")
-    parser.add_argument("--decisive-mass-coef", type=float, default=0.0,
-                        help="Lever A (force-concentration): ONE-TIME bonus the step our INFLIGHT "
-                             "force converging on an ENEMY planet first reaches producer_v2's capture "
-                             "floor = garrison + prod*eta + enemy_inbound + beta*rho(eta)*reachable_"
-                             "enemy_mass + 1 (eta = MAX arrival ETA of our converging mass; see "
-                             "--decisive-mass-beta). Board-grounded, not outcome-tied → injects the "
-                             "concentration gradient self-play can't price (we get out-massed ~2.3x, "
-                             "planets@50=6 invariant). 0 = off. Start ~0.2; read eval out-massed%% / "
-                             "garr@loss-vs-inbound. project_force_concentration_wall.")
-    parser.add_argument("--decisive-mass-beta", type=float, default=2.2,
-                        help="Weight on producer_v2's reactive-reinforcement floor margin "
-                             "(beta*rho(eta)*reachable_enemy_mass). 2.2 = v2-faithful (planner-"
-                             "conservative). LOWER it (e.g. 0.5-1.0) if `decis` stays ~0 on the "
-                             "resumed policy — a high beta makes the floor strict → sparse signal.")
     parser.add_argument("--staging-shaping-coef", type=float, default=0.0,
                         help="PBRS staging shaping (project_undermass_by_choice): potential-based "
                              "reward r += coef*(gamma*Phi(s') - Phi(s)), Phi = top-k Σ min(1, our_"
@@ -2210,63 +1946,6 @@ if __name__ == "__main__":
     parser.add_argument("--staging-topk", type=int, default=2,
                         help="k for the staging potential (top-k neutral targets summed). k=2 keeps "
                              "serial expansion-breadth while bounding simultaneous spread.")
-    parser.add_argument("--decisive-diag", action=argparse.BooleanOptionalAction, default=True,
-                        help="Compute the dm_* GAP diagnostic every step using the EXACT decisive-"
-                             "mass reward floor, even when --decisive-mass-coef=0. The `dm` diag "
-                             "line reports, split by phase: dm_gap (mean max(0,floor-mass)/floor — "
-                             "DOWN if attacks concentrate), dm_cross (fraction reaching the floor — "
-                             "UP), plus ratio/overkill/near-miss/targets-per-step. Tells whether PPO "
-                             "is moving toward the decmass target vs only improving adjacent "
-                             "competence. project_force_concentration_wall. NOTE: runs "
-                             "_decisive_mass_fields() EVERY step (a P×P enemy-pressure pass + fleet-"
-                             "target resolution) — benchmark the SPS delta on the GPU box; use "
-                             "--no-decisive-diag for max-throughput production once the measurement "
-                             "need is satisfied.")
-    parser.add_argument("--handicap-frac", type=float, default=0.0,
-                        help="Fraction of games where player 0 starts with --handicap-ships "
-                             "instead of the normal 10. Forces exposure to losing positions "
-                             "during self-play so the agent learns to fight back from behind. "
-                             "0 = off (symmetric starts). Suggested: 0.3.")
-    parser.add_argument("--handicap-ships", type=int, default=5,
-                        help="Starting ship count for player 0 in handicap games "
-                             "(default 5 = half normal). Only used when --handicap-frac > 0.")
-    parser.add_argument("--ssdr-frac", type=float, default=0.0,
-                        help="Start-State Domain Randomisation: fraction of env resets that "
-                             "fast-forward the game by 1..--ssdr-max-steps random steps before "
-                             "handing control to the learner. Both players act randomly during "
-                             "warmup, creating asymmetric mid-game starts that shatter the "
-                             "symmetric-start passive Nash. 0 = off. Suggested: 0.3.")
-    parser.add_argument("--ssdr-max-steps", type=int, default=20,
-                        help="Max warmup steps for SSDR. Actual steps ~ U(1, ssdr_max_steps). "
-                             "20 = up to ~4%% of a 500-step game pre-played. (default: 20)")
-    parser.add_argument("--neutral-garrison-scale", type=float, default=1.0,
-                        help="Board-curriculum: multiply neutral planet ships by this factor at "
-                             "reset, symmetrically (both players face the same board). >1.0 makes "
-                             "captures expensive → single-source can't capture early → must "
-                             "aggregate multiple sources (concentration). Training-only; eval/LB "
-                             "use default boards (1.0). 1.0 = off. Suggested: 3.0.")
-    parser.add_argument("--scenario-curriculum",
-                        choices=["off", "mixed", "agg_attack", "stage_attack", "hold_under_peel"],
-                        default="off",
-                        help="Tiny reset-state curriculum where the focal tactic is required for "
-                             "a short terminal win. agg_attack requires multi-source capture of a "
-                             "neutral; stage_attack requires topping up an existing friendly inbound; "
-                             "hold_under_peel requires reinforcing a thin owned planet under inbound "
-                             "enemy peel. mixed samples all three. Off by default.")
-    parser.add_argument("--scenario-fraction", type=float, default=0.0,
-                        help="Fraction of resets replaced by --scenario-curriculum boards. Keep this "
-                             "small (e.g. 0.05-0.20) when mixing into normal self-play; 0 = off.")
-    parser.add_argument("--scenario-deadline", type=int, default=20,
-                        help="Scenario terminal deadline in env steps. Attack/stage scenarios must "
-                             "capture the focal target before this step; hold scenarios must retain "
-                             "the focal planet through this step.")
-    parser.add_argument("--self-boost-planets", type=int, default=0,
-                        help="Handicapped-real-planner curriculum: grant OUR seat this many extra "
-                             "starting planets in POOL envs at step 0, tapering to 0 over "
-                             "--self-boost-ramp-steps. Makes a strong pool planner (deb) beatable so "
-                             "RL gets a win-gradient for holding, then weans off the head-start. 0 = off.")
-    parser.add_argument("--self-boost-ramp-steps", type=int, default=5000000,
-                        help="Steps over which --self-boost-planets tapers linearly to 0.")
     parser.add_argument("--srcs-multi-penalty", type=float, default=0.0,
                         help="Per-step reward penalty per source over --srcs-multi-threshold. "
                              "Applied symmetrically to both players each rollout step. "

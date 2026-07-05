@@ -793,46 +793,6 @@ def _apply_defensive_reinforce_overlay(
     return final_records
 
 
-def _path_obstruction_blocked(sx, sy, tx, ty, planets, src_id, tgt_id, player, max_send):
-    """True if the straight launch path source->target is screened by another planet the
-    fleet would hit FIRST and cannot capture with our full garrison (max_send).
-
-    A fleet travels on a fixed heading; it interacts with any planet whose disk its path
-    crosses. If a planet B (B != source, target) lies strictly between us and the target
-    (0 < projection < 1) and the segment passes within B's radius, the fleet hits B before
-    the intended target. If B's capture cost exceeds max_send, NO single launch from here
-    can clear it -> the intended target is unreachable on this line and the ships are wasted
-    (the replay 81509243 failure: 12 ships from a corner planet die on an 86-ship neutral
-    screening the cheap target). Capturable blockers are NOT flagged (the fleet just takes a
-    stepping-stone). Uses current positions — exact for static blockers (the failure mode);
-    a close approximation for orbiting ones.
-    """
-    dx = tx - sx
-    dy = ty - sy
-    seg2 = dx * dx + dy * dy
-    if seg2 < 1e-9:
-        return False
-    for b in planets:
-        bid = int(b[0])
-        if bid == src_id or bid == tgt_id:
-            continue
-        bx, by, br = float(b[2]), float(b[3]), float(b[4])
-        t = ((bx - sx) * dx + (by - sy) * dy) / seg2
-        if t <= 0.02 or t >= 0.98:            # blocker must lie strictly between us and the target
-            continue
-        cx, cy = sx + t * dx, sy + t * dy
-        if math.hypot(cx - bx, cy - by) >= br:  # path does not cross the blocker disk
-            continue
-        bo = int(b[1])
-        if bo == player:                       # our own planet on the path: a reinforce, not a waste
-            continue
-        bsh, bprod = float(b[5]), float(b[6])
-        cost = bsh + 1.0 if bo < 0 else bsh + bprod * 3.0 + 1.0
-        if cost > max_send:                    # full garrison still can't crack the screen
-            return True
-    return False
-
-
 def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_target, masks, obs, player,
                                fire_threshold=0.5, sample: bool = False,
                                ship_bin_mode: str = "absolute",
@@ -846,9 +806,6 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
                                cooldown_last: dict = None,
                                cooldown_step: int = 0,
                                sufficient_commit_factor: float = 0.0,
-                               path_obstruction_mask: bool = False,
-                               redundant_target_factor: float = 0.0,
-                               redundant_target_reactive: bool = False,
                                defensive_reinforce_k: int = 0,
                                defensive_reinforce_beta: float = 2.2,
                                defensive_reinforce_max_targets: int = 1,
@@ -922,79 +879,6 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
                 illegal = _own_reinforce_illegal(planets[pidx], tgt)
             if illegal:
                 target_logits[:, slot, tidx] = -1e9
-
-    # Path-obstruction REDIRECT (inference bugfix; default off, OW_PATH_OBSTRUCTION=1 to toggle).
-    # A launch on a straight heading hits any planet its path crosses; if a bigger, uncapturable
-    # planet screens the intended target, the fleet dies on the screen and the target is never
-    # reached (replay 81509243: 12 ships repeatedly annihilated on an 86-ship neutral blocking a
-    # cheap target; we never expand and lose). Pre-argmax per-(slot,target) mask so the target
-    # head falls through to a REACHABLE target instead of re-picking the screened one. Uses the
-    # source's full garrison (max_ships[slot]) as the can-we-ever-clear-it bar, so only genuinely
-    # wasted launches are masked (capturable stepping-stone blockers are left alone).
-    _path_mask = bool(path_obstruction_mask) or os.environ.get("OW_PATH_OBSTRUCTION", "") not in ("", "0")
-    if _path_mask:
-        for slot in range(min(masks["owned_count"], target_logits.shape[1])):
-            pidx = int(owned_indices[slot])
-            if pidx >= len(planets):
-                continue
-            src = planets[pidx]
-            sx, sy, src_id = float(src[2]), float(src[3]), int(src[0])
-            max_send = float(max_ships[slot])
-            for tidx, tgt in enumerate(planets[:target_logits.shape[-1]]):
-                if int(tgt[0]) == src_id or target_logits[0, slot, tidx] <= -1e8:
-                    continue                    # source itself or already masked
-                if _path_obstruction_blocked(sx, sy, float(tgt[2]), float(tgt[3]),
-                                              planets, src_id, int(tgt[0]), player, max_send):
-                    target_logits[:, slot, tidx] = -1e9
-
-    # Redundant-target REDIRECT (env-gated A/B prototype, OW_REDUNDANT_TGT_FACTOR>0).
-    # Mask any NEUTRAL whose IN-FLIGHT friendly fleets already clear its defense
-    # (friendly_inbound > (garrison + enemy_inbound) * factor) for ALL slots, BEFORE the
-    # target argmax. Unlike the post-hoc sufficient-commit veto (which only drops a too-
-    # small launch and leaves the source idle), this is a pre-argmax logit mask, so the
-    # target head's argmax falls through to the next-best neutral = it RETARGETS instead
-    # of piling more mass onto an already-won capture. Neutrals don't regrow (no owner<0
-    # production), so inbound>defense ⇒ the planet is already ours. (In-flight only; does
-    # not de-conflict two sources picking the same target within this same turn.)
-    _redund = float(redundant_target_factor) or float(os.environ.get("OW_REDUNDANT_TGT_FACTOR", "0.0"))
-    _reactive = bool(redundant_target_reactive) or os.environ.get("OW_REDUNDANT_REACTIVE", "") not in ("", "0")
-    if _redund > 0.0:
-        # DM reactive-floor constants (mirror torch_env._DM_*): beta, eta_free, eta_scale, horizon, overhead
-        _RB, _REF, _RES, _RH, _ROV = 2.2, 3.0, 12.0, 18.0, 1.0
-        for tidx, tgt in enumerate(planets[:target_logits.shape[-1]]):
-            if int(tgt[1]) >= 0:           # neutral targets only (owner < 0)
-                continue
-            tgt_id = int(tgt[0]); tx, ty = float(tgt[2]), float(tgt[3])
-            friendly_inbound = enemy_inbound = 0.0
-            max_f_eta = 1.0
-            for f in fleets:
-                ft = _def_fleet_target(planets, f)
-                if ft is None or int(ft[0]) != tgt_id:
-                    continue
-                sh = float(f[6])
-                if int(f[1]) == player:
-                    friendly_inbound += sh
-                    fd = math.hypot(tx - float(f[2]), ty - float(f[3]))
-                    max_f_eta = max(max_f_eta, fd / max(_fleet_speed(sh), 1e-6))
-                elif int(f[1]) >= 0:
-                    enemy_inbound += sh
-            if friendly_inbound <= 0.0:
-                continue
-            floor = float(tgt[5]) + enemy_inbound          # static: garrison + enemy inbound
-            if _reactive:
-                # + reactive peel: enemy PLANET mass that can reinforce the neutral by our arrival
-                em = 0.0
-                for ep in planets:
-                    eo = int(ep[1])
-                    if eo < 0 or eo == player or int(ep[0]) == tgt_id:
-                        continue
-                    reach = max(_fleet_speed(float(ep[5])) * _RH, 1e-6)
-                    d = math.hypot(float(ep[2]) - tx, float(ep[3]) - ty)
-                    em += float(ep[5]) * max(1.0 - d / reach, 0.0)
-                rho = min(max((max_f_eta - _REF) / _RES, 0.0), 1.0)
-                floor += _RB * rho * em + _ROV
-            if friendly_inbound > floor * _redund:
-                target_logits[:, :, tidx] = -1e9
 
     if target_sanity_penalty > 0.0:
         cand_info = _enumerate_sane_target_candidates(obs)

@@ -35,10 +35,6 @@ class ModelConfig:
     mlp_expansion: int = 3
     num_angle_bins: int = 144
     num_ship_bins: int = 32
-    # Mask ship bins below this index to -inf in model forward (never sampled).
-    # For fraction-head (10 bins on [0.1..1.0]), set to 1 to remove the
-    # "10%-of-source" bin that PPO collapses to in cold-start self-play.
-    min_ship_bin: int = 0
     # How to decode a ship-bin index into an absolute ship count:
     #   "absolute" — bin → SHIP_COUNTS[bin]  (32-entry hybrid linear-log table)
     #   "fraction" — bin → round(FRACTION_BIN_VALUES[bin] * max_ships)
@@ -59,8 +55,6 @@ class ModelConfig:
     reinforce_garrison_floor: float = 0.0
     reverse_edge_cooldown: int = 0
     sufficient_commit_factor: float = 0.0
-    redundant_target_factor: float = 0.0
-    path_obstruction_mask: bool = False
     dropout: float = 0.0
     # Value head input width. 0 = auto (2*entity_dim, new concat head).
     # Set to entity_dim when loading pre-Phase-1 checkpoints (old mean-pool head).
@@ -104,9 +98,8 @@ class PPOConfig:
     # threshold self-skips on a warm-critic resume (EV already high → 0 warmup steps).
     critic_warmup_ev: float = 0.0
     critic_warmup_max_updates: int = 30   # safety cap if EV never reaches the threshold
-    # Note: shaping_coef is intentionally NOT here — it is passed as --shaping-coef
-    # CLI arg directly to TorchEnv (see train_torch.py). PPOConfig is not the
-    # right owner for an environment reward shaping parameter.
+    # Note: env reward-shaping coefficients are CLI args wired directly to VecTorchEnv
+    # (see train_torch.py) — PPOConfig is not the right owner for them.
     max_grad_norm: float = 0.5
     clip_value: bool = True
     normalize_advantages: bool = True
