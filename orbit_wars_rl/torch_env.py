@@ -461,6 +461,7 @@ class VecTorchEnv:
 
         self._precompute_orbital_params()
         self._init_comets()
+        self._ftx_cache = None
         self.prev_production = self._compute_production()
         owner_p = self.planets[:, :, 1].long()
         self.prev_owned = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
@@ -526,6 +527,18 @@ class VecTorchEnv:
         tgt_idx = eta.masked_fill(~candidate, 1e6).argmin(dim=2)        # (N, F) — min-ETA hit
         return torch.where(has_candidate, tgt_idx, torch.full_like(tgt_idx, -1))
 
+    def _fleet_target_idx_cached(self) -> torch.Tensor:
+        """Per-tick cache of _fleet_target_idx — geometry-only and player-independent, so every
+        call between two state mutations returns the same tensor. Profiling (2026-07-05, 512 envs)
+        showed it computed 4x/tick (>50% of env wall time): get_features(p0), get_features(p1) and
+        _apply_actions(p0) all see the identical pre-launch state; only _apply_actions(p1)
+        legitimately differs (it sees p0's same-tick launches, as before). Every env-internal
+        mutation of fleets/planets sets self._ftx_cache = None; code that pokes those tensors
+        directly (tests) must do the same before relying on a cached consumer."""
+        if self._ftx_cache is None:
+            self._ftx_cache = self._fleet_target_idx()
+        return self._ftx_cache
+
     def _decisive_mass_fields(self):
         """Per-(N,P,num_players) inflight mass, capture floor, max-ETA and is_enemy mask — the
         EXACT quantities producer_v2's capture floor uses. Consumed by the PBRS staging
@@ -554,7 +567,7 @@ class VecTorchEnv:
         decay = (1.0 - pdist / src_reach.unsqueeze(2)).clamp(min=0.0)   # (N, P_src, P_tgt)
         not_self = ~torch.eye(P, dtype=torch.bool, device=self.device).unsqueeze(0)
         # Our converging fleets: target, ships, and ETA to that target.
-        tgt_idx = self._fleet_target_idx()                             # (N, F)
+        tgt_idx = self._fleet_target_idx_cached()                      # (N, F)
         f_owner = self.fleets[:, :, 1].long()
         f_ships_raw = self.fleets[:, :, 6]
         fx, fy = self.fleets[:, :, 2], self.fleets[:, :, 3]
@@ -672,12 +685,22 @@ class VecTorchEnv:
         if self.episode_steps <= COMET_SPAWN_STEPS[0]:
             return
         sc = self.step_count
-        for si, S in enumerate(COMET_SPAWN_STEPS):
-            if S >= self.episode_steps:
-                continue
-            need = (sc == (S - 1)) & ~self._comet_spawn_done[:, si]
-            if need.any():
-                self._compute_spawn(torch.where(need)[0].cpu().tolist(), si)
+        if getattr(self, "_spawn_prev_t", None) is None:
+            self._spawn_si = [si for si, S in enumerate(COMET_SPAWN_STEPS)
+                              if S < self.episode_steps]
+            self._spawn_prev_t = torch.tensor(
+                [COMET_SPAWN_STEPS[si] - 1 for si in self._spawn_si],
+                dtype=sc.dtype, device=self.device)
+        if not self._spawn_si:
+            return
+        # (k, N) need matrix, read back once — was one .any() sync per spawn index.
+        need = (sc.unsqueeze(0) == self._spawn_prev_t.unsqueeze(1)) \
+            & ~self._comet_spawn_done[:, self._spawn_si].T
+        need_cpu = need.cpu().numpy()
+        for row, si in enumerate(self._spawn_si):
+            envs = np.where(need_cpu[row])[0]
+            if envs.size:
+                self._compute_spawn(envs.tolist(), si)
 
     def _compute_spawn(self, env_indices, si):
         """Fill the comet schedule for spawn COMET_SPAWN_STEPS[si] for the given envs. Reuses
@@ -685,37 +708,46 @@ class VecTorchEnv:
         are byte-identical; folds spawn+advance into the per-step lookup (position, alive,
         check=collision-tested, ships0 at activation)."""
         S, T1 = COMET_SPAWN_STEPS[si], self.episode_steps + 1
-        for e in env_indices:
-            self._comet_spawn_done[e, si] = True
-            ang_vel = float(self.angular_velocity[e].item())
-            init_planets = []
-            for i in range(COMET_SLOT_START):
-                if bool(self.planet_alive[e, i]):
-                    p = self.init_planets[e, i].tolist()
-                    init_planets.append([int(p[0]), int(p[1]), p[2], p[3], p[4], p[5], p[6]])
+        # One batched device→CPU readback for all spawning envs; the old per-planet
+        # .item()/.tolist()/bool() reads were ~100 syncs per env (the spawn-step stall).
+        idx_t = torch.tensor(env_indices, dtype=torch.long, device=self.device)
+        self._comet_spawn_done[idx_t, si] = True
+        ip_cpu = self.init_planets[idx_t, :COMET_SLOT_START].cpu().numpy()
+        alive_cpu = self.planet_alive[idx_t, :COMET_SLOT_START].cpu().numpy()
+        av_cpu = self.angular_velocity[idx_t].cpu().numpy()
+        for j, e in enumerate(env_indices):
+            init_planets = [
+                [int(p[0]), int(p[1]), float(p[2]), float(p[3]), float(p[4]),
+                 float(p[5]), float(p[6])]
+                for p, a in zip(ip_cpu[j], alive_cpu[j]) if a
+            ]
             rng = random.Random(f"orbit_wars-comet-{self.seeds[e]}-{S}")
-            paths = _comet_paths_fast(init_planets, ang_vel, S, comet_planet_ids=set(),
+            paths = _comet_paths_fast(init_planets, float(av_cpu[j]), S, comet_planet_ids=set(),
                                       comet_speed=COMET_SPEED, rng=rng)
             if not paths:
                 continue
             comet_ships = min(rng.randint(1, 99), rng.randint(1, 99),
                               rng.randint(1, 99), rng.randint(1, 99))
+            # path_index k = step_count-(S-1). k in [0,L-1]=on-path; k==L = kaggle's
+            # stay-put expiry tick (still collidable), then gone. All 4 paths are
+            # symmetries of the same visible arc, so they share one length L.
+            # Stage the whole schedule in numpy and write per-env slices in a few ops
+            # (the old per-(t,c) element writes were ~700 device ops per env).
+            L = len(paths[0])
+            t0 = S - 1
+            span = min(L + 1, T1 - t0)
+            if span <= 0:
+                continue
+            kk = np.minimum(np.arange(span), L - 1)
+            xy = np.empty((span, N_COMET_SLOTS, 2), dtype=np.float32)
             for c in range(N_COMET_SLOTS):
-                path = paths[c]
-                L = len(path)
-                # path_index k = step_count-(S-1). k in [0,L-1]=on-path; k==L = kaggle's
-                # stay-put expiry tick (still collidable), then gone.
-                for k in range(L + 1):
-                    t = (S - 1) + k
-                    if t >= T1:
-                        break
-                    kk = min(k, L - 1)
-                    self._comet_xy[e, t, c, 0] = path[kk][0]
-                    self._comet_xy[e, t, c, 1] = path[kk][1]
-                    self._comet_alive[e, t, c] = True
-                    self._comet_check[e, t, c] = (k >= 1)
-                    if k == 0:
-                        self._comet_ships0[e, t, c] = comet_ships
+                xy[:, c, :] = np.asarray(paths[c], dtype=np.float32)[kk]
+            self._comet_xy[e, t0:t0 + span] = torch.from_numpy(xy).to(self.device)
+            self._comet_alive[e, t0:t0 + span] = True
+            chk = torch.ones(span, N_COMET_SLOTS, dtype=torch.bool)
+            chk[0] = False                      # k == 0: not collision-tested
+            self._comet_check[e, t0:t0 + span] = chk.to(self.device)
+            self._comet_ships0[e, t0, :] = float(comet_ships)
 
     def _apply_comet_state(self):
         """Set comet slots for the current step_count: activate new comets (owner=-1,
@@ -844,7 +876,7 @@ class VecTorchEnv:
         # Mirrors features._resolve_fleet_targets (parity-tested).
         # _fleet_target_idx runs over ALL self.fleets (256); the feature path caps to the first
         # F (=max_fleets). Resolution is per-fleet (geometry only) so slicing is exact.
-        _f_tgt = self._fleet_target_idx()[:, :fleets.shape[1]]              # (N, F), -1 if none
+        _f_tgt = self._fleet_target_idx_cached()[:, :fleets.shape[1]]       # (N, F), -1 if none
         _p_ar = torch.arange(x.shape[1], device=self.device).view(1, -1, 1)  # (1, P, 1)
         incoming_pw = (_f_tgt.unsqueeze(1) == _p_ar) & fleet_alive.unsqueeze(1)  # (N, P, F)
 
@@ -1591,11 +1623,16 @@ class VecTorchEnv:
                 cd = torch.where(clear, torch.full_like(cd, _REINF_CD_NEVER), cd)
                 rec = can_fire & is_reinforce                            # (N, MAX_OWNED)
                 step_now = self.step_count                               # (N,)
-                for slot in range(rec.shape[1]):
-                    m = rec[:, slot]
-                    if bool(m.any()):
-                        ni = m.nonzero(as_tuple=True)[0]
-                        cd[ni, owned_idx[ni, slot], target_idx[ni, slot]] = step_now[ni]
+                # Record executed edges src→tgt in one gather/scatter (the old per-slot
+                # loop cost up to MAX_OWNED CPU-GPU syncs per player per step). Slots are
+                # distinct sources (topk indices), so the flattened edge ids are unique
+                # per env; non-recording slots write their current value back (no-op).
+                Pp = cd.shape[1]
+                cd_flat = cd.view(N, Pp * Pp)
+                edge = owned_idx * Pp + target_idx                       # (N, MAX_OWNED)
+                cur = cd_flat.gather(1, edge)
+                val = torch.where(rec, step_now.unsqueeze(1).expand_as(edge), cur)
+                cd_flat.scatter_(1, edge, val)
                 self.reinf_cd[:, owner_id] = cd
             # #2 Per-ship transit cost: accumulate ships sent to own planets this step
             # for the launching player; the penalty is applied to the reward in step().
@@ -1650,7 +1687,7 @@ class VecTorchEnv:
                 fa = self.fleet_alive                                  # (N, F)
                 f_owner = fi[:, :, 1].long()
                 f_ships = fi[:, :, 6] * fa.float()
-                f_tgt = self._fleet_target_idx()                       # (N, F) — cached if available
+                f_tgt = self._fleet_target_idx_cached()                # (N, F)
                 f_fx, f_fy = fi[:, :, 2], fi[:, :, 3]
                 f_speed = _ship_speed(fi[:, :, 6]).clamp(min=1e-6)
                 # Per-(slot, fleet) ETA: distance from fleet to the slot's target / fleet speed
@@ -1735,6 +1772,9 @@ class VecTorchEnv:
         self.fleets[flat_env, flat_slot, 6] = ship_count[target_valid]
         self.fleet_alive[flat_env, flat_slot] = True
         self.next_fleet_id = self.next_fleet_id + target_valid.long().sum(dim=1)
+        # New fleets exist → the per-tick fleet-target cache is stale (the NEXT player's
+        # sufficient-commit veto must see this player's same-tick launches, as before).
+        self._ftx_cache = None
 
     def reset_reinforce_stats(self):
         """Zero the reinforce_rate accumulators. Call once per rollout (before the
@@ -1983,6 +2023,9 @@ class VecTorchEnv:
         # 9. Update fleet alive flags
         self.fleet_alive = survives
 
+        # Physics moved fleets/planets and resolved combat → fleet-target cache is stale.
+        self._ftx_cache = None
+
         # 10. Advance step
         self.step_count = self.step_count + 1
 
@@ -2190,6 +2233,7 @@ class VecTorchEnv:
             self.rewards[env_i] = 0.0
         # Re-precompute orbital params for changed envs
         self._precompute_orbital_params()
+        self._ftx_cache = None
         # Reset the comet schedule for the reset envs (new seeds → recomputed lazily).
         if done_idx:
             self._init_comets(done_idx)
