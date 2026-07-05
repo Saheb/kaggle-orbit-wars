@@ -477,16 +477,20 @@ def train(args):
             cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
         if "phase4_residual_init_std" in ckpt_cfg:
             cfg.model.phase4_residual_init_std = float(ckpt_cfg["phase4_residual_init_std"])
-        if bool(ckpt_cfg.get("game_phase_features", False)):
-            cfg.model.game_phase_features = True  # resumed weights are 15-global
-        if bool(ckpt_cfg.get("roi_enemy_deflate", False)):
-            cfg.model.roi_enemy_deflate = True  # resumed weights trained on enemy-deflated roi
-        if bool(ckpt_cfg.get("zero_roi_channels", False)):
-            cfg.model.zero_roi_channels = True  # resumed weights trained with roi ch12/13 zeroed
-        if bool(ckpt_cfg.get("pressure_precise_resolver", False)):
-            cfg.model.pressure_precise_resolver = True  # resumed weights trained on resolved pressure
-        if bool(ckpt_cfg.get("threat_eta_surface", False)):
-            cfg.model.threat_eta_surface = True  # resumed weights trained on surface threat ETA
+        # Blessed feature config guard (2026-07 cleanup): feature semantics are hard-coded
+        # (game-phase 15-global ON, precise pressure resolver ON, friendly roi-deflation ON,
+        # enemy-deflate/zero-roi/surface-threat REMOVED). A checkpoint trained under different
+        # semantics cannot be resumed here — use the pre-cleanup git tag for those.
+        _blessed = {"game_phase_features": True, "pressure_precise_resolver": True,
+                    "roi_enemy_deflate": False, "zero_roi_channels": False,
+                    "threat_eta_surface": False}
+        _mismatch = {k: ckpt_cfg.get(k, False) for k, want in _blessed.items()
+                     if bool(ckpt_cfg.get(k, False)) != want}
+        if _mismatch:
+            raise RuntimeError(
+                f"Checkpoint feature semantics {_mismatch} do not match the blessed config "
+                f"{_blessed}. This checkpoint predates the 2026-07 cleanup — resume it from "
+                f"the pre-cleanup git tag (pre-cleanup-2026-07) instead.")
         # Resume-path discipline parity: if the CLI left these at defaults, inherit
         # the checkpoint values so env/model wiring matches the source policy.
         if not args.allow_reinforce and bool(ckpt_cfg.get("allow_reinforce", False)):
@@ -531,16 +535,6 @@ def train(args):
     # PROVENANCE only (eval always clamps via _ship_bin_to_count, so this doesn't change the eval
     # contract) — but record how the ckpt was trained (drop vs clamp) so it's never ambiguous.
     cfg.model.ship_overflow_mode = args.ship_overflow_mode
-    # Game-phase features: on if the CLI asks OR a resumed ckpt had them (15-global weights).
-    cfg.model.game_phase_features = cfg.model.game_phase_features or args.game_phase_features
-    if cfg.model.game_phase_features:
-        cfg.model.global_feature_dim = 15
-    # ROI-channel discipline: on if the CLI asks OR a resumed ckpt trained with it.
-    cfg.model.roi_enemy_deflate = cfg.model.roi_enemy_deflate or args.roi_enemy_deflate
-    cfg.model.zero_roi_channels = cfg.model.zero_roi_channels or args.zero_roi_channels
-    cfg.model.pressure_precise_resolver = cfg.model.pressure_precise_resolver or args.pressure_precise_resolver
-    cfg.model.threat_eta_surface = cfg.model.threat_eta_surface or args.threat_eta_surface
-
     env = VecTorchEnv(num_envs=args.num_envs, num_players=args.num_players,
                       device=device, episode_steps=500,
                       rank_reward_coef=args.rank_reward_coef,
@@ -548,11 +542,6 @@ def train(args):
                       ship_overflow_mode=args.ship_overflow_mode,
                       action_decode=args.action_decode,
                       allow_reinforce=args.allow_reinforce,
-                      game_phase_features=cfg.model.game_phase_features,
-                      roi_enemy_deflate=cfg.model.roi_enemy_deflate,
-                      zero_roi_channels=cfg.model.zero_roi_channels,
-                      pressure_precise_resolver=cfg.model.pressure_precise_resolver,
-                      threat_eta_surface=cfg.model.threat_eta_surface,
                       reinforce_garrison_floor=args.reinforce_garrison_floor,
                       reinforce_cost=args.reinforce_cost,
                       reinforce_gate_min_planets=args.reinforce_gate_min_planets,
@@ -877,11 +866,7 @@ def train(args):
                     "action_decode": args.action_decode,
                     "resume": args.resume or "",
                     "ship_bin_mode": cfg.model.ship_bin_mode,
-                    "game_phase_features": cfg.model.game_phase_features,
-                    "roi_enemy_deflate": cfg.model.roi_enemy_deflate,
-                    "zero_roi_channels": cfg.model.zero_roi_channels,
-                    "pressure_precise_resolver": cfg.model.pressure_precise_resolver,
-                    "threat_eta_surface": cfg.model.threat_eta_surface,
+                    "feature_config": "blessed-2026-07",  # game-phase+resolver ON, deflate variants removed
                     "staging_shaping_coef": args.staging_shaping_coef,
                     "staging_topk": args.staging_topk,
                     "entropy_coef_fire": args.entropy_coef_fire,
@@ -2085,27 +2070,6 @@ if __name__ == "__main__":
                              "0.06-0.10). Ownership-change & episode resets clear stale edges so a "
                              "recaptured planet is never mis-blocked. Pure mask, internalised at "
                              "inference. 0 = off. Try 3. Enemy/neutral untouched; needs --allow-reinforce.")
-    parser.add_argument("--game-phase-features", action="store_true",
-                        help="Append 4 game-phase global channels (phase one-hot early<50/mid/late + "
-                             "normalized steps-to-next-comet-spawn); global feature dim 11->15. "
-                             "Breaks 11-global checkpoint loading → from-scratch runs only (Stage B).")
-    parser.add_argument("--roi-enemy-deflate", action="store_true",
-                        help="Deflate roi_20/roi_50 (pairwise ch12/13) by enemy contest, symmetric "
-                             "to the existing friendly-coverage deflation. Stops the target head from "
-                             "chasing a cheap neutral an enemy fleet captures first. Checkpoint-compatible.")
-    parser.add_argument("--zero-roi-channels", action="store_true",
-                        help="Zero the roi_20/roi_50 channels (ch12/13) entirely — tests whether they "
-                             "are redundant given reactive_roi_40 (ch17). Keeps dims; head weights on "
-                             "12/13 receive zeros. Mutually exclusive in practice with --roi-enemy-deflate.")
-    parser.add_argument("--pressure-precise-resolver", action="store_true",
-                        help="Attribute each fleet to its SINGLE lead-aware swept-collision target "
-                             "(torch_env._fleet_target_idx) for the pairwise pressure channels "
-                             "(enemy_contest/friendly_contest/threat), instead of the loose corridor "
-                             "that double-counts a fleet onto every planet in its path. Checkpoint-compatible.")
-    parser.add_argument("--threat-eta-surface", action="store_true",
-                        help="Measure threat ETA (ch20 enemy_mass_soon / ch21 threat_imminence) to the "
-                             "planet SURFACE (dist−radius, the resolver convention) instead of the "
-                             "center, which reads ~½ step under-urgent. Checkpoint-compatible.")
     parser.add_argument("--ship-overflow-mode", choices=["drop", "clamp"], default="clamp",
                         help="What torch_env does when a launch asks for more ships than the source "
                              "garrison: 'clamp' (DEFAULT — send min(ask,src), the whole garrison, "

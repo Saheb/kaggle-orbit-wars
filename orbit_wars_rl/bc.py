@@ -412,9 +412,9 @@ def _save_bc_checkpoint(model: EntityTransformer, cfg, save_path: str):
             "num_ship_bins":  cfg.model.num_ship_bins,
             "min_ship_bin":   cfg.model.min_ship_bin,
             "pairwise_feature_dim": cfg.model.pairwise_feature_dim,
-            # 15-global feature flag — load_checkpoint/train_torch restore the global dim from
-            # this so a 15-global BC warmstart loads correctly (omitting it silently breaks resume).
-            "game_phase_features": cfg.model.game_phase_features,
+            # Blessed feature semantics (2026-07 cleanup): always 15-global + precise resolver.
+            "game_phase_features": True,
+            "pressure_precise_resolver": True,
             # Target-decode discipline — persisted so train/eval/export agree on own-target
             # legality and attack-concentration vetoes (the previous silent-disagreement bug).
             "allow_reinforce": bool(getattr(cfg.model, "allow_reinforce", False)),
@@ -699,10 +699,6 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=0.0,
                         help="Learning rate override (default: use BCConfig.learning_rate=3e-4). "
                              "For fine-tuning from a strong checkpoint, use 1e-4.")
-    parser.add_argument("--game-phase-features", action="store_true",
-                        help="Train a 15-global model (11->15: phase one-hot + comet-cycle). The "
-                             "--samples pkl MUST be built with the same flag (build_snowball_bc.py "
-                             "--game-phase-features) so the stored global tensors are 15-dim.")
     parser.add_argument("--entity-dim", type=int, default=0,
                         help="Override model entity_dim (default 96). Use 128 for the capacity-probe arm.")
     parser.add_argument("--device", type=str, default="",
@@ -738,11 +734,6 @@ if __name__ == "__main__":
         cfg.device = args.device
     if args.batch_size > 0:
         cfg.bc.batch_size = args.batch_size
-    if args.game_phase_features:
-        from features import set_game_phase_features
-        cfg.model.game_phase_features = True
-        cfg.model.global_feature_dim = 15
-        set_game_phase_features(True)   # so any on-the-fly extraction emits 15-global too
     if args.entity_dim > 0:
         cfg.model.entity_dim = args.entity_dim
     cfg.model.allow_reinforce = bool(args.allow_reinforce)

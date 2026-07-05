@@ -9,8 +9,8 @@ Features per entity type:
   is_home, active mask
 - Fleet (13 features): position, owner, angle, ships, speed, dist_to_sun,
   fleet destination ETA/dist, threatens_owned, target_production, mask
-- Global (11 features): player, step, angular_velocity, economy stats,
-  enemy ships split (on_planets / in_fleets), mode
+- Global (15 features): player, step, angular_velocity, economy stats,
+  enemy ships split (on_planets / in_fleets), mode, game-phase channels
 
 Pairwise features (20 per owned-slot × target-planet pair):
   0: sin of arrival direction   (corrected for rotation on orbiting targets)
@@ -38,98 +38,17 @@ Pairwise features (20 per owned-slot × target-planet pair):
 from __future__ import annotations
 
 import math
-import os
 import numpy as np
 import torch
 
-# Eval-only escape hatch: measure a policy trained BEFORE the friendly-coverage roi-deflation
-# in its NATIVE feature regime (deflation off). Default off → deflation active (production path).
-_NO_FRIENDLY_DEFLATION = os.environ.get("ORBIT_NO_FRIENDLY_DEFLATION") == "1"
-
-# Game-phase observation features (Stage B). When on, append 4 global channels (global dim 11->15).
-# Set per-checkpoint by eval/export from cfg.model.game_phase_features (or the env var for probes).
-# MUST stay byte-identical to the vectorized version in torch_env.get_features — see
-# feature_parity_gamephase_probe.py. Pure function of `step` → parity-safe.
-_GAME_PHASE_FEATURES = os.environ.get("ORBIT_GAME_PHASE_FEATURES") == "1"
+# Blessed feature config (2026-07 cleanup; presres1 lineage — the final submissions):
+# - friendly-coverage roi-deflation: ALWAYS ON
+# - pressure channels resolved per-fleet by the lead-aware swept-collision resolver
+#   (torch_env._fleet_target_idx mirror below): ALWAYS ON
+# - game-phase global channels (global dim 15): ALWAYS ON
+# - roi enemy-deflation / zero-roi / surface threat-ETA: removed (never in a blessed run)
+# Pre-cleanup toggles and their alternate code paths live at the pre-cleanup git tag.
 _COMET_SPAWN_STEPS = (50, 150, 250, 350, 450)  # MUST match torch_env.COMET_SPAWN_STEPS
-
-
-def set_game_phase_features(on: bool) -> None:
-    """Toggle the game-phase global channels (called by eval/export after load_checkpoint)."""
-    global _GAME_PHASE_FEATURES
-    _GAME_PHASE_FEATURES = bool(on)
-
-
-# Diagnostic: permute the precomputed ROI channels (roi_20/roi_50) across targets per source slot,
-# so the target↔roi correspondence is destroyed while the value distribution is preserved. If
-# target selection is unchanged under this, the net is NOT using the precomputed ROI channel.
-# Eval-only ablation (set via --ablate-roi); never on in training/export.
-_ABLATE_CHANNELS: tuple = ()
-
-
-def set_ablate_roi(on: bool) -> None:
-    """Permute the precomputed ROI channels (roi_20=12, roi_50=13) across targets per slot."""
-    global _ABLATE_CHANNELS
-    _ABLATE_CHANNELS = (12, 13) if on else ()
-
-
-def set_ablate_channels(channels) -> None:
-    """Placebo/generic: permute arbitrary pairwise channels across targets per slot (e.g. sun_safe=4)."""
-    global _ABLATE_CHANNELS
-    _ABLATE_CHANNELS = tuple(int(c) for c in channels)
-
-
-# ROI-deflation by ENEMY contest (ch12/13). The friendly-coverage deflation (below) zeroes a
-# target we are ALREADY taking; its enemy counterpart was missing, so roi_20/roi_50 kept
-# advertising a cheap-garrison neutral that an enemy fleet is about to capture first. When on,
-# deflate roi by enemy_coverage symmetric to the friendly term. Persisted per-checkpoint; eval
-# mirrors via cfg.model.roi_enemy_deflate (parity-tested in test_torch_env_features).
-_ROI_ENEMY_DEFLATE = os.environ.get("ORBIT_ROI_ENEMY_DEFLATE") == "1"
-# Zero the precomputed ROI channels (roi_20=12, roi_50=13) entirely — hypothesis that they are
-# redundant given reactive_roi_40 (ch17, which IS contest-aware) and only drag the target head
-# toward cheap-but-contested planets. Keeps the channel dims (checkpoint-compatible); the head's
-# learned weights on 12/13 just receive zeros.
-_ZERO_ROI_CHANNELS = os.environ.get("ORBIT_ZERO_ROI_CHANNELS") == "1"
-
-
-def set_roi_enemy_deflate(on: bool) -> None:
-    """Toggle enemy-contest deflation of roi_20/roi_50 (called by eval/export after load)."""
-    global _ROI_ENEMY_DEFLATE
-    _ROI_ENEMY_DEFLATE = bool(on)
-
-
-def set_zero_roi_channels(on: bool) -> None:
-    """Toggle zeroing of the roi_20/roi_50 channels (called by eval/export after load)."""
-    global _ZERO_ROI_CHANNELS
-    _ZERO_ROI_CHANNELS = bool(on)
-
-
-# Pressure-channel target resolution. When OFF (default) the pairwise pressure channels
-# (enemy_contest ch14, friendly_contest→keepability/roi-deflation, enemy_mass_soon ch20,
-# threat_imminence ch21) attribute a fleet to EVERY planet in its loose corridor (perp<r+1.5,
-# launch heading, no orbital lead) — the deprecated ~85% heuristic. When ON, each fleet is
-# resolved to its SINGLE lead-aware swept-collision target (the 98.4% resolver the veto mask /
-# decisive-mass reward use, torch_env._fleet_target_idx). Persisted; eval mirrors via cfg.
-_PRESSURE_PRECISE_RESOLVER = os.environ.get("ORBIT_PRESSURE_PRECISE_RESOLVER") == "1"
-
-
-def set_pressure_precise_resolver(on: bool) -> None:
-    """Toggle precise fleet-target resolution for the pressure channels (eval/export after load)."""
-    global _PRESSURE_PRECISE_RESOLVER
-    _PRESSURE_PRECISE_RESOLVER = bool(on)
-
-
-# Threat-ETA convention (ch20 enemy_mass_soon / ch21 threat_imminence). When OFF (default) the
-# threat ETA is measured to the planet CENTER (Euclidean fleet→planet dist / speed). When ON it is
-# measured to the planet SURFACE (dist − radius), matching the resolver's _fleet_target_idx /
-# _resolve_fleet_targets eta — the center version reads ~½ step under-urgent. Persisted; eval mirrors.
-_THREAT_ETA_SURFACE = os.environ.get("ORBIT_THREAT_ETA_SURFACE") == "1"
-
-
-def set_threat_eta_surface(on: bool) -> None:
-    """Toggle surface (dist−radius) threat ETA for ch20/21 (called by eval/export after load)."""
-    global _THREAT_ETA_SURFACE
-    _THREAT_ETA_SURFACE = bool(on)
 
 
 def _resolve_fleet_targets(fx, fy, fcos, fsin, fspeed, px, py, pr, angvel):
@@ -257,12 +176,12 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
     fleet_owner = np.array([f[1] for f in fleets[:n_fleets]], dtype=np.int32)
     fleet_ships_arr = np.array([f[6] for f in fleets[:n_fleets]], dtype=np.float32)
 
-    # Planet ch12/13 attribution. With the resolver ON, attribute each fleet to its single
-    # lead-aware swept-collision target (mirrors torch_env incoming_pw); OFF keeps the loose
-    # corridor in the loop below. Resolved once over ALL fleets × planets → per-fleet target
-    # array-index (matches the loop's planet index i since both index planets[:max_planets]).
+    # Planet ch12/13 attribution: each fleet resolved to its single lead-aware swept-collision
+    # target (mirrors torch_env incoming_pw). Resolved once over ALL fleets × planets →
+    # per-fleet target array-index (matches the loop's planet index i since both index
+    # planets[:max_planets]).
     pp_resolved_tgt = None
-    if _PRESSURE_PRECISE_RESOLVER and n_fleets > 0 and n_planets > 0:
+    if n_fleets > 0 and n_planets > 0:
         _n_pp = min(n_planets, max_planets)
         _pp_px = np.array([planets[j][2] for j in range(_n_pp)], dtype=np.float32)
         _pp_py = np.array([planets[j][3] for j in range(_n_pp)], dtype=np.float32)
@@ -313,15 +232,8 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         # Incoming fleet pressure
         friendly_pressure = 0.0
         enemy_pressure = 0.0
-        if n_fleets > 0:
-            if pp_resolved_tgt is not None:
-                incoming = (pp_resolved_tgt == i)
-            else:
-                vx = x - fleet_x
-                vy = y - fleet_y
-                along = vx * fleet_cos + vy * fleet_sin
-                perp = np.abs(vx * fleet_sin - vy * fleet_cos)
-                incoming = (along > 0) & (perp < radius + 1.5)
+        if pp_resolved_tgt is not None:
+            incoming = (pp_resolved_tgt == i)
             friendly_pressure = float(np.sum(fleet_ships_arr[incoming & (fleet_owner == player)]))
             enemy_pressure = float(np.sum(fleet_ships_arr[incoming & (fleet_owner != player) & (fleet_owner >= 0)]))
 
@@ -480,8 +392,7 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         mode_2p,                             # 9: 2-player mode flag
         mode_4p,                             # 10: 4-player mode flag
     ]
-    if _GAME_PHASE_FEATURES:
-        global_list.extend(game_phase_channels(step))  # 11-13 phase one-hot, 14 comet-cycle
+    global_list.extend(game_phase_channels(step))  # 11-13 phase one-hot, 14 comet-cycle
     global_feats = np.array(global_list, dtype=np.float32)
 
     # Precompute enemy fleet ships racing toward each target planet (pairwise feat 14).
@@ -501,26 +412,18 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
             tgt_x_p = np.array([planets[j][2] for j in range(n_p_pair)], dtype=np.float32)
             tgt_y_p = np.array([planets[j][3] for j in range(n_p_pair)], dtype=np.float32)
             tgt_r_p = np.array([planets[j][4] for j in range(n_p_pair)], dtype=np.float32)
-            # (E, n_p) broadcast: is each enemy fleet e heading toward planet p?
+            # (E, n_p) broadcast geometry for threat ETAs below
             vx_ep = tgt_x_p[np.newaxis, :] - efx[:, np.newaxis]
             vy_ep = tgt_y_p[np.newaxis, :] - efy[:, np.newaxis]
-            along_ep = vx_ep * efcos[:, np.newaxis] + vy_ep * efsin[:, np.newaxis]
-            perp_ep  = np.abs(vx_ep * efsin[:, np.newaxis] - vy_ep * efcos[:, np.newaxis])
             efspeed = _ship_speed_np(efships)                                            # (E,)
-            if _PRESSURE_PRECISE_RESOLVER:
-                headed = _resolved_headed(efx, efy, efcos, efsin, efspeed,
-                                          tgt_x_p, tgt_y_p, tgt_r_p, angular_velocity)
-            else:
-                headed = (along_ep > 0) & (perp_ep < tgt_r_p[np.newaxis, :] + 1.5)
+            headed = _resolved_headed(efx, efy, efcos, efsin, efspeed,
+                                      tgt_x_p, tgt_y_p, tgt_r_p, angular_velocity)
             enemy_contest = (efships[:, np.newaxis] * headed).sum(axis=0).astype(np.float32)
-            # Threat timing (ch 20-21): ETA-profile the inbound enemy mass. eta = planet-fleet dist
-            # / fleet speed (mirrors torch_env _fleet_target_idx eta + the training path's threat
-            # computation byte-for-byte). ch14 sums ALL inbound mass; these add the WHEN — the only
-            # urgency signal in the pairwise bundle. _THREAT_ETA_SURFACE: subtract the planet radius
-            # so ETA is to the SURFACE (the resolver convention), not the under-urgent center.
+            # Threat timing (ch 20-21): ETA-profile the inbound enemy mass. eta = planet-fleet
+            # center dist / fleet speed (mirrors the torch_env training path byte-for-byte).
+            # ch14 sums ALL inbound mass; these add the WHEN — the only urgency signal in the
+            # pairwise bundle.
             dist_ep = np.sqrt(vx_ep * vx_ep + vy_ep * vy_ep)                              # (E, n_p)
-            if _THREAT_ETA_SURFACE:
-                dist_ep = np.clip(dist_ep - tgt_r_p[np.newaxis, :], 0.0, None)
             eta_ep = np.clip(dist_ep / np.maximum(efspeed[:, np.newaxis], 1e-3), 1.0, None)  # (E, n_p)
             soon = headed & (eta_ep <= _THREAT_ETA_WINDOW)                               # (E, n_p)
             enemy_mass_soon = (efships[:, np.newaxis] * soon).sum(axis=0).astype(np.float32)
@@ -545,23 +448,16 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
             tgt_x_pf = np.array([planets[j][2] for j in range(n_p_pair)], dtype=np.float32)
             tgt_y_pf = np.array([planets[j][3] for j in range(n_p_pair)], dtype=np.float32)
             tgt_r_pf = np.array([planets[j][4] for j in range(n_p_pair)], dtype=np.float32)
-            vx_fp = tgt_x_pf[np.newaxis, :] - ffx[:, np.newaxis]
-            vy_fp = tgt_y_pf[np.newaxis, :] - ffy[:, np.newaxis]
-            along_fp = vx_fp * ffcos[:, np.newaxis] + vy_fp * ffsin[:, np.newaxis]
-            perp_fp  = np.abs(vx_fp * ffsin[:, np.newaxis] - vy_fp * ffcos[:, np.newaxis])
-            if _PRESSURE_PRECISE_RESOLVER:
-                ffspeed = _ship_speed_np(ffships)
-                headed_f = _resolved_headed(ffx, ffy, ffcos, ffsin, ffspeed,
-                                            tgt_x_pf, tgt_y_pf, tgt_r_pf, angular_velocity)
-            else:
-                headed_f = (along_fp > 0) & (perp_fp < tgt_r_pf[np.newaxis, :] + 1.5)
+            ffspeed = _ship_speed_np(ffships)
+            headed_f = _resolved_headed(ffx, ffy, ffcos, ffsin, ffspeed,
+                                        tgt_x_pf, tgt_y_pf, tgt_r_pf, angular_velocity)
             friendly_contest = (ffships[:, np.newaxis] * headed_f).sum(axis=0).astype(np.float32)
 
     pairwise = compute_pairwise_features(
         planets, owned_indices, owned_count, player, max_planets=max_planets,
         max_owned=max_owned, angular_velocity=angular_velocity, step=step,
         init_by_id=init_by_id, enemy_contest=enemy_contest,
-        friendly_contest=None if _NO_FRIENDLY_DEFLATION else friendly_contest,
+        friendly_contest=friendly_contest,
         enemy_mass_soon=enemy_mass_soon, threat_imminence=threat_imminence,
         comet_ids=comet_planet_ids,
     )
@@ -808,18 +704,6 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
             roi_20 = roi_20 * (1.0 - coverage)
             roi_50 = roi_50 * (1.0 - coverage)
 
-        # Enemy-contest deflation (symmetric to the friendly term above): an enemy fleet racing
-        # for a cheap neutral makes its raw roi a trap — they capture first, then we crash into a
-        # grown garrison. Deflate roi by enemy_coverage = enemy_inbound / capture-cost.
-        if _ROI_ENEMY_DEFLATE and enemy_contest is not None:
-            enemy_coverage = np.where(tgt_owner != player,
-                                      np.minimum(enemy_contest[:n_p] / safe_cap, 1.0), 0.0)
-            roi_20 = roi_20 * (1.0 - enemy_coverage)
-            roi_50 = roi_50 * (1.0 - enemy_coverage)
-        if _ZERO_ROI_CHANNELS:
-            roi_20 = np.zeros_like(roi_20)
-            roi_50 = np.zeros_like(roi_50)
-
         enemy_contest_raw = enemy_contest[:n_p] if enemy_contest is not None else np.zeros(n_p, dtype=np.float32)
         friendly_contest_raw = friendly_contest[:n_p] if friendly_contest is not None else np.zeros(n_p, dtype=np.float32)
         enemy_pressure = reach_em + enemy_contest_raw
@@ -862,9 +746,5 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
             out[slot, :n_p, 20] = np.minimum(enemy_mass_soon[:n_p], 500.0) / 100.0  # enemy mass landing soon
         if threat_imminence is not None:
             out[slot, :n_p, 21] = threat_imminence[:n_p]                            # 1/(min_enemy_eta+1)
-        if _ABLATE_CHANNELS:                                  # diagnostic: scramble channel↔target mapping
-            _perm = np.random.permutation(n_p)
-            for _ch in _ABLATE_CHANNELS:
-                out[slot, :n_p, _ch] = out[slot, :n_p, _ch][_perm]
 
     return out

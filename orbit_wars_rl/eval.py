@@ -12,10 +12,7 @@ import numpy as np
 
 from config import Config
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, PHASE4_COMPAT_MISSING_KEYS
-from features import (extract_features, _ETA_PROBE_SPEED, set_game_phase_features,
-                      set_ablate_roi, set_ablate_channels, set_roi_enemy_deflate,
-                      set_zero_roi_channels, set_pressure_precise_resolver,
-                      set_threat_eta_surface, PAIRWISE_FEATURE_DIM)
+from features import extract_features, _ETA_PROBE_SPEED, PAIRWISE_FEATURE_DIM
 from action_mask import (compute_action_masks, actions_from_policy, actions_from_target_policy, _fleet_speed,
                          _ship_bin_to_count, _target_intercept_angle, MAX_OWNED_PLANETS)
 # Decisive-mass floor constants — IMPORTED from torch_env so the eval dm_* gap diagnostic uses the
@@ -88,20 +85,20 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     action_decode = str(ckpt_cfg.get("action_decode", "angle"))
     # Reinforcement: eval must mask targets the SAME way the checkpoint was trained.
     cfg.model.allow_reinforce = bool(ckpt_cfg.get("allow_reinforce", False))
-    # Game-phase features: eval's extract_features must emit the SAME globals the ckpt was
-    # trained on (11 vs 15). Set the module flag to match (off for all pre-Stage-B ckpts).
-    cfg.model.game_phase_features = bool(ckpt_cfg.get("game_phase_features", False))
-    set_game_phase_features(cfg.model.game_phase_features)
-    # ROI-channel discipline: eval's compute_pairwise_features must emit the SAME ch12/13 the
-    # ckpt trained on, else the target head sees a different roi than it learned.
-    cfg.model.roi_enemy_deflate = bool(ckpt_cfg.get("roi_enemy_deflate", False))
-    set_roi_enemy_deflate(cfg.model.roi_enemy_deflate)
-    cfg.model.zero_roi_channels = bool(ckpt_cfg.get("zero_roi_channels", False))
-    set_zero_roi_channels(cfg.model.zero_roi_channels)
-    cfg.model.pressure_precise_resolver = bool(ckpt_cfg.get("pressure_precise_resolver", False))
-    set_pressure_precise_resolver(cfg.model.pressure_precise_resolver)
-    cfg.model.threat_eta_surface = bool(ckpt_cfg.get("threat_eta_surface", False))
-    set_threat_eta_surface(cfg.model.threat_eta_surface)
+    # Blessed feature config guard (2026-07 cleanup): feature semantics are hard-coded in
+    # features.py (game-phase 15-global ON, precise pressure resolver ON, friendly deflation ON,
+    # enemy-deflate/zero-roi/surface-threat REMOVED). Evaluating a checkpoint trained under
+    # different semantics would silently feed it wrong features — refuse instead.
+    _blessed = {"game_phase_features": True, "pressure_precise_resolver": True,
+                "roi_enemy_deflate": False, "zero_roi_channels": False,
+                "threat_eta_surface": False}
+    _mismatch = {k: bool(ckpt_cfg.get(k, False)) for k, want in _blessed.items()
+                 if bool(ckpt_cfg.get(k, False)) != want}
+    if _mismatch:
+        raise RuntimeError(
+            f"Checkpoint feature semantics {_mismatch} do not match the blessed config "
+            f"{_blessed}. This checkpoint predates the 2026-07 cleanup — eval it from the "
+            f"pre-cleanup git tag (pre-cleanup-2026-07) instead.")
     # Reinforce / sufficient-commit DISCIPLINE: persisted at train time so eval/export mask the
     # SAME way (else the policy self-sabotages). Absent in old ckpts → defaults (0/False) → those
     # still require CLI flags, as before. evaluate_checkpoint uses these unless CLI overrides.
@@ -2548,14 +2545,6 @@ if __name__ == "__main__":
                         help="'random' or path to agent .py file")
     parser.add_argument("--num-players", type=int, choices=[2, 4], default=2)
     parser.add_argument("--fire-threshold", type=float, default=0.5)
-    parser.add_argument("--ablate-roi", action="store_true",
-                        help="DIAGNOSTIC: permute precomputed roi_20/roi_50 across targets per source slot "
-                             "(destroys target<->roi mapping). If target-selection metrics/WR don't move vs "
-                             "the control panel, the net is NOT using the precomputed ROI channel.")
-    parser.add_argument("--ablate-sun", action="store_true",
-                        help="PLACEBO control for --ablate-roi: permute the sun_safe channel (ch4) the same way. "
-                             "If WR also drops, the roi drop is general brittleness to inconsistent inputs; "
-                             "if WR holds, the roi effect is roi-specific.")
     parser.add_argument("--panel", action="store_true",
                         help="Use 128-seed community panel with both-seat eval "
                              "(256 games, per-archetype breakdown).")
@@ -2641,12 +2630,6 @@ if __name__ == "__main__":
                              "(suppresses the report; merge_panel_shards.py prints the merged report).")
     args = parser.parse_args()
     _DM_BETA_EVAL = args.decisive_mass_beta   # module global → used by _decisive_gap_step
-    if args.ablate_roi:
-        set_ablate_roi(True)
-        print("ABLATION: roi_20/roi_50 permuted across targets per slot (target<->roi mapping destroyed)")
-    if args.ablate_sun:
-        set_ablate_channels((4,))
-        print("PLACEBO ABLATION: sun_safe (ch4) permuted across targets per slot")
     if args.retarget_top_roi:
         set_retarget_top_roi(True, resize=args.retarget_resize)
         print(f"SELECTION ISOLATION: retarget each attack to top-holdable-ROI target "

@@ -287,19 +287,9 @@ def _get_model():
     return m
 
 
-# --- Feature extraction (inlined from features.py) ---
+# --- Feature extraction (inlined from features.py; blessed-2026-07 semantics hard-coded) ---
 
 {features_code}
-
-# Game-phase global channels: match the checkpoint (11 vs 15 globals).
-set_game_phase_features({game_phase_features})
-# ROI-channel discipline: match how the ckpt trained ch12/13 (enemy-deflated / zeroed).
-set_roi_enemy_deflate({roi_enemy_deflate})
-set_zero_roi_channels({zero_roi_channels})
-# Pressure channels: match resolver vs corridor attribution the ckpt trained on.
-set_pressure_precise_resolver({pressure_precise_resolver})
-# Threat ETA: match surface (dist−radius) vs center convention the ckpt trained on.
-set_threat_eta_surface({threat_eta_surface})
 
 
 # --- Reverse-edge cooldown rule (inlined from reinforce_cooldown.py) ---
@@ -484,12 +474,26 @@ def _apply_checkpoint_model_config(checkpoint, cfg: Config) -> dict:
         cfg.model.min_ship_bin = int(ckpt_cfg["min_ship_bin"])
     if "ship_bin_mode" in ckpt_cfg:
         cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
-    # Global feature dim + game-phase flag (Stage B: 11 vs 15 globals). Patch the dim from the
-    # weights so the rebuilt model matches; game_phase_features drives the inlined extractor.
+    # Blessed feature config guard (2026-07 cleanup): the inlined extractor hard-codes
+    # game-phase 15-global + precise resolver; refuse checkpoints trained otherwise. An ABSENT
+    # pressure_precise_resolver counts as OFF (same as eval/train_torch — a 15-global corridor
+    # checkpoint like stageb4/bc_snowball_15global must not silently export resolver features).
+    # Blessed-era saves that lack the flag due to the old cfg_blob persistence bug need it
+    # backfilled (see final_submissions/presres1_0.5M_backfilled_resolver.pt).
     if isinstance(state_dict, dict) and "global_proj.weight" in state_dict:
-        cfg.model.global_feature_dim = int(state_dict["global_proj.weight"].shape[1])
-    if bool(ckpt_cfg.get("game_phase_features", False)):
-        cfg.model.game_phase_features = True
+        _gdim = int(state_dict["global_proj.weight"].shape[1])
+        if _gdim != 15:
+            raise RuntimeError(
+                f"Checkpoint has {_gdim}-global weights; the blessed config is 15-global. "
+                f"Export it from the pre-cleanup git tag (pre-cleanup-2026-07) instead.")
+    _stale = {k: bool(ckpt_cfg.get(k, False))
+              for k in ("roi_enemy_deflate", "zero_roi_channels", "threat_eta_surface")
+              if bool(ckpt_cfg.get(k, False))}
+    if _stale or not bool(ckpt_cfg.get("pressure_precise_resolver", False)):
+        raise RuntimeError(
+            f"Checkpoint feature semantics (stale toggles: {_stale or 'resolver OFF/absent'}) "
+            f"predate the 2026-07 cleanup — export it from the pre-cleanup git tag "
+            f"(pre-cleanup-2026-07) instead.")
     # Pairwise input width must match what features.py emits (PAIRWISE_FEATURE_DIM), NOT the
     # checkpoint's stored width — narrower/older checkpoints are zero-padded by
     # EntityTransformer.load_state_dict. Stated explicitly (mirrors eval.load_checkpoint) so
@@ -573,11 +577,6 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     # the policy was trained (baked into the checkpoint config by ppo.state_dict).
     _ckpt = _load_checkpoint(checkpoint_path)
     allow_reinforce = bool(_ckpt.get("config", {}).get("allow_reinforce", False)) if isinstance(_ckpt, dict) else False
-    game_phase_features = bool(_ckpt.get("config", {}).get("game_phase_features", False)) if isinstance(_ckpt, dict) else False
-    roi_enemy_deflate = bool(_ckpt.get("config", {}).get("roi_enemy_deflate", False)) if isinstance(_ckpt, dict) else False
-    zero_roi_channels = bool(_ckpt.get("config", {}).get("zero_roi_channels", False)) if isinstance(_ckpt, dict) else False
-    pressure_precise_resolver = bool(_ckpt.get("config", {}).get("pressure_precise_resolver", False)) if isinstance(_ckpt, dict) else False
-    threat_eta_surface = bool(_ckpt.get("config", {}).get("threat_eta_surface", False)) if isinstance(_ckpt, dict) else False
     # Path-obstruction mask: bake if the run trained with it (persisted) OR the CLI flag is set
     # (inference-only enablement on a checkpoint that didn't train with it — safe either way).
     path_obstruction_mask = bool(path_obstruction_mask) or (
@@ -610,11 +609,6 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         ship_bin_mode=repr(m.ship_bin_mode),
         target_decode=target_decode,
         allow_reinforce=allow_reinforce,
-        game_phase_features=game_phase_features,
-        roi_enemy_deflate=roi_enemy_deflate,
-        zero_roi_channels=zero_roi_channels,
-        pressure_precise_resolver=pressure_precise_resolver,
-        threat_eta_surface=threat_eta_surface,
         reinforce_gate_min_planets=reinforce_gate_min_planets,
         reinforce_forward_only=reinforce_forward_only,
         reinforce_garrison_floor=reinforce_garrison_floor,

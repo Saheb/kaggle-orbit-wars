@@ -565,7 +565,10 @@ class PPOLearner:
                 "ship_bin_mode": str(getattr(model_cfg, "ship_bin_mode", "absolute")),
                 "action_decode": str(getattr(model_cfg, "action_decode", "angle")),
                 "allow_reinforce": bool(getattr(model_cfg, "allow_reinforce", False)),
-                "game_phase_features": bool(getattr(model_cfg, "game_phase_features", False)),
+                # Blessed feature semantics (2026-07 cleanup): recorded so loaders can verify.
+                "game_phase_features": True,
+                "pressure_precise_resolver": True,
+                "feature_config": "blessed-2026-07",
                 # Reinforce / sufficient-commit DISCIPLINE — eval & export must mask the SAME way
                 # the ckpt was trained or the policy self-sabotages. Persist so they auto-load
                 # instead of relying on CLI flags being remembered (a panel/submission footgun).
@@ -576,13 +579,6 @@ class PPOLearner:
                 "sufficient_commit_factor": float(getattr(model_cfg, "sufficient_commit_factor", 0.0)),
                 "redundant_target_factor": float(getattr(model_cfg, "redundant_target_factor", 0.0)),
                 "path_obstruction_mask": bool(getattr(model_cfg, "path_obstruction_mask", False)),
-                # FEATURE-discipline — eval & export must emit the SAME ch12/13/pressure/threat
-                # features the ckpt trained on, or the policy sees a different input than it learned.
-                # (This is the dict that actually lands in torch_step_*.pt — the only one loaders read.)
-                "roi_enemy_deflate": bool(getattr(model_cfg, "roi_enemy_deflate", False)),
-                "zero_roi_channels": bool(getattr(model_cfg, "zero_roi_channels", False)),
-                "pressure_precise_resolver": bool(getattr(model_cfg, "pressure_precise_resolver", False)),
-                "threat_eta_surface": bool(getattr(model_cfg, "threat_eta_surface", False)),
                 # provenance: how the ckpt was trained (eval always clamps, so not an eval-contract field)
                 "ship_overflow_mode": str(getattr(model_cfg, "ship_overflow_mode", "drop")),
                 # reward-shaping provenance only; eval/export do not consume these.

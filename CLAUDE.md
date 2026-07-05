@@ -103,6 +103,9 @@ opponents/                 ← eval + training opponents
   orbit_lite/                ← dependency for Ajay/Producer (intercept aiming etc.)
 
 seed_checkpoints/          ← resume points uploaded to training instances
+                             ⚠ ALL predate the 2026-07 blessed feature config (11-global and/or
+                             no resolver flag) — HEAD's guards refuse them for resume/eval/export.
+                             Use git tag `pre-cleanup-2026-07` for anything in here.
   rev32b_6M_resume.pt      ← Rev32b 6M (best Zach: 88.7%, 20/21 loss seeds)
   rev35c_1M_resume.pt      ← Rev35c 1M (best Ajay: 3.1%)
   bc_isaiah_hober_pressure_5k.pt  ← BC warmstart (Isaiah+Hober openings)
@@ -179,6 +182,11 @@ Opponent paths relative to repo root. Always `--target-decode` for Phase 1.
 | **corrpack3e 4.7M** | **98.8%** | **18.0%** | — | ⭐ Best Ajay AND Zach ever (self-anchor re-anchor + LR 1e-4 climbed to 6M). Wall still intact (out-massed ~96%) — numeric not structural. Base for Lever A (decmass1) |
 
 Target: Top 10 LB is **above 1500** (1153 is only ~top-100; #1 Isaiah ≈ 1751). Our LB record is 918.8 → the gap to top-10 is **~600+ points** (a large gap; goal is 900→1500+).
+
+Note: checkpoints above that predate the blessed feature config (everything before the presres
+lineage, incl. corrpack3e) are refused by HEAD's feature-semantics guards — resume/eval/export
+them from git tag `pre-cleanup-2026-07`. Of the preserved final artifacts, only
+`final_submissions/presres1_0.5M_backfilled_resolver.pt` and `stgpr1_0.5M.pt` load under HEAD.
 
 ---
 

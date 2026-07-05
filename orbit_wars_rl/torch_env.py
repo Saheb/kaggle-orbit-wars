@@ -273,30 +273,13 @@ class VecTorchEnv:
         sufficient_commit_factor: float = 0.0,
         redundant_target_factor: float = 0.0,
         path_obstruction_mask: bool = False,
-        game_phase_features: bool = False,
-        roi_enemy_deflate: bool = False,
-        zero_roi_channels: bool = False,
-        pressure_precise_resolver: bool = False,
-        threat_eta_surface: bool = False,
     ):
         self.num_envs = num_envs
-        # Game-phase observation channels (Stage B): append 4 globals (dim 11->15). Must match
-        # features.game_phase_channels (parity test feature_parity_gamephase_probe.py).
-        self.game_phase_features = bool(game_phase_features)
-        # ROI-channel discipline (ch12/13). roi_enemy_deflate: deflate roi by enemy contest
-        # (mirror of friendly deflation). zero_roi_channels: zero ch12/13 entirely. Must match
-        # features.compute_pairwise_features (parity test test_torch_env_features).
-        self.roi_enemy_deflate = bool(roi_enemy_deflate)
-        self.zero_roi_channels = bool(zero_roi_channels)
-        # Pressure channels: route fleet→planet attribution through the lead-aware swept-collision
-        # resolver (_fleet_target_idx, one fleet → one target) instead of the loose corridor that
-        # double-counts. Affects pairwise enemy_contest/friendly_contest/threat AND planet ch12/13
-        # (friendly/enemy pressure). Must match features.compute_pairwise (parity-tested).
-        self.pressure_precise_resolver = bool(pressure_precise_resolver)
-        # Threat-ETA convention (ch20/21): measure enemy fleet arrival to the planet SURFACE
-        # (dist − radius, the resolver convention) instead of the under-urgent center. Must match
-        # features.compute_pairwise_features (parity-tested).
-        self.threat_eta_surface = bool(threat_eta_surface)
+        # Blessed feature config (2026-07 cleanup): game-phase globals (dim 15) always on;
+        # pressure channels always routed through the lead-aware swept-collision resolver
+        # (_fleet_target_idx, one fleet → one target); threat ETA to planet CENTER; friendly
+        # roi-deflation always on; enemy-deflate/zero-roi removed. Must match features.py
+        # (parity test test_torch_env_features).
         # Reinforcement: when True, own planets (except the launch source) are LEGAL
         # targets — ships arriving at a friendly planet add to its garrison (physics
         # already implemented in step()). EDA of top players: ~57% of fleets reinforce;
@@ -1450,34 +1433,22 @@ class VecTorchEnv:
         pred_y = torch.where(is_orbiting, CENTER + orb_r * torch.sin(future_ang), y)
 
         # Incoming fleet pressure (vectorized).
-        # For each (planet, fleet): compute "along" and "perp" projections.
-        # along > 0 AND perp < r + 1.5 → fleet is incoming.
         fx = fleets[:, :, 2]; fy = fleets[:, :, 3]
         fa = fleets[:, :, 4]
         f_owner = fleets[:, :, 1].long()
         f_ships = fleets[:, :, 6]
         fcos = torch.cos(fa); fsin = torch.sin(fa)
-
-        # Broadcast: planet (N, P, 1) vs fleet (N, 1, F)
+        # Planet↔fleet deltas (N, P, F) — used by the threat-ETA channels below.
         vx = x.unsqueeze(2) - fx.unsqueeze(1)
         vy = y.unsqueeze(2) - fy.unsqueeze(1)
-        along = vx * fcos.unsqueeze(1) + vy * fsin.unsqueeze(1)
-        perp  = torch.abs(vx * fsin.unsqueeze(1) - vy * fcos.unsqueeze(1))
-        incoming = (along > 0) & (perp < r.unsqueeze(2) + 1.5) & fleet_alive.unsqueeze(1)
 
-        # Pressure-channel attribution: one fleet → its single lead-aware swept-collision target
-        # (vs the loose corridor `incoming` that double-counts). With the resolver ON it feeds BOTH
-        # the planet pressure channels (ch12/13 below) and the pairwise pressure channels
-        # (enemy_contest / friendly_contest / threat); with it OFF both keep the corridor. Mirrors
-        # features._resolve_fleet_targets (parity-tested).
-        if self.pressure_precise_resolver:
-            # _fleet_target_idx runs over ALL self.fleets (256); the feature path caps to the first
-            # F (=max_fleets). Resolution is per-fleet (geometry only) so slicing is exact.
-            _f_tgt = self._fleet_target_idx()[:, :fleets.shape[1]]              # (N, F), -1 if none
-            _p_ar = torch.arange(x.shape[1], device=self.device).view(1, -1, 1)  # (1, P, 1)
-            incoming_pw = (_f_tgt.unsqueeze(1) == _p_ar) & fleet_alive.unsqueeze(1)  # (N, P, F)
-        else:
-            incoming_pw = incoming
+        # Pressure-channel attribution: one fleet → its single lead-aware swept-collision target.
+        # Mirrors features._resolve_fleet_targets (parity-tested).
+        # _fleet_target_idx runs over ALL self.fleets (256); the feature path caps to the first
+        # F (=max_fleets). Resolution is per-fleet (geometry only) so slicing is exact.
+        _f_tgt = self._fleet_target_idx()[:, :fleets.shape[1]]              # (N, F), -1 if none
+        _p_ar = torch.arange(x.shape[1], device=self.device).view(1, -1, 1)  # (1, P, 1)
+        incoming_pw = (_f_tgt.unsqueeze(1) == _p_ar) & fleet_alive.unsqueeze(1)  # (N, P, F)
 
         # Planet ch12/13: friendly / enemy inbound mass per planet, attributed via incoming_pw.
         friend = incoming_pw & (f_owner.unsqueeze(1) == player)
@@ -1660,19 +1631,18 @@ class VecTorchEnv:
             torch.full_like(total_owned_ships, mode_2p),      # 9  (was 8)
             torch.full_like(total_owned_ships, mode_4p),      # 10 (was 9)
         ]
-        if self.game_phase_features:
-            # 11-13: phase one-hot (early<50 / mid50-100 / late>=100); 14: norm steps-to-next
-            # comet spawn = (next_spawn - step)/100 in (0,1], or 1.0 if none remain. Mirrors
-            # features.game_phase_channels exactly (parity-tested).
-            sc = self.step_count.float()
-            early = (sc < 50).float()
-            mid = ((sc >= 50) & (sc < 100)).float()
-            late = (sc >= 100).float()
-            comet_cycle = torch.ones_like(sc)
-            for S in reversed(COMET_SPAWN_STEPS):       # descending → smallest S>step wins
-                comet_cycle = torch.where(sc < S, (S - sc) / 100.0, comet_cycle)
-            gf_list += [early, mid, late, comet_cycle]
-        gf = torch.stack(gf_list, dim=1)  # (N, 11) or (N, 15) with game-phase
+        # 11-13: phase one-hot (early<50 / mid50-100 / late>=100); 14: norm steps-to-next
+        # comet spawn = (next_spawn - step)/100 in (0,1], or 1.0 if none remain. Mirrors
+        # features.game_phase_channels exactly (parity-tested).
+        sc = self.step_count.float()
+        early = (sc < 50).float()
+        mid = ((sc >= 50) & (sc < 100)).float()
+        late = (sc >= 100).float()
+        comet_cycle = torch.ones_like(sc)
+        for S in reversed(COMET_SPAWN_STEPS):       # descending → smallest S>step wins
+            comet_cycle = torch.where(sc < S, (S - sc) / 100.0, comet_cycle)
+        gf_list += [early, mid, late, comet_cycle]
+        gf = torch.stack(gf_list, dim=1)  # (N, 15)
 
         # Action masks
         owned_idx, slot_valid = self.owned_indices_for(player)
@@ -1746,7 +1716,7 @@ class VecTorchEnv:
         # Matches features.compute_pairwise_features() in the kaggle path.
         # Output: (N, MAX_OWNED, P, 15) — same channel order as features.py.
         # enemy_contest[n, p] = total enemy fleet ships racing toward planet p in env n.
-        # `incoming` (N, P, F) and enemy mask reuse tensors already computed above.
+        # `incoming_pw` (N, P, F) and enemy mask reuse tensors already computed above.
         enemy_fleet = (f_owner != player) & (f_owner >= 0) & fleet_alive   # (N, F)
         enemy_contest = (f_ships.unsqueeze(1) * (incoming_pw & enemy_fleet.unsqueeze(1)).float()).sum(dim=2)  # (N, P)
         # Threat timing (ch 20-21): ETA-profiled enemy pressure. enemy_contest (ch14) sums ALL
@@ -1755,9 +1725,6 @@ class VecTorchEnv:
         # features.py compute_pairwise_features ch20-21 byte-for-byte.
         enemy_inc = incoming_pw & enemy_fleet.unsqueeze(1)                # (N, P, F)
         dist_pf = torch.sqrt((vx * vx + vy * vy).clamp(min=1e-9))          # (N, P, F)
-        if self.threat_eta_surface:
-            # ETA to the SURFACE (resolver convention), not the under-urgent center.
-            dist_pf = (dist_pf - r.unsqueeze(2)).clamp(min=0.0)
         f_speed_pf = _ship_speed(f_ships).unsqueeze(1)                     # (N, 1, F)
         eta_pf = (dist_pf / f_speed_pf.clamp(min=1e-3)).clamp(min=1.0)     # (N, P, F)
         soon = enemy_inc & (eta_pf <= _THREAT_ETA_WINDOW)                  # (N, P, F)
@@ -1942,16 +1909,6 @@ class VecTorchEnv:
             roi_20 = roi_20 * (1.0 - coverage)
             roi_50 = roi_50 * (1.0 - coverage)
 
-        # Enemy-contest deflation (symmetric to the friendly term above): a cheap neutral an enemy
-        # fleet is racing for is a trap (they capture first, then grow). Mirrors features.py.
-        if self.roi_enemy_deflate and enemy_contest is not None:
-            ec_b = enemy_contest.unsqueeze(1).expand(-1, MO, -1)              # (N, MO, P)
-            enemy_coverage = torch.where(owner_exp != player,
-                                         (ec_b / safe_cap).clamp(max=1.0),
-                                         torch.zeros_like(safe_cap))
-            roi_20 = roi_20 * (1.0 - enemy_coverage)
-            roi_50 = roi_50 * (1.0 - enemy_coverage)
-
         # Enemy contest feature (ch 14): broadcast (N, P) → (N, MO, P)
         if enemy_contest is not None:
             contest_b = (enemy_contest / 100.0).clamp(max=5.0).unsqueeze(1).expand(-1, MO, -1)
@@ -2018,10 +1975,6 @@ class VecTorchEnv:
             imminence_b = threat_imminence.unsqueeze(1).expand(-1, MO, -1)
         else:
             imminence_b = torch.zeros(N, MO, P, device=device)
-
-        if self.zero_roi_channels:
-            roi_20 = torch.zeros_like(roi_20)
-            roi_50 = torch.zeros_like(roi_50)
 
         # Stack channels
         out = torch.stack([

@@ -24,26 +24,11 @@ class ModelConfig:
     max_owned_planets: int = 16
     planet_feature_dim: int = 20
     fleet_feature_dim: int = 13
-    global_feature_dim: int = 11
-    # Game-phase observation features (Stage B / Isaiah Lux-2021 borrow): when on,
-    # append 4 global channels — a 3-way phase one-hot (early<50 / mid50-100 / late>=100)
-    # + normalized steps-to-next-comet-spawn — taking global_feature_dim 11 -> 15. OFF by
-    # default so every existing 11-global checkpoint loads unchanged; the from-scratch run
-    # sets it (load_checkpoint round-trips it via ckpt_cfg). Parity-safe (pure fn of step).
-    game_phase_features: bool = False
-    # ROI-channel discipline (pairwise ch12/13). roi_enemy_deflate: also deflate roi_20/roi_50
-    # by enemy contest (mirror of the friendly-coverage term). zero_roi_channels: zero ch12/13
-    # entirely. Persisted so eval/export emit the SAME features the ckpt trained on.
-    roi_enemy_deflate: bool = False
-    zero_roi_channels: bool = False
-    # Route the pairwise pressure channels (enemy_contest/friendly_contest/threat) through the
-    # lead-aware swept-collision resolver instead of the loose corridor that double-counts a fleet
-    # onto every planet in its path. Persisted so eval/export emit the SAME channels.
-    pressure_precise_resolver: bool = False
-    # Threat-ETA (ch20 enemy_mass_soon / ch21 threat_imminence): measure fleet arrival to the planet
-    # SURFACE (dist − radius), matching the resolver's _fleet_target_idx convention, instead of the
-    # planet CENTER (which reads ~½ step under-urgent). Persisted so eval/export match training.
-    threat_eta_surface: bool = False
+    # Global features: 11 base + 4 game-phase channels (phase one-hot early/mid/late +
+    # normalized steps-to-next-comet-spawn). Always on since the 2026-07 cleanup; the
+    # pre-toggle era (11-global checkpoints, roi/resolver/threat toggles) lives at the
+    # pre-cleanup git tag.
+    global_feature_dim: int = 15
     entity_dim: int = 96
     num_heads: int = 4
     num_layers: int = 3
