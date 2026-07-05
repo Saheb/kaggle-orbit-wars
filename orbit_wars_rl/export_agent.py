@@ -149,7 +149,7 @@ class _Model(nn.Module):
         self.value_fc2 = nn.Linear(D, D // 2)
         self.value_out = nn.Linear(D // 2, 1)
 
-    def forward(self, pf, ff, gf, pm, fm, fire_mask=None, angle_mask=None,
+    def forward(self, pf, ff, gf, pm, fm, fire_mask=None,
                 slot_valid=None, owned_indices=None, pairwise_features=None):
         B, D = pf.shape[0], _ENTITY_DIM
         max_owned = MAX_OWNED
@@ -339,7 +339,6 @@ def agent(obs, cfg=None):
             features["planet_mask"].unsqueeze(0),
             features["fleet_mask"].unsqueeze(0),
             fire_mask=masks["fire_mask"],
-            angle_mask=masks["angle_mask"],
             slot_valid=masks["slot_valid"],
             owned_indices=masks["owned_indices"].unsqueeze(0),
             pairwise_features=features["pairwise_features"].unsqueeze(0)

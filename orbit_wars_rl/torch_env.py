@@ -765,7 +765,6 @@ class VecTorchEnv:
             planet_mask:      (N, max_planets) bool
             fleet_mask:       (N, max_fleets) bool
             fire_mask:        (N, MAX_OWNED) bool — can fire (owned planet)
-            angle_mask:       (N, MAX_OWNED, NUM_ANGLE_BINS) bool — all True for now
             target_mask:      (N, MAX_OWNED, max_planets) bool — legal target planets
             slot_valid:       (N, MAX_OWNED) bool
             owned_indices:    (N, MAX_OWNED) long
@@ -1052,7 +1051,6 @@ class VecTorchEnv:
         # Fire mask: can fire iff slot is valid and has at least 1 ship
         fire_mask = slot_valid & (max_ships >= 1.0)
         # Angle mask: all angles legal (no sun-blocking for now)
-        angle_mask = torch.ones(N, MAX_OWNED, NUM_ANGLE_BINS, dtype=torch.bool, device=self.device)
         # Target mask: target-conditioned rollouts sample a live planet. Per-source
         # mask keeps padded owned slots off. With reinforcement OFF (default) only
         # non-own planets are legal; with reinforcement ON, own planets are legal too
@@ -1146,7 +1144,6 @@ class VecTorchEnv:
             "planet_mask":     planet_alive,
             "fleet_mask":      fleet_alive,
             "fire_mask":       fire_mask,
-            "angle_mask":      angle_mask,
             "target_mask":     target_mask,
             "slot_valid":      slot_valid,
             "owned_indices":   owned_idx,
@@ -1513,7 +1510,7 @@ class VecTorchEnv:
             ship_counts_t = torch.tensor(SHIP_COUNTS, dtype=torch.float32, device=self.device)
             ship_count = ship_counts_t[ship_bin]                  # (N, MAX_OWNED)
 
-        # Angle-bin mode uses BIN center (matches actions_from_policy).
+        # Angle-bin decode uses the BIN CENTER (external-opponent action fallback).
         # Target mode executes the target head by converting target_idx to an
         # intercept angle while keeping angle_bin in storage for compatibility.
         angle = (angle_bin.float() + 0.5) * ANGLE_BIN_WIDTH       # (N, MAX_OWNED)

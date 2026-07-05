@@ -31,7 +31,7 @@ def _forward(model, feats):
         return model(
             feats["planet_features"], feats["fleet_features"],
             feats["global_features"], feats["planet_mask"], feats["fleet_mask"],
-            fire_mask=feats["fire_mask"], angle_mask=feats["angle_mask"],
+            fire_mask=feats["fire_mask"],
             slot_valid=feats["slot_valid"], owned_indices=feats["owned_indices"],
             owned_count=feats["owned_count"],
             pairwise_features=feats.get("pairwise_features"),

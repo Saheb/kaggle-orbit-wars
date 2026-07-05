@@ -14,15 +14,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from action_mask import (
-    compute_action_masks,
-    actions_from_target_policy,
-    NUM_ANGLE_BINS,
-    ANGLE_BIN_WIDTH,
-    CENTER,
-    SUN_RADIUS,
-    BOARD_SIZE,
-)
+from action_mask import compute_action_masks, actions_from_target_policy
 
 
 def _make_obs(planets, fleets=None):
@@ -66,40 +58,6 @@ def test_only_owned_planets_fire():
     print("test_only_owned_planets_fire: PASS")
 
 
-def test_sun_crossing_masked():
-    """Planet directly above the sun — shooting south should be masked."""
-    # Planet at (50, 25): sun center at (50, 50). Shooting south (angle≈π/2) crosses the sun.
-    planets = [[0, 0, 50.0, 25.0, 1.5, 50, 2]]
-    masks = compute_action_masks(_make_obs(planets), player=0)
-    angle_mask = masks["angle_mask"].squeeze(0)[0]  # (72,) for slot 0
-
-    # Bin for due-south angle (π/2)
-    south_bin = int((math.pi / 2) / ANGLE_BIN_WIDTH)
-    masked = ~angle_mask
-    n_masked = masked.sum().item()
-    print(f"  Sun-crossing: {n_masked}/{NUM_ANGLE_BINS} angles masked")
-    assert n_masked > 0, "Some angles should be masked (planet close to sun)"
-    assert masked[south_bin].item(), f"South bin ({south_bin}) should be masked"
-    print("test_sun_crossing_masked: PASS")
-
-
-def test_out_of_bounds_masked():
-    """Planet very close to edge — spawn point goes OOB for outward angles."""
-    # px=1.0, radius=1.5: spawn_x = 1.0 + 1.6*cos(π) = -0.6 → OOB for westward angle
-    planets = [[0, 0, 1.0, 50.0, 1.5, 50, 2]]
-    masks = compute_action_masks(_make_obs(planets), player=0)
-    angle_mask = masks["angle_mask"].squeeze(0)[0]  # (72,)
-    masked = ~angle_mask
-    n_masked = masked.sum().item()
-    print(f"  OOB (left-edge planet): {n_masked}/{NUM_ANGLE_BINS} angles masked")
-    assert n_masked > 0, "Left-edge planet should have some OOB-masked (westward) angles"
-
-    # West bin (angle ≈ π)
-    west_bin = int(math.pi / ANGLE_BIN_WIDTH)
-    assert masked[west_bin].item(), f"Westward bin ({west_bin}) should be OOB-masked"
-    print("test_out_of_bounds_masked: PASS")
-
-
 def test_max_ships_is_all_ships():
     """max_ships for a planet is the full ship count."""
     planets = [[0, 0, 25.0, 25.0, 1.5, 30, 2]]
@@ -107,30 +65,6 @@ def test_max_ships_is_all_ships():
     max_s = masks["max_ships"].squeeze(0)[0].item()
     assert max_s == 30, f"Expected max_ships=30, got {max_s}"
     print("test_max_ships_is_all_ships: PASS")
-
-
-def test_angle_bins_cover_full_circle():
-    """Verify that ANGLE_BIN_CENTERS span [0, 2π) without gaps."""
-    from action_mask import ANGLE_BIN_CENTERS
-    assert len(ANGLE_BIN_CENTERS) == NUM_ANGLE_BINS
-    assert abs(ANGLE_BIN_CENTERS[0] - ANGLE_BIN_WIDTH / 2) < 1e-6
-    for i in range(NUM_ANGLE_BINS - 1):
-        gap = ANGLE_BIN_CENTERS[i + 1] - ANGLE_BIN_CENTERS[i]
-        assert abs(gap - ANGLE_BIN_WIDTH) < 1e-6, f"Gap at bin {i}: {gap}"
-    print("test_angle_bins_cover_full_circle: PASS")
-
-
-def test_interior_planet_all_angles_legal():
-    """A planet far from sun and edges should have all 72 angles legal."""
-    planets = [[0, 0, 50.0, 85.0, 1.5, 50, 2]]  # top of map, away from sun
-    masks = compute_action_masks(_make_obs(planets), player=0)
-    angle_mask = masks["angle_mask"].squeeze(0)[0]
-    n_legal = angle_mask.sum().item()
-    # Due to the short 20-unit check distance and planet position, expect most angles legal.
-    # Not necessarily all 72 since sun is at (50,50) and we're at (50,85) — shooting south crosses it.
-    print(f"  Interior planet: {n_legal}/{NUM_ANGLE_BINS} legal angles")
-    assert n_legal > NUM_ANGLE_BINS // 2, f"Expected most angles legal, got {n_legal}"
-    print("test_interior_planet_all_angles_legal: PASS")
 
 
 def test_target_decode_masks_own_planet_before_argmax():
@@ -176,10 +110,6 @@ if __name__ == "__main__":
     print("Running action mask tests...\n")
     test_fire_mask_requires_ships()
     test_only_owned_planets_fire()
-    test_sun_crossing_masked()
-    test_out_of_bounds_masked()
     test_max_ships_is_all_ships()
-    test_angle_bins_cover_full_circle()
-    test_interior_planet_all_angles_legal()
     test_target_decode_masks_own_planet_before_argmax()
     print("\nAll action mask tests passed!")

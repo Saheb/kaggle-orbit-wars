@@ -13,7 +13,7 @@ import numpy as np
 from config import Config
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, PHASE4_COMPAT_MISSING_KEYS
 from features import extract_features, _ETA_PROBE_SPEED, PAIRWISE_FEATURE_DIM
-from action_mask import (compute_action_masks, actions_from_policy, actions_from_target_policy, _fleet_speed,
+from action_mask import (compute_action_masks, actions_from_target_policy, _fleet_speed,
                          _ship_bin_to_count, _target_intercept_angle, MAX_OWNED_PLANETS)
 # Decisive-mass floor constants — IMPORTED from torch_env so the eval dm_* gap diagnostic uses the
 # EXACT same floor as the training reward/diag (they can never drift). project_force_concentration_wall.
@@ -294,7 +294,6 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 features["planet_mask"].unsqueeze(0).to(device),
                 features["fleet_mask"].unsqueeze(0).to(device),
                 fire_mask=masks["fire_mask"].to(device),
-                angle_mask=masks["angle_mask"].to(device),
                 slot_valid=masks["slot_valid"].to(device),
                 owned_indices=masks["owned_indices"].to(device),
                 owned_count=masks["owned_count"],
@@ -302,9 +301,8 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                     if "pairwise_features" in features else None,
             )
 
-        action_fn = actions_from_target_policy if target_decode else actions_from_policy
         if target_decode:
-            moves = action_fn(
+            moves = actions_from_target_policy(
                 outputs["fire_logits"].cpu(),
                 outputs["target_logits"].cpu(),
                 outputs["ship_logits"].cpu(),

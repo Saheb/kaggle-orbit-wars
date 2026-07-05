@@ -255,7 +255,7 @@ class EntityTransformer(nn.Module):
         }
 
     def forward(self, planet_features, fleet_features, global_features,
-                planet_mask, fleet_mask, fire_mask=None, angle_mask=None,
+                planet_mask, fleet_mask, fire_mask=None,
                 slot_valid=None, owned_indices=None, owned_count=None,
                 pairwise_features=None):
         """
@@ -266,7 +266,6 @@ class EntityTransformer(nn.Module):
             planet_mask: (B, N_p) bool, True = real entity
             fleet_mask: (B, N_f) bool, True = real entity
             fire_mask: (B, max_owned) bool, True = can fire
-            angle_mask: accepted for caller compatibility but unused (angle head removed)
             slot_valid: (B, max_owned) bool, True = real owned planet slot
             owned_indices: (B, max_owned) int, indices into planet array
             owned_count: (B,) int
@@ -493,10 +492,6 @@ class EntityTransformer(nn.Module):
 
 def count_params(model):
     return sum(p.numel() for p in model.parameters())
-
-
-def angle_bin_to_radians(bin_idx):
-    return (bin_idx.float() + 0.5) * ANGLE_BIN_WIDTH
 
 
 def ship_bin_to_count(bin_idx, max_ships):
