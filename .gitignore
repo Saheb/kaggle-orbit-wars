@@ -51,3 +51,7 @@ candidate_tests/*
 docs/logs/
 
 *__pycache__
+
+# Preserved final-submission artifacts — exception to *.pt and submission* ignores above
+!final_submissions/
+!final_submissions/**
