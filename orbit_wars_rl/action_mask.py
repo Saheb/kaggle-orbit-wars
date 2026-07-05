@@ -796,7 +796,6 @@ def _apply_defensive_reinforce_overlay(
 def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_target, masks, obs, player,
                                fire_threshold=0.5, sample: bool = False,
                                ship_bin_mode: str = "absolute",
-                               target_sanity_penalty: float = 0.0,
                                reserve_frac: float = 0.0,
                                allow_reinforce: bool = False,
                                reinforce_gate_min_planets: int = 0,
@@ -879,17 +878,6 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
                 illegal = _own_reinforce_illegal(planets[pidx], tgt)
             if illegal:
                 target_logits[:, slot, tidx] = -1e9
-
-    if target_sanity_penalty > 0.0:
-        cand_info = _enumerate_sane_target_candidates(obs)
-        _apply_target_sanity_penalty_from_candidates(
-            target_logits,
-            masks,
-            obs,
-            player,
-            cand_info["candidates"],
-            penalty=float(target_sanity_penalty),
-        )
 
     if sample:
         target_dist = torch.distributions.Categorical(logits=target_logits)
@@ -1105,53 +1093,6 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
             _cd_record(cooldown_last, cooldown_step, s_id, d_id)
 
     return moves
-
-
-def _enumerate_sane_target_candidates(obs: dict) -> dict:
-    from orbit_wars_rl.producer_action_ranking import _enumerate_attack_candidates
-
-    return _enumerate_attack_candidates(obs)
-
-
-def _apply_target_sanity_penalty_from_candidates(
-    target_logits: torch.Tensor,
-    masks,
-    obs: dict,
-    player: int,
-    candidates,
-    *,
-    penalty: float,
-    max_score_gap: float = 3.0,
-    max_eta_gap: int = 4,
-) -> None:
-    """Penalize same-source targets that are clearly dominated locally."""
-    if penalty <= 0.0:
-        return
-
-    planets = obs["planets"]
-    owned_indices = masks["owned_indices"].cpu().numpy()
-    per_source: dict[int, list] = {}
-    for cand in candidates:
-        if not bool(getattr(cand, "valid", False)) or int(getattr(cand, "ships", 0)) <= 0:
-            continue
-        per_source.setdefault(int(cand.source_id), []).append(cand)
-
-    for slot in range(min(masks["owned_count"], target_logits.shape[1])):
-        pidx = int(owned_indices[slot])
-        if pidx >= len(planets):
-            continue
-        src_id = int(planets[pidx][0])
-        source_cands = per_source.get(src_id)
-        if not source_cands:
-            continue
-        best_score = max(float(c.score) for c in source_cands)
-        best_eta = min(int(c.eta) for c in source_cands)
-        for cand in source_cands:
-            tidx = int(cand.target_idx)
-            score_gap = best_score - float(cand.score)
-            eta_gap = int(cand.eta) - best_eta
-            if score_gap > max_score_gap or eta_gap > max_eta_gap:
-                target_logits[:, slot, tidx] -= penalty
 
 
 def actions_from_sampled_policy(fire_action, angle_action, ship_action, masks, obs, player,

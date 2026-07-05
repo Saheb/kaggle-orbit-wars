@@ -236,7 +236,6 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                    ship_bin_mode: str = "absolute",
                    target_decode: bool = False,
                    num_players: int = 2,
-                   target_sanity_penalty: float = 0.0,
                    reserve_frac: float = 0.0,
                    allow_reinforce: bool = False,
                    veto_stats: dict = None,
@@ -314,7 +313,6 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 fire_threshold=fire_threshold,
                 sample=sample,
                 ship_bin_mode=ship_bin_mode,
-                target_sanity_penalty=target_sanity_penalty,
                 reserve_frac=reserve_frac,
                 allow_reinforce=getattr(model, "allow_reinforce", allow_reinforce),
                 reinforce_gate_min_planets=getattr(model, "reinforce_gate_min_planets", 0),
@@ -1964,7 +1962,6 @@ def evaluate_against_baseline(
     sample: bool = False,
     ship_bin_mode: str = "absolute",
     target_decode: bool = False,
-    target_sanity_penalty: float = 0.0,
     defensive_reinforce_k: int = 0,
     defensive_reinforce_beta: float = 2.2,
     defensive_reinforce_max_targets: int = 1,
@@ -1985,7 +1982,6 @@ def evaluate_against_baseline(
     natural_head_stats = {} if natural_head_audit else None
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
                               ship_bin_mode=ship_bin_mode, target_decode=target_decode,
-                              target_sanity_penalty=target_sanity_penalty,
                               defensive_reinforce_k=defensive_reinforce_k,
                               defensive_reinforce_beta=defensive_reinforce_beta,
                               defensive_reinforce_max_targets=defensive_reinforce_max_targets,
@@ -2081,7 +2077,6 @@ def evaluate_panel(
     sample: bool = False,
     ship_bin_mode: str = "absolute",
     target_decode: bool = False,
-    target_sanity_penalty: float = 0.0,
     defensive_reinforce_k: int = 0,
     defensive_reinforce_beta: float = 2.2,
     defensive_reinforce_max_targets: int = 1,
@@ -2107,7 +2102,6 @@ def evaluate_panel(
     natural_head_stats = {} if natural_head_audit else None
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
                               ship_bin_mode=ship_bin_mode, target_decode=target_decode,
-                              target_sanity_penalty=target_sanity_penalty,
                               defensive_reinforce_k=defensive_reinforce_k,
                               defensive_reinforce_beta=defensive_reinforce_beta,
                               defensive_reinforce_max_targets=defensive_reinforce_max_targets,
@@ -2353,7 +2347,6 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         opponent: str = "random", fire_threshold: float = 0.5,
                         panel: bool = False, sample: bool = False,
                         target_decode: bool = False,
-                        target_sanity_penalty: float = 0.0,
                         reinforce_gate_min_planets: int = None,
                         reinforce_forward_only: bool = None,
                         reinforce_garrison_floor: float = None,
@@ -2465,7 +2458,6 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                                  fire_threshold=fire_threshold, sample=sample,
                                  ship_bin_mode=cfg.model.ship_bin_mode,
                                  target_decode=target_decode,
-                                 target_sanity_penalty=target_sanity_penalty,
                                  defensive_reinforce_k=defensive_reinforce_k,
                                  defensive_reinforce_beta=defensive_reinforce_beta,
                                  defensive_reinforce_max_targets=defensive_reinforce_max_targets,
@@ -2489,7 +2481,6 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         num_players=cfg.env.num_players,
         fire_threshold=fire_threshold,
         sample=sample,
-        target_sanity_penalty=target_sanity_penalty,
         defensive_reinforce_k=defensive_reinforce_k,
         defensive_reinforce_beta=defensive_reinforce_beta,
         defensive_reinforce_max_targets=defensive_reinforce_max_targets,
@@ -2503,7 +2494,6 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
           f"({results['wins']}/{results['total_games']})")
     print(f"Fire threshold: {fire_threshold}")
     print(f"Target decode: {target_decode}")
-    print(f"Target sanity penalty: {target_sanity_penalty}")
     print(f"Avg material: {results['avg_material']:.1f}")
     print(_fmt_conversion(results["conversion"]))
     if results.get("defensive_reinforce"):
@@ -2538,9 +2528,6 @@ if __name__ == "__main__":
     parser.add_argument("--target-decode", action="store_true",
                         help="Aim with target_logits plus orbital intercept instead "
                              "of directly using the angle head.")
-    parser.add_argument("--target-sanity-penalty", type=float, default=0.0,
-                        help="Subtract this from dominated same-source target logits "
-                             "before target decode.")
     parser.add_argument("--reinforce-gate-min-planets", type=int, default=None,
                         help="Reinforce-discipline parity: own targets legal only at "
                              ">= this many owned planets. Default=auto-load from checkpoint; "
@@ -2629,7 +2616,6 @@ if __name__ == "__main__":
         panel=args.panel,
         sample=args.sample,
         target_decode=args.target_decode,
-        target_sanity_penalty=args.target_sanity_penalty,
         reinforce_gate_min_planets=args.reinforce_gate_min_planets,
         reinforce_forward_only=args.reinforce_forward_only,
         reinforce_garrison_floor=args.reinforce_garrison_floor,

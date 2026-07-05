@@ -100,7 +100,7 @@ def test_gradient_direction():
     print("Test B: Positive advantage on fire-action ⇒ fire prob increases")
     print("=" * 60)
     torch.manual_seed(42)
-    cfg = Config(); cfg.device = "cpu"; cfg.ppo.bc_coef = 0.0
+    cfg = Config(); cfg.device = "cpu"
 
     model = EntityTransformer(cfg.model)
     learner = PPOLearner(model, cfg, device="cpu")

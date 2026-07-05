@@ -79,16 +79,6 @@ class PPOConfig:
     entropy_coef_fire: float = 0.01
     entropy_coef_target: float = 0.02   # entropy bonus on the target head (was misnamed entropy_coef_angle)
     entropy_coef_ships: float = 0.01
-    bc_coef: float = 0.0
-    # IL regularization: KL penalty between current policy and a frozen
-    # reference (typically the BC warmstart). Computed on PPO rollout states.
-    # Anchors the policy to teacher competence — prevents drift to degenerate
-    # local optima in self-play. Decays linearly to 0 over training so the
-    # policy can eventually exceed the teacher.
-    #   il_lambda:        peak coefficient (0 = disabled)
-    #   il_decay_frac:    fraction of training over which lambda decays to 0
-    il_lambda: float = 0.0
-    il_decay_frac: float = 0.8
     kl_target: float = 0.05   # KL early-stop threshold per epoch; inf = disabled
     value_coef: float = 0.5
     # Critic-only warmup (for BC warmstarts: trained policy + UNtrained critic).
@@ -116,20 +106,11 @@ class SelfPlayConfig:
 
 
 @dataclass
-class BCConfig:
-    num_trajectories: int = 5000
-    num_steps: int = 5000
-    learning_rate: float = 3e-4
-    batch_size: int = 128    # 128 < typical dataset so each epoch has multiple steps
-
-
-@dataclass
 class Config:
     env: EnvConfig = field(default_factory=EnvConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
     self_play: SelfPlayConfig = field(default_factory=SelfPlayConfig)
-    bc: BCConfig = field(default_factory=BCConfig)
     seed: int = 42
     wandb_project: str = "orbit-wars-rl"
     wandb_entity: str = ""

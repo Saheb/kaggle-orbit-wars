@@ -76,23 +76,19 @@ orbit_wars_rl/.venv
 orbit_wars_rl/          ← ALL active RL code lives here
   train_torch.py        ← PRIMARY: GPU self-play training (always use this)
   eval.py               ← PRIMARY: full 256-game panel eval
-  quick_eval.py         ← sanity check only (never use for decisions)
   export_agent.py       ← export checkpoint → submission agent
   model.py              ← entity transformer model (encode_state() + forward())
-  torch_env.py          ← vectorised GPU env (SSDR, ship bins, action decode)
-  features.py           ← feature extraction (Phase 1 feature bundle)
-  ppo.py                ← PPO learner + IL regularisation
+  torch_env.py          ← vectorised GPU env (physics, blessed shaping, action decode)
+  features.py           ← feature extraction (blessed-2026-07 bundle)
+  ppo.py                ← PPO learner
   opponent_pool.py      ← self-play pool + PFSP
   config.py             ← ModelConfig / PPOConfig
-  action_mask.py        ← action masking for eval
-  bc.py                 ← behaviour cloning (used to create warmstart)
+  action_mask.py        ← action masking for eval (inlined into exports)
+  reinforce_cooldown.py ← canonical reverse-edge cooldown rule (live core, baked into subs)
   eval_panel.py         ← stratified community-panel eval (used by eval.py)
   tests/                ← unit tests
-  scripts/              ← one-off analysis/probe/audit/BC-builder scripts (~80)
-                          NOT the core pipeline. Run via module mode from repo root:
-                          `python -m orbit_wars_rl.scripts.<name> --help`
-                          (e.g. hold_autopsy, expansion_probe, probe_aggregation,
-                           compare_tempo_checkpoints, build_conversion_bc, step_firep)
+  (one-off scripts, bc.py/env.py BC pipeline, producer_* ranking chain: archived in
+   archive/cleanup_2026-07/ during C2–C5; runnable at git tag pre-cleanup-2026-07)
 
 opponents/                 ← eval + training opponents
   candidate_hellburner.py
@@ -202,9 +198,9 @@ them from git tag `pre-cleanup-2026-07`. Of the preserved final artifacts, only
 2. **SSDR** (asymmetric planet starts) improves Ajay from 0.8% → 3.1% but improvement is transient — self-play Nash reforms after ~2M steps regardless of pool mask gating. *(Lever removed in C4 — revive from `pre-cleanup-2026-07` if needed.)*
 3. **ship0 collapse** — agent learns to send 1-ship probes when behind. Fix was `--min-ship-bin 4` *(removed in C4; the blessed lineage doesn't exhibit it)*. Does NOT fix the underlying SSDR regression.
 4. **First Strike** (`--first-strike-steps 50 --first-strike-mult 2.0`) fixed opening paralysis and scored 918.8 LB. It's a reward shaping band-aid, not a structural fix.
-5. **BC aux at bc-coef=0.05** — too small to move the needle but can disrupt conversion (Rev34: us_first_cap 14→136 after 1M).
+5. **BC aux at bc-coef=0.05** — too small to move the needle but can disrupt conversion (Rev34: us_first_cap 14→136 after 1M). *(BC/IL machinery removed in C5 — pre-cleanup tag if needed.)*
 6. **Pool mask gating** — SSDR should only apply to self-play envs, not pool envs (was `env.set_ssdr_mask`; removed in C4 with SSDR). Slows regression but doesn't stop it.
 7. **PFSP death-spiral**: small N games → noisy wr → never sampled. Fix: `--pool-pfsp-min-games 30`.
 8. **LR=0.000025** is the mature-run rate (halved twice). Use LR=0.0001 for fresh BC warmstarts.
-9. **BC warmstart from partial/diagnostic checkpoints** causes clip_frac=0 (frozen policy). Always use a strong PPO checkpoint as `--resume`, BC aux via `--bc-samples`.
+9. **BC warmstart from partial/diagnostic checkpoints** causes clip_frac=0 (frozen policy). Always use a strong PPO checkpoint as `--resume`. *(BC aux `--bc-samples` removed in C5.)*
 10. **Export**: always use `--target-decode` for Phase 1 checkpoints. Run 10/10 vs random before submitting.

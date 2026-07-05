@@ -16,7 +16,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from action_mask import (
     compute_action_masks,
-    _apply_target_sanity_penalty_from_candidates,
     actions_from_target_policy,
     NUM_ANGLE_BINS,
     ANGLE_BIN_WIDTH,
@@ -173,44 +172,6 @@ def test_target_decode_masks_own_planet_before_argmax():
     print("test_target_decode_masks_own_planet_before_argmax: PASS")
 
 
-def test_target_sanity_penalty_demotes_dominated_same_source_target():
-    class _Cand:
-        def __init__(self, source_id, target_idx, score, eta, ships=10, valid=True):
-            self.source_id = source_id
-            self.target_idx = target_idx
-            self.score = score
-            self.eta = eta
-            self.ships = ships
-            self.valid = valid
-
-    planets = [
-        [0, 0, 20.0, 20.0, 1.5, 30, 2],
-        [1, -1, 28.0, 20.0, 1.5, 6, 2],
-        [2, -1, 55.0, 20.0, 1.5, 6, 2],
-    ]
-    obs = _make_obs(planets)
-    masks = compute_action_masks(obs, player=0)
-    logits = torch.zeros((1, 16, 48), dtype=torch.float32)
-    logits[0, 0, 1] = 5.0
-    logits[0, 0, 2] = 6.0
-    cands = [
-        _Cand(source_id=0, target_idx=1, score=10.0, eta=3),
-        _Cand(source_id=0, target_idx=2, score=5.5, eta=9),
-    ]
-
-    _apply_target_sanity_penalty_from_candidates(
-        logits,
-        masks,
-        obs,
-        player=0,
-        candidates=cands,
-        penalty=8.0,
-    )
-    assert logits[0, 0, 1].item() == 5.0
-    assert logits[0, 0, 2].item() == -2.0
-    print("test_target_sanity_penalty_demotes_dominated_same_source_target: PASS")
-
-
 if __name__ == "__main__":
     print("Running action mask tests...\n")
     test_fire_mask_requires_ships()
@@ -221,5 +182,4 @@ if __name__ == "__main__":
     test_angle_bins_cover_full_circle()
     test_interior_planet_all_angles_legal()
     test_target_decode_masks_own_planet_before_argmax()
-    test_target_sanity_penalty_demotes_dominated_same_source_target()
     print("\nAll action mask tests passed!")

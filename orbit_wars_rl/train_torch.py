@@ -26,7 +26,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 
 # wandb is optional — only imported when --wandb flag is passed
 try:
@@ -360,16 +359,10 @@ def train(args):
         cfg.ppo.max_grad_norm = args.max_grad_norm
     if args.gae_lambda is not None:
         cfg.ppo.gae_lambda = args.gae_lambda
-    if args.il_lambda is not None:
-        cfg.ppo.il_lambda = args.il_lambda
-    if args.il_decay_frac is not None:
-        cfg.ppo.il_decay_frac = args.il_decay_frac
     if args.critic_warmup_ev is not None:
         cfg.ppo.critic_warmup_ev = args.critic_warmup_ev
     if args.critic_warmup_max_updates is not None:
         cfg.ppo.critic_warmup_max_updates = args.critic_warmup_max_updates
-    if args.bc_coef is not None:
-        cfg.ppo.bc_coef = args.bc_coef
     print(f"PPO config: lr={cfg.ppo.learning_rate}, ppo_epochs={cfg.ppo.ppo_epochs}, "
           f"num_minibatches={cfg.ppo.num_minibatches}, clip_eps={cfg.ppo.clip_eps}, "
           f"entropy_coef_fire={cfg.ppo.entropy_coef_fire}, gae_lambda={cfg.ppo.gae_lambda}, "
@@ -516,50 +509,7 @@ def train(args):
                 _m.reset_parameters()
             print("  CONTROL: scalar critic re-initialised fresh (warm policy kept).")
 
-    # IL regularization: load frozen reference policy if requested
-    frozen_il_model = None
-    if args.il_ref:
-        frozen_il_model = EntityTransformer(cfg.model).to(device)
-        sd = torch.load(args.il_ref, map_location="cpu", weights_only=False)
-        if "model" in sd: sd = sd["model"]
-        _load_phase4_compatible(frozen_il_model, sd, "--il-ref")
-        frozen_il_model.eval()
-        print(f"IL reference loaded from {args.il_ref}  (lambda={cfg.ppo.il_lambda}, "
-              f"decay_frac={cfg.ppo.il_decay_frac})")
-    elif cfg.ppo.il_lambda > 0:
-        # If --resume is set and no separate ref, default to the resume checkpoint
-        if args.resume:
-            frozen_il_model = EntityTransformer(cfg.model).to(device)
-            sd = torch.load(args.resume, map_location="cpu", weights_only=False)
-            if "model" in sd: sd = sd["model"]
-            _load_phase4_compatible(frozen_il_model, sd, "--resume IL default")
-            frozen_il_model.eval()
-            print(f"IL reference defaulted to --resume checkpoint  (lambda={cfg.ppo.il_lambda})")
-        else:
-            print("WARNING: il_lambda > 0 but no --il-ref and no --resume — IL disabled")
-
-    roi_heads = None
-    if args.aux_roi_coef > 0.0:
-        roi_heads = {
-            "kv": nn.Linear(2 * cfg.model.entity_dim, 3, bias=False),
-            "ts": nn.Linear(cfg.model.entity_dim, 3, bias=False),
-        }
-        print(f"ROI aux loss: coef={args.aux_roi_coef} (keeps pair_kv/target_scorer columns encoding roi_20/roi_50/enemy_contest)")
-
-    learner = PPOLearner(model, cfg, device=device, frozen_il_model=frozen_il_model,
-                        roi_heads=roi_heads, aux_roi_coef=args.aux_roi_coef)
-
-    # BC auxiliary supervision: load teacher samples once, sample a minibatch
-    # per PPO update. Cross-entropy on teacher's actions directly penalizes
-    # argmax-drift away from teacher — fixes the failure mode where KL-on-
-    # distributions (il_lambda) keeps distributions close but argmax flips.
-    bc_samples_for_aux = None
-    if args.bc_samples and cfg.ppo.bc_coef > 0:
-        import pickle as _pkl
-        with open(args.bc_samples, "rb") as f:
-            bc_samples_for_aux = _pkl.load(f)
-        print(f"BC auxiliary samples: {len(bc_samples_for_aux)} from {args.bc_samples} "
-              f"(bc_coef={cfg.ppo.bc_coef})")
+    learner = PPOLearner(model, cfg, device=device)
 
     # LR scheduler: warmup + cosine decay over total updates.
     # On --resume, skip warmup by default (the model is already trained — no
@@ -771,7 +721,6 @@ def train(args):
                     "srcs_multi_penalty": args.srcs_multi_penalty,
                     "srcs_multi_threshold": args.srcs_multi_threshold,
                     "fleet_activity_coef": args.fleet_activity_coef,
-                    "il_lambda": cfg.ppo.il_lambda,
                     "win_margin_coeff": args.win_margin_coeff,
                     "action_decode": args.action_decode,
                     "resume": args.resume or "",
@@ -821,8 +770,7 @@ def train(args):
         # (per-(slot,target) scorer) needs them in the PPO-update forward, or it
         # falls back to a zeros/uniform target head that disagrees with the rollout
         # policy → persistent rollout-vs-update mismatch (KL/clip explode, never
-        # stabilise). Must NOT be gated on aux_roi_coef (a separate aux loss); doing
-        # so silently broke the target head whenever aux_roi_coef=0 (rev49+).
+        # stabilise).
         **({"pairwise_features": torch.zeros(rollout_T, N, P, MAX_OWNED, cfg.env.max_planets, cfg.model.pairwise_feature_dim, device=storage_dev)} if cfg.model.pairwise_feature_dim > 0 else {}),
         "fire_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
         "ship_a":     torch.zeros(rollout_T, N, P, MAX_OWNED, dtype=torch.long, device=storage_dev),
@@ -1327,24 +1275,6 @@ def train(args):
                     sub[k] = v
             minibatches.append(sub)
 
-        # IL coefficient schedule: linear decay from il_lambda → 0 over
-        # il_decay_frac of total training. Held at 0 thereafter so PPO can
-        # eventually exceed the teacher.
-        if learner.frozen_il_model is not None and cfg.ppo.il_lambda > 0:
-            progress = total_env_steps / max(args.total_steps, 1)
-            decay = max(0.0, 1.0 - progress / max(cfg.ppo.il_decay_frac, 1e-6))
-            learner.set_il_coef(cfg.ppo.il_lambda * decay)
-
-        # Sample a BC minibatch for auxiliary supervision (if enabled)
-        bc_batch = None
-        if bc_samples_for_aux is not None:
-            from bc import _collate as _bc_collate
-            bc_idx = np.random.choice(len(bc_samples_for_aux),
-                                       size=min(cfg.bc.batch_size, len(bc_samples_for_aux)),
-                                       replace=False)
-            bc_subset = [bc_samples_for_aux[i] for i in bc_idx]
-            bc_batch = _bc_collate(bc_subset, device)
-
         # PPO update — OR a critic-only warmup step while the BC-warmstart critic is
         # still cold (policy frozen, value head only). The EV-based exit is checked
         # below, after this rollout's EV is computed.
@@ -1355,8 +1285,7 @@ def train(args):
             critic_warmup_count += 1
         else:
             metrics = learner.update(minibatches, scheduler=scheduler,
-                                     kl_target=cfg.ppo.kl_target,
-                                     bc_batch=bc_batch)
+                                     kl_target=cfg.ppo.kl_target)
         _t_acc["upd"] += time.perf_counter() - _t_upd
         metrics.update(ms_metrics)
         # train_mask time-fraction per (env,player): under per-episode assignment a slot's
@@ -1662,8 +1591,6 @@ def train(args):
                     "reward/mean": metrics.get("reward_mean", 0),
                     "reward/nonzero_frac": metrics.get("reward_nonzero", 0),
                     # IL (zero when not active)
-                    "il/kl": metrics.get("il_kl", 0),
-                    "il/coef": metrics.get("il_coef", 0),
                     # PBRS staging potential (is the agent staging toward neutrals?)
                     "staging/phi": metrics.get("staging_phi", 0),
                 }, step=total_env_steps)
@@ -1804,14 +1731,6 @@ if __name__ == "__main__":
                              "(default: cfg.ppo.max_grad_norm=0.5)")
     parser.add_argument("--gae-lambda", type=float, default=None,
                         help="Override GAE lambda (default: cfg.ppo.gae_lambda=0.95)")
-    # IL regularization (KL-to-frozen-BC penalty) ------------------------
-    parser.add_argument("--il-lambda", type=float, default=None,
-                        help="Peak coef for KL(current||frozen_BC) penalty. "
-                             "0 = disabled. Typical: 0.1–1.0. Decays linearly "
-                             "to 0 over --il-decay-frac of training.")
-    parser.add_argument("--il-decay-frac", type=float, default=None,
-                        help="Fraction of total training over which il_lambda "
-                             "decays to 0 (default cfg: 0.8).")
     parser.add_argument("--critic-warmup-ev", type=float, default=None,
                         help="Critic-only warmup: before PPO, freeze the trunk + policy "
                              "heads and train ONLY the value head until explained-variance "
@@ -1820,19 +1739,6 @@ if __name__ == "__main__":
                              "warm-critic resume (EV already high → 0 warmup steps).")
     parser.add_argument("--critic-warmup-max-updates", type=int, default=None,
                         help="Safety cap on critic-warmup rollouts if EV never reaches the threshold.")
-    parser.add_argument("--il-ref", type=str, default="",
-                        help="Path to a separate frozen reference .pt for IL. "
-                             "Default behaviour: when il_lambda>0 and --resume is "
-                             "set, the resume checkpoint is used as the reference.")
-    # BC auxiliary supervision (cross-entropy on teacher actions during PPO).
-    # Unlike il_lambda (KL on distributions), this directly penalizes argmax
-    # drift via supervised loss on teacher's labels.
-    parser.add_argument("--bc-coef", type=float, default=None,
-                        help="Coefficient on auxiliary BC loss during PPO. "
-                             "Requires --bc-samples. Typical: 0.5–2.0.")
-    parser.add_argument("--bc-samples", type=str, default="",
-                        help="Path to .pkl of teacher samples (produced by "
-                             "extract_teacher_samples.py or bc_frac.py cache).")
     parser.add_argument("--action-decode", choices=["angle", "target"], default="angle",
                         help="Direction component executed during PPO rollouts. "
                              "angle keeps the legacy free angle-bin action; target "
@@ -1960,11 +1866,6 @@ if __name__ == "__main__":
                              "--srcs-multi-penalty to 0 over this fraction of --total-steps. "
                              "E.g. 0.5 = penalty is full strength at step 0, decays to 0 "
                              "by step total_steps*0.5, stays 0 after. 0 = constant penalty.")
-    parser.add_argument("--aux-roi-coef", type=float, default=0.0,
-                        help="Coefficient for ROI auxiliary regression loss. Keeps "
-                             "pair_kv.weight[:, 108:111] and target_scorer ROI columns "
-                             "anchored to encoding roi_20/roi_50/enemy_contest throughout "
-                             "PPO. Reg heads are transient (not saved). Typical: 0.01–0.05.")
     parser.add_argument("--fleet-activity-coef", type=float, default=0.0,
                         help="Per-step reward added when any planet fires (n_fires > 0). "
                              "Breaks the fire=0 Nash created by srcs_multi penalty alone — "

@@ -11,7 +11,6 @@ from collections import deque
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS
@@ -31,31 +30,10 @@ def _gather_target_ship_logits(per_target_logits: torch.Tensor, target_idx: torc
 
 
 class PPOLearner:
-    def __init__(self, model, cfg, device="cpu", frozen_il_model=None,
-                 roi_heads=None, aux_roi_coef=0.0):
+    def __init__(self, model, cfg, device="cpu"):
         self.model = model.to(device)
         self.cfg = cfg
         self.device = device
-        # Frozen reference policy for IL regularization (KL-to-BC penalty).
-        # Held in eval mode, no gradients. Set via training entrypoint when
-        # cfg.ppo.il_lambda > 0.
-        self.frozen_il_model = frozen_il_model
-        if self.frozen_il_model is not None:
-            self.frozen_il_model.to(device).eval()
-            for p in self.frozen_il_model.parameters():
-                p.requires_grad_(False)
-        # Current IL coefficient — schedule updated externally each iter
-        self.il_coef = float(getattr(cfg.ppo, "il_lambda", 0.0)) if frozen_il_model is not None else 0.0
-
-        # ROI auxiliary regression heads — keep the original ROI/contest pairwise columns
-        # (pair_kv.weight[:, 108:111] and target_scorer[0].weight[:, 204:207])
-        # anchored to encoding roi_20/roi_50/enemy_contest throughout PPO.
-        # Transient: not saved to checkpoint, discarded after training.
-        self.roi_heads = roi_heads   # dict with keys "kv" and "ts", or None
-        self.aux_roi_coef = float(aux_roi_coef)
-        if self.roi_heads is not None:
-            for h in self.roi_heads.values():
-                h.to(device)
 
         self.phase4_residual_lr_mult = float(getattr(cfg.ppo, "phase4_residual_lr_mult", 1.0))
         residual_prefixes = (
@@ -72,11 +50,6 @@ class PPOLearner:
             if not p.requires_grad:
                 continue
             (residual_params if id(p) in residual_param_ids else base_params).append(p)
-        if self.roi_heads is not None and self.aux_roi_coef > 0.0:
-            for h in self.roi_heads.values():
-                for p in h.parameters():
-                    if p.requires_grad:
-                        base_params.append(p)
 
         param_groups = [{"params": base_params, "lr": cfg.ppo.learning_rate}]
         if residual_params:
@@ -88,69 +61,6 @@ class PPOLearner:
         self.optimizer = torch.optim.Adam(param_groups, eps=1e-5)
         self.total_steps = 0
         self.update_count = 0
-
-    def set_il_coef(self, coef: float) -> None:
-        """Update the IL coefficient (typically called per iter for schedule)."""
-        self.il_coef = float(coef)
-
-    def _il_kl_penalty(self, batch, current_outputs) -> torch.Tensor:
-        """KL(π_current || π_frozen_BC) on fire/ship/target heads, masked to valid
-        slots. Returns scalar tensor; 0.0 if no frozen ref.
-
-        Angle is not part of the executed policy (target-decode only) so its KL
-        is not included.
-        """
-        if self.frozen_il_model is None or self.il_coef <= 0:
-            return torch.zeros((), device=self.device)
-
-        def to_dev(x):
-            return x.to(self.device) if isinstance(x, torch.Tensor) else x
-
-        with torch.no_grad():
-            pairwise = batch.get("pairwise_features")
-            if pairwise is not None:
-                pairwise = to_dev(pairwise)
-            frozen_out = self.frozen_il_model(
-                to_dev(batch["planet_features"]),
-                to_dev(batch["fleet_features"]),
-                to_dev(batch["global_features"]),
-                to_dev(batch["planet_mask"]),
-                to_dev(batch["fleet_mask"]),
-                fire_mask=to_dev(batch["fire_mask"]),
-                slot_valid=to_dev(batch["slot_valid"]),
-                owned_indices=batch["owned_indices"],
-                pairwise_features=pairwise,
-            )
-
-        slot_valid = to_dev(batch["slot_valid"]).float()    # (B, MO)
-        sv_sum = slot_valid.sum().clamp(min=1)
-
-        target_action = to_dev(batch["actions"]["target"])
-        curr_fire_logits = _gather_target_logits(current_outputs["fire_logits"], target_action)
-        froz_fire_logits = _gather_target_logits(frozen_out["fire_logits"], target_action)
-        curr_ship_logits = _gather_target_ship_logits(current_outputs["ship_logits"], target_action)
-        froz_ship_logits = _gather_target_ship_logits(frozen_out["ship_logits"], target_action)
-
-        # Fire: Bernoulli KL at the sampled target, averaged over valid slots.
-        # KL(Bern(p) || Bern(q)) = p log(p/q) + (1-p) log((1-p)/(1-q))
-        p_curr = torch.sigmoid(curr_fire_logits).clamp(1e-6, 1 - 1e-6)
-        p_froz = torch.sigmoid(froz_fire_logits).clamp(1e-6, 1 - 1e-6)
-        fire_kl = (p_curr * (p_curr / p_froz).log()
-                   + (1 - p_curr) * ((1 - p_curr) / (1 - p_froz)).log())
-        fire_kl = (fire_kl * slot_valid).sum() / sv_sum
-
-        # Ship / target: Categorical KL on logits, only for valid slots.
-        def cat_kl(curr_logits, froz_logits, slot_mask):
-            log_curr = torch.log_softmax(curr_logits, dim=-1)
-            log_froz = torch.log_softmax(froz_logits, dim=-1)
-            p_curr_ = log_curr.exp()
-            kl_per = (p_curr_ * (log_curr - log_froz)).sum(dim=-1)  # (B, MO)
-            return (kl_per * slot_mask).sum() / slot_mask.sum().clamp(min=1)
-
-        ship_kl = cat_kl(curr_ship_logits, froz_ship_logits, slot_valid)
-        target_kl = cat_kl(current_outputs["target_logits"], frozen_out["target_logits"], slot_valid)
-
-        return fire_kl + ship_kl + target_kl
 
     def compute_loss(self, batch, return_metrics=False, value_only=False):
         """Compute PPO clipped loss on a batch (target-decode only).
@@ -258,12 +168,6 @@ class PPOLearner:
         ship_entropy   = ship_dist.entropy().mean()
         target_entropy = target_dist.entropy().mean()
 
-        # IL regularization: KL(π_current || π_frozen_BC) on rollout states.
-        # Skipped in value_only (critic warmup) — the policy is frozen, so the IL
-        # anchor and entropy/policy terms are irrelevant (and the frozen-IL forward
-        # would be wasted compute).
-        il_kl = self._il_kl_penalty(batch, outputs) if not value_only else outputs["fire_logits"].new_zeros(())
-
         if value_only:
             loss = cfg.value_coef * value_loss
         else:
@@ -271,8 +175,7 @@ class PPOLearner:
                     + cfg.value_coef * value_loss
                     - cfg.entropy_coef_fire  * fire_entropy
                     - cfg.entropy_coef_target * target_entropy
-                    - cfg.entropy_coef_ships * ship_entropy
-                    + self.il_coef * il_kl)
+                    - cfg.entropy_coef_ships * ship_entropy)
 
         if return_metrics:
             clip_frac = ((ratio - 1.0).abs() > cfg.clip_eps).float().mean()
@@ -391,8 +294,6 @@ class PPOLearner:
                 "phase4_ship_resid_abs_mean": float(ship_resid_abs_mean),
                 "phase4_fire_decision_flip": float(fire_decision_flip),
                 "phase4_ship_decision_flip": float(ship_decision_flip),
-                "il_kl": il_kl.item() if isinstance(il_kl, torch.Tensor) else float(il_kl),
-                "il_coef": self.il_coef,
                 "per_slot_fire_probs": per_slot_fire.detach().cpu().tolist(),
             }
             return loss, metrics
@@ -400,16 +301,12 @@ class PPOLearner:
         return loss
 
     def update(self, batches, scheduler=None, ppo_epochs=None,
-               kl_target: float = 0.05, bc_batch: dict | None = None):
+               kl_target: float = 0.05):
         """Run PPO update on a list of minibatches.
 
         kl_target:  stop epoch loop early if mean approx-KL exceeds this value,
                     preventing destructive policy updates.
                     Good range: 0.01–0.05. Pass float('inf') to disable.
-        bc_batch:   optional dict of BC training samples (from bc._collate).
-                    If provided, a BC forward pass is combined into the same
-                    backward as each PPO minibatch (single optimizer step),
-                    preventing competing gradient updates.
         """
         cfg = self.cfg.ppo
         epochs = ppo_epochs or cfg.ppo_epochs
@@ -422,53 +319,7 @@ class PPOLearner:
             epoch_kl = 0.0
             for batch in batches:
                 ppo_loss, metrics = self.compute_loss(batch, return_metrics=True)
-
-                # BC regularization: separate forward pass, combined backward.
-                # This avoids the batch-size mismatch of embedding bc_targets
-                # inside the PPO forward, while still using a single optimizer step.
-                bc_loss_val = 0.0
-                if bc_batch is not None and cfg.bc_coef > 0:
-                    from bc import bc_loss as _bc_loss
-                    bc_pairwise = bc_batch.get("pairwise_features")
-                    if bc_pairwise is not None:
-                        bc_pairwise = bc_pairwise.to(self.device)
-                    bc_out = self.model(
-                        bc_batch["planet_features"].to(self.device),
-                        bc_batch["fleet_features"].to(self.device),
-                        bc_batch["global_features"].to(self.device),
-                        bc_batch["planet_mask"].to(self.device),
-                        bc_batch["fleet_mask"].to(self.device),
-                        fire_mask=bc_batch["fire_mask"].to(self.device),
-                        slot_valid=bc_batch["slot_valid"].to(self.device),
-                        owned_indices=bc_batch["owned_indices"],
-                        pairwise_features=bc_pairwise,
-                    )
-                    bc_loss_tensor, bc_m = _bc_loss(bc_out, {
-                        k: v.to(self.device) for k, v in bc_batch.items()
-                    })
-                    total_loss = ppo_loss + cfg.bc_coef * bc_loss_tensor
-                    bc_loss_val = bc_m["loss"]
-                    for k, v in bc_m.items():
-                        metrics[f"bc_{k}"] = v
-                else:
-                    total_loss = ppo_loss
-
-                # ROI auxiliary loss: keep pair_kv.weight[:, 108:111] and
-                # target_scorer[0].weight[:, 204:207] encoding roi/contest info.
-                # Gradient flows only through those columns (other weights not in graph).
-                if self.roi_heads is not None and self.aux_roi_coef > 0.0:
-                    pairwise = batch.get("pairwise_features")
-                    if pairwise is not None:
-                        pairwise = pairwise.to(self.device)          # (B, MO, N_p, F_pair)
-                        x_new = pairwise[..., 12:15].reshape(-1, 3)  # (B*MO*N_p, 3)
-                        # pair_kv branch — only new columns in computational graph
-                        contrib_kv = F.linear(x_new, self.model.pair_kv.weight[:, 108:111])
-                        pred_kv = self.roi_heads["kv"](contrib_kv)
-                        # target_scorer branch
-                        contrib_ts = F.linear(x_new, self.model.target_scorer[0].weight[:, 204:207])
-                        pred_ts = self.roi_heads["ts"](contrib_ts)
-                        aux_loss = F.mse_loss(pred_kv, x_new) + F.mse_loss(pred_ts, x_new)
-                        total_loss = total_loss + self.aux_roi_coef * aux_loss
+                total_loss = ppo_loss
 
                 self.optimizer.zero_grad()
                 total_loss.backward()
