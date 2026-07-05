@@ -9,14 +9,13 @@ __pycache__/
 .venv/
 .env
 
-# Model checkpoints (large binary files)
+# Large binaries
 *.pt
 *.pkl
 *.zip
 *.csv
-*.pyc
 
-# Training artifacts (gitignored — use rsync watcher to sync locally)
+# Training artifacts (synced from GPU boxes; never tracked)
 gpu_run_artifacts/
 
 # Archive data (large datasets)
@@ -25,32 +24,23 @@ archive/data/
 # Kaggle / competition data
 leader-replays/
 orbit-wars-data/
-
-# Logs (gpu_run_artifacts logs are covered above; docs/logs/ is tracked intentionally)
-gpu_run_artifacts/**/*.log
+replays/
+replays*/
 
 # W&B local cache
 wandb/
 
 # Misc
-replays/
-replays*/
 kernels/
 build/
-main_submitted.py
 pytorch_docs/
-train_trends.png
 *.DS_Store
 
+# Local-only agents and submissions
 opponents/*
 candidate_tests/
 submission*
-opponents/ourbest/
-opponents/*
-candidate_tests/*
 docs/logs/
-
-*__pycache__
 
 # Preserved final-submission artifacts — exception to *.pt and submission* ignores above
 !final_submissions/
