@@ -344,6 +344,10 @@ class VecTorchEnv:
         self.num_players = num_players
         self.episode_steps = episode_steps
         self.device = torch.device(device)
+        # Ship-bin decode lookup tables, built once (were re-created + copied to device
+        # on every _apply_actions call).
+        self._ship_counts_t = torch.tensor(SHIP_COUNTS, dtype=torch.float32, device=self.device)
+        self._frac_bins_t = torch.tensor(FRACTION_BIN_VALUES, dtype=torch.float32, device=self.device)
         # See ModelConfig.ship_bin_mode. "absolute" uses SHIP_COUNTS lookup;
         # "fraction" uses round(FRAC_VALUES[bin] * src_ships).
         self.ship_bin_mode = ship_bin_mode
@@ -1040,15 +1044,18 @@ class VecTorchEnv:
             torch.where(f_owner >= 0, -torch.ones_like(fx), torch.full_like(fx, -0.5)),
         )
 
-        # Fleet→planet vectors: (N, F, P)
-        vx_fp = x.unsqueeze(1) - fx.unsqueeze(2)   # planet_x − fleet_x
-        vy_fp = y.unsqueeze(1) - fy.unsqueeze(2)
+        # Fleet→planet vectors: transposed views of the (N, P, F) deltas computed above
+        # (vx[n,p,f] = x[p] − fx[f] — identical values, no second subtraction cube).
+        vx_fp = vx.transpose(1, 2)                 # (N, F, P) planet_x − fleet_x
+        vy_fp = vy.transpose(1, 2)
         along_fp = vx_fp * fcos.unsqueeze(2) + vy_fp * fsin.unsqueeze(2)
         perp_fp  = torch.abs(vx_fp * fsin.unsqueeze(2) - vy_fp * fcos.unsqueeze(2))
         alive_expand = planet_alive.unsqueeze(1).expand(-1, F, -1)  # (N, F, P)
         candidate = (along_fp > 0) & (perp_fp < r.unsqueeze(1) + 2.0) & alive_expand
         has_candidate = candidate.any(dim=2)
-        dists_fp = torch.sqrt(vx_fp * vx_fp + vy_fp * vy_fp)
+        # One distance cube shared with the threat-ETA channels below (dist_pf).
+        dist_pf = torch.sqrt((vx * vx + vy * vy).clamp(min=1e-9))   # (N, P, F)
+        dists_fp = dist_pf.transpose(1, 2)                          # (N, F, P) view
         dists_masked = dists_fp.masked_fill(~candidate, 1e6)
         tgt_idx = dists_masked.argmin(dim=2)  # (N, F) — target planet index per fleet
 
@@ -1162,12 +1169,10 @@ class VecTorchEnv:
             if self.reinforce_forward_only:
                 is_own = (target_owner == player)  # (N, MAX_OWNED, P)
                 enemy_planet = (owner != player) & (owner >= 0) & planet_alive  # (N, P)
-                dx = x.unsqueeze(2) - x.unsqueeze(1)   # (N, P, P): planet i vs planet j
-                dy = y.unsqueeze(2) - y.unsqueeze(1)
-                pdist = torch.sqrt(dx * dx + dy * dy)
-                INF = torch.finfo(pdist.dtype).max
-                d2e = torch.where(enemy_planet.unsqueeze(1), pdist,
-                                  torch.full_like(pdist, INF)).min(dim=2).values  # (N, P)
+                # dpp (N, P, P) pairwise dists computed above
+                INF = torch.finfo(dpp.dtype).max
+                d2e = torch.where(enemy_planet.unsqueeze(1), dpp,
+                                  torch.full_like(dpp, INF)).min(dim=2).values  # (N, P)
                 # gather source planet's enemy-distance per owned slot (owned_idx is
                 # clamped gather-safe; padded slots are dropped by slot_valid anyway)
                 src_d2e = torch.gather(d2e, 1, owned_idx)              # (N, MAX_OWNED)
@@ -1205,7 +1210,7 @@ class VecTorchEnv:
         # fleet speed (matches _fleet_target_idx eta_to_target, torch_env.py:1478). Mirrors
         # features.py compute_pairwise_features ch20-21 byte-for-byte.
         enemy_inc = incoming_pw & enemy_fleet.unsqueeze(1)                # (N, P, F)
-        dist_pf = torch.sqrt((vx * vx + vy * vy).clamp(min=1e-9))          # (N, P, F)
+        # dist_pf (N, P, F) computed once in the fleet-features block above.
         f_speed_pf = _ship_speed(f_ships).unsqueeze(1)                     # (N, 1, F)
         eta_pf = (dist_pf / f_speed_pf.clamp(min=1e-3)).clamp(min=1.0)     # (N, P, F)
         soon = enemy_inc & (eta_pf <= _THREAT_ETA_WINDOW)                  # (N, P, F)
@@ -1219,6 +1224,7 @@ class VecTorchEnv:
             friendly_contest=friendly_pressure_pw,   # (N, P): own ships inbound per target (resolved)
             enemy_mass_soon=enemy_mass_soon,
             threat_imminence=threat_imminence,
+            planet_dist=dpp,                         # (N, P, P) pairwise dists computed above
         )
 
         return {
@@ -1237,8 +1243,11 @@ class VecTorchEnv:
         }
 
     def _compute_pairwise(self, planets, planet_alive, P, owned_idx, slot_valid, player,
+                          planet_dist,
                           enemy_contest=None, friendly_contest=None,
                           enemy_mass_soon=None, threat_imminence=None):
+        # planet_dist: (N, P, P) pairwise planet distances from get_features (its dpp),
+        # passed to avoid recomputing the distance cube.
         """Vectorized counterpart of features.compute_pairwise_features().
 
         Returns (N, MAX_OWNED, P, 22) float32 on self.device. Channel order:
@@ -1406,13 +1415,12 @@ class VecTorchEnv:
         # computed per-target and broadcast. Raw (no rho/eta scaling) — the per-target head
         # learns its own reaction coefficient. Mirrors features.compute_pairwise_features ch15
         # and the dm-floor enemy_mass term.
-        px_a = planets[:, :, 2]                                  # (N, P)
-        py_a = planets[:, :, 3]
         gar_a = planets[:, :, 5]
         own_a = planets[:, :, 1].long()
-        dxe = px_a.unsqueeze(2) - px_a.unsqueeze(1)             # (N, P_src, P_tgt)
-        dye = py_a.unsqueeze(2) - py_a.unsqueeze(1)
-        pde = torch.sqrt((dxe * dxe + dye * dye).clamp(min=1e-9))
+        # Pairwise planet distances: the caller's dpp. Identical values where consumed —
+        # the diagonal (where the previously-computed clamped sqrt differed by ~3e-5)
+        # is masked by not_self below.
+        pde = planet_dist                                       # (N, P_src, P_tgt)
         src_reach_e = (_ship_speed(gar_a) * _DM_HORIZON).clamp(min=1e-6)   # (N, P_src)
         dec = (1.0 - pde / src_reach_e.unsqueeze(2)).clamp(min=0.0)        # (N, P_src, P_tgt)
         not_self = ~torch.eye(P, dtype=torch.bool, device=device).unsqueeze(0)
@@ -1585,14 +1593,12 @@ class VecTorchEnv:
         if self.ship_bin_mode == "fraction":
             num_bins = len(FRACTION_BIN_VALUES)
             ship_bin = actions[:, :, 2].long().clamp(0, num_bins - 1)
-            frac_t = torch.tensor(FRACTION_BIN_VALUES, dtype=torch.float32, device=self.device)
-            frac = frac_t[ship_bin]                                # (N, MAX_OWNED)
+            frac = self._frac_bins_t[ship_bin]                    # (N, MAX_OWNED)
             max_sendable = (src_ships - 1.0).clamp(min=1.0)
             ship_count = torch.round(frac * max_sendable).clamp(min=1.0)
         else:
             ship_bin = actions[:, :, 2].long().clamp(0, NUM_SHIP_BINS - 1)
-            ship_counts_t = torch.tensor(SHIP_COUNTS, dtype=torch.float32, device=self.device)
-            ship_count = ship_counts_t[ship_bin]                  # (N, MAX_OWNED)
+            ship_count = self._ship_counts_t[ship_bin]            # (N, MAX_OWNED)
 
         # Angle-bin decode uses the BIN CENTER (external-opponent action fallback).
         # Target mode executes the target head by converting target_idx to an
