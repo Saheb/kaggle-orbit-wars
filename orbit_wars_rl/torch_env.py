@@ -60,6 +60,10 @@ _REINF_CD_NEVER = -(1 << 30)
 MAX_PLANETS = 48
 MAX_FLEETS = 256
 MAX_OWNED = 16
+# fleet_tgt sentinel: fleet exists but its target was never resolved (created outside
+# _apply_actions, or invalidated by a comet alive-transition) → lazy re-resolve in
+# _fleet_targets(). Distinct from -1 = resolved, hits nothing.
+_TGT_UNRESOLVED = -2
 
 # Comets (extra-solar objects) — spawn mid-game, are collidable + capturable + moving.
 # Match kaggle_environments.envs.orbit_wars: 4-comet symmetric groups spawn at these steps,
@@ -236,8 +240,22 @@ class VecTorchEnv:
         reinforce_forward_only: bool = False,
         reverse_edge_cooldown: int = 0,
         sufficient_commit_factor: float = 0.0,
+        enable_comets: bool = True,
+        fleet_target_refresh_every: int = 4,
     ):
         self.num_envs = num_envs
+        # Comets kill-switch (2026-07-05 SPS decision): training may disable comets
+        # entirely (no spawns, no schedule compute). The real kaggle game HAS comets —
+        # eval/export always keep them — so this trades a training-distribution gap
+        # for SPS. Default ON.
+        self.enable_comets = bool(enable_comets)
+        # Launch-cache staleness bound: every K ticks step() re-resolves ALL cached fleet
+        # targets from current state (see _fleet_targets). Measured accuracy vs the true
+        # swept collision (64 envs x 300 random steps, comets on): K=1 95.6%, K=2 95.0%,
+        # K=4 93.7%, K=8 91.9%, K=0 (launch-only, comet staleness never fixed) 79.2% —
+        # long-range lead error vs rotating planets drifts. K=4 = ~1/4 the resolver cost
+        # for a 2pp accuracy dip. 1 ≈ fresh every tick, 0 = never refresh.
+        self.fleet_target_refresh_every = int(fleet_target_refresh_every)
         # Blessed feature config (2026-07 cleanup): game-phase globals (dim 15) always on;
         # pressure channels always routed through the lead-aware swept-collision resolver
         # (_fleet_target_idx, one fleet → one target); threat ETA to planet CENTER; friendly
@@ -461,7 +479,13 @@ class VecTorchEnv:
 
         self._precompute_orbital_params()
         self._init_comets()
-        self._ftx_cache = None
+        # Launch-time fleet-target cache (see _fleet_targets). No fleets yet → all "none";
+        # checked=True keeps the training hot path a plain read (only refresh_fleet_targets
+        # arms the lazy sweep).
+        self.fleet_tgt = torch.full((self.num_envs, MAX_FLEETS), -1,
+                                    dtype=torch.long, device=self.device)
+        self._fleet_tgt_checked = True
+        self._tick_counter = 0   # global tick for the periodic fleet-target refresh
         self.prev_production = self._compute_production()
         owner_p = self.planets[:, :, 1].long()
         self.prev_owned = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
@@ -494,12 +518,19 @@ class VecTorchEnv:
         ignored orbital lead and over-loosely matched). Player-independent (geometry only). Feeds the
         capture-floor machinery via _decisive_mass_fields (staging potential, sufficient-commit
         veto); dead fleets are masked by the caller (valid_f)."""
-        fx = self.fleets[:, :, 2].unsqueeze(2)                          # (N, F, 1)
-        fy = self.fleets[:, :, 3].unsqueeze(2)
-        fang = self.fleets[:, :, 4]
-        fcos = torch.cos(fang).unsqueeze(2)                            # (N, F, 1)
-        fsin = torch.sin(fang).unsqueeze(2)
-        speed = _ship_speed(self.fleets[:, :, 6]).clamp(min=1e-6).unsqueeze(2)   # (N, F, 1)
+        return self._resolve_targets_at(
+            self.fleets[:, :, 2], self.fleets[:, :, 3],
+            self.fleets[:, :, 4], self.fleets[:, :, 6])
+
+    def _resolve_targets_at(self, fleet_x, fleet_y, fleet_angle, fleet_ships) -> torch.Tensor:
+        """Resolver core for arbitrary fleet states (each arg (N, K)) → (N, K) target idx or -1.
+        Used per-launch on the (N, MAX_OWNED) grid (the SPS path) and by _fleet_target_idx for
+        full-fleet re-resolution (comet transitions, externally-poked fleets, direct test calls)."""
+        fx = fleet_x.unsqueeze(2)                                      # (N, K, 1)
+        fy = fleet_y.unsqueeze(2)
+        fcos = torch.cos(fleet_angle).unsqueeze(2)                     # (N, K, 1)
+        fsin = torch.sin(fleet_angle).unsqueeze(2)
+        speed = _ship_speed(fleet_ships).clamp(min=1e-6).unsqueeze(2)  # (N, K, 1)
         px = self.planets[:, :, 2].unsqueeze(1)                        # (N, 1, P)
         py = self.planets[:, :, 3].unsqueeze(1)
         pr = self.planets[:, :, 4].unsqueeze(1)
@@ -527,17 +558,35 @@ class VecTorchEnv:
         tgt_idx = eta.masked_fill(~candidate, 1e6).argmin(dim=2)        # (N, F) — min-ETA hit
         return torch.where(has_candidate, tgt_idx, torch.full_like(tgt_idx, -1))
 
-    def _fleet_target_idx_cached(self) -> torch.Tensor:
-        """Per-tick cache of _fleet_target_idx — geometry-only and player-independent, so every
-        call between two state mutations returns the same tensor. Profiling (2026-07-05, 512 envs)
-        showed it computed 4x/tick (>50% of env wall time): get_features(p0), get_features(p1) and
-        _apply_actions(p0) all see the identical pre-launch state; only _apply_actions(p1)
-        legitimately differs (it sees p0's same-tick launches, as before). Every env-internal
-        mutation of fleets/planets sets self._ftx_cache = None; code that pokes those tensors
-        directly (tests) must do the same before relying on a cached consumer."""
-        if self._ftx_cache is None:
-            self._ftx_cache = self._fleet_target_idx()
-        return self._ftx_cache
+    def _fleet_targets(self) -> torch.Tensor:
+        """(N, F) resolved target planet per fleet slot; -1 = hits nothing. LAUNCH-TIME CACHE
+        (2026-07-05 SPS decision, parity deliberately dropped): a fleet's ray and every planet's
+        orbit are fixed at launch, so the target is resolved ONCE in _apply_actions on the
+        (N, MAX_OWNED) launch grid instead of the (N, 256, P) full cube every tick (was >50% of
+        env wall time). Mid-flight the cached answer can drift from a fresh per-tick resolve
+        (features.py on the kaggle side re-resolves from current obs each step; the acceptance
+        test perp < r+0.5 is evaluated from the current fleet position) — accepted for SPS.
+
+        Staleness bound: step() re-resolves ALL targets every fleet_target_refresh_every ticks
+        (unconditional, sync-free), which also covers comet spawn/expiry changing who a ray
+        hits. The lazy sweep below exists ONLY for fleets poked into existence outside
+        _apply_actions — tests must call refresh_fleet_targets() after direct pokes; the
+        training loop never sets the flag, so the hot path is a plain attribute read."""
+        if not self._fleet_tgt_checked:
+            self._fleet_tgt_checked = True
+            unresolved = self.fleet_alive & (self.fleet_tgt == _TGT_UNRESOLVED)
+            if bool(unresolved.any()):
+                fresh = self._fleet_target_idx()
+                self.fleet_tgt = torch.where(unresolved, fresh, self.fleet_tgt)
+        return self.fleet_tgt
+
+    def refresh_fleet_targets(self):
+        """Force a from-current-state re-resolution of every fleet's cached target on the
+        next consumer. For parity tests (features.py resolves from current obs — see
+        _fleet_targets for the accepted drift) and after poking env.fleets directly.
+        Training never needs this."""
+        self.fleet_tgt.fill_(_TGT_UNRESOLVED)
+        self._fleet_tgt_checked = False
 
     def _decisive_mass_fields(self):
         """Per-(N,P,num_players) inflight mass, capture floor, max-ETA and is_enemy mask — the
@@ -567,7 +616,7 @@ class VecTorchEnv:
         decay = (1.0 - pdist / src_reach.unsqueeze(2)).clamp(min=0.0)   # (N, P_src, P_tgt)
         not_self = ~torch.eye(P, dtype=torch.bool, device=self.device).unsqueeze(0)
         # Our converging fleets: target, ships, and ETA to that target.
-        tgt_idx = self._fleet_target_idx_cached()                      # (N, F)
+        tgt_idx = self._fleet_targets()                                # (N, F)
         f_owner = self.fleets[:, :, 1].long()
         f_ships_raw = self.fleets[:, :, 6]
         fx, fy = self.fleets[:, :, 2], self.fleets[:, :, 3]
@@ -657,6 +706,9 @@ class VecTorchEnv:
         is expensive (5000-pt sampling) and most games end before the later spawns — so an upfront
         precompute of all 5 spawns × N envs would dominate reset/auto-reset cost. `_has_comets`
         stays True (the integration is always wired); an un-computed schedule is simply all-dead."""
+        if not self.enable_comets:
+            self._has_comets = False
+            return
         N, T1 = self.num_envs, self.episode_steps + 1
         if getattr(self, "_comet_xy", None) is None:
             self._comet_xy = torch.zeros(N, T1, N_COMET_SLOTS, 2, device=self.device)
@@ -876,7 +928,7 @@ class VecTorchEnv:
         # Mirrors features._resolve_fleet_targets (parity-tested).
         # _fleet_target_idx runs over ALL self.fleets (256); the feature path caps to the first
         # F (=max_fleets). Resolution is per-fleet (geometry only) so slicing is exact.
-        _f_tgt = self._fleet_target_idx_cached()[:, :fleets.shape[1]]       # (N, F), -1 if none
+        _f_tgt = self._fleet_targets()[:, :fleets.shape[1]]                 # (N, F), -1 if none
         _p_ar = torch.arange(x.shape[1], device=self.device).view(1, -1, 1)  # (1, P, 1)
         incoming_pw = (_f_tgt.unsqueeze(1) == _p_ar) & fleet_alive.unsqueeze(1)  # (N, P, F)
 
@@ -1687,7 +1739,7 @@ class VecTorchEnv:
                 fa = self.fleet_alive                                  # (N, F)
                 f_owner = fi[:, :, 1].long()
                 f_ships = fi[:, :, 6] * fa.float()
-                f_tgt = self._fleet_target_idx_cached()                # (N, F)
+                f_tgt = self._fleet_targets()                          # (N, F)
                 f_fx, f_fy = fi[:, :, 2], fi[:, :, 3]
                 f_speed = _ship_speed(fi[:, :, 6]).clamp(min=1e-6)
                 # Per-(slot, fleet) ETA: distance from fleet to the slot's target / fleet speed
@@ -1772,9 +1824,12 @@ class VecTorchEnv:
         self.fleets[flat_env, flat_slot, 6] = ship_count[target_valid]
         self.fleet_alive[flat_env, flat_slot] = True
         self.next_fleet_id = self.next_fleet_id + target_valid.long().sum(dim=1)
-        # New fleets exist → the per-tick fleet-target cache is stale (the NEXT player's
-        # sufficient-commit veto must see this player's same-tick launches, as before).
-        self._ftx_cache = None
+        # Resolve the new fleets' targets ONCE, on the (N, MAX_OWNED) launch grid — the ray
+        # and the planets' orbits are fixed at launch (see _fleet_targets). Uses the final
+        # angle (post intercept/override) and final ship_count (speed), i.e. exactly what
+        # was written into the fleet slots above.
+        new_tgt = self._resolve_targets_at(start_x, start_y, angle, ship_count)  # (N, MAX_OWNED)
+        self.fleet_tgt[flat_env, flat_slot] = new_tgt[target_valid]
 
     def reset_reinforce_stats(self):
         """Zero the reinforce_rate accumulators. Call once per rollout (before the
@@ -1932,6 +1987,10 @@ class VecTorchEnv:
         hit_any = hit.any(dim=2)                                       # (N, F)
         # Use argmax on bool-as-int to find first true index along P axis
         hit_planet_idx = hit.float().argmax(dim=2)                     # (N, F)
+        # Diagnostic stash: the TRUE swept-collision outcome this tick (ground truth for
+        # resolver-accuracy measurements; see gpu_run_artifacts/envperf/).
+        self._last_hit_any = hit_any
+        self._last_hit_idx = hit_planet_idx
 
         # 5. Sun-crossing: fleet path crosses sun (point-to-segment distance <= SUN_RADIUS).
         # Project (CENTER, CENTER) onto segment (fleet_old → fleet_new) and check distance.
@@ -2022,9 +2081,6 @@ class VecTorchEnv:
 
         # 9. Update fleet alive flags
         self.fleet_alive = survives
-
-        # Physics moved fleets/planets and resolved combat → fleet-target cache is stale.
-        self._ftx_cache = None
 
         # 10. Advance step
         self.step_count = self.step_count + 1
@@ -2125,6 +2181,16 @@ class VecTorchEnv:
         # reinforce edges mis-block the new board — same boundary bug class as decmass re-arm).
         if self.reverse_edge_cooldown > 0 and self.reinf_cd is not None and done.any():
             self.reinf_cd[done] = _REINF_CD_NEVER
+        # Periodic refresh (staleness bound, see fleet_target_refresh_every): every K
+        # ticks re-resolve ALL fleet targets from the post-step state, UNCONDITIONALLY —
+        # the cadence is known CPU-side, so the hot loop stays free of data-dependent
+        # syncs (a mark-unresolved variant paid a pipeline flush inside get_features on
+        # every refresh tick, costing more than it saved). Comet spawn/expiry staleness
+        # is bounded by the same cadence (the K-accuracy sweep ran with comets on).
+        self._tick_counter += 1
+        if (self.fleet_target_refresh_every > 0
+                and self._tick_counter % self.fleet_target_refresh_every == 0):
+            self.fleet_tgt = self._fleet_target_idx()
         return self._state_dict(), terminal_rewards, done
 
     # ---------------------------------------------------------------------
@@ -2233,10 +2299,10 @@ class VecTorchEnv:
             self.rewards[env_i] = 0.0
         # Re-precompute orbital params for changed envs
         self._precompute_orbital_params()
-        self._ftx_cache = None
         # Reset the comet schedule for the reset envs (new seeds → recomputed lazily).
         if done_idx:
             self._init_comets(done_idx)
+            self.fleet_tgt[torch.tensor(done_idx, device=self.device)] = -1
 
 
 # -------------------------------------------------------------------------

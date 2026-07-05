@@ -22,6 +22,9 @@ def test_pairwise_roi_parity():
     for _ in range(30):  # random play → fleets in flight → friendly_contest nonzero
         env.step({0: torch.randint(0, 2, (num_envs, MAX_OWNED, 3)),
                   1: torch.randint(0, 2, (num_envs, MAX_OWNED, 3))})
+    # features.py resolves fleet targets from current obs; force the same here (the
+    # launch-cache drift is an accepted SPS trade — this test locks the MATH).
+    env.refresh_fleet_targets()
 
     max_diff = 0.0
     exercised = False
@@ -81,6 +84,7 @@ def test_target_value_keepability_parity():
     for _ in range(25):
         env.step({0: torch.randint(0, 2, (num_envs, MAX_OWNED, 3)),
                   1: torch.randint(0, 2, (num_envs, MAX_OWNED, 3))})
+    env.refresh_fleet_targets()   # match features.py's from-current-obs resolve (see roi test)
 
     max_diff = 0.0
     exercised = False

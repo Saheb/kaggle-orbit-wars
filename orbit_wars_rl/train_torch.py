@@ -490,7 +490,9 @@ def train(args):
                       first_strike_mult=args.first_strike_mult,
                       staging_shaping_coef=args.staging_shaping_coef,
                       staging_topk=args.staging_topk,
-                      staging_gamma=cfg.ppo.gamma)
+                      staging_gamma=cfg.ppo.gamma,
+                      enable_comets=not args.disable_comets,
+                      fleet_target_refresh_every=args.fleet_target_refresh)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
 
     model = EntityTransformer(cfg.model).to(device)
@@ -1850,6 +1852,15 @@ if __name__ == "__main__":
     parser.add_argument("--staging-topk", type=int, default=2,
                         help="k for the staging potential (top-k neutral targets summed). k=2 keeps "
                              "serial expansion-breadth while bounding simultaneous spread.")
+    parser.add_argument("--disable-comets", action="store_true",
+                        help="Train WITHOUT comets (no spawns/schedule — SPS lever, 2026-07-05). "
+                             "The real kaggle game has comets; eval/export always keep them, so "
+                             "this trades a training-distribution gap for throughput.")
+    parser.add_argument("--fleet-target-refresh", type=int, default=4,
+                        help="Re-resolve ALL cached fleet targets every K ticks (staleness bound "
+                             "for the launch-time target cache — SPS lever, 2026-07-05). Accuracy "
+                             "vs true collision: 1 (~fresh) 95.6%%, 2 95.0%%, 4 93.7%%, 8 91.9%%, "
+                             "0 (launch-only; comet staleness never fixed) 79.2%%.")
     parser.add_argument("--srcs-multi-penalty", type=float, default=0.0,
                         help="Per-step reward penalty per source over --srcs-multi-threshold. "
                              "Applied symmetrically to both players each rollout step. "

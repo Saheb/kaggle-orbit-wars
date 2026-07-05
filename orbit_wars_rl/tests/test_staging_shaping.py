@@ -101,6 +101,8 @@ def _build_pair():
         e.fleets[0, 0, 4], e.fleets[0, 0, 6] = 0.0, 8.0
         e.fleet_alive[0, 0] = True
         e.step_count[0] = 0
+        # hand-placed fleets bypass _apply_actions → resolve their targets from current state
+        e.refresh_fleet_targets()
         # re-arm prev_staging_phi from this hand-set state (reset() saw the seed board, not ours)
         e.prev_staging_phi[:] = e._staging_potential(e._decisive_mass_fields())
         envs.append(e)

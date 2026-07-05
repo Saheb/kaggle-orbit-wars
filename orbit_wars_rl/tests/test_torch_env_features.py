@@ -33,6 +33,13 @@ def run_parity(num_envs: int = 4, after_steps: int = 30):
         env.step({0: _t.randint(0, 2, (num_envs, MAX_OWNED, 3)),
                   1: _t.randint(0, 2, (num_envs, MAX_OWNED, 3))})
 
+    # Launch-time target cache (2026-07-05 SPS decision): training carries fleet targets
+    # resolved at LAUNCH, while features.py re-resolves from the current obs each step —
+    # mid-flight drift between the two is an ACCEPTED trade, not a bug. Force a fresh
+    # from-current-state resolve here so this test keeps locking the resolver MATH (and
+    # every other channel) to features.py.
+    env.refresh_fleet_targets()
+
     for player in (0, 1):
         vec_feats = env.get_features(player, max_planets=48, max_fleets=128)
         total_err = 0
