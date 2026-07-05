@@ -37,7 +37,6 @@ pytorch_docs/
 *.DS_Store
 
 # Local-only agents and submissions
-opponents/*
 candidate_tests/
 submission*
 docs/logs/
