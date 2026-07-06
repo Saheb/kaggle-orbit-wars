@@ -101,8 +101,7 @@ class EntityTransformer(nn.Module):
         # NB: the angle head was removed — Phase 1 decodes fire direction from the
         # target via orbital-intercept geometry (target-decode), so the head was
         # dead weight (never sampled, no gradient). NUM_ANGLE_BINS is still used by
-        # the env/action-mask geometry. Legacy checkpoints' angle_head.* keys are
-        # dropped in load_state_dict below.
+        # the env/action-mask geometry.
         # Ship head: bin count is configurable so the fraction-head experiment
         # can swap to 10 fraction bins. Default 32 = legacy absolute counts.
         self.num_ship_bins = getattr(cfg, "num_ship_bins", NUM_SHIP_BINS)
@@ -464,11 +463,6 @@ class EntityTransformer(nn.Module):
         return {"q_sa": q_sa, "q_fire": q_fire, "q_idle": q_idle, "q_all_idle": q_all_idle}
 
     def load_state_dict(self, state_dict, strict=True):
-        # Legacy checkpoints carry a now-removed angle head; drop those keys so
-        # resume/eval/export from pre-removal checkpoints (rev38, rev32b, ...) work.
-        if any(k.startswith("angle_head.") for k in state_dict):
-            state_dict = {k: v for k, v in state_dict.items()
-                          if not k.startswith("angle_head.")}
         # Input-channel growth (e.g. adding target-value / keepability pairwise channels, or
         # game-phase globals 11-14 on top of an 11-global checkpoint): the affected input Linear
         # gains trailing input columns. Zero-pad the new columns of an older checkpoint so the

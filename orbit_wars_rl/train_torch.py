@@ -346,13 +346,8 @@ def train(args):
         cfg.ppo.clip_eps = args.clip_eps
     if args.entropy_coef_fire is not None:
         cfg.ppo.entropy_coef_fire = args.entropy_coef_fire
-    # --entropy-coef-target is the honest name; --entropy-coef-angle is a deprecated
-    # alias kept so old launch scripts still work (the coef has always weighted the
-    # target head, not the now-vestigial angle head).
     if args.entropy_coef_target is not None:
         cfg.ppo.entropy_coef_target = args.entropy_coef_target
-    elif args.entropy_coef_angle is not None:
-        cfg.ppo.entropy_coef_target = args.entropy_coef_angle
     if args.entropy_coef_ships is not None:
         cfg.ppo.entropy_coef_ships = args.entropy_coef_ships
     if args.max_grad_norm is not None:
@@ -1716,9 +1711,6 @@ if __name__ == "__main__":
     parser.add_argument("--entropy-coef-target", type=float, default=None,
                         help="Override target-head entropy coefficient "
                              "(default: cfg.ppo.entropy_coef_target=0.02)")
-    parser.add_argument("--entropy-coef-angle", type=float, default=None,
-                        help="DEPRECATED alias for --entropy-coef-target "
-                             "(the angle head is vestigial; this coef weights the target head)")
     parser.add_argument("--entropy-coef-ships", type=float, default=None,
                         help="Override ships-head entropy coefficient "
                              "(default: cfg.ppo.entropy_coef_ships=0.01)")
