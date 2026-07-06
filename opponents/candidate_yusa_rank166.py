@@ -4,10 +4,14 @@ Wraps github.com/yusa-bot/Kaggle_Orbit_Wars_public `submission/` — a 7.2M enti
 transformer trained by behavioral cloning of 13 top teams (torch-only inference,
 2p/4p auto-detected). The submission's bare modules (model/features/physics) are
 vendored under the `yusa_il` PACKAGE in opponents/yusa_bundle/ so their generic
-names don't collide with our own model.py/features.py in sys.modules; the 2p/4p
-`.pth` weights live in yusa_il/weights/ (gitignored, ~58MB). Re-exports the
-submission's `agent(obs)` as the kaggle path-agent hook. Same sibling-package
-pattern as opponents/ender_bundle/.
+names don't collide with our own model.py/features.py in sys.modules. Re-exports the
+submission's `agent(obs)` as the kaggle path-agent hook. Same sibling-package pattern
+as opponents/ender_bundle/.
+
+⚠ WEIGHTS ARE GITIGNORED (*.pth, ~58MB). To run this opponent, place the two files in
+opponents/yusa_bundle/yusa_il/weights/ :
+  joint13_d384_best_2pbest.pth   joint13_d384_best_4pbest.pth
+from github.com/yusa-bot/Kaggle_Orbit_Wars_public → submission/weights/.
 """
 import os
 import sys

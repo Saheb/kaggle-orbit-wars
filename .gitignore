@@ -11,6 +11,7 @@ __pycache__/
 
 # Large binaries
 *.pt
+*.pth
 *.pkl
 *.zip
 *.csv
