@@ -861,11 +861,6 @@ def _fmt_conversion(acc):
     medh_w, medh_l = _med(acc["hold_durations_won"]), _med(acc["hold_durations_lost"])
     # median game LENGTH split by outcome: long wins = stall-and-win (attrition), short = decisive snowball.
     medlen_w, medlen_l = _med(acc["game_len_won"]), _med(acc["game_len_lost"])
-    # lost-capture autopsy: WHY held planets fall. out-massed = enemy fleet > our garrison (the
-    # force-concentration gap — planners mass a decisive strike; we hold a thin line everywhere).
-    lmt = sum(acc["loss_mode"]) or 1
-    lm = [x / lmt for x in acc["loss_mode"]]
-    gcap_med, gloss_med, einb_med = _med(acc["loss_garr_cap"]), _med(acc["loss_garr_at"]), _med(acc["loss_enemy_in"])
     # opening (t<50) cap/atk-launch: the whole-game value is PHASE-confounded (easy late-game
     # cleanup captures mask a catastrophic opening). The opening decides expansion → read this.
     # caps_early/atk_early; mild window-edge bias (a t~48 launch capturing at t~55 deflates it).
@@ -924,8 +919,6 @@ def _fmt_conversion(acc):
             f"  retention  peel-rate {lost_rate:.2f} ({acc['lost_caps']}/{c} caps lost)  median-hold {med_hold}st\n"
             f"{rwl}"
             f"{ldepth}"
-            f"  hold-loss  out-massed {lm[1]:.0%}  garr@cap {gcap_med:.0f}→@loss {gloss_med:.0f} vs enemy-inbound {einb_med:.0f}"
-            f"   [⚠ out-massed% SATURATES vs strong play (95-99%) → floor, NOT a gradient; use loss-depth]\n"
             f"  fire-rate  launch_rate {lr:.3f}  fire_frac {ff:.2f}   [ref:Isaiah 0.036 / 0.17]\n"
             f"{wl}"
             f"  ship0 1-ship-probe by phase  {_s0('')}{s0wl}")
@@ -938,77 +931,36 @@ def _fmt_tier_summary(acc):
     gw, gl = acc["games_won"], acc["games_lost"]
     wr = gw / max(gw + gl, 1)
     _med = lambda h: (sorted(h)[len(h) // 2] if h else 0)
-    # T2 — diagnose our wall
-    lmt = sum(acc["loss_mode"]) or 1
-    outmassed = acc["loss_mode"][1] / lmt
-    _dm = acc["dm_ratios_ph"][0] + acc["dm_ratios_ph"][1] + acc["dm_ratios_ph"][2]
-    dm_gap = sum(max(0.0, 1.0 - r) for r in _dm) / max(len(_dm), 1)
-    dm_cross = sum(1 for r in _dm if r >= 1.0) / max(len(_dm), 1)
-    # ships-sent-vs-need (the honest ships/cap replacement — churn-free, floor-relative):
-    #   overkill = mean(ratio | crossed) = mass over the CAPTURE floor on targets we clear; med =
-    #   median send/need. NB the floor is the take-floor, not the hold-floor — a strong agent sends
-    #   margin above it to HOLD, so overkill >1 is NORMAL (Ender ~3.4 @ 100% WR). Waste only if the
-    #   margin doesn't buy retention → read overkill WITH peel-rate (high overkill + high peel = wasted
-    #   excess; ours vs Ajay 6.2 @ peel .68 = pile-and-lose vs Ender 3.4 @ peel .41). gap = under-send.
-    _dm_crossed = [r for r in _dm if r >= 1.0]
-    dm_overkill = (sum(_dm_crossed) / len(_dm_crossed)) if _dm_crossed else 0.0
-    dm_med = _med(_dm)
-    # MARGIN-FREE overkill: same ratio vs the take-AND-hold floor (take-floor + one more reactive
-    # wave), so excess above it is PURE waste (not the legit hold reserve). Pair take (_dm) & hold
-    # (_dmh) per target → the all-in / half-measure / no-show split: half-measure = took but can't
-    # hold (r_take≥1 but r_hold<1) = the fragmentation to push toward all-in-or-skip.
-    _dmh = acc["dm_hold_ratios_ph"][0] + acc["dm_hold_ratios_ph"][1] + acc["dm_hold_ratios_ph"][2]
-    _dmh_crossed = [r for r in _dmh if r >= 1.0]
-    dm_overkill_h = (sum(_dmh_crossed) / len(_dmh_crossed)) if _dmh_crossed else 0.0
-    _decisive = _half = _under = 0
-    for _rt, _rh in zip(_dm, _dmh):
-        if _rh >= 1.0:
-            _decisive += 1
-        elif _rt >= 1.0:
-            _half += 1
-        else:
-            _under += 1
-    _cmt = max(_decisive + _half + _under, 1)
+    # T2 — the wall, OUTCOME-grounded only. The model-based dm family (gap/take-rate/overkill/med,
+    # take+hold/can't-hold/too-few, waste) and out-massed% were CULLED 2026-07: model-based, non-
+    # discriminating in matched play, and take+hold was contradicted by observed retention. Keep
+    # only what is grounded in the actual game outcome and tracks skill. [[project-ender-...]]
+    lostmat = acc["lost_material"]
+    lmed = _med(lostmat) if lostmat else 0
+    wiped = (100 * sum(1 for m in lostmat if m <= 0) / len(lostmat)) if lostmat else 0.0
+    peel = acc["lost_caps"] / max(acc["captures"], 1)                 # of captures, fraction we lose
+    peel_w = acc["lost_caps_won"] / max(acc["captures_won"], 1)       # won-game (elimination-free) read
+    hold_w = _med(acc["hold_durations_won"])
     cap_open_w = acc["caps_early_won"] / max(acc["atk_early_won"], 1)
-    rsh_e = acc["reinf_early"] / max(acc["reinf_early"] + acc["atk_early"], 1)  # opening reinforce/stage share
     p50w = (acc["p50_sum_won"] / acc["p50_n_won"]) if acc["p50_n_won"] else 0.0
+    endp = acc["end_planets"] / max(acc["games"], 1)
     # T3 — degeneracy tripwires (binary; normal = ignore)
     lr = acc["launch_count"] / max(acc["launch_states"], 1)
     ff_w = acc["fire_frac_sum_won"] / max(acc["fire_steps_won"], 1)
     s0 = sum(acc["ship1_ph"]) / max(sum(acc["launches_ph"]), 1)
     medlen_w = _med(acc["game_len_won"])
-    lostmat = acc["lost_material"]
-    lmed = _med(lostmat) if lostmat else 0
-    wiped = (100 * sum(1 for m in lostmat if m <= 0) / len(lostmat)) if lostmat else 0.0
-    _d, _h, _u = 100 * _decisive / _cmt, 100 * _half / _cmt, 100 * _under / _cmt
     bar = "─" * 78
     return (
         f"\n{bar}\n"
         f"⭐ TIERED METRIC SUMMARY  (priority order; values duplicated from above — docs/metrics.md)\n"
         f"{bar}\n"
-        f"  T1 ARBITER   win-rate {wr:.1%} ({gw}/{gw + gl})   ← only signal that sees absolute regression\n"
+        f"  T1 ARBITER   win-rate {wr:.1%} ({gw}/{gw + gl})   ← the only absolute-regression signal\n"
         f"  T2 THE WALL  loss-depth med-material-in-loss {lmed:.0f} · wiped-to-0 {wiped:.0f}%  (graded; want ↑ material)\n"
-        f"               force-to-floor  gap {dm_gap:.2f} / take-rate {dm_cross:.2f} "
-        f"/ overkill {dm_overkill:.2f} / med {dm_med:.2f}  (want gap↓ take-rate↑; overkill=mass/take-floor)\n"
-        f"               ship-sizing  waste {dm_overkill_h:.2f}  ·  of attacks  take+hold {_d:.0f}% "
-        f"/ can't-hold {_h:.0f}% / too-few {_u:.0f}%  (waste = over-pile above take+hold)\n"
-        f"               open<50 cap/atk WON {cap_open_w:.2f}   planets@50 WON {p50w:.0f}\n"
-        f"               out-massed {outmassed:.0%} (⚠ saturates vs strong play — floor, not gradient)   "
-        f"reinf@<50 {rsh_e:.2f}\n"
+        f"               retention  peel-rate WON {peel_w:.2f} (all {peel:.2f}) · median-hold WON {hold_w}st  (want peel↓)\n"
+        f"               expansion  planets@50 WON {p50w:.0f} · end {endp:.1f}   ·   open<50 cap/atk WON {cap_open_w:.2f}\n"
         f"  T3 TRIPWIRE  launch_rate {lr:.3f} (→0 passive)   fire_frac WON {ff_w:.2f} (→1 carpet-bomb)   "
         f"ship0 {s0:.0%} (high = 1-ship collapse)\n"
         f"  colour only  game-len WON {medlen_w}st  (symptom of the root, NOT a gate — don't bribe with speed_coef)\n"
-        f"{bar}\n"
-        f"  WHAT THE WORDS MEAN  (definitions, not this run's values)\n"
-        f"     take-floor    mass to CAPTURE = garrison + production-in-flight + enemy inbound + reactive reinforcement\n"
-        f"     take+hold     take-floor + one more reactive wave = enough to capture AND survive the retake\n"
-        f"     gap / take-rate   mean shortfall below the take-floor / share of attacks that reach it\n"
-        f"     overkill / med    mass ÷ take-floor on attacks that reach it / its median (overkill>1 normal = hold margin)\n"
-        f"     waste         mass ÷ take+hold on attacks that reach it — margin-free over-pile\n"
-        f"     take+hold %   attack brings enough to capture AND survive the modeled retake\n"
-        f"     can't-hold %  enough to capture but NOT the retake — PREDICTED from the floor, not observed (see peel-rate)\n"
-        f"     too-few %     not enough to even capture\n"
-        f"     loss-depth / out-massed   our leftover material in LOST games (0=wiped) / lost planets where enemy-in>garrison (saturates)\n"
         f"{bar}"
     )
 
