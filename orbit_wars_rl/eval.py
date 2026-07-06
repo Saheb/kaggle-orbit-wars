@@ -980,6 +980,30 @@ def _fmt_tier_summary(acc):
     lostmat = acc["lost_material"]
     lmed = _med(lostmat) if lostmat else 0
     wiped = (100 * sum(1 for m in lostmat if m <= 0) / len(lostmat)) if lostmat else 0.0
+    peel = acc["lost_caps"] / max(acc["captures"], 1)               # of captures, fraction we then lose
+    _d, _h, _u = 100 * _decisive / _cmt, 100 * _half / _cmt, 100 * _under / _cmt
+    # ── plain-English reading of the T2 numbers, auto-generated from THIS run ──
+    _sev = ("total wipeouts" if wiped >= 80 else "deep losses" if lmed == 0 else "still contesting at the end")
+    if gl == 0 and gw > 0:
+        _r1 = f"Win rate {wr:.0%} — no losses in this sample."
+    elif gw + gl:
+        _r1 = f"Win rate {wr:.0%}; when we lose it's {_sev} (wiped to nothing {wiped:.0f}% of losses)."
+    else:
+        _r1 = ""
+    _r2 = (f"Of the planets we attack: {_d:.0f}% we hit hard enough to TAKE AND HOLD, "
+           f"{_h:.0f}% we take but can't hold (peeled back off us), {_u:.0f}% we send too few to even take.")
+    if _u >= 35 and dm_overkill_h >= 3:
+        _r3 = (f"Sizing is all-or-nothing the WRONG way — {_u:.0f}% too few AND {dm_overkill_h:.1f}x "
+               f"over-piled on the rest; almost nothing is right-sized.")
+    elif _u >= 40:
+        _r3 = f"Biggest leak: {_u:.0f}% too few — we often don't commit enough to capture at all."
+    elif dm_overkill_h >= 3 and peel >= 0.5:
+        _r3 = (f"Biggest leak: on the attacks we commit to we over-pile {dm_overkill_h:.1f}x the hold "
+               f"floor yet still lose {peel:.0%} of captures — the extra mass isn't turning into holding.")
+    elif _h >= 15:
+        _r3 = f"Biggest leak: {_h:.0f}% take-but-can't-hold — fragmented; push toward all-in or skip."
+    else:
+        _r3 = "Sizing looks balanced — the wall is elsewhere (retention / expansion)."
     bar = "─" * 78
     return (
         f"\n{bar}\n"
@@ -987,17 +1011,21 @@ def _fmt_tier_summary(acc):
         f"{bar}\n"
         f"  T1 ARBITER   win-rate {wr:.1%} ({gw}/{gw + gl})   ← only signal that sees absolute regression\n"
         f"  T2 THE WALL  loss-depth med-material-in-loss {lmed:.0f} · wiped-to-0 {wiped:.0f}%  (graded; want ↑ material)\n"
-        f"               concentration  decisive-mass gap {dm_gap:.2f} / cross {dm_cross:.2f} "
-        f"/ overkill {dm_overkill:.2f} / med {dm_med:.2f}  (gap↓ cross↑; overkill=mass/take-floor)\n"
-        f"               ship-sizing  waste(overkill vs take+hold) {dm_overkill_h:.2f}  ·  commit "
-        f"decisive {100*_decisive/_cmt:.0f}% / half-measure {100*_half/_cmt:.0f}% / no-show {100*_under/_cmt:.0f}%"
-        f"  (half = took-can't-hold = fragmentation; push → all-in or skip)\n"
+        f"               force-to-floor  gap {dm_gap:.2f} / take-rate {dm_cross:.2f} "
+        f"/ overkill {dm_overkill:.2f} / med {dm_med:.2f}  (want gap↓ take-rate↑; overkill=mass/take-floor)\n"
+        f"               ship-sizing  waste {dm_overkill_h:.2f}  ·  of attacks  take+hold {_d:.0f}% "
+        f"/ can't-hold {_h:.0f}% / too-few {_u:.0f}%  (waste = over-pile above take+hold)\n"
         f"               open<50 cap/atk WON {cap_open_w:.2f}   planets@50 WON {p50w:.0f}\n"
         f"               out-massed {outmassed:.0%} (⚠ saturates vs strong play — floor, not gradient)   "
         f"reinf@<50 {rsh_e:.2f}\n"
         f"  T3 TRIPWIRE  launch_rate {lr:.3f} (→0 passive)   fire_frac WON {ff_w:.2f} (→1 carpet-bomb)   "
         f"ship0 {s0:.0%} (high = 1-ship collapse)\n"
         f"  colour only  game-len WON {medlen_w}st  (symptom of the root, NOT a gate — don't bribe with speed_coef)\n"
+        f"{bar}\n"
+        f"  IN PLAIN ENGLISH\n"
+        + (f"     {_r1}\n" if _r1 else "")
+        + f"     {_r2}\n"
+        f"     {_r3}\n"
         f"{bar}"
     )
 
