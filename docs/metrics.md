@@ -191,6 +191,7 @@ Reproduce the reference column: `CUDA_VISIBLE_DEVICES="" python orbit_wars_rl/en
 | win-rate | 40.2% | **0.0%** | 100% |
 | loss-depth · wiped-to-0 | 0 · 97% | 0 · **100%** | — |
 | dm gap / cross | 0.17 / 0.55 | **0.37 / 0.19** | 0.10 / 0.69 |
+| dm overkill / med (32g re-run) | 6.16 / 1.46 | 2.42 / **0.65** | 3.42 / 1.53 |
 | cap/atk-launch (open<50) | 0.65 (0.58) | 0.64 (0.59) | 1.03 (0.75) |
 | ships/cap | 117 | 65\* | 60 |
 | launch_rate | 0.121 | 0.052 | 0.059 |
@@ -206,8 +207,19 @@ so per-launch conversion is NOT where strong play breaks us. **Decisive-mass cro
 Ender): we can't assemble mass to the capture floor, get out-massed 96-inbound vs 47-garrison, lose
 ~every capture (peel 0.99), and are wiped to 0 material 100% of games. Note `cap/atk-launch` counts
 launch *events* and ignores ship count — on the ship axis we overkill (ships/cap 117 vs 60) AND still
-can't hold. It's spray + overkill, not efficiency. **Track: WR-vs-Ender, loss-depth/wiped-to-0%,
-dm-cross (→0.69), ships/cap (117→60). Ignore out-massed%.**
+can't hold. It's spray + overkill, not efficiency.
+
+**Ship-sizing (dm overkill/med — the ships/cap replacement).** ⚠ `overkill → 1` is NOT the target: Ender
+(100% WR) runs `overkill 3.42 / med 1.53` — a strong agent sends margin *above* the take-floor to HOLD.
+The floor is the take-floor, not the hold-floor, so `overkill > 1` is normal; it's waste only when the
+margin doesn't buy retention. **Read `overkill` WITH `peel-rate`:** ours vs Ajay `6.16 @ peel 0.68` =
+pile-and-**lose** (excess wasted); Ender `3.42 @ peel 0.41` = pile-and-**hold** (productive margin). `med`
+does not discriminate between winners (1.46 ≈ 1.53); its only signal is `med < 1` = can't reach the floor
+(undercommit) — our `0.65` vs Ender. Clean sizing read = **`cross` (bring enough) + `overkill × peel-rate`
+(excess productive or wasted).**
+
+**Track: WR-vs-Ender, loss-depth/wiped-to-0%, dm-cross (→0.69), dm-overkill×peel-rate. Ignore out-massed%,
+raw ships/cap, and med-as-headline.**
 
 ---
 
