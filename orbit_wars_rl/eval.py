@@ -373,11 +373,6 @@ _LAUNCH_WINDOW = 50
 _MID_WINDOW = 100      # mid-game cap/atk window = [_LAUNCH_WINDOW, _MID_WINDOW) = steps 50-100
 _TRIAGE_LOSS_WINDOWS = (10, 20, 30)
 _SAFE_REINF_LOOKAHEAD = 30
-# Isaiah (#1 player) hoard reference at the same milestones. Contested phase (16-50)
-# is the clean read: ~half the army deployed, ~11-22 ships/planet. The @100 jump
-# (garr 0.87, 60 ships/planet) is won-game accumulation, not hoarding.
-_ISAIAH_HOARD_REF = "garr_frac 0.50/0.51/0.54/0.87  ships/planet 11/15/22/60"
-
 # reinforce-by-empire-size bins (owned planets AT LAUNCH TIME). The aggregate reinf_share
 # is opponent/success-confounded (it co-moves with empire size — phase2 §6); bucketing by
 # empire size makes it directly comparable to the top-player ramp (phase2 §2 / metrics.md):
@@ -387,8 +382,6 @@ _ISAIAH_HOARD_REF = "garr_frac 0.50/0.51/0.54/0.87  ships/planet 11/15/22/60"
 # winner ramp (89 snowball replays) is @1:0.007 @2:0.10 @3:0.19 — so @3 ≈ 2× a combined 2-3.
 _REINF_BINS = [(1, 1, "1"), (2, 2, "2"), (3, 3, "3"), (4, 6, "4-6"),
                (7, 9, "7-9"), (10, 12, "10-12"), (13, 10**9, "13+")]
-_REINF_RAMP_REF = "@1:0.01 @2:0.10 @3:0.19 @9-12:0.30 @13+:0.34-0.61"
-_REINF_STEP_REF = "<50:0.29 · 50-100:0.41 · >100:0.31"   # snowball winners; peaks mid-game
 _ATK_FAIL_LABELS = ("single", "wrong-src", "aggregate", "unafford", "sufficient", "redundant")
 
 
@@ -1371,6 +1364,9 @@ def new_conversion_acc():
            "glen_sum": 0, "games": 0, "atk_early": 0, "caps_early": 0, "redundant_early": 0, "underkill_early": 0,
            "lost_caps": 0, "hold_durations": [],
            "loss_mode": [0, 0, 0, 0], "loss_garr_cap": [], "loss_garr_at": [], "loss_enemy_in": [],
+           # elimination-depth: our final own-material in LOST games (0 = total wipeout). A GRADED
+           # loss signal (out-massed% saturates vs strong play; this doesn't). See docs/metrics.md.
+           "lost_material": [],
            "launch_states": 0, "launch_count": 0, "fire_steps": 0, "fire_frac_sum": 0.0,
            # fire-rate split by game outcome — fire_frac inflates on losses (cornered to few
            # planets → firing from "many of few"), so the won-game value is the honest spray read.
@@ -1454,7 +1450,9 @@ def new_conversion_acc():
     return acc
 
 
-def add_conversion(acc, conv, won=None):
+def add_conversion(acc, conv, won=None, material=None):
+    if won is False and material is not None:
+        acc["lost_material"].append(material)  # elimination-depth (graded loss signal)
     for k in ("captures", "attack_launches", "reinforce_launches", "attack_ships",
               "end_planets", "redundant", "underkill", "atk_early", "caps_early", "redundant_early",
               "underkill_early", "lost_caps", "launch_states", "launch_count",
@@ -1573,53 +1571,10 @@ def _fmt_conversion(acc):
     (reinforce can't capture). Reference = Isaiah (#1 player)."""
     n = max(acc["games"], 1)
     c, al, rl = acc["captures"], acc["attack_launches"], acc["reinforce_launches"]
-    # reinforce SHARE by step-window (own-target launches ÷ all launches in that window) — shows
-    # WHEN reinforcement kicks in. late = whole − early − mid (counts derived from totals).
-    re_e, re_m = acc["reinf_early"], acc["reinf_mid"]
-    re_l = rl - re_e - re_m
-    at_e, at_m = acc["atk_early"], acc["atk_mid"]
-    at_l = al - at_e - at_m
-    rsh_e = re_e / max(re_e + at_e, 1)
-    rsh_m = re_m / max(re_m + at_m, 1)
-    rsh_l = re_l / max(re_l + at_l, 1)
-    rdf = 100 * acc["reinf_fwd"] / max(acc["reinf_dirn"], 1)   # forward-staging % of reinforces
-    rdr = 100 * acc["reinf_rear"] / max(acc["reinf_dirn"], 1)  # rear-defense % (forward-only blocks these)
-    _rl = max(acc["reinforce_launches"], 1)                    # reinforce-ping-pong rate (of reinforces)
-    rr1, rr2, rr3 = (acc["reinf_recip"][0] / _rl, acc["reinf_recip"][1] / _rl, acc["reinf_recip"][2] / _rl)
-    _f3 = lambda num, den: tuple(num[i] / max(den[i], 1) for i in range(3))   # phase/size-safe fraction
-    fwde = _f3(acc["reinf_fwde_ph"], acc["reinf_n_ph"])    # forward-to-nearest-enemy by phase
-    cout = _f3(acc["reinf_cout_ph"], acc["reinf_n_ph"])    # centroid-outward by phase
-    ftop3 = _f3(acc["reinf_ftop3_ph"], acc["reinf_n_ph"])  # target-frontline-top3 by phase
-    fwsz = _f3(acc["reinf_fwde_sz"], acc["reinf_n_sz"])    # forward-to-enemy by ship size
-    rc3p = acc["reinf_recip3_ph"]; rnp = acc["reinf_n_ph"]
     pl = lambda ms: (f"{acc[f'p{ms}_sum']/acc[f'p{ms}_n']:.0f}" if acc[f"p{ms}_n"] else "—")
     plw = lambda ms: (f"{acc[f'p{ms}_sum_won']/acc[f'p{ms}_n_won']:.0f}" if acc[f"p{ms}_n_won"] else "—")
     pll = lambda ms: (f"{acc[f'p{ms}_sum_lost']/acc[f'p{ms}_n_lost']:.0f}" if acc[f"p{ms}_n_lost"] else "—")
-    # Hoard read at fixed milestones (not episode-averaged → no end-step skew):
-    # garr_frac = parked / (parked + in-flight) ; ships/planet = parked / owned planets.
-    gf = lambda ms: (f"{acc[f'g{ms}_sum']/(acc[f'g{ms}_sum']+acc[f'if{ms}_sum']):.2f}"
-                     if (acc[f'g{ms}_sum'] + acc[f'if{ms}_sum']) > 0 else "—")
-    spp = lambda ms: (f"{acc[f'g{ms}_sum']/acc[f'p{ms}_sum']:.0f}" if acc[f"p{ms}_sum"] else "—")
-    # reinforce ramp by empire size: own-target share among launches made at that size,
-    # with launch count in parens (low-count bins are noisy). Compare to the top-player ramp.
-    def rb(i):
-        r, a = acc["reinf_bin"][i], acc["atk_bin"][i]
-        return f"{r/(r+a):.2f}({r+a})" if (r + a) else f"—(0)"
-    ramp = "  ".join(f"{_REINF_BINS[i][2]}:{rb(i)}" for i in range(len(_REINF_BINS)))
-    # churn = gross captures per planet held at end (capture-then-lose-then-recapture). ⚠️
-    # LENGTH-CONFOUNDED: more steps → more gross re-captures, so a 500-step grind reads high
-    # even when holding well (Isaiah 7.1 > Jake 3.5 purely on game length). Always read with
-    # game length; `churn/100st` normalizes it (caps/end per 100 steps). The clean hold signal
-    # is the planets@N trajectory turning over (peak then decline), not churn alone.
-    # Launch waste, both vs cap_cost_at_arrival (== the roi-deflation's own condition) and
-    # OPENING-windowed (<50) as the headline (whole-game inflated by benign end-game surplus in
-    # long won games; `(WG x)` kept for context). redundant = OVERKILL (target already covered
-    # before the launch); underkill = launch that still can't capture (e.g. 18 sent at a 23-ship
-    # neutral). Top-player opening redundant ref ~0.12.
-    glen = acc["glen_sum"] / n
-    churn = c / max(acc["end_planets"], 1)
-    churn_n = churn / max(glen / 100.0, 1e-6)
-    # Retention (denominator-free, unlike churn): of planets we CAPTURE, the fraction we then lose,
+    # Retention (denominator-free): of planets we CAPTURE, the fraction we then lose,
     # and the median steps we held a lost planet (short = peeled fast). lost-cap rate→1 = pure
     # capture-and-lose turnover (the "can't hold the midgame lead" disease); hold→game length = sticky.
     hd = acc["hold_durations"]
@@ -1638,10 +1593,6 @@ def _fmt_conversion(acc):
     lmt = sum(acc["loss_mode"]) or 1
     lm = [x / lmt for x in acc["loss_mode"]]
     gcap_med, gloss_med, einb_med = _med(acc["loss_garr_cap"]), _med(acc["loss_garr_at"]), _med(acc["loss_enemy_in"])
-    redf = acc["redundant_early"] / max(acc["atk_early"], 1)
-    redf_wg = acc["redundant"] / max(al, 1)
-    undf = acc["underkill_early"] / max(acc["atk_early"], 1)
-    undf_wg = acc["underkill"] / max(al, 1)
     # opening (t<50) cap/atk-launch: the whole-game value is PHASE-confounded (easy late-game
     # cleanup captures mask a catastrophic opening). The opening decides expansion → read this.
     # caps_early/atk_early; mild window-edge bias (a t~48 launch capturing at t~55 deflates it).
@@ -1681,231 +1632,30 @@ def _fmt_conversion(acc):
             (f"{nm} {100*s1[i]/lp[i]:.0f}%(mean{ss[i]/lp[i]:.0f},n{lp[i]})" if lp[i] else f"{nm} —(n0)")
             for i, nm in enumerate(("early<50", "mid50-100", "late>=100")))
     s0wl = (f"\n     WON  {_s0('_won')}\n     LOST {_s0('_lost')}" if (gw + gl) > 0 else "")
-    def _nf(suf):
-        n, nr, rs, dm = (acc[f"atkfar_n_ph{suf}"], acc[f"atkfar_nearest_ph{suf}"],
-                         acc[f"atkfar_ratio_sum_ph{suf}"], acc[f"atkdom_ph{suf}"])
-        return "  ".join(
-            (f"{nm} nearest {100*nr[i]/n[i]:.0f}% ratio {rs[i]/n[i]:.2f} dom {100*dm[i]/n[i]:.0f}%(n{n[i]})"
-             if n[i] else f"{nm} —(n0)")
-            for i, nm in enumerate(("early<50", "mid50-100", "late>=100")))
-    nfwl = (f"\n     WON  {_nf('_won')}\n     LOST {_nf('_lost')}" if (gw + gl) > 0 else "")
-    def _hr(suf):
-        n, bst, t3 = acc[f"atkh_n_ph{suf}"], acc[f"atkh_best_ph{suf}"], acc[f"atkh_top3_ph{suf}"]
-        return "  ".join(
-            (f"{nm} best {100*bst[i]/n[i]:.0f}% top3 {100*t3[i]/n[i]:.0f}%(n{n[i]})" if n[i] else f"{nm} —(n0)")
-            for i, nm in enumerate(("early<50", "mid50-100", "late>=100")))
-    hrwl = (f"\n     WON  {_hr('_won')}\n     LOST {_hr('_lost')}" if (gw + gl) > 0 else "")
-    def _af(suf):
-        an = acc[f"atk_n_ph{suf}"]
-        fn = acc[f"atkfail_n_ph{suf}"]
-        buckets = acc[f"atkfail_bucket_ph{suf}"]
-        names = ("single", "wsrc", "agg", "unaff", "suff", "red")
-        out = []
-        for i, nm in enumerate(("early<50", "mid50-100", "late>=100")):
-            if an[i] == 0:
-                out.append(f"{nm} —(n0)")
-                continue
-            if fn[i] == 0:
-                out.append(f"{nm} fail 0%(n{an[i]})")
-                continue
-            mix = "/".join(f"{names[j]} {100*buckets[j][i]/fn[i]:.0f}%" for j in range(len(names)))
-            out.append(f"{nm} fail {100*fn[i]/an[i]:.0f}%({fn[i]}/{an[i]}) [{mix}]")
-        return "  ".join(out)
-    afwl = (f"\n     WON  {_af('_won')}\n     LOST {_af('_lost')}" if (gw + gl) > 0 else "")
-    def _agg2(suf):
-        fn = acc[f"atkfail_n_ph{suf}"]
-        raw = acc[f"atkfail_bucket_ph{suf}"][_ATK_FAIL_LABELS.index("aggregate")]
-        reach = acc[f"atkagg_reach_ph{suf}"]
-        out = []
-        for i, nm in enumerate(("early<50", "mid50-100", "late>=100")):
-            if raw[i] == 0:
-                out.append(f"{nm} —(raw0)")
-                continue
-            out.append(
-                f"{nm} {100*reach[i]/raw[i]:.0f}% raw-agg ({reach[i]}/{raw[i]}), "
-                f"{100*reach[i]/max(fn[i],1):.0f}% failures"
-            )
-        return "  ".join(out)
-    agg2wl = (f"\n     WON  {_agg2('_won')}\n     LOST {_agg2('_lost')}" if (gw + gl) > 0 else "")
-    # decisive-mass GAP (force concentration toward producer_v2's capture floor; same floor as the
-    # training reward). Per phase: gap = mean max(0,1-mass/floor) (DOWN=concentrating), cross =
-    # mean(mass>=floor) (UP), p50 = median ratio. overkill = mean ratio on crossed (catch 3x dumb-
-    # overkill); near-miss = fraction in [0.75,1) (approaching but not crossing). target-steps/game
-    # = duration-weighted target observations per game (a long-ETA attack counts each step it is
-    # inflight — a state-time signal, NOT unique targets/launches). project_force_concentration_wall.
-    # hold-floor (DEFENSIVE): of threatened own planets, what fraction are under-defended (hold
-    # ratio < 1), split by phase and by age-after-capture. High under% at 0-5 = we lose captures
-    # immediately (can't route defensive mass in time → action-grammar/timing); high at 16+ =
-    # later logistics/churn. The defensive mirror of the decisive-mass attack gap.
-    def _hold_stats(rs):
-        if not rs:
-            return "—/— (n0)"
-        under = sum(1 for r in rs if r < 1.0) / len(rs)
-        p50 = sorted(rs)[len(rs) // 2]
-        return f"{under:.0%}/{p50:.2f} (n{len(rs)})"
-    hold_line = (
-        f"  hold-floor (garr+friendly_in)/(enemy_in+β·reach+1) β={_DM_BETA_EVAL:.1f}, threatened own [under%(ratio<1)/p50]\n"
-        f"     by phase <50/50-100/>=100  "
-        + "  ".join(_hold_stats(acc["hold_ph"][i]) for i in range(3)) + "\n"
-        f"     by age-after-capture 0-5/6-15/16+  "
-        + "  ".join(_hold_stats(acc["hold_age"][i]) for i in range(3))
-        + "   [under% high at 0-5 = fail immediately (route defense too slow); at 16+ = logistics/churn]\n")
-    # reinforce TRIAGE / save-efficiency: are we reinforcing the WRONG planets (pouring mass into
-    # hopeless/eventually-lost ones) instead of recycling it? Mirrors producer_v2 (safe_drain + roi).
-    _tr = acc["triage"]
-    def _share(part, whole):
-        return part / whole if whole else 0.0
-    _cs = _tr["class_ships"]; _cst = sum(_cs) or 1.0
-    _lbc = _tr["lost_by_class"]; _lbt = sum(_lbc) or 1.0
-    _lbc_cap = _tr["lost_by_class_cap_nt"]; _lbc_capt = sum(_lbc_cap) or 1.0
-    _hl = _tr["hopeless_reinf"] + _tr["hopeless_aband"]
-    _lw = _tr["lost_within"]; _reinf_mass = sum(_cs) or 1.0
-    _su = _tr["safe_util"]; _sut = sum(_su) or 1.0
-    _born = _tr["cap_born"]; _born_lost = _tr["cap_born_lost_nt"]
-    def _hopeless_share(suf):                       # reinforce mass → hopeless targets, won/lost/overall
-        cs = _tr[f"class_ships_{suf}"] if suf else _cs
-        return _share(cs[3], sum(cs) or 1.0)
-    def _tolost_share(suf):                         # reinforce mass on planets we then LOST
-        tl = _tr[f"to_lost_{suf}"] if suf else _tr["to_lost"]
-        ts = _tr[f"to_saved_{suf}"] if suf else _tr["to_saved"]
-        return _share(tl, (tl + ts) or 1.0)
-    triage_line = (
-        f"  reinforce-triage  ships→ safe {_share(_cs[0],_cst):.0%} cheap-save {_share(_cs[1],_cst):.0%} "
-        f"exp-save {_share(_cs[2],_cst):.0%} HOPELESS {_share(_cs[3],_cst):.0%}  (β={_DM_BETA_EVAL:.1f})\n"
-        f"     reinforce mass on LOST planets {_tolost_share(''):.0%} (to-saved {1-_tolost_share(''):.0%})  ·  "
-        f"of LOST planets: cheap-save-MISSED {_share(_lbc[1],_lbt):.0%} hopeless(ok-to-drop) {_share(_lbc[3],_lbt):.0%}\n"
-        f"     captured-only nonterminal LOST: cheap-save-MISSED {_share(_lbc_cap[1],_lbc_capt):.0%} "
-        f"hopeless(ok-to-drop) {_share(_lbc_cap[3],_lbc_capt):.0%} (n{sum(_lbc_cap)})\n"
-        f"     hopeless-loss events: reinforced {_share(_tr['hopeless_reinf'],_hl or 1):.0%} abandoned {_share(_tr['hopeless_aband'],_hl or 1):.0%} (n{_hl}); "
-        f"ship-waste {_tr['hopeless_reinf_ships']:.0f} ({_share(_tr['hopeless_reinf_ships'], _tr['to_lost'] or 1.0):.0%} of to-lost mass)\n"
-        f"     lost≤{_TRIAGE_LOSS_WINDOWS[0]}/{_TRIAGE_LOSS_WINDOWS[1]}/{_TRIAGE_LOSS_WINDOWS[2]}st after reinforce "
-        f"{_share(_lw[0],_reinf_mass):.0%}/{_share(_lw[1],_reinf_mass):.0%}/{_share(_lw[2],_reinf_mass):.0%} of reinforce mass  ·  "
-        f"safe-reinf≤{_SAFE_REINF_LOOKAHEAD} utility attack/frontline/idle "
-        f"{_share(_su[0],_sut):.0%}/{_share(_su[1],_sut):.0%}/{_share(_su[2],_sut):.0%}\n"
-        f"     capture-born class safe/cheap/exp/hopeless "
-        f"{_share(_born[0],sum(_born) or 1):.0%}/{_share(_born[1],sum(_born) or 1):.0%}/"
-        f"{_share(_born[2],sum(_born) or 1):.0%}/{_share(_born[3],sum(_born) or 1):.0%}; "
-        f"nonterminal lost-rate by birth "
-        f"{_share(_born_lost[0],_born[0] or 1):.0%}/{_share(_born_lost[1],_born[1] or 1):.0%}/"
-        f"{_share(_born_lost[2],_born[2] or 1):.0%}/{_share(_born_lost[3],_born[3] or 1):.0%}\n"
-        f"     "
-        f"WON/LOST hopeless-reinf-share {_hopeless_share('won'):.0%}/{_hopeless_share('lost'):.0%}  to-lost {_tolost_share('won'):.0%}/{_tolost_share('lost'):.0%}\n"
-        f"   [born-hopeless high = capture quality/follow-up issue; safe-idle high = staging/churn, not useful defense]\n")
-    # outmassed/WR conditioned on opening expansion (planets@32 bucket). The verdict is computed
-    # from THIS panel (>=6 vs <=4), not asserted — if >=6 has materially lower out-massed / higher
-    # WR, opening expansion looks upstream; if not, the wall is downstream (defensive/tactical).
-    def _om32_vals(b):
-        bk = acc["om32"][b]
-        g = bk["games"]
-        if g == 0:
-            return None
-        tot_lm = sum(bk["lm"])
-        return (bk["lm"][1] / tot_lm if tot_lm else 0.0, bk["wins"] / g, g)
-    def _om32(b):
-        v = _om32_vals(b)
-        return f"{b}: —(n0)" if v is None else f"{b}: outmassed {v[0]:.0%} WR {v[1]:.0%} (n{v[2]})"
-    _lo, _hi = _om32_vals("<=4"), _om32_vals(">=6")
-    if _lo is None or _hi is None or _lo[2] < 15 or _hi[2] < 15:
-        _verdict = "low-n in a bucket → inconclusive"
-    else:
-        d_om = _lo[0] - _hi[0]            # +ve = >=6 is LESS out-massed (expansion helps)
-        d_wr = _hi[1] - _lo[1]            # +ve = >=6 wins MORE
-        if d_om >= 0.04 or d_wr >= 0.05:
-            _verdict = (f">=6 better (outmassed {d_om:+.0%}, WR {d_wr:+.0%} vs <=4) "
-                        "→ opening expansion looks UPSTREAM")
-        else:
-            _verdict = (f">=6 ~ <=4 (outmassed {d_om:+.0%}, WR {d_wr:+.0%}) "
-                        "→ opening expansion NOT the lever; wall is downstream")
-    om32_line = ("  outmassed by planets@32  "
-                 + "  ".join(_om32(b) for b in ("<=4", "5", ">=6"))
-                 + f"   [{_verdict}]\n")
-    _dmp = acc["dm_ratios_ph"]
-    _dm_all = _dmp[0] + _dmp[1] + _dmp[2]
-    def _dm_ph(rs):
-        if not rs:
-            return "—/—/—"
-        gap = sum(max(0.0, 1.0 - r) for r in rs) / len(rs)
-        cross = sum(1 for r in rs if r >= 1.0) / len(rs)
-        return f"{gap:.2f}/{cross:.2f}/{sorted(rs)[len(rs)//2]:.2f}"
-    _cross_all = [r for r in _dm_all if r >= 1.0]
-    dm_gap = sum(max(0.0, 1.0 - r) for r in _dm_all) / max(len(_dm_all), 1)
-    dm_cross = len(_cross_all) / max(len(_dm_all), 1)
-    dm_over = sum(_cross_all) / max(len(_cross_all), 1) if _cross_all else 0.0
-    dm_nm = sum(1 for r in _dm_all if 0.75 <= r < 1.0) / max(len(_dm_all), 1)
-    dm_tpg = len(_dm_all) / n
-    dm_line = (f"  decisive-mass  gap {dm_gap:.2f}  cross {dm_cross:.2f}  overkill {dm_over:.2f}  "
-               f"near-miss {dm_nm:.2f}  target-steps/game {dm_tpg:.1f}  (beta {_DM_BETA_EVAL:.1f})\n"
-               f"     by phase <50/50-100/>=100 (gap/cross/p50)  "
-               f"{_dm_ph(_dmp[0])}  {_dm_ph(_dmp[1])}  {_dm_ph(_dmp[2])}"
-               f"   [enemy-target only; effectively the CONTESTED bucket. gap DOWN + cross UP = assembling to the capture floor]\n")
-    dm_contested_line = (
-        f"  decisive-mass CONTESTED  gap {dm_gap:.2f}  cross {dm_cross:.2f}  overkill {dm_over:.2f}  "
-        f"near-miss {dm_nm:.2f}  target-steps/game {dm_tpg:.1f}   (enemy targets only; same floor as decmass reward)\n"
-        f"     by phase <50/50-100/>=100 (gap/cross/p50)  "
-        f"{_dm_ph(_dmp[0])}  {_dm_ph(_dmp[1])}  {_dm_ph(_dmp[2])}"
-        f"   [this is the wall-facing bucket; compare against NEUTRAL to separate land-grab from contested conversion]\n"
-    )
-    _dmn = acc["dm_neutral_ratios_ph"]
-    _dmn_all = _dmn[0] + _dmn[1] + _dmn[2]
-    dmn_gap = sum(max(0.0, 1.0 - r) for r in _dmn_all) / max(len(_dmn_all), 1)
-    dmn_cross = sum(1 for r in _dmn_all if r >= 1.0) / max(len(_dmn_all), 1)
-    dmn_tpg = len(_dmn_all) / n
-    dm_neutral_line = (f"  decisive-mass NEUTRAL  gap {dmn_gap:.2f}  cross {dmn_cross:.2f}  "
-                       f"target-steps/game {dmn_tpg:.1f}   (floor = static garrison; the opening land-grab)\n"
-                       f"     by phase <50/50-100/>=100 (gap/cross/p50)  "
-                       f"{_dm_ph(_dmn[0])}  {_dm_ph(_dmn[1])}  {_dm_ph(_dmn[2])}"
-                       f"   [cross = sent enough to TAKE the neutral; low <50 cross = undercommit in the land-grab]\n")
-    failed_attack_line = (
-        f"  failed-attack decomposition  {_af('')}{afwl}\n"
-        f"     [single=chosen source had enough but undersent; wsrc=another source had enough; "
-        f"agg=needed multiple sources; unaff=owned mass below floor; suff=sent enough but still failed; "
-        f"red=already covered before launch]\n"
-        f"  failed-attack agg2 reachable-drainable  {_agg2('')}{agg2wl}\n"
-        f"     [agg2 narrows raw agg: drainable owned-source spare that can arrive by attack eta+10; "
-        f"still an estimate, but closer to the AR-actionable coordination ceiling]\n")
+    # ── Trusted core only (aggressive prune 2026-07-06; git history has the full dump). ──
+    # Cut: the force-concentration-wall microscopy (decisive-mass, hold-floor, triage, om32,
+    # failed-attack), the reinf-* deep-dives, hoard-vs-Isaiah, near-vs-far, launch-waste
+    # (self-flagged non-discriminating) — all elaborations of proxies that saturate vs strong
+    # play / proved gameable (decmass). out-massed DEMOTED to one annotated floor number.
+    # Elimination-depth added (graded loss signal). See docs/metrics.md + Ender calibration.
+    lostmat = acc["lost_material"]
+    ldepth = (f"  loss-depth  median own-material in LOST games {_med(lostmat):.0f} "
+              f"(0 = total wipeout)  ·  wiped-to-0 {100*sum(1 for m in lostmat if m<=0)/len(lostmat):.0f}%\n"
+              if lostmat else "")
     return (f"Conversion: caps/game {c/n:.1f}  atk-launch/game {al/n:.1f}  "
-            f"cap/atk-launch {c/max(al,1):.3f} (open<50 {cap_open:.3f}  mid50-100 {cap_mid:.3f})  ships/cap {acc['attack_ships']/max(c,1):.0f}  "
-            f"reinf_share {rl/max(al+rl,1):.2f}\n"
-            f"  planets@16/32/50/100 {pl(16)}/{pl(32)}/{pl(50)}/{pl(100)}  end {acc['end_planets']/n:.1f}"
-            f"   churn {churn:.2f} ({churn_n:.2f}/100st, mean-len {glen:.0f})\n"
-            f"  game-len  median WON {medlen_w}st ({acc['games_won']}g)  ·  LOST {medlen_l}st ({acc['games_lost']}g)"
-            f"   [long WON = stall-and-win/attrition; short = decisive snowball]\n"
+            f"cap/atk-launch {c/max(al,1):.3f} (open<50 {cap_open:.3f}  mid50-100 {cap_mid:.3f})  "
+            f"ships/cap {acc['attack_ships']/max(c,1):.0f}  reinf_share {rl/max(al+rl,1):.2f}\n"
+            f"  planets@16/32/50/100 {pl(16)}/{pl(32)}/{pl(50)}/{pl(100)}  end {acc['end_planets']/n:.1f}\n"
+            f"  game-len  median WON {medlen_w}st ({acc['games_won']}g)  ·  LOST {medlen_l}st ({acc['games_lost']}g)\n"
             f"{pwl}"
-            f"\n  retention  peel-rate {lost_rate:.2f} ({acc['lost_caps']}/{c} caps lost)  median-hold {med_hold}st\n"
+            f"  retention  peel-rate {lost_rate:.2f} ({acc['lost_caps']}/{c} caps lost)  median-hold {med_hold}st\n"
             f"{rwl}"
-            f"  hold-loss  out-massed {lm[1]:.0%} · abandoned {lm[0]:.0%} · too-late {lm[2]:.0%} · other {lm[3]:.0%}"
-            f"   garr@cap {gcap_med:.0f}→@loss {gloss_med:.0f} vs enemy-inbound {einb_med:.0f}"
-            f"   [out-massed = enemy fleet > our garrison = force-concentration gap]\n"
-            f"{hold_line}"
-            f"{triage_line}"
-            f"{om32_line}"
-            f"{dm_line}"
-            f"{dm_contested_line}"
-            f"{dm_neutral_line}"
-            f"{failed_attack_line}"
-            f"  launch-waste<50  redundant {redf:.2f} (WG {redf_wg:.2f})  underkill {undf:.2f} (WG {undf_wg:.2f})"
-            f"   [⚠ underkill NON-discriminating: winners also ~0.40. THE signal = open<50 cap/atk above]\n"
-            f"   [ref:winner  cap/atk whole 0.53 · open<50 0.51 · mid50-100 0.47 · planets 2/6/9/10 · reinf 0.30]\n"
+            f"{ldepth}"
+            f"  hold-loss  out-massed {lm[1]:.0%}  garr@cap {gcap_med:.0f}→@loss {gloss_med:.0f} vs enemy-inbound {einb_med:.0f}"
+            f"   [⚠ out-massed% SATURATES vs strong play (95-99%) → floor, NOT a gradient; use loss-depth]\n"
             f"  fire-rate  launch_rate {lr:.3f}  fire_frac {ff:.2f}   [ref:Isaiah 0.036 / 0.17]\n"
             f"{wl}"
-            f"  hoard  garr_frac@ {gf(16)}/{gf(32)}/{gf(50)}/{gf(100)}  "
-            f"ships/planet@ {spp(16)}/{spp(32)}/{spp(50)}/{spp(100)}"
-            f"   [ref:Isaiah {_ISAIAH_HOARD_REF}]\n"
-            f"  reinf by empire size  {ramp}   [ref:ramp {_REINF_RAMP_REF}]\n"
-            f"  reinf by step  <50:{rsh_e:.2f}  50-100:{rsh_m:.2f}  >100:{rsh_l:.2f}   [ref:winner {_REINF_STEP_REF}]\n"
-            f"  reinf direction  fwd {rdf:.0f}%  rear {rdr:.0f}%  (n={acc['reinf_dirn']})   [ref:winner fwd ~57% · rear ~26%]\n"
-            f"  reinf ping-pong  recip<=1/2/3st {rr1:.2f}/{rr2:.2f}/{rr3:.2f} of {acc['reinforce_launches']} reinf "
-            f"({acc['reinf_recip'][2]} within 3st; by phase {rc3p[0]}/{rc3p[1]}/{rc3p[2]})   [A->B then B->A = waste loop; rank1 <0.01, NOT caught by same-turn mutex]\n"
-            f"  reinf by phase  n {rnp[0]}/{rnp[1]}/{rnp[2]} (<50/50-100/>100)  fwd-enemy {fwde[0]:.2f}/{fwde[1]:.2f}/{fwde[2]:.2f} [rank1 0.77/0.50/0.48]\n"
-            f"     centroid-out {cout[0]:.2f}/{cout[1]:.2f}/{cout[2]:.2f} [rank1 0.83/0.69/0.70]  target-front-top3 {ftop3[0]:.2f}/{ftop3[1]:.2f}/{ftop3[2]:.2f} [rank1 0.81/0.34/0.27]\n"
-            f"  reinf fwd-enemy by size  <=20/21-50/51+ {fwsz[0]:.2f}/{fwsz[1]:.2f}/{fwsz[2]:.2f}  (n {acc['reinf_n_sz'][0]}/{acc['reinf_n_sz'][1]}/{acc['reinf_n_sz'][2]})   [rank1 <=20:0.42 51-100:0.71]\n"
-            f"  ship0 1-ship-probe by phase  {_s0('')}{s0wl}\n"
-            f"  attack target near-vs-far  {_nf('')}{nfwl}\n"
-            f"     [nearest%=chose closest enemy/neutral; ratio=chosen/nearest dist; dom%=passed up a CLOSER-AND-RICHER "
-            f"target (value-aware defect, no production excuse). WON≈LOST dom => systematic; LOST≫WON => losing-state artifact]\n"
-            f"  attack target holdable-ROI rank  {_hr('')}{hrwl}\n"
-            f"     [best%=chose top holdable-ROI target (value priced w/ reactive peel = decisive-mass floor); top3=within 3. "
-            f"LOST best%≪WON => value-aware selection IS the lever; WON≈LOST => systematic but not outcome-relevant]")
+            f"  ship0 1-ship-probe by phase  {_s0('')}{s0wl}")
 
 
 def _fmt_tier_summary(acc):
@@ -1921,8 +1671,6 @@ def _fmt_tier_summary(acc):
     _dm = acc["dm_ratios_ph"][0] + acc["dm_ratios_ph"][1] + acc["dm_ratios_ph"][2]
     dm_gap = sum(max(0.0, 1.0 - r) for r in _dm) / max(len(_dm), 1)
     dm_cross = sum(1 for r in _dm if r >= 1.0) / max(len(_dm), 1)
-    h05 = acc["hold_age"][0]
-    h05_under = (sum(1 for r in h05 if r < 1.0) / len(h05)) if h05 else 0.0
     cap_open_w = acc["caps_early_won"] / max(acc["atk_early_won"], 1)
     rsh_e = acc["reinf_early"] / max(acc["reinf_early"] + acc["atk_early"], 1)  # opening reinforce/stage share
     p50w = (acc["p50_sum_won"] / acc["p50_n_won"]) if acc["p50_n_won"] else 0.0
@@ -1931,17 +1679,20 @@ def _fmt_tier_summary(acc):
     ff_w = acc["fire_frac_sum_won"] / max(acc["fire_steps_won"], 1)
     s0 = sum(acc["ship1_ph"]) / max(sum(acc["launches_ph"]), 1)
     medlen_w = _med(acc["game_len_won"])
+    lostmat = acc["lost_material"]
+    lmed = _med(lostmat) if lostmat else 0
+    wiped = (100 * sum(1 for m in lostmat if m <= 0) / len(lostmat)) if lostmat else 0.0
     bar = "─" * 78
     return (
         f"\n{bar}\n"
         f"⭐ TIERED METRIC SUMMARY  (priority order; values duplicated from above — docs/metrics.md)\n"
         f"{bar}\n"
         f"  T1 ARBITER   win-rate {wr:.1%} ({gw}/{gw + gl})   ← only signal that sees absolute regression\n"
-        f"  T2 THE WALL  out-massed {outmassed:.0%} (want ↓ = wall breaking)   "
-        f"decisive-mass gap {dm_gap:.2f} / cross {dm_cross:.2f} (gap↓ cross↑ = concentrating)\n"
-        f"               hold-floor @age0-5 under {h05_under:.0%} (↓; capture-then-lose wall)   "
-        f"open<50 cap/atk WON {cap_open_w:.2f} (ref .51)   planets@50 WON {p50w:.0f} (ref 9)\n"
-        f"               reinf@<50 {rsh_e:.2f} (ref .29 = stage the attack early)\n"
+        f"  T2 THE WALL  loss-depth med-material-in-loss {lmed:.0f} · wiped-to-0 {wiped:.0f}%  (graded; want ↑ material)\n"
+        f"               concentration  decisive-mass gap {dm_gap:.2f} / cross {dm_cross:.2f} (gap↓ cross↑)   "
+        f"open<50 cap/atk WON {cap_open_w:.2f}   planets@50 WON {p50w:.0f}\n"
+        f"               out-massed {outmassed:.0%} (⚠ saturates vs strong play — floor, not gradient)   "
+        f"reinf@<50 {rsh_e:.2f}\n"
         f"  T3 TRIPWIRE  launch_rate {lr:.3f} (→0 passive)   fire_frac WON {ff_w:.2f} (→1 carpet-bomb)   "
         f"ship0 {s0:.0%} (high = 1-ship collapse)\n"
         f"  colour only  game-len WON {medlen_w}st  (symptom of the root, NOT a gate — don't bribe with speed_coef)\n"
@@ -2012,7 +1763,7 @@ def evaluate_against_baseline(
         best_opp = max((r for r in rewards[1:] if r is not None), default=0.0)
         is_win = my_reward > best_opp
 
-        add_conversion(conv_tot, game_conversion(env.steps, 0), won=is_win)
+        add_conversion(conv_tot, game_conversion(env.steps, 0), won=is_win, material=material)
 
         wins += int(is_win)
         total_material += material
@@ -2055,7 +1806,7 @@ def _accumulate_panel_records(records: list) -> dict:
     for r in records:
         arch = r["archetype"]; my_seat = r["my_seat"]
         is_win = r["is_win"]; material = r["material"]
-        add_conversion(conv_tot, r["conv"], won=is_win)
+        add_conversion(conv_tot, r["conv"], won=is_win, material=material)
         c = per_arch[arch]
         c["wins"] += int(is_win); c["total"] += 1
         c[f"wins_seat{my_seat}"] += int(is_win)

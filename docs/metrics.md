@@ -6,6 +6,9 @@ Which numbers mean what, what's normal, and **which to trust**. Overhauls baked 
   controlled-time **milestone** metrics, and added **conversion** metrics (eval + training) with a
   top-player reference. See "Conversion & hoard" below.
 - **⭐ 2026-06-20 target-resolution fix** — see banner below; re-read every target-derived number.
+- **⭐ 2026-07-06 eval-dump prune + out-massed demotion** — the ~30-line conversion dump was cut to a
+  trusted core, `out-massed%` was DEMOTED from a lever to a single annotated floor number, and a new
+  graded loss signal **loss-depth** replaces it as the T2 headline. See "2026-07-06 dump prune" below.
 
 ---
 
@@ -48,6 +51,42 @@ was wrong.
 **Code:** `eval.py` (`_lead_collision_target`/`_planet_pos_at`, `_resolve_launch_target(...,ships)`,
 `_dm_fleet_target`, `_CONV_ANGVEL`), `torch_env._fleet_target_idx`, test `test_fleet_target_lead.py`.
 Driver to recompute any reference: `conversion_from_replays.py`. STILL STALE: Isaiah/TonyK rows below.
+
+---
+
+## ⭐ 2026-07-06 dump prune + out-massed demotion (loss-depth is the new T2 headline)
+
+The eval conversion dump had grown to ~30 lines of force-concentration-wall microscopy. Most of it was
+**elaborations of proxies that saturate against strong play or proved gameable** — so it was pruned to a
+trusted core. Nothing about *how we compute* the underlying game accumulator changed (`game_conversion`
+still computes every field); this is a **presentation** cut plus one new metric. Full pre-prune dump is
+recoverable from git history.
+
+**Why out-massed% was demoted.** The 2026-06-15 "losses are ~100% OUT-MASSED" finding was real but the
+number is **useless as a gradient**: against any strong opponent (Ender total-elimination, Ajay) it pins
+at **95–99% and never moves**, because a losing agent is *by definition* out-massed at the moment of loss.
+It's a floor, not a lever — optimising toward it gives no signal. It's kept as **one annotated line**
+(`hold-loss  out-massed X%  garr@cap A→@loss B vs enemy-inbound C`) with an explicit ⚠ that it saturates.
+[[project_ender_opponent_calibration]] confirmed this against the newly-wired Ender opponent (presres1
+loses 0/16, wiped to total elimination).
+
+**loss-depth — the graded replacement (T2 headline).** In LOST games, record our final own-material
+(`lost_material`). Printed as `loss-depth  median own-material in LOST games X (0 = total wipeout)  ·
+wiped-to-0 X%`. Unlike out-massed%, this **grades** losses: 0 = total wipeout (Ender-class annihilation),
+higher = we were still contesting at the end. Want ↑ material as the wall breaks. Passed through
+`add_conversion(..., material=material)` from both the baseline and panel eval paths.
+
+**What's still printed** (the trusted core): `caps/game`, `cap/atk-launch` (+ open<50 / mid50-100 —
+the real opening discriminator, §2026-06-20), `ships/cap`, `reinf_share`, `planets@N` + WON/LOST
+milestone split, `game-len`, `retention` (peel-rate / median-hold) + WON/LOST split, **loss-depth**,
+the demoted `out-massed` floor line, `fire-rate`, `ship0` 1-ship-probe.
+
+**What's cut from the dump** (definitions kept below for reference; still computed, just not printed):
+decisive-mass (contested/neutral), hold-floor, reinforce-triage, outmassed-by-planets@32, failed-attack
+decomposition, launch-waste<50 (self-flagged non-discriminating), the reinf-* deep-dives (by step /
+direction / ping-pong / phase / size), hoard-vs-Isaiah, attack near-vs-far, holdable-ROI rank. The
+**tiered summary** still surfaces `decisive-mass gap/cross`, `open<50 cap/atk WON`, `planets@50 WON`,
+and `reinf@<50` under T2 — those remain the concentration reads worth a glance.
 
 ---
 
@@ -192,18 +231,24 @@ top-player replays, so eval is directly comparable to the human reference. The w
 win-rate alone can't give you: *are we capturing efficiently, expanding, and deploying — or churning
 and hoarding?* Implementation: `eval.py:game_conversion()`; training side mirrors it for player 0.
 
+⚠️ **The dump below was PRUNED 2026-07-06 — see "dump prune" section above.** Lines shown here that are
+NOT in the current output (`churn`, `launch-waste<50`, `hoard`, `reinf by empire size`, and the other
+deep-dives) are still *defined* below for reference but no longer *printed*. Current output:
 ```
-Conversion: caps/game X  atk-launch/game X  cap/atk-launch X (open<50 X)  ships/cap X  reinf_share X
-  planets@16/32/50/100 a/b/c/d  end X   churn X (X/100st, len X)
-  retention  lost-cap X (lost/total caps)  median-hold Xst
-  launch-waste<50  redundant X (WG X)  underkill X (WG X)
-  fire-rate  launch_rate X  fire_frac X   [ref Isaiah 0.036 / 0.17]
+Conversion: caps/game X  atk-launch/game X  cap/atk-launch X (open<50 X  mid50-100 X)  ships/cap X  reinf_share X
+  planets@16/32/50/100 a/b/c/d  end X
+  game-len  median WON Xst (Ng)  ·  LOST Yst (Ng)
+     [planets@N WON/LOST milestone split]
+  retention  peel-rate X (lost/total caps)  median-hold Xst
+     [retention WON/LOST split]
+  loss-depth  median own-material in LOST games X (0 = total wipeout)  ·  wiped-to-0 X%
+  hold-loss  out-massed X%  garr@cap A→@loss B vs enemy-inbound C   [⚠ SATURATES vs strong play → floor]
+  fire-rate  launch_rate X  fire_frac X   [ref:Isaiah 0.036 / 0.17]
      WON(Ng) lr X ff X  |  LOST(Ng) lr X ff X   (read WON; ff inflates on losses)
-  hoard  garr_frac@ a/b/c/d  ships/planet@ a/b/c/d
-  reinf by empire size  1:r(n)  2-3:r(n)  4-6:r(n)  7-9:r(n)  10-12:r(n)  13+:r(n)   [ref ramp (Jake corrected 2026-06-20) @1:0.00 @2:0.17 @3:0.33 @4-6:0.52 @7-9:0.61 @10-12:0.60 @13+:0.57]
+  ship0 1-ship-probe by phase  early<50 X% mid X% late X%
 ```
-Printed on **every** eval (`--panel` and baseline). `churn`, `launch-waste<50 (redundant/underkill)` are
-defined below; all compute identically from top-player replays via `conversion_from_replays.py`.
+Printed on **every** eval (`--panel` and baseline). All fields compute identically from top-player
+replays via `conversion_from_replays.py`.
 
 **Definitions** (a "launch" = a legal fire, `sent ≤ source ships`):
 - **capture** = a planet whose owner transitions **to us**. Counts re-captures, so it's gross, not net.
@@ -249,8 +294,18 @@ defined below; all compute identically from top-player replays via `conversion_f
   short hold = capture-and-lose ("can't hold the lead"); lost-cap low + hold≈game-length = sticky. Home/
   initial planets excluded by construction (only planets that entered `cap_step` count). Diagnostic of the
   Phase-2 retention gap; expect high lost-cap/short hold vs a strong planner (deb), low/long vs weak (Zach).
-- **hold-loss autopsy** (`hold-loss  out-massed X% · abandoned X% · too-late X% · other X%   garr@cap A→@loss B
-  vs enemy-inbound C`, added 2026-06-15) — WHY a captured planet falls, classified at the step of loss from the
+- **loss-depth** (`loss-depth  median own-material in LOST games X (0 = total wipeout)  ·  wiped-to-0 X%`,
+  added 2026-07-06) — the **graded loss signal** that replaced out-massed% as the T2 headline (see the
+  "dump prune" section above). In LOST games only, records our final own-material (`lost_material`); the
+  median grades *how badly* we lost (0 = total elimination, higher = still contesting at the end) and
+  `wiped-to-0%` is the total-annihilation rate. Unlike out-massed% (which pins at 95–99% vs any strong
+  opponent because a loser is out-massed by definition), this **moves** — want ↑ material as the wall
+  breaks. Fed via `add_conversion(..., material=material)` from both baseline and panel eval paths.
+  [[project_ender_opponent_calibration]].
+- **hold-loss autopsy** (`hold-loss  out-massed X%   garr@cap A→@loss B vs enemy-inbound C`, added
+  2026-06-15; **DEMOTED 2026-07-06** to one annotated floor line — the `abandoned/too-late/other` split
+  is no longer printed, use **loss-depth** as the graded signal) — WHY a captured planet falls, classified
+  at the step of loss from the
   t-1 state (reuses `_friendly_inbound` geometry): **ABANDONED** = garrison ≤2 (we left it undefended); **OUT-MASSED**
   = garrison >2 but enemy inbound fleet > our garrison (under-massed vs the threat); **TOO-LATE** = we had reinforcement
   inbound but not enough/in time; **OTHER**. `garr@cap`/`@loss` = median garrison just after capture / just before loss;
@@ -258,8 +313,9 @@ defined below; all compute identically from top-player replays via `conversion_f
   planners** (deb ~96 inbound vs our ~59 garrison), UNIVERSAL across our lineage (rev38 98% too). NOT a defense-laziness
   gap (we garrison + reinforce) — a **force-concentration** gap: planners forward-project defenders + regroup multiple
   planets into one decisive strike; we fire per-planet sized to current defense. The incoming fleet IS in our features
-  (planet ch13 `enemy_pressure` / pairwise feat 14 `enemy_contest`) → the fix is a training SIGNAL, not a feature. Watch
-  `out-massed%` DROP as a concentration lever works. Standalone tool: `orbit_wars_rl/hold_autopsy.py`. Memory:
+  (planet ch13 `enemy_pressure` / pairwise feat 14 `enemy_contest`) → the fix is a training SIGNAL, not a feature.
+  **⚠️ 2026-07-06: `out-massed%` SATURATES** (95–99% vs strong play) — it is a floor, not a gradient; do NOT
+  optimise toward it. Standalone tool: `orbit_wars_rl/hold_autopsy.py`. Memory:
   `project_force_concentration_wall`.
 - **hold-floor** (`hold-floor (garr+friendly_in)/(enemy_in+β·reach+1) β=2.2 … by phase … by age-after-capture 0-5/6-15/16+`,
   added 2026-06-16) — the **DEFENSIVE mirror** of the decisive-mass attack gap, and the most direct read on the
