@@ -210,6 +210,32 @@ numbers if ever needed.
 **Track (outcome-grounded, non-saturating): WR-vs-Ender · loss-depth/wiped-to-0% · peel-rate · planets@N/end ·
 cap/atk-launch(open<50).** Ignore anything model-based (dm floors, out-massed%) and gross averages (ships/cap).
 
+### ⭐⭐ THE NORTH STAR — phase-wise cap/atk-launch vs Ender (what we work towards)
+
+The single mechanism gap, phase-split. cap/atk-launch = captures ÷ attack-launches (target-conversion:
+of fires aimed at a not-owned planet, what fraction land a capture). Both vs Ajay, 256-game panels:
+
+| phase | **presres1 total** (256g) | **presres1 WON** (103g) | **Ender** (256g) | gap |
+|---|---|---|---|---|
+| opening `<50` | 0.576 | 0.58 | **0.75** | −0.17 |
+| mid-game `50–100` | 0.671 | 0.69 | **1.12** | −0.43 |
+| whole game | 0.649 | 0.66 | **1.03** | −0.37 |
+
+Read it:
+- **Behind in every phase; the gap WIDENS.** Ender's cap/atk *climbs* 0.75 → 1.12 (mid-game >1 = the
+  snowball: earlier strikes land + cascading flips + momentum on light neutrals). Ours is FLAT ~0.6.
+- **The opening (`<50`) is the fixable ROOT.** The mid-game blow-out is downstream — Ender enters the
+  midgame ahead (from the opening) and compounds; we enter behind and plateau. The opening deficit lives
+  in the BC seed and survives PPO (§2026-06-20).
+- **Our total ≈ WON** (0.576≈0.58, 0.671≈0.69) — cap/atk barely changes whether we win or lose, so this
+  is a STRUCTURAL conversion deficit (how we aim + commit), not a variance/tail problem. (Ender's WON =
+  total since it wins 100%.) Caveat: our column is our BEST games (103 wins) vs Ender-always, so the gap
+  is if anything understated.
+
+**GOAL: close the opening `<50` cap/atk-launch — presres1 0.58 → Ender 0.75.** That is the lever; the
+mid-game snowball should follow. Track it every run (it's the `open<50` value on the eval conversion line
+and the T2 `open<50 cap/atk WON`). Regenerate Ender's column with `orbit_wars_rl/ender_ref.py`.
+
 ---
 
 ## Decode / masks (eval + export)
