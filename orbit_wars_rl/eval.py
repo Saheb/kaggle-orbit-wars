@@ -506,14 +506,18 @@ def _dm_fleet_target(planets, f):
     return _lead_collision_target(planets, f[2], f[3], f[4], f[6])
 
 
-def _decisive_gap_step(planets, fleets, seat, beta=None, targets="enemy"):
+def _decisive_gap_step(planets, fleets, seat, beta=None, targets="enemy", hold=False):
     """Per attacked-enemy-target decisive-mass RATIO (mass/floor) for `seat` from one observation,
     using the EXACT floor of torch_env._decisive_mass_fields:
         floor = garr + prod*eta + enemy_inbound + beta*rho(eta)*reachable_enemy_mass + overhead
     (eta = MAX arrival ETA of our converging mass). `beta` defaults to _DM_BETA_EVAL (= the training
     default 2.2; pass explicitly to match a non-default-beta run). Returns a list of ratios, one per
     enemy planet we have inflight mass converging on. cross/gap/near-miss/overkill all derive from
-    the ratio (cross = ratio>=1, gap = max(0,1-ratio)), so the eval read can't drift from the reward."""
+    the ratio (cross = ratio>=1, gap = max(0,1-ratio)), so the eval read can't drift from the reward.
+    `hold=True` uses the TAKE-AND-HOLD floor (take-floor + one more reactive wave = enough to capture
+    AND survive the retake), so overkill above it is MARGIN-FREE = pure waste. Same index order as the
+    take-floor call (enemy_planets, skip mass<=0) → the two lists pair per target for the
+    decisive/half-measure/undercommit split."""
     if beta is None:
         beta = _DM_BETA_EVAL
     if not planets:
@@ -567,7 +571,9 @@ def _decisive_gap_step(planets, fleets, seat, beta=None, targets="enemy"):
             reach = max(_ship_speed_py(src[5]) * _DM_HORIZON, 1e-6)
             em += src[5] * max(1.0 - pd / reach, 0.0)
         rho = min(max((eta - _DM_ETA_FREE) / _DM_ETA_SCALE, 0.0), 1.0)
-        floor = max(tgt[5] + tgt[6] * eta + inbound + beta * rho * em + _DM_OVERHEAD, 1e-6)
+        reactive = inbound + beta * rho * em                          # the mass that fights/retakes
+        # take-floor punches through once; hold-floor adds a second reactive wave to SURVIVE the retake.
+        floor = max(tgt[5] + tgt[6] * eta + reactive + (reactive if hold else 0.0) + _DM_OVERHEAD, 1e-6)
         ratios.append(mass / floor)
     return ratios
 
@@ -633,6 +639,7 @@ def game_conversion(steps, seat):
     # target, split by phase (<50/50-100/>=100). Survives-argmax read of the decmass target — does
     # the policy assemble force to the capture floor vs only improving adjacent competence?
     dm_ratios_ph = [[], [], []]
+    dm_hold_ratios_ph = [[], [], []]   # same targets vs the TAKE-AND-HOLD floor (margin-free waste read)
     prev = {}
     last = None
     for t in range(1, len(steps)):
@@ -685,6 +692,7 @@ def game_conversion(steps, seat):
             _f_dm = steps[t][seat].observation.get("fleets") or []
             _ph_dm = 0 if t < _LAUNCH_WINDOW else (1 if t < _MID_WINDOW else 2)
             dm_ratios_ph[_ph_dm].extend(_decisive_gap_step(p1, _f_dm, seat))
+            dm_hold_ratios_ph[_ph_dm].extend(_decisive_gap_step(p1, _f_dm, seat, hold=True))
         if not p0:
             continue
         byid = {p[0]: p for p in p0}
@@ -736,7 +744,7 @@ def game_conversion(steps, seat):
            "launch_states": launch_states, "launch_count": launch_count,
            "fire_steps": fire_steps, "fire_frac_sum": fire_frac_sum,
            "launches_ph": launches_ph, "ship1_ph": ship1_ph, "ship_ph_sum": ship_ph_sum,
-           "dm_ratios_ph": dm_ratios_ph}
+           "dm_ratios_ph": dm_ratios_ph, "dm_hold_ratios_ph": dm_hold_ratios_ph}
     for ms in _CONV_MILESTONES:
         out[f"p{ms}"] = planets_at[ms]
     return out
@@ -773,8 +781,9 @@ def new_conversion_acc():
            "atk_early_won": 0, "atk_early_lost": 0, "caps_early_won": 0, "caps_early_lost": 0,
            "atk_mid_won": 0, "atk_mid_lost": 0, "caps_mid_won": 0, "caps_mid_lost": 0,
            "games_won": 0, "games_lost": 0,
-           # decisive-mass gap: pooled mass/floor ratios per phase (cross/gap/p50 derive)
-           "dm_ratios_ph": [[], [], []]}
+           # decisive-mass gap: pooled mass/floor ratios per phase (cross/gap/p50 derive). _hold_ =
+           # vs the take-AND-hold floor (index-aligned with dm_ratios_ph → decisive/half/undercommit).
+           "dm_ratios_ph": [[], [], []], "dm_hold_ratios_ph": [[], [], []]}
     for ms in _CONV_MILESTONES:
         acc[f"p{ms}_sum"] = 0
         acc[f"p{ms}_n"] = 0
@@ -806,8 +815,10 @@ def add_conversion(acc, conv, won=None, material=None):
         acc["loss_mode"][i] += conv["loss_mode"][i]
     for k in ("loss_garr_cap", "loss_garr_at", "loss_enemy_in"):
         acc[k].extend(conv[k])
+    _conv_dmh = conv.get("dm_hold_ratios_ph") or [[], [], []]   # tolerate pre-metric pickles
     for i in range(3):
         acc["dm_ratios_ph"][i].extend(conv["dm_ratios_ph"][i])
+        acc["dm_hold_ratios_ph"][i].extend(_conv_dmh[i])
         acc["launches_ph"][i] += conv["launches_ph"][i]
         acc["ship1_ph"][i] += conv["ship1_ph"][i]
         acc["ship_ph_sum"][i] += conv["ship_ph_sum"][i]
@@ -942,6 +953,22 @@ def _fmt_tier_summary(acc):
     _dm_crossed = [r for r in _dm if r >= 1.0]
     dm_overkill = (sum(_dm_crossed) / len(_dm_crossed)) if _dm_crossed else 0.0
     dm_med = _med(_dm)
+    # MARGIN-FREE overkill: same ratio vs the take-AND-hold floor (take-floor + one more reactive
+    # wave), so excess above it is PURE waste (not the legit hold reserve). Pair take (_dm) & hold
+    # (_dmh) per target → the all-in / half-measure / no-show split: half-measure = took but can't
+    # hold (r_take≥1 but r_hold<1) = the fragmentation to push toward all-in-or-skip.
+    _dmh = acc["dm_hold_ratios_ph"][0] + acc["dm_hold_ratios_ph"][1] + acc["dm_hold_ratios_ph"][2]
+    _dmh_crossed = [r for r in _dmh if r >= 1.0]
+    dm_overkill_h = (sum(_dmh_crossed) / len(_dmh_crossed)) if _dmh_crossed else 0.0
+    _decisive = _half = _under = 0
+    for _rt, _rh in zip(_dm, _dmh):
+        if _rh >= 1.0:
+            _decisive += 1
+        elif _rt >= 1.0:
+            _half += 1
+        else:
+            _under += 1
+    _cmt = max(_decisive + _half + _under, 1)
     cap_open_w = acc["caps_early_won"] / max(acc["atk_early_won"], 1)
     rsh_e = acc["reinf_early"] / max(acc["reinf_early"] + acc["atk_early"], 1)  # opening reinforce/stage share
     p50w = (acc["p50_sum_won"] / acc["p50_n_won"]) if acc["p50_n_won"] else 0.0
@@ -961,7 +988,10 @@ def _fmt_tier_summary(acc):
         f"  T1 ARBITER   win-rate {wr:.1%} ({gw}/{gw + gl})   ← only signal that sees absolute regression\n"
         f"  T2 THE WALL  loss-depth med-material-in-loss {lmed:.0f} · wiped-to-0 {wiped:.0f}%  (graded; want ↑ material)\n"
         f"               concentration  decisive-mass gap {dm_gap:.2f} / cross {dm_cross:.2f} "
-        f"/ overkill {dm_overkill:.2f} / med {dm_med:.2f}  (gap↓ cross↑; overkill=mass/floor — waste iff peel↑)\n"
+        f"/ overkill {dm_overkill:.2f} / med {dm_med:.2f}  (gap↓ cross↑; overkill=mass/take-floor)\n"
+        f"               ship-sizing  waste(overkill vs take+hold) {dm_overkill_h:.2f}  ·  commit "
+        f"decisive {100*_decisive/_cmt:.0f}% / half-measure {100*_half/_cmt:.0f}% / no-show {100*_under/_cmt:.0f}%"
+        f"  (half = took-can't-hold = fragmentation; push → all-in or skip)\n"
         f"               open<50 cap/atk WON {cap_open_w:.2f}   planets@50 WON {p50w:.0f}\n"
         f"               out-massed {outmassed:.0%} (⚠ saturates vs strong play — floor, not gradient)   "
         f"reinf@<50 {rsh_e:.2f}\n"
