@@ -20,11 +20,6 @@ from action_mask import (compute_action_masks, actions_from_target_policy, _flee
 from torch_env import (_DM_BETA, _DM_ETA_FREE, _DM_ETA_SCALE, _DM_HORIZON, _DM_OVERHEAD,
                        MAX_SHIP_SPEED as _DM_MAX_SPEED)
 from kaggle_environments.envs.orbit_wars.orbit_wars import CENTER, ROTATION_RADIUS_LIMIT
-# Reactive-margin weight for the eval dm_* floor. Defaults to torch_env's 2.2 (= training default).
-# A decmass run trained with a NON-default --decisive-mass-beta must pass --decisive-mass-beta to
-# eval for "eval floor == reward floor" to hold (beta is an env param, not persisted in the ckpt).
-# The value used is printed on the `decisive-mass` line so the floor is never ambiguous.
-_DM_BETA_EVAL = _DM_BETA
 
 
 def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
@@ -498,86 +493,6 @@ def _ship_speed_py(ships):
     return min(1.0 + (_DM_MAX_SPEED - 1.0) * base, _DM_MAX_SPEED)
 
 
-def _dm_fleet_target(planets, f):
-    """Planet a fleet `f` is converging on — the lead-aware swept-collision target (min-ETA hit,
-    accounting for the planet's orbital motion over the flight). Mirrors torch_env._fleet_target_idx
-    so the eval dm_* gap diagnostic and the training reward attribute the SAME target; NOT
-    _friendly_inbound (which sums to every roughly-aligned target). Returns planet record or None."""
-    return _lead_collision_target(planets, f[2], f[3], f[4], f[6])
-
-
-def _decisive_gap_step(planets, fleets, seat, beta=None, targets="enemy", hold=False):
-    """Per attacked-enemy-target decisive-mass RATIO (mass/floor) for `seat` from one observation,
-    using the EXACT floor of torch_env._decisive_mass_fields:
-        floor = garr + prod*eta + enemy_inbound + beta*rho(eta)*reachable_enemy_mass + overhead
-    (eta = MAX arrival ETA of our converging mass). `beta` defaults to _DM_BETA_EVAL (= the training
-    default 2.2; pass explicitly to match a non-default-beta run). Returns a list of ratios, one per
-    enemy planet we have inflight mass converging on. cross/gap/near-miss/overkill all derive from
-    the ratio (cross = ratio>=1, gap = max(0,1-ratio)), so the eval read can't drift from the reward.
-    `hold=True` uses the TAKE-AND-HOLD floor (take-floor + one more reactive wave = enough to capture
-    AND survive the retake), so overkill above it is MARGIN-FREE = pure waste. Same index order as the
-    take-floor call (enemy_planets, skip mass<=0) → the two lists pair per target for the
-    decisive/half-measure/undercommit split."""
-    if beta is None:
-        beta = _DM_BETA_EVAL
-    if not planets:
-        return []
-    our_mass: dict = {}
-    our_eta: dict = {}
-    enemy_inbound: dict = {}
-    for f in (fleets or []):
-        own = int(f[1])
-        if own < 0:
-            continue
-        tgt = _dm_fleet_target(planets, f)
-        if tgt is None:
-            continue
-        tid = tgt[0]
-        if own == seat:
-            our_mass[tid] = our_mass.get(tid, 0.0) + f[6]
-            dist = math.hypot(tgt[2] - f[2], tgt[3] - f[3])
-            eta = min(dist / max(_ship_speed_py(f[6]), 1e-6), _DM_HORIZON)
-            our_eta[tid] = max(our_eta.get(tid, 0.0), eta)             # MAX ETA over our fleets
-        else:
-            enemy_inbound[tid] = enemy_inbound.get(tid, 0.0) + f[6]
-    if targets == "neutral":
-        # NEUTRAL capture sufficiency: neutrals don't grow or reinforce, so the floor is just the
-        # static garrison (+overhead) — the "did we send enough to TAKE this neutral" gap the enemy
-        # dm line (owner>=0) skips. This is the opening land-grab undercommit (e.g. 16 ships at g25).
-        ratios = []
-        for tgt in planets:
-            if int(tgt[1]) != -1:
-                continue                                              # neutrals only
-            mass = our_mass.get(tgt[0], 0.0)
-            if mass <= 0:
-                continue                                              # attacked-with-mass only
-            floor = max(tgt[5] + _DM_OVERHEAD, 1e-6)                  # static garrison; no prod growth / no reactive term
-            ratios.append(mass / floor)
-        return ratios
-    enemy_planets = [p for p in planets if int(p[1]) != seat and int(p[1]) >= 0]
-    ratios = []
-    for tgt in enemy_planets:
-        tid = tgt[0]
-        mass = our_mass.get(tid, 0.0)
-        if mass <= 0:
-            continue                                                  # attacked-with-mass only
-        eta = our_eta.get(tid, 0.0)
-        inbound = enemy_inbound.get(tid, 0.0)
-        em = 0.0                                                       # reachable enemy PLANET mass
-        for src in enemy_planets:
-            if src[0] == tid:
-                continue
-            pd = math.hypot(src[2] - tgt[2], src[3] - tgt[3])
-            reach = max(_ship_speed_py(src[5]) * _DM_HORIZON, 1e-6)
-            em += src[5] * max(1.0 - pd / reach, 0.0)
-        rho = min(max((eta - _DM_ETA_FREE) / _DM_ETA_SCALE, 0.0), 1.0)
-        reactive = inbound + beta * rho * em                          # the mass that fights/retakes
-        # take-floor punches through once; hold-floor adds a second reactive wave to SURVIVE the retake.
-        floor = max(tgt[5] + tgt[6] * eta + reactive + (reactive if hold else 0.0) + _DM_OVERHEAD, 1e-6)
-        ratios.append(mass / floor)
-    return ratios
-
-
 def game_conversion(steps, seat):
     """Whole-game CONVERSION for `seat` from kaggle env.steps.
 
@@ -612,16 +527,6 @@ def game_conversion(steps, seat):
     cap_step: dict = {}
     lost_caps = 0
     hold_durations: list = []   # steps held before losing (lost episodes only; held-to-end censored)
-    # lost-capture AUTOPSY (why do held planets fall?): measured at the step of loss from the t-1
-    # state, reusing _friendly_inbound geometry. mode = [abandoned, out-massed, too-late, other]:
-    #   abandoned  = we left <=2 ships (captured and moved the army on)
-    #   out-massed = garrison>2 but enemy inbound fleet > our garrison (under-massed vs the threat)
-    #   too-late   = we had reinforcement inbound but not enough/in time (reactive)
-    cap_garr: dict = {}          # ships on a planet right after we captured it (holding-surplus read)
-    loss_mode = [0, 0, 0, 0]
-    loss_garr_cap: list = []     # garrison at capture, per lost planet
-    loss_garr_at: list = []      # garrison just before loss
-    loss_enemy_in: list = []     # enemy ships inbound to it just before loss
     # launch_rate / fire_frac (vs Isaiah 0.036 / 0.17): ALL legal launches (attack+reinforce),
     # counted BEFORE target resolution (a fire is a fire). launch_rate = launches /
     # owned-planet-steps; fire_frac = on firing steps, mean fraction of owned planets that fired.
@@ -635,11 +540,6 @@ def game_conversion(steps, seat):
     ship1_ph = [0, 0, 0]
     ship_ph_sum = [0, 0, 0]
     planets_at = {ms: None for ms in _CONV_MILESTONES}
-    # decisive-mass GAP: ratios (our inflight mass / producer_v2 capture floor) per attacked enemy
-    # target, split by phase (<50/50-100/>=100). Survives-argmax read of the decmass target — does
-    # the policy assemble force to the capture floor vs only improving adjacent competence?
-    dm_ratios_ph = [[], [], []]
-    dm_hold_ratios_ph = [[], [], []]   # same targets vs the TAKE-AND-HOLD floor (margin-free waste read)
     prev = {}
     last = None
     for t in range(1, len(steps)):
@@ -662,37 +562,14 @@ def game_conversion(steps, seat):
                     elif t < _MID_WINDOW:
                         caps_mid += 1                  # mid-game (50-100) captures
                     cap_step[pid] = t                  # open a hold episode
-                    cap_garr[pid] = p[5]               # garrison right after capture
                 elif was == seat and own != seat and pid in cap_step:
                     hold_durations.append(t - cap_step[pid])   # lost what we took
                     lost_caps += 1
-                    # AUTOPSY: why? use t-1 state (just before the flip).
-                    tgt0 = next((q for q in p0 if q[0] == pid), None) if p0 else None
-                    if tgt0 is not None:
-                        f0a = steps[t - 1][seat].observation.get("fleets") or []
-                        g_loss = tgt0[5]
-                        e_in = _friendly_inbound(f0a, tgt0, 1 - seat)
-                        loss_garr_cap.append(cap_garr.get(pid, 0))
-                        loss_garr_at.append(g_loss)
-                        loss_enemy_in.append(e_in)
-                        if g_loss <= 2:
-                            loss_mode[0] += 1                          # ABANDONED
-                        elif e_in > g_loss:
-                            loss_mode[1] += 1                          # OUT-MASSED
-                        elif _friendly_inbound(f0a, tgt0, seat) > 0:
-                            loss_mode[2] += 1                          # TOO-LATE
-                        else:
-                            loss_mode[3] += 1                          # OTHER
                     del cap_step[pid]
                 prev[pid] = own
             last = p1
             if t in planets_at:
                 planets_at[t] = owned_now
-            # decisive-mass gap on the post-step state (mirrors training's per-step measurement)
-            _f_dm = steps[t][seat].observation.get("fleets") or []
-            _ph_dm = 0 if t < _LAUNCH_WINDOW else (1 if t < _MID_WINDOW else 2)
-            dm_ratios_ph[_ph_dm].extend(_decisive_gap_step(p1, _f_dm, seat))
-            dm_hold_ratios_ph[_ph_dm].extend(_decisive_gap_step(p1, _f_dm, seat, hold=True))
         if not p0:
             continue
         byid = {p[0]: p for p in p0}
@@ -738,13 +615,10 @@ def game_conversion(steps, seat):
            "atk_early": atk_early, "caps_early": caps_early, "atk_mid": atk_mid, "caps_mid": caps_mid,
            "reinf_early": reinf_early,
            "lost_caps": lost_caps, "hold_durations": hold_durations,
-           "loss_mode": loss_mode, "loss_garr_cap": loss_garr_cap,
-           "loss_garr_at": loss_garr_at, "loss_enemy_in": loss_enemy_in,
            "glen": len(steps),
            "launch_states": launch_states, "launch_count": launch_count,
            "fire_steps": fire_steps, "fire_frac_sum": fire_frac_sum,
-           "launches_ph": launches_ph, "ship1_ph": ship1_ph, "ship_ph_sum": ship_ph_sum,
-           "dm_ratios_ph": dm_ratios_ph, "dm_hold_ratios_ph": dm_hold_ratios_ph}
+           "launches_ph": launches_ph, "ship1_ph": ship1_ph, "ship_ph_sum": ship_ph_sum}
     for ms in _CONV_MILESTONES:
         out[f"p{ms}"] = planets_at[ms]
     return out
@@ -755,7 +629,6 @@ def new_conversion_acc():
            "attack_ships": 0, "end_planets": 0, "games": 0,
            "atk_early": 0, "caps_early": 0, "atk_mid": 0, "caps_mid": 0, "reinf_early": 0,
            "lost_caps": 0, "hold_durations": [],
-           "loss_mode": [0, 0, 0, 0], "loss_garr_cap": [], "loss_garr_at": [], "loss_enemy_in": [],
            # elimination-depth: our final own-material in LOST games (0 = total wipeout). A GRADED
            # loss signal (out-massed% saturates vs strong play; this doesn't). See docs/metrics.md.
            "lost_material": [],
@@ -780,10 +653,7 @@ def new_conversion_acc():
            "attack_launches_won": 0, "attack_launches_lost": 0,
            "atk_early_won": 0, "atk_early_lost": 0, "caps_early_won": 0, "caps_early_lost": 0,
            "atk_mid_won": 0, "atk_mid_lost": 0, "caps_mid_won": 0, "caps_mid_lost": 0,
-           "games_won": 0, "games_lost": 0,
-           # decisive-mass gap: pooled mass/floor ratios per phase (cross/gap/p50 derive). _hold_ =
-           # vs the take-AND-hold floor (index-aligned with dm_ratios_ph → decisive/half/undercommit).
-           "dm_ratios_ph": [[], [], []], "dm_hold_ratios_ph": [[], [], []]}
+           "games_won": 0, "games_lost": 0}
     for ms in _CONV_MILESTONES:
         acc[f"p{ms}_sum"] = 0
         acc[f"p{ms}_n"] = 0
@@ -811,14 +681,7 @@ def add_conversion(acc, conv, won=None, material=None):
         acc[f"game_len_{suf}"].append(conv["glen"])
         acc["games_won" if won else "games_lost"] += 1
     acc["hold_durations"].extend(conv["hold_durations"])
-    for i in range(4):
-        acc["loss_mode"][i] += conv["loss_mode"][i]
-    for k in ("loss_garr_cap", "loss_garr_at", "loss_enemy_in"):
-        acc[k].extend(conv[k])
-    _conv_dmh = conv.get("dm_hold_ratios_ph") or [[], [], []]   # tolerate pre-metric pickles
     for i in range(3):
-        acc["dm_ratios_ph"][i].extend(conv["dm_ratios_ph"][i])
-        acc["dm_hold_ratios_ph"][i].extend(_conv_dmh[i])
         acc["launches_ph"][i] += conv["launches_ph"][i]
         acc["ship1_ph"][i] += conv["ship1_ph"][i]
         acc["ship_ph_sum"][i] += conv["ship_ph_sum"][i]
@@ -1614,7 +1477,6 @@ if __name__ == "__main__":
                              "re-derives any metric offline — so a later metric addition never needs a "
                              "panel re-run. No effect without --panel.")
     args = parser.parse_args()
-    _DM_BETA_EVAL = args.decisive_mass_beta   # module global → used by _decisive_gap_step
     if args.retarget_top_roi:
         set_retarget_top_roi(True, resize=args.retarget_resize)
         print(f"SELECTION ISOLATION: retarget each attack to top-holdable-ROI target "
