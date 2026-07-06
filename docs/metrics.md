@@ -176,6 +176,41 @@ slightly high) — **firing more is the wrong lever**; the gap is *which* launch
 
 ---
 
+## ⭐ Ender reference — the progress-tracking setup
+
+The trusted "are we improving" signal is **held-out win-rate + loss-depth + decisive-mass cross vs
+Ender** (`opponents/candidate_ender.py`, a top-10 open-source agent), with **Ender-vs-Ajay as the
+target line**. These are the numbers that DON'T saturate (unlike out-massed%, pinned 93–99% everywhere).
+Reproduce the reference column: `CUDA_VISIBLE_DEVICES="" python orbit_wars_rl/ender_ref.py --seeds 128`
+(256 games; runs Ender vs Ajay as path-agents, prints Ender's conversion). [[project-ender-opponent-calibration]]
+
+256-game panels, presres1 = the HEAD-loadable blessed checkpoint (2026-07-06):
+
+| metric | presres1 → Ajay | presres1 → Ender | **Ender → Ajay (target)** |
+|---|---|---|---|
+| win-rate | 40.2% | **0.0%** | 100% |
+| loss-depth · wiped-to-0 | 0 · 97% | 0 · **100%** | — |
+| dm gap / cross | 0.17 / 0.55 | **0.37 / 0.19** | 0.10 / 0.69 |
+| cap/atk-launch (open<50) | 0.65 (0.58) | 0.64 (0.59) | 1.03 (0.75) |
+| ships/cap | 117 | 65\* | 60 |
+| launch_rate | 0.121 | 0.052 | 0.059 |
+| planets@50 · end | 8 · 10.8 | 7 · **0.0** | 9 · 18.5 |
+| peel-rate | 0.68 | **0.99** | 0.41 |
+| game-len | 164 WON | 99 LOST | 102 WON |
+
+\* ships/cap 65 vs Ender is **churn-deflated** (peel 0.99 → cheap re-captures inflate the denominator),
+not efficiency.
+
+**Diagnosis this locks:** our `cap/atk-launch` is opponent-INVARIANT (0.65 vs Ajay ≈ 0.64 vs Ender) —
+so per-launch conversion is NOT where strong play breaks us. **Decisive-mass cross is** (0.55 → 0.19 vs
+Ender): we can't assemble mass to the capture floor, get out-massed 96-inbound vs 47-garrison, lose
+~every capture (peel 0.99), and are wiped to 0 material 100% of games. Note `cap/atk-launch` counts
+launch *events* and ignores ship count — on the ship axis we overkill (ships/cap 117 vs 60) AND still
+can't hold. It's spray + overkill, not efficiency. **Track: WR-vs-Ender, loss-depth/wiped-to-0%,
+dm-cross (→0.69), ships/cap (117→60). Ignore out-massed%.**
+
+---
+
 ## Decode / masks (eval + export)
 
 Eval and export use **`fire_threshold=0.5`** (default), NOT `--sample` — firing only when confident is
