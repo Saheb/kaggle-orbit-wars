@@ -832,9 +832,11 @@ def _fmt_tier_summary(acc):
     ff_w = acc["fire_frac_sum_won"] / max(acc["fire_steps_won"], 1)
     s0 = sum(acc["ship1_ph"]) / max(sum(acc["launches_ph"]), 1)
     medlen_w = _med(acc["game_len_won"])
-    # deploy efficiency: parked share of the army at mid-game (won games). high = ships left behind.
-    _g50w, _if50w = acc["g50_sum_won"], acc["if50_sum_won"]
-    garr50w = _g50w / max(_g50w + _if50w, 1)
+    # deploy efficiency: parked share of the army over the game (won games). high = ships left behind.
+    # Read the TRAJECTORY, not one point — @16/32 is where divergence starts (by 50 we're often already
+    # behind); @100 trivially rises toward 1 as fleets land. A single milestone catches agents at
+    # different phases; the ramp shows WHEN the army gets left idle.
+    _gf = lambda ms: (acc[f"g{ms}_sum_won"] / max(acc[f"g{ms}_sum_won"] + acc[f"if{ms}_sum_won"], 1))
     bar = "─" * 78
     return (
         f"\n{bar}\n"
@@ -844,8 +846,8 @@ def _fmt_tier_summary(acc):
         f"  T2 THE WALL  loss-depth med-material-in-loss {lmed:.0f} · wiped-to-0 {wiped:.0f}%  (graded; want ↑ material)\n"
         f"               retention  peel-rate WON {peel_w:.2f} (all {peel:.2f}) · median-hold WON {hold_w}st  (want peel↓)\n"
         f"               expansion  planets@50 WON {p50w:.0f} · end {endp:.1f}   ·   open<50 cap/atk WON {cap_open_w:.2f}\n"
-        f"               efficiency  garr_frac@50 WON {garr50w:.2f} (parked share — high=army left behind)   "
-        f"fire_frac WON {ff_w:.2f}\n"
+        f"               efficiency  garr_frac@16/32/50/100 WON {_gf(16):.2f}/{_gf(32):.2f}/{_gf(50):.2f}/{_gf(100):.2f} "
+        f"(parked share, high=left behind)   fire_frac WON {ff_w:.2f}\n"
         f"  T3 TRIPWIRE  launch_rate {lr:.3f} (→0 passive)   fire_frac WON {ff_w:.2f} (→1 carpet-bomb)   "
         f"ship0 {s0:.0%} (high = 1-ship collapse)\n"
         f"  colour only  game-len WON {medlen_w}st  (symptom of the root, NOT a gate — don't bribe with speed_coef)\n"
