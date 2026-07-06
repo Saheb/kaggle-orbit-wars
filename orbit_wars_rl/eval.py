@@ -540,12 +540,12 @@ def game_conversion(steps, seat):
     ship1_ph = [0, 0, 0]
     ship_ph_sum = [0, 0, 0]
     planets_at = {ms: None for ms in _CONV_MILESTONES}
-    # deploy vs "left behind": parked garrison (on planets) vs in-flight (own fleets) at each
-    # milestone. garr_frac = parked/(parked+inflight) — direct observation, no model, no churn
-    # confound. High = army sitting idle on planets; low = deployed. (End-step lands everything → use
-    # a mid-game milestone.) Complements fire_frac (activity).
-    garr_at = {ms: None for ms in _CONV_MILESTONES}    # parked ships on owned planets
-    infl_at = {ms: None for ms in _CONV_MILESTONES}    # ships in our own in-flight fleets
+    # per-fire commitment: every time a planet fires, what fraction of its garrison it commits
+    # (sent / source_ships) and how many ships it keeps behind (source − sent). Grounded (no model,
+    # no milestone/phase confound) — measures strike DISCIPLINE: a disciplined agent commits a
+    # measured share and holds a defensive remainder; spray fragments; all-in dumps the whole planet.
+    commit_sum = 0.0          # Σ sent/source_ships over launches → mean = avg fraction committed
+    left_sum = 0.0            # Σ (source_ships − sent) → mean = avg ships kept on the source
     prev = {}
     last = None
     for t in range(1, len(steps)):
@@ -576,9 +576,6 @@ def game_conversion(steps, seat):
             last = p1
             if t in planets_at:
                 planets_at[t] = owned_now
-                _fl = steps[t][seat].observation.get("fleets") or []
-                garr_at[t] = sum(p[5] for p in p1 if int(p[1]) == seat)
-                infl_at[t] = sum(f[6] for f in _fl if int(f[1]) == seat)
         if not p0:
             continue
         byid = {p[0]: p for p in p0}
@@ -595,6 +592,8 @@ def game_conversion(steps, seat):
             if not (ssh > 0 and sent <= ssh):       # legal launches only
                 continue
             fired_this_step += 1                    # counted before target resolution
+            commit_sum += sent / ssh                # fraction of the source garrison committed
+            left_sum += ssh - sent                  # ships kept behind on the source
             _ph = 0 if t < _LAUNCH_WINDOW else (1 if t < _MID_WINDOW else 2)
             launches_ph[_ph] += 1
             ship_ph_sum[_ph] += sent
@@ -627,11 +626,10 @@ def game_conversion(steps, seat):
            "glen": len(steps),
            "launch_states": launch_states, "launch_count": launch_count,
            "fire_steps": fire_steps, "fire_frac_sum": fire_frac_sum,
+           "commit_sum": commit_sum, "left_sum": left_sum,
            "launches_ph": launches_ph, "ship1_ph": ship1_ph, "ship_ph_sum": ship_ph_sum}
     for ms in _CONV_MILESTONES:
         out[f"p{ms}"] = planets_at[ms]
-        out[f"g{ms}"] = garr_at[ms]
-        out[f"if{ms}"] = infl_at[ms]
     return out
 
 
@@ -644,6 +642,9 @@ def new_conversion_acc():
            # loss signal (out-massed% saturates vs strong play; this doesn't). See docs/metrics.md.
            "lost_material": [],
            "launch_states": 0, "launch_count": 0, "fire_steps": 0, "fire_frac_sum": 0.0,
+           # per-fire commitment: Σ sent/source (commit_sum) and Σ ships-kept (left_sum); mean = ÷launches
+           "commit_sum": 0.0, "left_sum": 0.0,
+           "commit_sum_won": 0.0, "left_sum_won": 0.0, "commit_sum_lost": 0.0, "left_sum_lost": 0.0,
            # fire-rate split by game outcome — fire_frac inflates on losses (cornered to few
            # planets → firing from "many of few"), so the won-game value is the honest spray read.
            "launch_states_won": 0, "launch_count_won": 0, "fire_steps_won": 0, "fire_frac_sum_won": 0.0,
@@ -670,9 +671,6 @@ def new_conversion_acc():
         acc[f"p{ms}_n"] = 0
         acc[f"p{ms}_sum_won"] = 0; acc[f"p{ms}_n_won"] = 0
         acc[f"p{ms}_sum_lost"] = 0; acc[f"p{ms}_n_lost"] = 0
-        # parked/in-flight ship sums for garr_frac (deploy vs left-behind)
-        acc[f"g{ms}_sum"] = 0; acc[f"if{ms}_sum"] = 0
-        acc[f"g{ms}_sum_won"] = 0; acc[f"if{ms}_sum_won"] = 0
     return acc
 
 
@@ -681,13 +679,15 @@ def add_conversion(acc, conv, won=None, material=None):
         acc["lost_material"].append(material)  # elimination-depth (graded loss signal)
     for k in ("captures", "attack_launches", "reinforce_launches", "attack_ships",
               "end_planets", "atk_early", "caps_early", "atk_mid", "caps_mid", "reinf_early",
-              "lost_caps", "launch_states", "launch_count", "fire_steps", "fire_frac_sum"):
+              "lost_caps", "launch_states", "launch_count", "fire_steps", "fire_frac_sum",
+              "commit_sum", "left_sum"):
         acc[k] += conv[k]
     # route the fire-rate + conversion fields into won/lost buckets so spray + the opening ramp can
     # be read free of the losing-position confound (won=None from non-eval callers → overall only)
     if won is not None:
         suf = "won" if won else "lost"
         for k in ("launch_states", "launch_count", "fire_steps", "fire_frac_sum",
+                  "commit_sum", "left_sum",
                   "captures", "lost_caps", "attack_launches", "atk_early", "caps_early",
                   "atk_mid", "caps_mid"):
             acc[f"{k}_{suf}"] += conv[k]
@@ -710,12 +710,6 @@ def add_conversion(acc, conv, won=None, material=None):
         if v is not None:
             acc[f"p{ms}_sum"] += v
             acc[f"p{ms}_n"] += 1
-            _g, _if = conv.get(f"g{ms}", 0) or 0, conv.get(f"if{ms}", 0) or 0   # tolerate old pickles
-            acc[f"g{ms}_sum"] += _g
-            acc[f"if{ms}_sum"] += _if
-            if won:
-                acc[f"g{ms}_sum_won"] += _g
-                acc[f"if{ms}_sum_won"] += _if
             if won is not None:
                 suf = "won" if won else "lost"
                 acc[f"p{ms}_sum_{suf}"] += v
@@ -832,11 +826,12 @@ def _fmt_tier_summary(acc):
     ff_w = acc["fire_frac_sum_won"] / max(acc["fire_steps_won"], 1)
     s0 = sum(acc["ship1_ph"]) / max(sum(acc["launches_ph"]), 1)
     medlen_w = _med(acc["game_len_won"])
-    # deploy efficiency: parked share of the army over the game (won games). high = ships left behind.
-    # Read the TRAJECTORY, not one point — @16/32 is where divergence starts (by 50 we're often already
-    # behind); @100 trivially rises toward 1 as fleets land. A single milestone catches agents at
-    # different phases; the ramp shows WHEN the army gets left idle.
-    _gf = lambda ms: (acc[f"g{ms}_sum_won"] / max(acc[f"g{ms}_sum_won"] + acc[f"if{ms}_sum_won"], 1))
+    # per-fire commitment (won games): of the source planet's garrison, what fraction each launch
+    # commits (commit) and how many ships it keeps behind (kept). Grounded, per-fire — strike
+    # discipline, not a milestone snapshot. Read WITH fire_frac (how often) + cap/atk (right target).
+    _lcw = max(acc["launch_count_won"], 1)
+    commit_w = acc["commit_sum_won"] / _lcw          # mean fraction of source committed per fire
+    kept_w = acc["left_sum_won"] / _lcw              # mean ships kept on the source per fire
     bar = "─" * 78
     return (
         f"\n{bar}\n"
@@ -846,8 +841,8 @@ def _fmt_tier_summary(acc):
         f"  T2 THE WALL  loss-depth med-material-in-loss {lmed:.0f} · wiped-to-0 {wiped:.0f}%  (graded; want ↑ material)\n"
         f"               retention  peel-rate WON {peel_w:.2f} (all {peel:.2f}) · median-hold WON {hold_w}st  (want peel↓)\n"
         f"               expansion  planets@50 WON {p50w:.0f} · end {endp:.1f}   ·   open<50 cap/atk WON {cap_open_w:.2f}\n"
-        f"               efficiency  garr_frac@16/32/50/100 WON {_gf(16):.2f}/{_gf(32):.2f}/{_gf(50):.2f}/{_gf(100):.2f} "
-        f"(parked share, high=left behind)   fire_frac WON {ff_w:.2f}\n"
+        f"               per-fire  commit WON {commit_w:.0%} of source · keeps {kept_w:.0f} behind   "
+        f"fire_frac WON {ff_w:.2f}  (discipline: right size × right often × right target)\n"
         f"  T3 TRIPWIRE  launch_rate {lr:.3f} (→0 passive)   fire_frac WON {ff_w:.2f} (→1 carpet-bomb)   "
         f"ship0 {s0:.0%} (high = 1-ship collapse)\n"
         f"  colour only  game-len WON {medlen_w}st  (symptom of the root, NOT a gate — don't bribe with speed_coef)\n"
