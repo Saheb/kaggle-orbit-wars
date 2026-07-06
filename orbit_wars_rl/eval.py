@@ -540,6 +540,12 @@ def game_conversion(steps, seat):
     ship1_ph = [0, 0, 0]
     ship_ph_sum = [0, 0, 0]
     planets_at = {ms: None for ms in _CONV_MILESTONES}
+    # deploy vs "left behind": parked garrison (on planets) vs in-flight (own fleets) at each
+    # milestone. garr_frac = parked/(parked+inflight) — direct observation, no model, no churn
+    # confound. High = army sitting idle on planets; low = deployed. (End-step lands everything → use
+    # a mid-game milestone.) Complements fire_frac (activity).
+    garr_at = {ms: None for ms in _CONV_MILESTONES}    # parked ships on owned planets
+    infl_at = {ms: None for ms in _CONV_MILESTONES}    # ships in our own in-flight fleets
     prev = {}
     last = None
     for t in range(1, len(steps)):
@@ -570,6 +576,9 @@ def game_conversion(steps, seat):
             last = p1
             if t in planets_at:
                 planets_at[t] = owned_now
+                _fl = steps[t][seat].observation.get("fleets") or []
+                garr_at[t] = sum(p[5] for p in p1 if int(p[1]) == seat)
+                infl_at[t] = sum(f[6] for f in _fl if int(f[1]) == seat)
         if not p0:
             continue
         byid = {p[0]: p for p in p0}
@@ -621,6 +630,8 @@ def game_conversion(steps, seat):
            "launches_ph": launches_ph, "ship1_ph": ship1_ph, "ship_ph_sum": ship_ph_sum}
     for ms in _CONV_MILESTONES:
         out[f"p{ms}"] = planets_at[ms]
+        out[f"g{ms}"] = garr_at[ms]
+        out[f"if{ms}"] = infl_at[ms]
     return out
 
 
@@ -659,6 +670,9 @@ def new_conversion_acc():
         acc[f"p{ms}_n"] = 0
         acc[f"p{ms}_sum_won"] = 0; acc[f"p{ms}_n_won"] = 0
         acc[f"p{ms}_sum_lost"] = 0; acc[f"p{ms}_n_lost"] = 0
+        # parked/in-flight ship sums for garr_frac (deploy vs left-behind)
+        acc[f"g{ms}_sum"] = 0; acc[f"if{ms}_sum"] = 0
+        acc[f"g{ms}_sum_won"] = 0; acc[f"if{ms}_sum_won"] = 0
     return acc
 
 
@@ -696,6 +710,12 @@ def add_conversion(acc, conv, won=None, material=None):
         if v is not None:
             acc[f"p{ms}_sum"] += v
             acc[f"p{ms}_n"] += 1
+            _g, _if = conv.get(f"g{ms}", 0) or 0, conv.get(f"if{ms}", 0) or 0   # tolerate old pickles
+            acc[f"g{ms}_sum"] += _g
+            acc[f"if{ms}_sum"] += _if
+            if won:
+                acc[f"g{ms}_sum_won"] += _g
+                acc[f"if{ms}_sum_won"] += _if
             if won is not None:
                 suf = "won" if won else "lost"
                 acc[f"p{ms}_sum_{suf}"] += v
@@ -812,6 +832,9 @@ def _fmt_tier_summary(acc):
     ff_w = acc["fire_frac_sum_won"] / max(acc["fire_steps_won"], 1)
     s0 = sum(acc["ship1_ph"]) / max(sum(acc["launches_ph"]), 1)
     medlen_w = _med(acc["game_len_won"])
+    # deploy efficiency: parked share of the army at mid-game (won games). high = ships left behind.
+    _g50w, _if50w = acc["g50_sum_won"], acc["if50_sum_won"]
+    garr50w = _g50w / max(_g50w + _if50w, 1)
     bar = "─" * 78
     return (
         f"\n{bar}\n"
@@ -821,6 +844,8 @@ def _fmt_tier_summary(acc):
         f"  T2 THE WALL  loss-depth med-material-in-loss {lmed:.0f} · wiped-to-0 {wiped:.0f}%  (graded; want ↑ material)\n"
         f"               retention  peel-rate WON {peel_w:.2f} (all {peel:.2f}) · median-hold WON {hold_w}st  (want peel↓)\n"
         f"               expansion  planets@50 WON {p50w:.0f} · end {endp:.1f}   ·   open<50 cap/atk WON {cap_open_w:.2f}\n"
+        f"               efficiency  garr_frac@50 WON {garr50w:.2f} (parked share — high=army left behind)   "
+        f"fire_frac WON {ff_w:.2f}\n"
         f"  T3 TRIPWIRE  launch_rate {lr:.3f} (→0 passive)   fire_frac WON {ff_w:.2f} (→1 carpet-bomb)   "
         f"ship0 {s0:.0%} (high = 1-ship collapse)\n"
         f"  colour only  game-len WON {medlen_w}st  (symptom of the root, NOT a gate — don't bribe with speed_coef)\n"
