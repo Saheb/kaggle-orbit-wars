@@ -934,8 +934,11 @@ def _fmt_tier_summary(acc):
     dm_gap = sum(max(0.0, 1.0 - r) for r in _dm) / max(len(_dm), 1)
     dm_cross = sum(1 for r in _dm if r >= 1.0) / max(len(_dm), 1)
     # ships-sent-vs-need (the honest ships/cap replacement — churn-free, floor-relative):
-    #   overkill = mean(ratio | crossed) → over-send factor on targets we DID clear (~1.1 tight, ≥2 = 3×
-    #   waste); med = median send/need over contested targets. gap (above) is the under-send side.
+    #   overkill = mean(ratio | crossed) = mass over the CAPTURE floor on targets we clear; med =
+    #   median send/need. NB the floor is the take-floor, not the hold-floor — a strong agent sends
+    #   margin above it to HOLD, so overkill >1 is NORMAL (Ender ~3.4 @ 100% WR). Waste only if the
+    #   margin doesn't buy retention → read overkill WITH peel-rate (high overkill + high peel = wasted
+    #   excess; ours vs Ajay 6.2 @ peel .68 = pile-and-lose vs Ender 3.4 @ peel .41). gap = under-send.
     _dm_crossed = [r for r in _dm if r >= 1.0]
     dm_overkill = (sum(_dm_crossed) / len(_dm_crossed)) if _dm_crossed else 0.0
     dm_med = _med(_dm)
@@ -958,7 +961,7 @@ def _fmt_tier_summary(acc):
         f"  T1 ARBITER   win-rate {wr:.1%} ({gw}/{gw + gl})   ← only signal that sees absolute regression\n"
         f"  T2 THE WALL  loss-depth med-material-in-loss {lmed:.0f} · wiped-to-0 {wiped:.0f}%  (graded; want ↑ material)\n"
         f"               concentration  decisive-mass gap {dm_gap:.2f} / cross {dm_cross:.2f} "
-        f"/ overkill {dm_overkill:.2f} / med {dm_med:.2f}  (gap↓ cross↑ overkill→1 = right-sized)\n"
+        f"/ overkill {dm_overkill:.2f} / med {dm_med:.2f}  (gap↓ cross↑; overkill=mass/floor — waste iff peel↑)\n"
         f"               open<50 cap/atk WON {cap_open_w:.2f}   planets@50 WON {p50w:.0f}\n"
         f"               out-massed {outmassed:.0%} (⚠ saturates vs strong play — floor, not gradient)   "
         f"reinf@<50 {rsh_e:.2f}\n"
