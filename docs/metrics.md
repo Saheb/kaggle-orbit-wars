@@ -4,6 +4,11 @@ What each number means, what's normal, and **which to trust**. This describes th
 metrics only; the history of how they evolved (target-resolution fix, dump prunes, superseded
 corrections) is in git.
 
+**Principle (2026-07 cull):** keep only metrics that are **outcome-grounded and provably track skill**;
+rather have none than a conflated/misleading one. All model-based decisive-mass reads and the saturating
+out-massed% were removed from eval — see the "dm culled" note in the Ender reference for the failure that
+motivated it.
+
 ## Trust order
 
 1. **Held-out win-rate** (Ajay / zach / Ender panels) — the only signal that sees *absolute*
@@ -76,9 +81,11 @@ reward can't drift). Runs even at `--decisive-mass-coef 0`. Phase-split `<50 / 5
   in `[0.75, 1.0)`; `tgt/step` = duration-weighted attacked-target observations.
 
 Read: `gap↓ + cross↑ + overkill steady` = teaching concentration. **WR↑ but gap flat** = adjacent
-competence, not concentration. Eval prints the same line (+ p50/phase). β via `--decisive-mass-beta`
-(default 2.2, an env param not stored in the ckpt — pass it to eval to match a non-default run). SPS:
-`_decisive_mass_fields()` runs every step — `--no-decisive-diag` for max throughput.
+competence, not concentration. β via `--decisive-mass-beta` (default 2.2). SPS: `_decisive_mass_fields()`
+runs every step — `--no-decisive-diag` for max throughput.
+⚠️ **This is the TRAINING diag only** — the eval mirror of dm was **culled 2026-07** (model-based, and
+`take+hold` was contradicted by observed retention; see the Ender reference). Trust it only as a check
+that the decisive-mass *reward* is responding when you train with it; it is NOT a skill metric on its own.
 [[project_decisive_mass_lever]] [[project_force_concentration_wall]]
 
 ### `CKPT_METRICS` (each checkpoint — parsed by track.py)
@@ -102,7 +109,6 @@ Conversion: caps/game X  atk-launch/game X  cap/atk-launch X (open<50 X  mid50-1
   retention  peel-rate X (lost/total caps)  median-hold Xst
      [retention WON/LOST split]
   loss-depth  median own-material in LOST games X (0 = total wipeout)  ·  wiped-to-0 X%
-  hold-loss  out-massed X%  garr@cap A→@loss B vs enemy-inbound C
   fire-rate  launch_rate X  fire_frac X   [ref:Isaiah 0.036 / 0.17]
      WON(Ng) lr X ff X  |  LOST(Ng) lr X ff X   (read WON; ff inflates on losses)
   ship0 1-ship-probe by phase  early<50 X% mid X% late X%
@@ -133,24 +139,18 @@ Conversion: caps/game X  atk-launch/game X  cap/atk-launch X (open<50 X  mid50-1
 - **loss-depth** = in LOST games, median final own-material (0 = total wipeout) + `wiped-to-0%`. The
   **graded loss signal** — grades *how badly* we lost, and unlike out-massed% it actually **moves**.
   Want ↑ material as the wall breaks. [[project_ender_opponent_calibration]]
-- **hold-loss out-massed%** = fraction of captured-planet losses where enemy inbound > our garrison
-  (garr@cap→@loss vs enemy-inbound = medians at capture / loss). Losses are ~100% out-massed vs
-  planners — a **force-concentration** gap (they regroup multiple planets into one decisive strike; we
-  fire per-planet). ⚠️ **SATURATES at 95–99% vs any strong opponent** (a loser is out-massed by
-  definition) → it's a floor, NOT a gradient; do not optimise toward it — use **loss-depth**.
-  Standalone tool: `orbit_wars_rl/hold_autopsy.py`. [[project_force_concentration_wall]]
 - **fire-rate** = `launch_rate` (fraction of owned-planet-steps with a legal launch) + `fire_frac`.
   ⚠️ `fire_frac` is WIN/LOSS-confounded — **read the WON value** (losing corners you to few planets,
   inflating "many of few"; winners ~0.19–0.21, losers ~0.31–0.33). The lever is *winning more*
   (retention), not a fire tax.
 - **ship0** = fraction of opening launches that are 1-ship probes, by phase (degeneracy tripwire).
 
-`game_conversion()` still computes several fields no longer printed (decisive-mass contested/neutral,
-hold-floor, reinforce-triage, outmassed-by-planets@32, failed-attack decomposition, launch-waste<50,
-the reinf-* deep-dives, hoard, near/far, holdable-ROI). They saturate vs strong play or proved
-gameable; definitions are in git history (pre-2026-07-06). The **tiered summary** at the end of an
-eval surfaces the concentration reads worth a glance: `decisive-mass gap/cross`, `open<50 cap/atk WON`,
-`planets@50 WON`, `reinf@<50`.
+The **tiered summary** at the end of an eval re-prints the highest-signal reads in priority order:
+win-rate → loss-depth → retention (peel-rate/median-hold) → expansion (planets@50/end, open<50 cap/atk) →
+degeneracy tripwires. All the model-based / saturating / conflated families that used to print
+(decisive-mass gap/cross/overkill/med, take+hold/can't-hold/too-few, out-massed%, hold-floor, triage,
+launch-waste, reinf deep-dives, hoard, near/far, holdable-ROI) were **culled** — definitions in git
+history (pre-2026-07-06). See the Ender-reference "dm culled" note below for why.
 
 ---
 
@@ -178,9 +178,9 @@ slightly high) — **firing more is the wrong lever**; the gap is *which* launch
 
 ## ⭐ Ender reference — the progress-tracking setup
 
-The trusted "are we improving" signal is **held-out win-rate + loss-depth + decisive-mass cross vs
+The trusted "are we improving" signal is **held-out win-rate + loss-depth + peel-rate + expansion vs
 Ender** (`opponents/candidate_ender.py`, a top-10 open-source agent), with **Ender-vs-Ajay as the
-target line**. These are the numbers that DON'T saturate (unlike out-massed%, pinned 93–99% everywhere).
+target line** — all outcome-grounded, none saturating (unlike out-massed%, pinned 93–99% everywhere).
 Reproduce the reference column: `CUDA_VISIBLE_DEVICES="" python orbit_wars_rl/ender_ref.py --seeds 128`
 (256 games; runs Ender vs Ajay as path-agents, prints Ender's conversion). [[project-ender-opponent-calibration]]
 
@@ -190,36 +190,25 @@ Reproduce the reference column: `CUDA_VISIBLE_DEVICES="" python orbit_wars_rl/en
 |---|---|---|---|
 | win-rate | 40.2% | **0.0%** | 100% |
 | loss-depth · wiped-to-0 | 0 · 97% | 0 · **100%** | — |
-| dm gap / cross | 0.17 / 0.55 | **0.37 / 0.19** | 0.10 / 0.69 |
-| dm overkill / med (32g re-run) | 6.16 / 1.46 | 2.42 / **0.65** | 3.42 / 1.53 |
 | cap/atk-launch (open<50) | 0.65 (0.58) | 0.64 (0.59) | 1.03 (0.75) |
-| ships/cap | 117 | 65\* | 60 |
-| launch_rate | 0.121 | 0.052 | 0.059 |
 | planets@50 · end | 8 · 10.8 | 7 · **0.0** | 9 · 18.5 |
 | peel-rate | 0.68 | **0.99** | 0.41 |
 | game-len | 164 WON | 99 LOST | 102 WON |
 
-\* ships/cap 65 vs Ender is **churn-deflated** (peel 0.99 → cheap re-captures inflate the denominator),
-not efficiency.
+**Diagnosis this locks:** our `cap/atk-launch` is opponent-INVARIANT (0.65 vs Ajay ≈ 0.64 vs Ender) — so
+per-launch conversion is NOT where strong play breaks us. The real, OUTCOME-grounded gaps vs Ajay are
+**peel-rate** (0.41 Ender vs 0.68 us — retention), **expansion** (end 18.5 vs 10.8), and **cap/atk**
+(1.03 vs 0.65). Against Ender we're wiped to 0 material 100% of games — categorically below top-10.
 
-**Diagnosis this locks:** our `cap/atk-launch` is opponent-INVARIANT (0.65 vs Ajay ≈ 0.64 vs Ender) —
-so per-launch conversion is NOT where strong play breaks us. **Decisive-mass cross is** (0.55 → 0.19 vs
-Ender): we can't assemble mass to the capture floor, get out-massed 96-inbound vs 47-garrison, lose
-~every capture (peel 0.99), and are wiped to 0 material 100% of games. Note `cap/atk-launch` counts
-launch *events* and ignores ship count — on the ship axis we overkill (ships/cap 117 vs 60) AND still
-can't hold. It's spray + overkill, not efficiency.
+**⚠ The dm (decisive-mass, model-based) family was CULLED from eval 2026-07** — gap/take-rate/overkill/med,
+take+hold/can't-hold/too-few, waste, and out-massed%. They were model-based (β/ρ floor assumptions),
+non-discriminating in matched play, and take+hold was **contradicted by observed retention** (Ender read
+MORE model-predicted can't-hold, 11% vs our 7%, yet HELD better, peel 0.41 vs 0.68 — the floor model is
+blind to the friendly follow-up reinforcement that actually does the holding). See git history for the
+numbers if ever needed.
 
-**Ship-sizing (dm overkill/med — the ships/cap replacement).** ⚠ `overkill → 1` is NOT the target: Ender
-(100% WR) runs `overkill 3.42 / med 1.53` — a strong agent sends margin *above* the take-floor to HOLD.
-The floor is the take-floor, not the hold-floor, so `overkill > 1` is normal; it's waste only when the
-margin doesn't buy retention. **Read `overkill` WITH `peel-rate`:** ours vs Ajay `6.16 @ peel 0.68` =
-pile-and-**lose** (excess wasted); Ender `3.42 @ peel 0.41` = pile-and-**hold** (productive margin). `med`
-does not discriminate between winners (1.46 ≈ 1.53); its only signal is `med < 1` = can't reach the floor
-(undercommit) — our `0.65` vs Ender. Clean sizing read = **`cross` (bring enough) + `overkill × peel-rate`
-(excess productive or wasted).**
-
-**Track: WR-vs-Ender, loss-depth/wiped-to-0%, dm-cross (→0.69), dm-overkill×peel-rate. Ignore out-massed%,
-raw ships/cap, and med-as-headline.**
+**Track (outcome-grounded, non-saturating): WR-vs-Ender · loss-depth/wiped-to-0% · peel-rate · planets@N/end ·
+cap/atk-launch(open<50).** Ignore anything model-based (dm floors, out-massed%) and gross averages (ships/cap).
 
 ---
 
