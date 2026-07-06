@@ -933,6 +933,12 @@ def _fmt_tier_summary(acc):
     _dm = acc["dm_ratios_ph"][0] + acc["dm_ratios_ph"][1] + acc["dm_ratios_ph"][2]
     dm_gap = sum(max(0.0, 1.0 - r) for r in _dm) / max(len(_dm), 1)
     dm_cross = sum(1 for r in _dm if r >= 1.0) / max(len(_dm), 1)
+    # ships-sent-vs-need (the honest ships/cap replacement — churn-free, floor-relative):
+    #   overkill = mean(ratio | crossed) → over-send factor on targets we DID clear (~1.1 tight, ≥2 = 3×
+    #   waste); med = median send/need over contested targets. gap (above) is the under-send side.
+    _dm_crossed = [r for r in _dm if r >= 1.0]
+    dm_overkill = (sum(_dm_crossed) / len(_dm_crossed)) if _dm_crossed else 0.0
+    dm_med = _med(_dm)
     cap_open_w = acc["caps_early_won"] / max(acc["atk_early_won"], 1)
     rsh_e = acc["reinf_early"] / max(acc["reinf_early"] + acc["atk_early"], 1)  # opening reinforce/stage share
     p50w = (acc["p50_sum_won"] / acc["p50_n_won"]) if acc["p50_n_won"] else 0.0
@@ -951,8 +957,9 @@ def _fmt_tier_summary(acc):
         f"{bar}\n"
         f"  T1 ARBITER   win-rate {wr:.1%} ({gw}/{gw + gl})   ← only signal that sees absolute regression\n"
         f"  T2 THE WALL  loss-depth med-material-in-loss {lmed:.0f} · wiped-to-0 {wiped:.0f}%  (graded; want ↑ material)\n"
-        f"               concentration  decisive-mass gap {dm_gap:.2f} / cross {dm_cross:.2f} (gap↓ cross↑)   "
-        f"open<50 cap/atk WON {cap_open_w:.2f}   planets@50 WON {p50w:.0f}\n"
+        f"               concentration  decisive-mass gap {dm_gap:.2f} / cross {dm_cross:.2f} "
+        f"/ overkill {dm_overkill:.2f} / med {dm_med:.2f}  (gap↓ cross↑ overkill→1 = right-sized)\n"
+        f"               open<50 cap/atk WON {cap_open_w:.2f}   planets@50 WON {p50w:.0f}\n"
         f"               out-massed {outmassed:.0%} (⚠ saturates vs strong play — floor, not gradient)   "
         f"reinf@<50 {rsh_e:.2f}\n"
         f"  T3 TRIPWIRE  launch_rate {lr:.3f} (→0 passive)   fire_frac WON {ff_w:.2f} (→1 carpet-bomb)   "
