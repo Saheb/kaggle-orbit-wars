@@ -1485,7 +1485,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                                  natural_head_audit_beta=natural_head_audit_beta,
                                  shard_idx=shard_idx, shard_count=shard_count,
                                  collect_records=collect_records)
-        if not collect_records:
+        if shard_count <= 1:                 # real shards (>1) stay silent; --panel-out prints normally
             print_panel_report(results, opponent)
         return results
 
@@ -1612,6 +1612,11 @@ if __name__ == "__main__":
     parser.add_argument("--shard-out", type=str, default=None,
                         help="With --panel-shards>1: pickle this shard's per-game records here "
                              "(suppresses the report; merge_panel_shards.py prints the merged report).")
+    parser.add_argument("--panel-out", type=str, default=None,
+                        help="Pickle the full --panel per-game records here (each game's conv dict "
+                             "incl. dm_ratios), AND print the report normally. recompute_panel.py "
+                             "re-derives any metric offline — so a later metric addition never needs a "
+                             "panel re-run. No effect without --panel.")
     args = parser.parse_args()
     _DM_BETA_EVAL = args.decisive_mass_beta   # module global → used by _decisive_gap_step
     if args.retarget_top_roi:
@@ -1649,7 +1654,7 @@ if __name__ == "__main__":
                                  else args.natural_head_audit_beta),
         shard_idx=args.panel_shard_idx,
         shard_count=args.panel_shards,
-        collect_records=bool(args.shard_out),
+        collect_records=bool(args.shard_out) or bool(args.panel_out),
     )
     if args.shard_out and _eval_result is not None:
         import pickle
@@ -1660,6 +1665,15 @@ if __name__ == "__main__":
         _o = _eval_result["overall"]
         print(f"SHARD {args.panel_shard_idx}/{args.panel_shards} → {args.shard_out}: "
               f"{len(_eval_result.get('_records', []))} games, {_o['wins']}/{_o['total']} wins",
+              flush=True)
+    if args.panel_out and _eval_result is not None:
+        import pickle
+        with open(args.panel_out, "wb") as _f:
+            pickle.dump({"records": _eval_result.get("_records", []),
+                         "opponent": args.opponent}, _f)
+        print(f"PANEL RECORDS → {args.panel_out}: "
+              f"{len(_eval_result.get('_records', []))} games "
+              f"(recompute any metric: python orbit_wars_rl/recompute_panel.py {args.panel_out})",
               flush=True)
     if args.retarget_top_roi:
         rt = _RETARGET
