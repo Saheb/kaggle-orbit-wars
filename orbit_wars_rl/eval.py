@@ -59,17 +59,12 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
         cfg.model.fleet_feature_dim = int(sd["fleet_proj.weight"].shape[1])
     if "global_proj.weight" in sd:
         cfg.model.global_feature_dim = int(sd["global_proj.weight"].shape[1])
-    if "pair_kv.weight" in sd:
-        D = int(sd["planet_proj.weight"].shape[0])
-        ckpt_pw = int(sd["pair_kv.weight"].shape[1]) - D
-        # features.py always emits PAIRWISE_FEATURE_DIM channels, so the model's pairwise
-        # input must be that wide regardless of the checkpoint. Older/narrower checkpoints
-        # are zero-padded by EntityTransformer.load_state_dict (new channels contribute
-        # nothing → identical behaviour). Building to the checkpoint width would feed
-        # PAIRWISE_FEATURE_DIM-channel features to a narrower model → shape mismatch at forward.
-        cfg.model.pairwise_feature_dim = PAIRWISE_FEATURE_DIM if ckpt_pw > 0 else 0
-    else:
-        cfg.model.pairwise_feature_dim = 0
+    # features.py always emits PAIRWISE_FEATURE_DIM channels, so the model's pairwise input
+    # must be that wide regardless of the checkpoint. Older/narrower checkpoints are zero-padded
+    # by EntityTransformer.load_state_dict (new channels contribute nothing → identical
+    # behaviour). Pairwise is mandatory since the always-pairwise cleanup; a checkpoint without
+    # pair_kv is pre-pairwise and unsupported (it fails at load_state_dict with missing keys).
+    cfg.model.pairwise_feature_dim = PAIRWISE_FEATURE_DIM
 
     # Detect value head version from fc1 input width (old=D, new=2D).
     if "value_fc1.weight" in sd:
@@ -1321,8 +1316,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         print(f"Natural head audit: ON | beta={natural_head_audit_beta} "
               f"(passive logits/intent diagnostics; actions unchanged)")
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    allowed_missing = {"target_head.weight", "target_head.bias"} | PHASE4_COMPAT_MISSING_KEYS
-    bad_missing = [k for k in missing if k not in allowed_missing]
+    bad_missing = [k for k in missing if k not in PHASE4_COMPAT_MISSING_KEYS]
     # VDN per-planet value head (Stage 2) is never used at eval — ignore it if the
     # checkpoint carries it but this (eval-time) model doesn't.
     bad_unexpected = [k for k in unexpected if not k.startswith("value_pp_")]

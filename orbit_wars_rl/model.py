@@ -89,12 +89,15 @@ class EntityTransformer(nn.Module):
         # explicit (src, tgt) geometric features. Closes the trig gap exposed by the
         # prior BC angle-head failure (0.08 reduction vs 0.40 gate).
         F_pair = getattr(cfg, "pairwise_feature_dim", 0)
-        self.use_pairwise = F_pair > 0
-        if self.use_pairwise:
-            self.pair_kv = nn.Linear(D + F_pair, 2 * D)
-            self.pair_q = nn.Linear(D, D)
-            self.pair_out = nn.Linear(D, D)
-            self.pair_ln = nn.LayerNorm(D)
+        assert F_pair > 0, (
+            "pairwise_feature_dim must be > 0 — the pairwise cross-attention target head "
+            "is mandatory since the always-pairwise cleanup. Pre-pairwise checkpoints "
+            "(pairwise_feature_dim=0) are unsupported; load them from git tag pre-cleanup-2026-07."
+        )
+        self.pair_kv = nn.Linear(D + F_pair, 2 * D)
+        self.pair_q = nn.Linear(D, D)
+        self.pair_out = nn.Linear(D, D)
+        self.pair_ln = nn.LayerNorm(D)
 
         # Action heads (per owned planet)
         self.fire_head = nn.Linear(D, 1)
@@ -106,45 +109,41 @@ class EntityTransformer(nn.Module):
         # can swap to 10 fraction bins. Default 32 = legacy absolute counts.
         self.num_ship_bins = getattr(cfg, "num_ship_bins", NUM_SHIP_BINS)
         self.ship_head = nn.Linear(D, self.num_ship_bins)
-        # Target-index head. When pairwise features are available we score each
-        # (slot, target) pair from per-target inputs — see docs/bugs.md (target-head
-        # collapse). When pairwise is disabled we fall back to a slot-only Linear.
+        # Target-index head: score each (slot, target) pair from per-target inputs —
+        # see docs/bugs.md (target-head collapse).
         self.max_planets = cfg.max_planets if hasattr(cfg, "max_planets") else 48
-        if self.use_pairwise:
-            self.tgt_q = nn.Linear(D, D)
-            self.tgt_k = nn.Linear(D, D)
-            tgt_in = D + D + F_pair
-            tgt_hidden = D
-            self.target_scorer = nn.Sequential(
-                nn.Linear(tgt_in, tgt_hidden),
-                nn.GELU(),
-                nn.Linear(tgt_hidden, 1),
-            )
-            self.fire_q = nn.Linear(D, D)
-            self.fire_k = nn.Linear(D, D)
-            self.fire_scorer = nn.Sequential(
-                nn.Linear(tgt_in, tgt_hidden),
-                nn.GELU(),
-                nn.Linear(tgt_hidden, 1),
-            )
-            self.ship_q = nn.Linear(D, D)
-            self.ship_k = nn.Linear(D, D)
-            self.ship_scorer = nn.Sequential(
-                nn.Linear(tgt_in, tgt_hidden),
-                nn.GELU(),
-                nn.Linear(tgt_hidden, self.num_ship_bins),
-            )
-            resid_init_std = float(getattr(cfg, "phase4_residual_init_std", 0.0))
-            if resid_init_std > 0.0:
-                nn.init.normal_(self.fire_scorer[-1].weight, mean=0.0, std=resid_init_std)
-                nn.init.normal_(self.ship_scorer[-1].weight, mean=0.0, std=resid_init_std)
-            else:
-                nn.init.zeros_(self.fire_scorer[-1].weight)
-                nn.init.zeros_(self.ship_scorer[-1].weight)
-            nn.init.zeros_(self.fire_scorer[-1].bias)
-            nn.init.zeros_(self.ship_scorer[-1].bias)
+        self.tgt_q = nn.Linear(D, D)
+        self.tgt_k = nn.Linear(D, D)
+        tgt_in = D + D + F_pair
+        tgt_hidden = D
+        self.target_scorer = nn.Sequential(
+            nn.Linear(tgt_in, tgt_hidden),
+            nn.GELU(),
+            nn.Linear(tgt_hidden, 1),
+        )
+        self.fire_q = nn.Linear(D, D)
+        self.fire_k = nn.Linear(D, D)
+        self.fire_scorer = nn.Sequential(
+            nn.Linear(tgt_in, tgt_hidden),
+            nn.GELU(),
+            nn.Linear(tgt_hidden, 1),
+        )
+        self.ship_q = nn.Linear(D, D)
+        self.ship_k = nn.Linear(D, D)
+        self.ship_scorer = nn.Sequential(
+            nn.Linear(tgt_in, tgt_hidden),
+            nn.GELU(),
+            nn.Linear(tgt_hidden, self.num_ship_bins),
+        )
+        resid_init_std = float(getattr(cfg, "phase4_residual_init_std", 0.0))
+        if resid_init_std > 0.0:
+            nn.init.normal_(self.fire_scorer[-1].weight, mean=0.0, std=resid_init_std)
+            nn.init.normal_(self.ship_scorer[-1].weight, mean=0.0, std=resid_init_std)
         else:
-            self.target_head = nn.Linear(D, self.max_planets)
+            nn.init.zeros_(self.fire_scorer[-1].weight)
+            nn.init.zeros_(self.ship_scorer[-1].weight)
+        nn.init.zeros_(self.fire_scorer[-1].bias)
+        nn.init.zeros_(self.ship_scorer[-1].bias)
 
         # Value head: concat global token + owned pool → Linear(2D→D) by default.
         # value_head_in=0 means auto (2*D); load_checkpoint sets it to D for
@@ -228,7 +227,7 @@ class EntityTransformer(nn.Module):
         # Pairwise cross-attention: enrich each slot with explicit (src, tgt) geometry
         # for fire/angle/ship heads. Target head scores per-(slot, target) directly
         # from the same per-target inputs — see docs/bugs.md.
-        if self.use_pairwise and pairwise_features is not None:
+        if pairwise_features is not None:
             N_p = planet_features.shape[1]
             planet_per_slot = planet_emb_post.unsqueeze(1).expand(-1, max_owned, -1, -1)
             kv_input = torch.cat([planet_per_slot, pairwise_features], dim=-1)  # (B, MO, N_p, D+F)
@@ -291,7 +290,7 @@ class EntityTransformer(nn.Module):
         # [q_slot, k_target, pair_features]. This is the fix for the collapse
         # documented in docs/bugs.md — the prior Linear(D, max_planets) head
         # had no per-target conditioning, capping target_top1 near random.
-        if self.use_pairwise and pairwise_features is not None:
+        if pairwise_features is not None:
             N_p = planet_features.shape[1]
             q_tgt = self.tgt_q(owned_enriched).unsqueeze(2).expand(-1, -1, N_p, -1)
             k_tgt = self.tgt_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
@@ -312,10 +311,9 @@ class EntityTransformer(nn.Module):
             elif N_p > self.max_planets:
                 tgt_scores = tgt_scores[..., :self.max_planets]
             target_logits = tgt_scores
-        elif self.use_pairwise:
-            # Some legacy tests/callers do not pass pairwise_features and do
-            # not consume target_logits. Keep forward usable for those paths
-            # without adding fallback parameters that would break checkpoints.
+        else:
+            # Some tests/callers do not pass pairwise_features and do not consume
+            # target_logits. Keep forward usable for those paths with a zeros target.
             target_logits = torch.zeros(
                 B, max_owned, self.max_planets,
                 device=owned_enriched.device, dtype=owned_enriched.dtype,
@@ -332,7 +330,7 @@ class EntityTransformer(nn.Module):
         ship_residual = torch.zeros_like(ship_prior)
         fire_logits = fire_prior
         ship_logits = ship_prior
-        if self.use_pairwise and pairwise_features is not None:
+        if pairwise_features is not None:
             N_p = planet_features.shape[1]
             q_fire = self.fire_q(owned_enriched).unsqueeze(2).expand(-1, -1, N_p, -1)
             k_fire = self.fire_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
@@ -350,8 +348,6 @@ class EntityTransformer(nn.Module):
             ship_residual[..., :N_p, :] = ship_resid_live
             fire_logits[..., :N_p] = fire_logits[..., :N_p] + fire_resid_live
             ship_logits[..., :N_p, :] = ship_logits[..., :N_p, :] + ship_resid_live
-        if target_logits is None:
-            target_logits = self.target_head(owned_entities)  # (B, max_owned, max_planets)
         # Mask out invalid planet slots (padded) so target softmax only sees real planets
         if planet_mask is not None:
             tgt_mask = planet_mask.unsqueeze(1).expand(-1, max_owned, -1)  # (B, MO, N_p)

@@ -109,42 +109,37 @@ class _Model(nn.Module):
         self.global_proj = nn.Linear(_GLOBAL_DIM, D)
         self.mode_proj = nn.Linear(_GLOBAL_DIM, D)
         self.blocks = nn.ModuleList([_Block(D, _NUM_HEADS, _MLP_EXP) for _ in range(_NUM_LAYERS)])
-        self.use_pairwise = _PAIRWISE_DIM > 0
-        if self.use_pairwise:
-            self.pair_kv = nn.Linear(D + _PAIRWISE_DIM, 2 * D)
-            self.pair_q = nn.Linear(D, D)
-            self.pair_out = nn.Linear(D, D)
-            self.pair_ln = nn.LayerNorm(D)
+        self.pair_kv = nn.Linear(D + _PAIRWISE_DIM, 2 * D)
+        self.pair_q = nn.Linear(D, D)
+        self.pair_out = nn.Linear(D, D)
+        self.pair_ln = nn.LayerNorm(D)
         self.fire_head = nn.Linear(D, 1)
         self.ship_head = nn.Linear(D, NUM_SHIP_BINS)
-        if self.use_pairwise:
-            self.tgt_q = nn.Linear(D, D)
-            self.tgt_k = nn.Linear(D, D)
-            self.target_scorer = nn.Sequential(
-                nn.Linear(D + D + _PAIRWISE_DIM, D),
-                nn.GELU(),
-                nn.Linear(D, 1),
-            )
-            self.fire_q = nn.Linear(D, D)
-            self.fire_k = nn.Linear(D, D)
-            self.fire_scorer = nn.Sequential(
-                nn.Linear(D + D + _PAIRWISE_DIM, D),
-                nn.GELU(),
-                nn.Linear(D, 1),
-            )
-            self.ship_q = nn.Linear(D, D)
-            self.ship_k = nn.Linear(D, D)
-            self.ship_scorer = nn.Sequential(
-                nn.Linear(D + D + _PAIRWISE_DIM, D),
-                nn.GELU(),
-                nn.Linear(D, NUM_SHIP_BINS),
-            )
-            nn.init.zeros_(self.fire_scorer[-1].weight)
-            nn.init.zeros_(self.fire_scorer[-1].bias)
-            nn.init.zeros_(self.ship_scorer[-1].weight)
-            nn.init.zeros_(self.ship_scorer[-1].bias)
-        else:
-            self.target_head = nn.Linear(D, _MAX_PLANETS)
+        self.tgt_q = nn.Linear(D, D)
+        self.tgt_k = nn.Linear(D, D)
+        self.target_scorer = nn.Sequential(
+            nn.Linear(D + D + _PAIRWISE_DIM, D),
+            nn.GELU(),
+            nn.Linear(D, 1),
+        )
+        self.fire_q = nn.Linear(D, D)
+        self.fire_k = nn.Linear(D, D)
+        self.fire_scorer = nn.Sequential(
+            nn.Linear(D + D + _PAIRWISE_DIM, D),
+            nn.GELU(),
+            nn.Linear(D, 1),
+        )
+        self.ship_q = nn.Linear(D, D)
+        self.ship_k = nn.Linear(D, D)
+        self.ship_scorer = nn.Sequential(
+            nn.Linear(D + D + _PAIRWISE_DIM, D),
+            nn.GELU(),
+            nn.Linear(D, NUM_SHIP_BINS),
+        )
+        nn.init.zeros_(self.fire_scorer[-1].weight)
+        nn.init.zeros_(self.fire_scorer[-1].bias)
+        nn.init.zeros_(self.ship_scorer[-1].weight)
+        nn.init.zeros_(self.ship_scorer[-1].bias)
         self.value_fc1 = nn.Linear(2 * D, D)
         self.value_fc2 = nn.Linear(D, D // 2)
         self.value_out = nn.Linear(D // 2, 1)
@@ -175,7 +170,7 @@ class _Model(nn.Module):
         oe = x[bi, fi]
 
         target_logits = None
-        if self.use_pairwise and pairwise_features is not None:
+        if pairwise_features is not None:
             n_p = pf.shape[1]
             planet_emb_post = x[:, 1:1 + n_p, :]
             planet_per_slot = planet_emb_post.unsqueeze(1).expand(-1, max_owned, -1, -1)
@@ -203,7 +198,7 @@ class _Model(nn.Module):
             else:
                 tgt_scores = tgt_scores[..., :_MAX_PLANETS]
             target_logits = tgt_scores
-        elif self.use_pairwise:
+        else:
             target_logits = torch.zeros(
                 B, max_owned, _MAX_PLANETS,
                 device=oe.device, dtype=oe.dtype,
@@ -213,7 +208,7 @@ class _Model(nn.Module):
         sl_slot = self.ship_head(oe)
         fl = fl_slot.unsqueeze(-1).expand(-1, -1, _MAX_PLANETS)
         sl = sl_slot.unsqueeze(2).expand(-1, -1, _MAX_PLANETS, -1)
-        if self.use_pairwise and pairwise_features is not None:
+        if pairwise_features is not None:
             q_fire = self.fire_q(oe).unsqueeze(2).expand(-1, -1, n_p, -1)
             k_fire = self.fire_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
             fire_in = torch.cat([q_fire, k_fire, pairwise_features], dim=-1)
@@ -226,8 +221,6 @@ class _Model(nn.Module):
             sl = sl.clone()
             fl[..., :n_p] = fl[..., :n_p] + fire_resid
             sl[..., :n_p, :] = sl[..., :n_p, :] + ship_resid
-        if target_logits is None:
-            target_logits = self.target_head(oe)
         if pm is not None:
             tgt_mask = pm.unsqueeze(1).expand(-1, max_owned, -1)
             mp = target_logits.shape[-1]
@@ -487,8 +480,10 @@ def _apply_checkpoint_model_config(checkpoint, cfg: Config) -> dict:
     # checkpoint's stored width — narrower/older checkpoints are zero-padded by
     # EntityTransformer.load_state_dict. Stated explicitly (mirrors eval.load_checkpoint) so
     # export doesn't silently rely on the Config default tracking the feature width.
+    # Pairwise is mandatory since the always-pairwise cleanup; a checkpoint without pair_kv
+    # is pre-pairwise and unsupported (it fails at load_state_dict with missing pair_kv keys).
     if isinstance(state_dict, dict):
-        cfg.model.pairwise_feature_dim = PAIRWISE_FEATURE_DIM if "pair_kv.weight" in state_dict else 0
+        cfg.model.pairwise_feature_dim = PAIRWISE_FEATURE_DIM
     # Reinforce / sufficient-commit DISCIPLINE (persisted by ppo.state_dict) so the exported
     # mask matches training without relying on remembered CLI flags. Absent in old ckpts → 0/False.
     cfg.model._discipline_persisted = ("reinforce_gate_min_planets" in ckpt_cfg)
