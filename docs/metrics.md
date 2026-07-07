@@ -55,15 +55,14 @@ the value mean.) Conversion metrics in the **training diag** are self-play-confo
 | `ship0` | fraction of fires choosing bin 0 (=1 ship) | ~0 | **high = 1-ship-probe collapse** (trust) |
 | `meanshipbin` | mean ship-size bin when firing | ~15–20 | low = undersized launches |
 | `pl@16/50/100` | planets owned at episode-step 16/50/100 (player 0) | ramp ~6→9→10 | flat/low = expansion plateau |
-| `garrfrac@50` | garrison fraction at step 50 = parked / (parked+in-flight) | ~0.5 | **>0.65 = hoarding** (army parked) |
-| `shipspp@50` | ships per owned planet at step 50 (parked) | ~22 (Isaiah) | ≫ref = piling instead of spending |
+| `shipspp@50` | ships per owned planet at step 50 (parked) | ~22 (Isaiah) | ≫ref = piling instead of spending (hoard signal) |
 | `H_ship` | ship-head entropy | ~3.4 | low = ship collapse |
 | `Vμ` | mean of V(s) | swings | **NOT a collapse signal — ignore sign** |
 | `Rμ / Rσ / Aσ` | mean/std returns, adv std | Rμ~0 (zero-sum) | Rμ→0 = equilibrium; Aσ→0 = no learning signal |
 | `featσ p/f/g/pw` | feature std | ~0.3–0.45 | →0 = representation collapse |
 | `reinf step<50/50-100/>100` | reinforce own-target share by episode-window | peaks MID (50-100) `[ref:win 0.29/0.41/0.31]` | watch <50 and 50-100 climb; back-loaded = too little early |
 
-`pl@`, `garrfrac@`, `shipspp@` are player-0 snapshots at the exact episode step (16/32/50/100),
+`pl@`, `shipspp@` are player-0 snapshots at the exact episode step (16/32/50/100),
 accumulated over the rollout — controlled-time, so not skewed by game length or end-state. Full set
 goes to W&B under `hoard/*`.
 
@@ -90,7 +89,7 @@ that the decisive-mass *reward* is responding when you train with it; it is NOT 
 
 ### `CKPT_METRICS` (each checkpoint — parsed by track.py)
 
-`step EV KL clip fire_frac owned garrfrac@50 shipspp@50 fire_rate Hfire reinf`
+`step EV KL clip fire_frac owned shipspp@50 fire_rate Hfire reinf`
 (`fire_rate` = unconditional fraction of owned-planet-slots firing; `fire_frac` conditions on firing steps.)
 
 ---
@@ -158,17 +157,17 @@ history (pre-2026-07-06). See the Ender-reference "dm culled" note below for why
 
 Timing-corrected replays (action@t paired with obs@t-1), lead-collision target resolver.
 
-| player | rank | n | cap/atk-launch | ships/cap | reinf_share | planets@16/32/50/100 | garr_frac@16/32/50/100 | ships/planet@16/32/50/100 |
-|---|---|---|---|---|---|---|---|---|
-| Jake Will | #2 | 313 | **0.71** (open<50 **0.70**) | 83 | **0.56** | 2/5/8/11 | 0.59/0.59/0.60/0.77 | 13/16/24/43 |
-| Isaiah @ Tufa Labs | #1 | 194 | 0.59 ⚠stale | 168 | 0.30 ⚠ | 2/6/9/10 | 0.50/0.51/0.54/0.87 | 11/15/22/60 |
-| 213tubo | mid | 46 | 0.07 (carpet-bomber) | 199 | 0.45 | 2/5/8/10 | 0.52/0.51/0.45/0.49 | 11/15/18/21 |
+| player | rank | n | cap/atk-launch | ships/cap | reinf_share | planets@16/32/50/100 | ships/planet@16/32/50/100 |
+|---|---|---|---|---|---|---|---|
+| Jake Will | #2 | 313 | **0.71** (open<50 **0.70**) | 83 | **0.56** | 2/5/8/11 | 13/16/24/43 |
+| Isaiah @ Tufa Labs | #1 | 194 | 0.59 ⚠stale | 168 | 0.30 ⚠ | 2/6/9/10 | 11/15/22/60 |
+| 213tubo | mid | 46 | 0.07 (carpet-bomber) | 199 | 0.45 | 2/5/8/10 | 11/15/18/21 |
 
 ⚠️ Only Jake's target-derived columns are recomputed on the fixed resolver; Isaiah/TonyK
 `cap/atk-launch` + `reinf_share` are STALE (old angle resolver, understated) — recompute with
-`conversion_from_replays.py` before citing. `ships/cap`, `planets@`, `garr_frac@`, `ships/planet@`
+`conversion_from_replays.py` before citing. `ships/cap`, `planets@`, `ships/planet@`
 are not target-derived → valid. Elite play = high cap/atk-launch, steady expansion to ~10 planets,
-~half the army deployed mid-game (garr_frac ~0.5). Contested window = steps 16–50; @100 is endgame.
+~11–22 ships/planet mid-game (deploy, don't hoard). Contested window = steps 16–50; @100 is endgame.
 
 **Fire-rate:** top players fire RARELY — Isaiah `launch_rate` **0.036** / `fire_frac` 0.17; Jake
 0.081 / 0.17; carpet-bomber 213tubo 0.41 / 0.47. Our `fire[0] ~0.09` is top-player-normal (even
@@ -251,8 +250,11 @@ training** at inference or the policy reinforces where it was masked and self-sa
 ## Deprecated / don't-trust
 
 - **`avgfleet` / `p90`** — REMOVED. Episode-average level metrics are end-step-skewed (late large
-  empires inflate them for winners as much as hoarders). Use milestone `garr_frac@` / `ships/planet@`.
+  empires inflate them for winners as much as hoarders). Use milestone `ships/planet@`.
   Don't reintroduce a raw fleet-size average.
+- **`garr_frac@`** — REMOVED (eval, training diag, and this reference). parked/(parked+in-flight)
+  is confounded (same failure as the culled per-fire commitment metric) and moved no wins.
+  `ships/planet@` is the retained hoard signal (pile-up per planet). Don't reintroduce it.
 - **`srcs_multi`** — REMOVED. Empire-size-confounded, outlier-dominated; never moved wins.
 - **Zach panel WR** — saturated ~88–89% for the Phase-1 lineage → sanity check only. (For a lineage
   that traded general strength for reinforcement skill it's informative, not a ceiling.) The

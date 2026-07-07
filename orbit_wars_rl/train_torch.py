@@ -180,6 +180,123 @@ def compute_gae(rewards: torch.Tensor, values: torch.Tensor,
     return advantages, returns
 
 
+def compute_diagnostics(metrics, *, train_mask, env, model, args, flat, flat_adv, flat_ret):
+    """Populate `metrics` in place with per-rollout behavioural + PPO-health diagnostics.
+
+    Read-only w.r.t. training state — every value is derived from the just-finished
+    rollout's env accumulators, the flattened batch (`flat`/`flat_adv`/`flat_ret`), and
+    the current model weights. W&B logs all keys; the console prints a curated subset.
+
+    `train_mask` is storage["train_mask"] (T, N, P): its per-slot time-fraction weights the
+    env's rollout-SUMMED accumulators. Under per-episode assignment a slot's learning-ness can
+    flip mid-rollout (env resets pool<->self / seat), so weighting by the FRACTION of steps
+    each slot was the learning policy is ≈ correct vs the old t=0 snapshot (which counted a
+    flipped slot's whole-rollout total). Still approximate: assumes a slot's counts are roughly
+    uniform over the rollout (the env totals aren't split by when they happened).
+    """
+    train_frac = train_mask.float().mean(0).to(env.device)   # (N, P) in [0,1]
+    # reinforce_rate: of the current policy's realized launches (train_frac-weighted,
+    # across both seats), the fraction sent to our own planets (Vadasz ~0.57; target 0.4-0.6).
+    if args.allow_reinforce and env._fire_launch_count is not None:
+        tm = train_frac                                        # (N, P)
+        fires = (env._fire_launch_count * tm).sum()
+        reinf = (env._reinforce_launch_count * tm).sum()
+        neut = (env._neutral_launch_count * tm).sum()
+        denom = fires.clamp(min=1.0)
+        metrics["reinforce_rate"] = float((reinf / denom).item())   # own-target share
+        # target-owner share among the current policy's launches (own/neutral/enemy);
+        # Phase-2 target-head health — a selective head ≠ uniform across owners.
+        metrics["target_share_neutral"] = float((neut / denom).item())
+        metrics["target_share_enemy"] = float(((fires - reinf - neut) / denom).item())
+        # reinf-by-step: own-target share by episode-window [<50, 50-100, >100]. Winners
+        # peak MID-game (0.29/0.41/0.31); ours was back-loaded (0.05/0.19/0.42). The deb-in-pool
+        # run should shift reinforcement EARLIER/MID — watch these climb at <50 and 50-100.
+        if env._reinf_step is not None:
+            tmu = tm.unsqueeze(-1)                                  # (N, players, 1)
+            rs = (env._reinf_step * tmu).sum(dim=(0, 1))           # (3,)
+            fs = (env._fire_step * tmu).sum(dim=(0, 1)).clamp(min=1.0)
+            metrics["reinf_step_e"] = float((rs[0] / fs[0]).item())
+            metrics["reinf_step_m"] = float((rs[1] / fs[1]).item())
+            metrics["reinf_step_l"] = float((rs[2] / fs[2]).item())
+    if args.staging_shaping_coef != 0.0 and getattr(env, "_staging_phi_n", 0) > 0:
+        metrics["staging_phi"] = env._staging_phi_acc / env._staging_phi_n
+    # overask_rate: fraction of the current policy's INTENDED launches whose ship_count >
+    # source garrison (→ DROPPED in "drop" mode, clamped-to-full in "clamp"/eval). Always
+    # logged (not gated on allow_reinforce); split by episode window [<50/50-100/>100].
+    if getattr(env, "_attempt_step", None) is not None:
+        tmu = train_frac.unsqueeze(-1)                                        # (N, players, 1)
+        oa = (env._overask_step * tmu).sum(dim=(0, 1))                        # (3,)
+        at = (env._attempt_step * tmu).sum(dim=(0, 1))                        # (3,)
+        metrics["overask_rate"] = float((oa.sum() / at.sum().clamp(min=1.0)).item())
+        metrics["overask_e"] = float((oa[0] / at[0].clamp(min=1.0)).item())
+        metrics["overask_m"] = float((oa[1] / at[1].clamp(min=1.0)).item())
+        metrics["overask_l"] = float((oa[2] / at[2].clamp(min=1.0)).item())
+        # requested→emitted gap + fleet saturation + obs truncation (current policy via train_mask)
+        req = float((env._attempt_step * tmu).sum().item())
+        emi = float((env._emitted_step * tmu).sum().item())
+        ssv = float((env._slotstarve_step * tmu).sum().item())
+        metrics["moves_emit_req"] = emi / max(req, 1.0)            # emitted / requested
+        metrics["fleet_saturation"] = ssv / max(emi + ssv, 1.0)   # dropped-for-no-slot / can_fire
+        if getattr(env, "_obs_calls", None) is not None:
+            metrics["obs_trunc_rate"] = float(env._obs_trunc.sum().item()) / max(float(env._obs_calls.sum().item()), 1.0)
+            # severity: how much of the live fleet count / ship mass is hidden past the obs cap
+            metrics["obs_trunc_fleet_frac"] = float(env._obs_trunc_fleets.sum().item()) / max(float(env._obs_total_fleets.sum().item()), 1.0)
+            metrics["obs_trunc_ship_frac"] = float(env._obs_trunc_ships.sum().item()) / max(float(env._obs_total_ships.sum().item()), 1.0)
+            # ENEMY omitted ship mass ÷ all enemy ship mass — the obs256 decider (is the
+            # hidden mass the OPPONENT's, e.g. an inbound strike we can't see?).
+            metrics["obs_trunc_enemy_ship_frac"] = float(env._obs_trunc_enemy_ships.sum().item()) / max(float(env._obs_total_enemy_ships.sum().item()), 1.0)
+    with torch.no_grad():
+        metrics["old_value_mean"] = float(flat["values"].mean().item())
+        metrics["old_value_std"] = float(flat["values"].std(unbiased=False).item())
+        metrics["return_mean"] = float(flat_ret.mean().item())
+        metrics["return_std"] = float(flat_ret.std(unbiased=False).item())
+        metrics["adv_std"] = float(flat_adv.std(unbiased=False).item())
+        # Explained variance: how much of the return variance the value head
+        # captures. EV = 1 - Var(returns - values)/Var(returns); since
+        # returns = advantages + values, (returns - values) == advantages.
+        # The master PPO-health signal (should climb >0.8 within ~100 iters;
+        # if it never passes ~0.5, suspect obs representation / architecture).
+        _ret_var = float(flat_ret.var(unbiased=False).item())
+        metrics["explained_variance"] = (
+            1.0 - float(flat_adv.var(unbiased=False).item()) / _ret_var
+            if _ret_var > 1e-8 else 0.0
+        )
+        metrics["reward_mean"] = float(flat["rewards"].mean().item())
+        metrics["reward_std"] = float(flat["rewards"].std(unbiased=False).item())
+        metrics["reward_nonzero"] = float((flat["rewards"].abs() > 1e-8).float().mean().item())
+        metrics["planet_feat_std"] = float(flat["planet_features"].std(unbiased=False).item())
+        metrics["fleet_feat_std"] = float(flat["fleet_features"].std(unbiased=False).item())
+        metrics["global_feat_std"] = float(flat["global_features"].std(unbiased=False).item())
+        if "pairwise_features" in flat:
+            metrics["pairwise_feat_std"] = float(flat["pairwise_features"].std(unbiased=False).item())
+        # Per-feature input-weight norms on the pairwise cross-attention. Track whether
+        # newer target-value / keepability columns actually get used after a padded
+        # checkpoint resume (norm climbing toward the original geometry/owner channels)
+        # vs staying inert near zero.
+        if hasattr(model, "pair_kv"):
+            fw = model.pair_kv.weight          # [2D, D + F_pair]
+            D = fw.shape[0] // 2
+            feat_cols = fw[:, D:]              # [2D, F_pair]
+            if feat_cols.shape[1] >= 15:
+                metrics["wnorm_roi20"] = float(feat_cols[:, 12].norm().item())
+                metrics["wnorm_roi50"] = float(feat_cols[:, 13].norm().item())
+                metrics["wnorm_enemy_contest"] = float(feat_cols[:, 14].norm().item())
+                metrics["wnorm_pw_orig"] = float(feat_cols[:, :12].norm(dim=0).mean().item())
+            if feat_cols.shape[1] >= 20:
+                metrics["wnorm_reachable_enemy"] = float(feat_cols[:, 15].norm().item())
+                metrics["wnorm_capture_value"] = float(feat_cols[:, 16].norm().item())
+                metrics["wnorm_reactive_roi"] = float(feat_cols[:, 17].norm().item())
+                metrics["wnorm_friendly_reach"] = float(feat_cols[:, 18].norm().item())
+                metrics["wnorm_keepability"] = float(feat_cols[:, 19].norm().item())
+        if hasattr(model, "fire_q"):
+            metrics["phase4_fire_q_norm"] = float(model.fire_q.weight.norm().item())
+            metrics["phase4_fire_k_norm"] = float(model.fire_k.weight.norm().item())
+            metrics["phase4_ship_q_norm"] = float(model.ship_q.weight.norm().item())
+            metrics["phase4_ship_k_norm"] = float(model.ship_k.weight.norm().item())
+            metrics["phase4_fire_resid_out_norm"] = float(model.fire_scorer[2].weight.norm().item())
+            metrics["phase4_ship_resid_out_norm"] = float(model.ship_scorer[2].weight.norm().item())
+
+
 # In-training eval was removed: vs-frozen-initial gave false positives
 # (degenerate policies "improved" over the unchanged baseline). Source of
 # truth is local eval (eval.py) on downloaded checkpoints against raw
@@ -393,12 +510,6 @@ def train(args):
               f"{args.early_capture_anneal_frac * args.total_steps:,.0f} steps "
               f"(frac {args.early_capture_anneal_frac}), then 0")
     print(f"First Strike: {args.first_strike_mult}x for t<{args.first_strike_steps} steps" if args.first_strike_steps > 0 else "First Strike: off")
-    if args.srcs_multi_penalty > 0.0:
-        print(f"srcs_multi penalty: coef={args.srcs_multi_penalty}, threshold={args.srcs_multi_threshold}, "
-              f"decay_frac={args.srcs_multi_penalty_decay_frac} "
-              f"({'cosine decay to 0' if args.srcs_multi_penalty_decay_frac > 0 else 'constant'})")
-    if args.fleet_activity_coef > 0.0:
-        print(f"fleet_activity reward: coef={args.fleet_activity_coef} (per step any planet fires)")
 
     # Honor model-config fields saved in the checkpoint (num_ship_bins,
     # ship_bin_mode) BEFORE creating env or model.
@@ -715,9 +826,6 @@ def train(args):
                     "pool_mode": args.pool_mode,
                     "pool_fraction": args.pool_fraction,
                     "pool_external_fraction": args.pool_external_fraction,
-                    "srcs_multi_penalty": args.srcs_multi_penalty,
-                    "srcs_multi_threshold": args.srcs_multi_threshold,
-                    "fleet_activity_coef": args.fleet_activity_coef,
                     "win_margin_coeff": args.win_margin_coeff,
                     "action_decode": args.action_decode,
                     "resume": args.resume or "",
@@ -782,7 +890,6 @@ def train(args):
         # train_mask[t, e, p] = True if (env=e, player=p) is OUR current policy at
         # step t. Pool-opponent slots are False so PPO won't train on them.
         "train_mask": torch.ones(rollout_T, N, P, dtype=torch.bool, device=storage_dev),
-        # Planet ship counts snapshot per step — used for avgfleet/p90fleet metrics.
     }
 
     def _get_pool_self_model(member: PoolMember):
@@ -976,12 +1083,11 @@ def train(args):
         # so overask_rate logs for non-reinforce runs too; reinforce-specific counts stay gated.
         env.reset_reinforce_stats()
 
-        # Hoard milestones (player 0): snapshot garrison/in-flight/planets when an env
-        # is AT episode-step 16/32/50/100. Controlled-time + scale-free → replaces the
+        # Hoard milestones (player 0): snapshot garrison/planets when an env is AT
+        # episode-step 16/32/50/100. Controlled-time + scale-free → replaces the
         # end-skewed avgfleet/p90. Accumulated on-device, synced once after the rollout.
         _MS = (16, 32, 50, 100)
         ms_garr = {m: torch.zeros((), device=env.device) for m in _MS}
-        ms_infl = {m: torch.zeros((), device=env.device) for m in _MS}
         ms_plan = {m: torch.zeros((), device=env.device) for m in _MS}
         ms_n    = {m: torch.zeros((), device=env.device) for m in _MS}
 
@@ -1072,47 +1178,19 @@ def train(args):
             state, rewards, done = env.step(actions_per_player, angle_overrides=angle_overrides)
             _t_acc["estep"] += time.perf_counter() - _t_es
             # Hoard milestones: when an env is at episode-step 16/32/50/100, accumulate
-            # player-0 garrison (parked), in-flight, and owned-planet counts for that env.
+            # player-0 garrison (parked) and owned-planet counts for that env.
             ownp = env.planets[:, :, 1].long()                            # (N, P) owner
             mine_p = (ownp == 0) & env.planet_alive                       # player-0 planets
             garr_p0 = (env.planets[:, :, 5] * mine_p.float()).sum(dim=1)  # (N,) parked ships
             plan_p0 = mine_p.float().sum(dim=1)                           # (N,) planets owned
-            mine_f = (env.fleets[:, :, 1].long() == 0) & env.fleet_alive
-            infl_p0 = (env.fleets[:, :, 6] * mine_f.float()).sum(dim=1)   # (N,) in-flight ships
             for _m in _MS:
                 sel = (env.step_count == _m).float()                     # (N,) at-milestone
                 ms_garr[_m] += (garr_p0 * sel).sum()
-                ms_infl[_m] += (infl_p0 * sel).sum()
                 ms_plan[_m] += (plan_p0 * sel).sum()
                 ms_n[_m]    += sel.sum()
             # rewards: (N, P); done: (N,) shared across players.
             storage["rewards"][t].copy_(rewards[:, :P], non_blocking=True)
 
-            # Per-step srcs_multi penalty: discourage firing from too many
-            # sources simultaneously.  Applied symmetrically to both players.
-            # penalty_t[n,p] = effective_coef * max(0, n_fires[n,p] - threshold)
-            # If srcs_multi_penalty_decay_frac > 0, the coefficient cosine-decays
-            # from srcs_multi_penalty to 0 over that fraction of total_steps.
-            if args.srcs_multi_penalty > 0.0 or args.fleet_activity_coef > 0.0:
-                if args.srcs_multi_penalty > 0.0 and args.srcs_multi_penalty_decay_frac > 0.0:
-                    decay_steps = args.srcs_multi_penalty_decay_frac * args.total_steps
-                    t_frac = min(total_env_steps / max(decay_steps, 1), 1.0)
-                    _pen_coef = args.srcs_multi_penalty * 0.5 * (1.0 + math.cos(math.pi * t_frac))
-                else:
-                    _pen_coef = args.srcs_multi_penalty
-                for p in range(P):
-                    fires_p = storage["fire_a"][t, :, p].float()    # (N, MAX_OWNED)
-                    sv_p    = storage["slot_valid"][t, :, p].float() # (N, MAX_OWNED)
-                    n_fires = (fires_p * sv_p).sum(dim=-1)           # (N,)
-                    if args.srcs_multi_penalty > 0.0:
-                        excess = (n_fires - args.srcs_multi_threshold).clamp(min=0)
-                        storage["rewards"][t, :, p] -= _pen_coef * excess
-                    if args.fleet_activity_coef > 0.0:
-                        # Proportional up to threshold: each source adds activity_coef
-                        # until threshold, then the srcs_multi penalty takes over.
-                        # Nash = fire from exactly threshold sources (not binary token-fire).
-                        activity = n_fires.clamp(max=args.srcs_multi_threshold)
-                        storage["rewards"][t, :, p] += args.fleet_activity_coef * activity
             # done is shared across all seats of an env (game ends for everyone at once).
             storage["dones"][t].copy_(done.unsqueeze(1).expand(N, P), non_blocking=True)
 
@@ -1198,16 +1276,13 @@ def train(args):
         fired_train_slots = flat["fire_a"].float() * flat["slot_valid"].float()
         fired_count = fired_train_slots.sum().clamp(min=1.0)
         # Hoard milestones (player 0, controlled episode-step → no end-skew): at 16/32/50/100,
-        #   garr_frac   = parked / (parked + in-flight)   — scale-free deployment ratio
         #   ships/planet = parked / owned planets         — pile-up per planet
         #   planets     = owned planets                   — expansion trajectory
-        # Replaces the end-skewed avgfleet/p90. Reference (Isaiah): garr_frac ~0.5 mid-game,
-        # ~11-22 ships/planet, planets 2/6/9/10.
+        # Replaces the end-skewed avgfleet/p90. Reference (Isaiah): ~11-22 ships/planet,
+        # planets 2/6/9/10.
         ms_metrics = {}
         for _m in _MS:
-            g, fl, pl, nn = (ms_garr[_m].item(), ms_infl[_m].item(),
-                             ms_plan[_m].item(), ms_n[_m].item())
-            ms_metrics[f"garr_frac@{_m}"] = g / (g + fl) if (g + fl) > 0 else 0.0
+            g, pl, nn = ms_garr[_m].item(), ms_plan[_m].item(), ms_n[_m].item()
             ms_metrics[f"ships_per_planet@{_m}"] = g / pl if pl > 0 else 0.0
             ms_metrics[f"planets@{_m}"] = pl / nn if nn > 0 else 0.0
 
@@ -1283,113 +1358,9 @@ def train(args):
                                      kl_target=cfg.ppo.kl_target)
         _t_acc["upd"] += time.perf_counter() - _t_upd
         metrics.update(ms_metrics)
-        # train_mask time-fraction per (env,player): under per-episode assignment a slot's
-        # learning-ness can flip mid-rollout (env resets pool<->self / seat), so the env's
-        # rollout-SUMMED diagnostic accumulators below are weighted by the FRACTION of steps
-        # each slot was the learning policy — ≈ correct vs the old t=0 snapshot (which counted
-        # a flipped slot's whole-rollout total). Still approximate: assumes a slot's counts are
-        # roughly uniform over the rollout (the env totals aren't split by when they happened).
-        train_frac = storage["train_mask"].float().mean(0).to(env.device)   # (N, P) in [0,1]
-        # reinforce_rate: of the current policy's realized launches (train_frac-weighted,
-        # across both seats), the fraction sent to our own planets (Vadasz ~0.57; target 0.4-0.6).
-        if args.allow_reinforce and env._fire_launch_count is not None:
-            tm = train_frac                                        # (N, P)
-            fires = (env._fire_launch_count * tm).sum()
-            reinf = (env._reinforce_launch_count * tm).sum()
-            neut = (env._neutral_launch_count * tm).sum()
-            denom = fires.clamp(min=1.0)
-            metrics["reinforce_rate"] = float((reinf / denom).item())   # own-target share
-            # target-owner share among the current policy's launches (own/neutral/enemy);
-            # Phase-2 target-head health — a selective head ≠ uniform across owners.
-            metrics["target_share_neutral"] = float((neut / denom).item())
-            metrics["target_share_enemy"] = float(((fires - reinf - neut) / denom).item())
-            # reinf-by-step: own-target share by episode-window [<50, 50-100, >100]. Winners
-            # peak MID-game (0.29/0.41/0.31); ours was back-loaded (0.05/0.19/0.42). The deb-in-pool
-            # run should shift reinforcement EARLIER/MID — watch these climb at <50 and 50-100.
-            if env._reinf_step is not None:
-                tmu = tm.unsqueeze(-1)                                  # (N, players, 1)
-                rs = (env._reinf_step * tmu).sum(dim=(0, 1))           # (3,)
-                fs = (env._fire_step * tmu).sum(dim=(0, 1)).clamp(min=1.0)
-                metrics["reinf_step_e"] = float((rs[0] / fs[0]).item())
-                metrics["reinf_step_m"] = float((rs[1] / fs[1]).item())
-                metrics["reinf_step_l"] = float((rs[2] / fs[2]).item())
-        if args.staging_shaping_coef != 0.0 and getattr(env, "_staging_phi_n", 0) > 0:
-            metrics["staging_phi"] = env._staging_phi_acc / env._staging_phi_n
-        # overask_rate: fraction of the current policy's INTENDED launches whose ship_count >
-        # source garrison (→ DROPPED in "drop" mode, clamped-to-full in "clamp"/eval). Always
-        # logged (not gated on allow_reinforce); split by episode window [<50/50-100/>100].
-        if getattr(env, "_attempt_step", None) is not None:
-            tmu = train_frac.unsqueeze(-1)                                        # (N, players, 1)
-            oa = (env._overask_step * tmu).sum(dim=(0, 1))                        # (3,)
-            at = (env._attempt_step * tmu).sum(dim=(0, 1))                        # (3,)
-            metrics["overask_rate"] = float((oa.sum() / at.sum().clamp(min=1.0)).item())
-            metrics["overask_e"] = float((oa[0] / at[0].clamp(min=1.0)).item())
-            metrics["overask_m"] = float((oa[1] / at[1].clamp(min=1.0)).item())
-            metrics["overask_l"] = float((oa[2] / at[2].clamp(min=1.0)).item())
-            # requested→emitted gap + fleet saturation + obs truncation (current policy via train_mask)
-            req = float((env._attempt_step * tmu).sum().item())
-            emi = float((env._emitted_step * tmu).sum().item())
-            ssv = float((env._slotstarve_step * tmu).sum().item())
-            metrics["moves_emit_req"] = emi / max(req, 1.0)            # emitted / requested
-            metrics["fleet_saturation"] = ssv / max(emi + ssv, 1.0)   # dropped-for-no-slot / can_fire
-            if getattr(env, "_obs_calls", None) is not None:
-                metrics["obs_trunc_rate"] = float(env._obs_trunc.sum().item()) / max(float(env._obs_calls.sum().item()), 1.0)
-                # severity: how much of the live fleet count / ship mass is hidden past the obs cap
-                metrics["obs_trunc_fleet_frac"] = float(env._obs_trunc_fleets.sum().item()) / max(float(env._obs_total_fleets.sum().item()), 1.0)
-                metrics["obs_trunc_ship_frac"] = float(env._obs_trunc_ships.sum().item()) / max(float(env._obs_total_ships.sum().item()), 1.0)
-                # ENEMY omitted ship mass ÷ all enemy ship mass — the obs256 decider (is the
-                # hidden mass the OPPONENT's, e.g. an inbound strike we can't see?).
-                metrics["obs_trunc_enemy_ship_frac"] = float(env._obs_trunc_enemy_ships.sum().item()) / max(float(env._obs_total_enemy_ships.sum().item()), 1.0)
-        with torch.no_grad():
-            metrics["old_value_mean"] = float(flat["values"].mean().item())
-            metrics["old_value_std"] = float(flat["values"].std(unbiased=False).item())
-            metrics["return_mean"] = float(flat_ret.mean().item())
-            metrics["return_std"] = float(flat_ret.std(unbiased=False).item())
-            metrics["adv_std"] = float(flat_adv.std(unbiased=False).item())
-            # Explained variance: how much of the return variance the value head
-            # captures. EV = 1 - Var(returns - values)/Var(returns); since
-            # returns = advantages + values, (returns - values) == advantages.
-            # The master PPO-health signal (should climb >0.8 within ~100 iters;
-            # if it never passes ~0.5, suspect obs representation / architecture).
-            _ret_var = float(flat_ret.var(unbiased=False).item())
-            metrics["explained_variance"] = (
-                1.0 - float(flat_adv.var(unbiased=False).item()) / _ret_var
-                if _ret_var > 1e-8 else 0.0
-            )
-            metrics["reward_mean"] = float(flat["rewards"].mean().item())
-            metrics["reward_std"] = float(flat["rewards"].std(unbiased=False).item())
-            metrics["reward_nonzero"] = float((flat["rewards"].abs() > 1e-8).float().mean().item())
-            metrics["planet_feat_std"] = float(flat["planet_features"].std(unbiased=False).item())
-            metrics["fleet_feat_std"] = float(flat["fleet_features"].std(unbiased=False).item())
-            metrics["global_feat_std"] = float(flat["global_features"].std(unbiased=False).item())
-            if "pairwise_features" in flat:
-                metrics["pairwise_feat_std"] = float(flat["pairwise_features"].std(unbiased=False).item())
-            # Per-feature input-weight norms on the pairwise cross-attention. Track whether
-            # newer target-value / keepability columns actually get used after a padded
-            # checkpoint resume (norm climbing toward the original geometry/owner channels)
-            # vs staying inert near zero.
-            if hasattr(model, "pair_kv"):
-                fw = model.pair_kv.weight          # [2D, D + F_pair]
-                D = fw.shape[0] // 2
-                feat_cols = fw[:, D:]              # [2D, F_pair]
-                if feat_cols.shape[1] >= 15:
-                    metrics["wnorm_roi20"] = float(feat_cols[:, 12].norm().item())
-                    metrics["wnorm_roi50"] = float(feat_cols[:, 13].norm().item())
-                    metrics["wnorm_enemy_contest"] = float(feat_cols[:, 14].norm().item())
-                    metrics["wnorm_pw_orig"] = float(feat_cols[:, :12].norm(dim=0).mean().item())
-                if feat_cols.shape[1] >= 20:
-                    metrics["wnorm_reachable_enemy"] = float(feat_cols[:, 15].norm().item())
-                    metrics["wnorm_capture_value"] = float(feat_cols[:, 16].norm().item())
-                    metrics["wnorm_reactive_roi"] = float(feat_cols[:, 17].norm().item())
-                    metrics["wnorm_friendly_reach"] = float(feat_cols[:, 18].norm().item())
-                    metrics["wnorm_keepability"] = float(feat_cols[:, 19].norm().item())
-            if hasattr(model, "fire_q"):
-                metrics["phase4_fire_q_norm"] = float(model.fire_q.weight.norm().item())
-                metrics["phase4_fire_k_norm"] = float(model.fire_k.weight.norm().item())
-                metrics["phase4_ship_q_norm"] = float(model.ship_q.weight.norm().item())
-                metrics["phase4_ship_k_norm"] = float(model.ship_k.weight.norm().item())
-                metrics["phase4_fire_resid_out_norm"] = float(model.fire_scorer[2].weight.norm().item())
-                metrics["phase4_ship_resid_out_norm"] = float(model.ship_scorer[2].weight.norm().item())
+        compute_diagnostics(metrics, train_mask=storage["train_mask"], env=env,
+                            model=model, args=args, flat=flat,
+                            flat_adv=flat_adv, flat_ret=flat_ret)
 
         total_env_steps += rollout_T * N
         iter_count += 1
@@ -1439,12 +1410,6 @@ def train(args):
             # Secondary behavioural diagnostics — occasionally useful, not decision
             # drivers (W&B keeps them every iter). Console-print every 5th log.
             if iter_count == 1 or iter_count % 5 == 0:
-                pencoef = ""
-                if args.srcs_multi_penalty > 0.0 and args.srcs_multi_penalty_decay_frac > 0.0:
-                    _pc = args.srcs_multi_penalty * 0.5 * (1.0 + math.cos(math.pi * min(
-                        total_env_steps / max(args.srcs_multi_penalty_decay_frac * args.total_steps, 1), 1.0)))
-                    pencoef = f" pencoef {_pc:.5f}"
-                actcoef = f" actcoef {args.fleet_activity_coef:.4f}" if args.fleet_activity_coef > 0.0 else ""
                 reinfstr = (
                     f"reinf {metrics.get('reinforce_rate', 0):.2f} "
                     f"step<50/50-100/>100 {metrics.get('reinf_step_e',0):.2f}/"
@@ -1461,7 +1426,6 @@ def train(args):
                     f"meanshipbin {metrics.get('mean_ship_bin', 0):.1f} | "
                     f"pl@16/32/50/100 {metrics.get('planets@16',0):.0f}/{metrics.get('planets@32',0):.0f}/"
                     f"{metrics.get('planets@50',0):.0f}/{metrics.get('planets@100',0):.0f} "
-                    f"garrfrac@50 {metrics.get('garr_frac@50',0):.2f} "
                     f"shipspp@50 {metrics.get('ships_per_planet@50',0):.0f} | "
                     f"overask {metrics.get('overask_rate',0):.2f} "
                     f"(<50/50-100/>100 {metrics.get('overask_e',0):.2f}/"
@@ -1486,7 +1450,6 @@ def train(args):
                     f"val/keep {metrics.get('wnorm_capture_value', 0):.3f}/"
                     f"{metrics.get('wnorm_keepability', 0):.3f} "
                     f"(orig~{metrics.get('wnorm_pw_orig', 0):.2f})"
-                    + actcoef + pencoef
                 )
                 print(
                     f"   p4   | fire/ship tgtσ {metrics.get('fire_target_std', 0):.3f}/"
@@ -1615,12 +1578,12 @@ def train(args):
             # tracker can read metrics that line up exactly with each checkpoint
             # rather than the sparse every-20-iter diag line.
             print("  CKPT_METRICS step={} EV={:.3f} KL={:.4f} clip={:.3f} fire_frac={:.3f} "
-                  "owned={:.1f} garrfrac@50={:.2f} shipspp@50={:.0f} fire_rate={:.3f} Hfire={:.3f} reinf={:.3f}".format(
+                  "owned={:.1f} shipspp@50={:.0f} fire_rate={:.3f} Hfire={:.3f} reinf={:.3f}".format(
                       total_env_steps,
                       metrics.get("explained_variance", 0), metrics.get("approx_kl", 0),
                       metrics.get("clip_frac", 0), metrics.get("fire_fraction", 0),
                       metrics.get("owned_planets", 0),
-                      metrics.get("garr_frac@50", 0), metrics.get("ships_per_planet@50", 0),
+                      metrics.get("ships_per_planet@50", 0),
                       metrics.get("fire_rate_overall", 0),
                       metrics.get("fire_entropy", 0), metrics.get("reinforce_rate", 0)))
             # Persist pool alongside the disk checkpoint so spot interrupts
@@ -1823,7 +1786,7 @@ if __name__ == "__main__":
     parser.add_argument("--early-capture-anneal-frac", type=float, default=0.0,
                         help="Training-wide (not within-episode) anneal of --early-capture-coef to 0. "
                              "Cosine decay from full coef at step 0 to 0 at frac*total_steps, then "
-                             "stays 0 (mirrors --srcs-multi-penalty-decay-frac). Cosine holds near full "
+                             "stays 0. Cosine holds near full "
                              "early (bootstrap) and fades fastest mid-run. Removes the capture-shaping "
                              "crutch once the pool can sustain aggression. 0 = off (constant coef).")
     parser.add_argument("--first-strike-steps", type=int, default=0,
@@ -1853,27 +1816,6 @@ if __name__ == "__main__":
                              "for the launch-time target cache — SPS lever, 2026-07-05). Accuracy "
                              "vs true collision: 1 (~fresh) 95.6%%, 2 95.0%%, 4 93.7%%, 8 91.9%%, "
                              "0 (launch-only; comet staleness never fixed) 79.2%%.")
-    parser.add_argument("--srcs-multi-penalty", type=float, default=0.0,
-                        help="Per-step reward penalty per source over --srcs-multi-threshold. "
-                             "Applied symmetrically to both players each rollout step. "
-                             "Discourages carpet-bombing (firing from many sources at once). "
-                             "Typical: 0.001–0.005. 0 = off.")
-    parser.add_argument("--srcs-multi-threshold", type=float, default=2.0,
-                        help="Number of simultaneous fire sources at or below which no "
-                             "penalty is applied (default: 2.0). Fires > threshold incur "
-                             "--srcs-multi-penalty per excess source per step.")
-    parser.add_argument("--srcs-multi-penalty-decay-frac", type=float, default=0.0,
-                        help="If > 0, the srcs_multi penalty cosine-decays from "
-                             "--srcs-multi-penalty to 0 over this fraction of --total-steps. "
-                             "E.g. 0.5 = penalty is full strength at step 0, decays to 0 "
-                             "by step total_steps*0.5, stays 0 after. 0 = constant penalty.")
-    parser.add_argument("--fleet-activity-coef", type=float, default=0.0,
-                        help="Per-step reward added when any planet fires (n_fires > 0). "
-                             "Breaks the fire=0 Nash created by srcs_multi penalty alone — "
-                             "fire=0 forgoes this reward, making passivity costly. "
-                             "Pair with --srcs-multi-penalty: activity reward makes firing "
-                             "attractive, penalty caps how many sources are used. "
-                             "Typical: 0.001–0.003. 0 = off.")
     # Opponent pool (PFSP self-play with optional external heuristics) ----
     parser.add_argument("--pool-mode", choices=["none", "self", "mixed"], default="none",
                         help="none: pure current-vs-current self-play (default). "
