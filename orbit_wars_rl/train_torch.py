@@ -475,6 +475,8 @@ def train(args):
         cfg.ppo.critic_warmup_ev = args.critic_warmup_ev
     if args.critic_warmup_max_updates is not None:
         cfg.ppo.critic_warmup_max_updates = args.critic_warmup_max_updates
+    cfg.ppo.noop_kl_coef = args.noop_kl_coef
+    cfg.ppo.noop_target_launch_rate = args.noop_target_launch_rate
     print(f"PPO config: lr={cfg.ppo.learning_rate}, ppo_epochs={cfg.ppo.ppo_epochs}, "
           f"num_minibatches={cfg.ppo.num_minibatches}, clip_eps={cfg.ppo.clip_eps}, "
           f"entropy_coef_fire={cfg.ppo.entropy_coef_fire}, gae_lambda={cfg.ppo.gae_lambda}, "
@@ -483,6 +485,9 @@ def train(args):
         print(f"Phase4 residual LR multiplier: x{cfg.ppo.phase4_residual_lr_mult:.3g}")
     print(f"Entropy coefs: fire={cfg.ppo.entropy_coef_fire}, target={cfg.ppo.entropy_coef_target}, "
           f"ships={cfg.ppo.entropy_coef_ships} | max_grad_norm={cfg.ppo.max_grad_norm}")
+    if cfg.ppo.noop_kl_coef > 0.0:
+        print(f"No-op KL bias: coef={cfg.ppo.noop_kl_coef} → mean launch rate "
+              f"{cfg.ppo.noop_target_launch_rate} (anti-spray, adds to fire entropy)")
     print(f"Action decode: {args.action_decode}")
     print(f"Reinforcement (own planets as targets): {'ON' if args.allow_reinforce else 'off'}")
     if args.allow_reinforce and args.reinforce_anneal_frac > 0.0:
@@ -834,6 +839,8 @@ def train(args):
                     "staging_shaping_coef": args.staging_shaping_coef,
                     "staging_topk": args.staging_topk,
                     "entropy_coef_fire": args.entropy_coef_fire,
+                    "noop_kl_coef": args.noop_kl_coef,
+                    "noop_target_launch_rate": args.noop_target_launch_rate,
                 },
                 resume="allow",
             )
@@ -1421,6 +1428,7 @@ def train(args):
                 print(
                     f"   diag | fire[0] {slot0:.2f} rest_max {slot_rest_max:.2f} | "
                     f"fire_frac {metrics.get('fire_fraction', 0):.2f} "
+                    f"launch_rate {metrics.get('mean_launch_rate', 0):.3f} "
                     f"owned {metrics.get('owned_planets', 0):.1f} "
                     f"ship0 {metrics.get('ship_bin0_rate', 0):.2f} "
                     f"meanshipbin {metrics.get('mean_ship_bin', 0):.1f} | "
@@ -1677,6 +1685,14 @@ if __name__ == "__main__":
     parser.add_argument("--entropy-coef-ships", type=float, default=None,
                         help="Override ships-head entropy coefficient "
                              "(default: cfg.ppo.entropy_coef_ships=0.01)")
+    parser.add_argument("--noop-kl-coef", type=float, default=0.0,
+                        help="No-op KL bias (Jake Will Rank-2 anti-spray lever): coefficient on a "
+                             "KL that pulls the BATCH-MEAN launch rate toward --noop-target-launch-"
+                             "rate. Anchors the mean, so individual turns may still fire at 100%%. "
+                             "Adds to (does not replace) the fire entropy bonus. 0 = off. Try ~0.3.")
+    parser.add_argument("--noop-target-launch-rate", type=float, default=0.10,
+                        help="Target mean fire probability the no-op KL anchors to (default 0.10, "
+                             "the winners' ~10%% launch rate). Only active with --noop-kl-coef > 0.")
     parser.add_argument("--phase4-residual-init-std", type=float, default=None,
                         help="Stddev for Phase 4 residual output-layer init. "
                              "0.0 = exact parity; small nonzero values let the "

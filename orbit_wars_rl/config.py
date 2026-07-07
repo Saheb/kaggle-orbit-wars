@@ -79,6 +79,11 @@ class PPOConfig:
     entropy_coef_fire: float = 0.01
     entropy_coef_target: float = 0.02   # entropy bonus on the target head (was misnamed entropy_coef_angle)
     entropy_coef_ships: float = 0.01
+    # No-op KL bias (Jake Will Rank-2 lever): pull the BATCH-MEAN launch rate toward a low
+    # prior so the policy saves ships instead of spraying. 0 = off. Adds to (not replaces)
+    # the fire entropy bonus. See docs/writeup_lessons.md Lesson 3.
+    noop_kl_coef: float = 0.0
+    noop_target_launch_rate: float = 0.10   # target mean fire probability the KL anchors to
     kl_target: float = 0.05   # KL early-stop threshold per epoch; inf = disabled
     value_coef: float = 0.5
     # Critic-only warmup (for BC warmstarts: trained policy + UNtrained critic).

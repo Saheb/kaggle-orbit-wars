@@ -168,6 +168,21 @@ class PPOLearner:
         ship_entropy   = ship_dist.entropy().mean()
         target_entropy = target_dist.entropy().mean()
 
+        # No-op KL bias (Jake Will Rank-2 lever): anchor the BATCH-MEAN launch rate to a low
+        # prior. p_bar = mean fire prob over valid owned slots (WITH grad); KL(Bern(p_bar) ‖
+        # Bern(q)) pulls it toward q. Anchoring the MEAN (not per-sample) lets individual turns
+        # fire at 100% as long as others average out — kills spray without killing decisiveness.
+        mean_launch_rate = 0.0
+        noop_kl = 0.0
+        if cfg.noop_kl_coef > 0.0:
+            q = cfg.noop_target_launch_rate
+            sv_lr = slot_valid_2d.float()                              # (B, MO)
+            p_bar = (torch.sigmoid(fire_logits) * sv_lr).sum() / sv_lr.sum().clamp(min=1)
+            p_bar = p_bar.clamp(1e-6, 1.0 - 1e-6)
+            noop_kl = (p_bar * (p_bar / q).log()
+                       + (1.0 - p_bar) * ((1.0 - p_bar) / (1.0 - q)).log())
+            mean_launch_rate = p_bar.detach().item()
+
         if value_only:
             loss = cfg.value_coef * value_loss
         else:
@@ -176,6 +191,8 @@ class PPOLearner:
                     - cfg.entropy_coef_fire  * fire_entropy
                     - cfg.entropy_coef_target * target_entropy
                     - cfg.entropy_coef_ships * ship_entropy)
+            if cfg.noop_kl_coef > 0.0:
+                loss = loss + cfg.noop_kl_coef * noop_kl
 
         if return_metrics:
             clip_frac = ((ratio - 1.0).abs() > cfg.clip_eps).float().mean()
@@ -271,6 +288,8 @@ class PPOLearner:
                 "fire_entropy": fire_entropy.item(),
                 "target_entropy": target_entropy.item(),
                 "ship_entropy": ship_entropy.item(),
+                "noop_kl": float(noop_kl.item() if torch.is_tensor(noop_kl) else noop_kl),
+                "mean_launch_rate": mean_launch_rate,
                 "clip_frac": clip_frac.item(),
                 "clip_frac_fire": clip_frac_fire.item(),
                 "approx_kl": (old_log_prob - new_log_prob).mean().item(),
