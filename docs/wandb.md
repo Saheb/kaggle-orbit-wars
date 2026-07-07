@@ -17,8 +17,13 @@ Verify:
 python -c "import wandb; print(wandb.__version__)"
 ```
 
-If wandb is not installed, training runs fine without it (silent skip + warning).
+If wandb is not installed, training runs fine without it (**silent skip** + warning) — so a run on
+a box without wandb installed logs to the console text log only, even without `--no-wandb`.
 To explicitly disable for a run: `--no-wandb`.
+
+**GCP:** `gpu_run_artifacts/launch_gpu_gcp.sh` now installs wandb and pushes the `api.wandb.ai`
+credential from your local `~/.netrc` automatically — so just omit `--no-wandb` in the training
+command and runs log natively. (Ensure `wandb login` has been run locally first.)
 
 ---
 
