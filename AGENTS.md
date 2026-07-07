@@ -103,12 +103,12 @@ seed_checkpoints/          ← resume points uploaded to training instances
 setup/                     ← install orbit_wars kaggle env (run once per instance)
 docs/                      ← runbooks and logs
   commands.md              ← ⭐ copy-paste command reference (start here)
-  training.md              ← current training state, full run history, key config
   submissions.md           ← full submission log with Kaggle IDs and checkpoint paths
   GCP_RUNBOOK.md           ← GCP L4 launch, monitoring, terminate
   JARVIS_RUNBOOK.md        ← Jarvis H100 spot instances
 gpu_run_artifacts/         ← training scripts, watchers, synced checkpoints (gitignored)
 archive/                   ← dead code, old logs (ignore unless archaeology)
+  docs/training-till-submission.md ← full run history + reward/mask deltas through first submission
 ```
 
 ---

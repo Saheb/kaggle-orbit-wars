@@ -11,7 +11,7 @@ training signal that produces retention instead of spray-and-churn.
 
 ## Phases
 
-Each phase is one structural attack on that holding problem. Reward/mask deltas live in `docs/training.md`;
+Each phase is one structural attack on that holding problem. Reward/mask deltas live in `archive/docs/training-till-submission.md`;
 these docs cover the architecture- and dynamics-level changes.
 
 | Phase | Idea | Design doc |
@@ -95,7 +95,7 @@ Snapshot in [`docs/current-state.md`](docs/current-state.md); standing diagnosis
 | `results/` | Final eval panels + raw cert/FFA logs |
 | `seed_checkpoints/` | Resume points uploaded to training instances |
 | `docs/commands.md` | Copy-paste command reference (start here for ops) |
-| `docs/training.md` | Full run history + key config |
+| `archive/docs/training-till-submission.md` | Full run history + key config (through first submission) |
 | `docs/submissions.md` | Submission log with Kaggle IDs and checkpoint paths |
 | `docs/GCP_RUNBOOK.md` · `docs/JARVIS_RUNBOOK.md` | GPU instance launch / monitor / teardown |
 | `CLAUDE.md` | Agent operating rules (hard constraints for Claude Code) |
