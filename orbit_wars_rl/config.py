@@ -22,7 +22,10 @@ class EnvConfig:
 class ModelConfig:
     max_entities: int = 64
     max_owned_planets: int = 16
-    planet_feature_dim: int = 20
+    # 20 base channels + 96 projected-timeline (timeline.TIMELINE_DIM: 4 ch × 24 steps —
+    # writeup lesson 1, adopted 2026-07-10). Pre-timeline checkpoints are 20-wide; eval
+    # infers the width from planet_proj.weight and feeds matching features.
+    planet_feature_dim: int = 116
     fleet_feature_dim: int = 13
     # Global features: 11 base + 4 game-phase channels (phase one-hot early/mid/late +
     # normalized steps-to-next-comet-spawn). Always on since the 2026-07 cleanup; the
@@ -72,7 +75,10 @@ class PPOConfig:
     total_env_steps: int = 500_000_000
     batch_size: int = 2048
     num_minibatches: int = 4
-    ppo_epochs: int = 4
+    # 2 epochs = Jake Will (Rank-2) hyperparameter, adopted 2026-07-09. Halves the PPO-update
+    # phase vs the old default of 4 (≈ +30% SPS) at a modest sample-efficiency cost. See
+    # docs/perf.md (lever ladder). Override per-run with --ppo-epochs.
+    ppo_epochs: int = 2
     clip_eps: float = 0.2
     gamma: float = 0.995
     gae_lambda: float = 0.95

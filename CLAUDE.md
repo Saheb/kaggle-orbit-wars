@@ -79,7 +79,10 @@ orbit_wars_rl/          ← ALL active RL code lives here
   export_agent.py       ← export checkpoint → submission agent
   model.py              ← entity transformer model (encode_state() + forward())
   torch_env.py          ← vectorised GPU env (physics, blessed shaping, action decode)
-  features.py           ← feature extraction (blessed-2026-07 bundle)
+  torch_env_fn.py       ← pure-functional env twin (compile/JAX-ready; timeline parity oracle)
+  timeline.py           ← projected-future timeline features (planet dim 20→116; import-free,
+                           inlined into exports; writeup lesson 1)
+  features.py           ← feature extraction (blessed-2026-07 bundle + timeline channels)
   ppo.py                ← PPO learner
   opponent_pool.py      ← self-play pool + PFSP
   config.py             ← ModelConfig / PPOConfig
@@ -112,6 +115,7 @@ docs/                      ← runbooks and logs
   submissions.md           ← full submission log with Kaggle IDs and checkpoint paths
   GCP_RUNBOOK.md           ← GCP L4 launch, monitoring, terminate
   JARVIS_RUNBOOK.md        ← Jarvis H100 spot instances
+  perf.md                  ← ⭐ SPS profile: loop is PPO/model-compute-bound, JAX won't hit 10k
 gpu_run_artifacts/         ← training scripts, watchers, synced checkpoints (gitignored)
 archive/                   ← dead code, old logs (ignore unless archaeology)
   docs/training-till-submission.md ← full run history + reward/mask deltas through first submission
@@ -189,6 +193,11 @@ Note: checkpoints above that predate the blessed feature config (everything befo
 lineage, incl. corrpack3e) are refused by HEAD's feature-semantics guards — resume/eval/export
 them from git tag `pre-cleanup-2026-07`. Of the preserved final artifacts, only
 `final_submissions/presres1_0.5M_backfilled_resolver.pt` and `stgpr1_0.5M.pt` load under HEAD.
+
+Timeline features (2026-07-10, planet dim 20→116): NO pre-timeline checkpoint can **resume**
+under HEAD (guard + shape mismatch) — training restarts from scratch (the plan anyway). presres1
+/ stgpr1 remain **eval/export-able**: eval and export infer the width from `planet_proj` and
+feed 20-dim features (`extract_features(timeline=False)`).
 
 ---
 

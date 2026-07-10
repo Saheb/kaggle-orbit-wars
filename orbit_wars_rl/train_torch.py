@@ -443,6 +443,17 @@ def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device, *,
 def train(args):
     device = torch.device(args.device)
     print(f"Training on device: {device}")
+    # Precision / matmul backend (throughput lever, CUDA only). fp32 = true fp32 matmuls;
+    # tf32 = fp32 API but tensor-core matmuls (near-free, ~10-bit mantissa); bf16 = autocast
+    # the model fwd/bwd to bfloat16 (no GradScaler — bf16 keeps fp32's exponent range).
+    _prec = getattr(args, "precision", "fp32")
+    if device.type == "cuda":
+        _tf32 = _prec in ("tf32", "bf16")
+        torch.backends.cuda.matmul.allow_tf32 = _tf32
+        torch.backends.cudnn.allow_tf32 = _tf32
+    _amp_enabled = (_prec == "bf16") and device.type == "cuda"
+    print(f"Precision: {_prec} (tf32_matmul={_prec in ('tf32','bf16') and device.type=='cuda'}, "
+          f"bf16_autocast={_amp_enabled})")
     print(f"Parallel envs: {args.num_envs}")
     print(f"Rollout steps: {args.rollout_steps}")
     print(f"Batch per update: {args.num_envs * args.rollout_steps * args.num_players}  "
@@ -453,7 +464,15 @@ def train(args):
     cfg = Config()
     cfg.ppo.total_env_steps = args.total_steps
     cfg.device = args.device
+    # Model-capacity overrides (weight-class experiments). None = keep ModelConfig
+    # defaults (96/3 ≈ 525K params). Resuming a mismatched arch fails at load.
+    if args.entity_dim is not None:
+        cfg.model.entity_dim = args.entity_dim
+    if args.num_layers is not None:
+        cfg.model.num_layers = args.num_layers
     cfg.ppo.num_minibatches = args.num_minibatches
+    if getattr(args, "kl_target", None) is not None:
+        cfg.ppo.kl_target = args.kl_target
     if args.learning_rate is not None:
         cfg.ppo.learning_rate = args.learning_rate
     cfg.ppo.phase4_residual_lr_mult = args.phase4_residual_lr_mult
@@ -542,7 +561,11 @@ def train(args):
         # semantics cannot be resumed here — use the pre-cleanup git tag for those.
         _blessed = {"game_phase_features": True, "pressure_precise_resolver": True,
                     "roi_enemy_deflate": False, "zero_roi_channels": False,
-                    "threat_eta_surface": False}
+                    "threat_eta_surface": False,
+                    # Projected-future timeline (2026-07-10, planet dim 20→116): resume
+                    # requires a timeline-era checkpoint (older ones also shape-mismatch
+                    # at load_state_dict — this just gives the clear error first).
+                    "timeline_features": True}
         _mismatch = {k: ckpt_cfg.get(k, False) for k, want in _blessed.items()
                      if bool(ckpt_cfg.get(k, False)) != want}
         if _mismatch:
@@ -605,11 +628,26 @@ def train(args):
                       enable_comets=not args.disable_comets,
                       fleet_target_refresh_every=args.fleet_target_refresh)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
+    # torch.compile the env physics (probe). env.step is mostly pure vectorized arithmetic
+    # (production / planet paths / fleet movement / swept-collision) with a control-flow tail
+    # (_check_done / _auto_reset). fullgraph=False fuses the arithmetic and falls back to eager
+    # on the breaks. torch.compile is semantics-preserving (not lossy like bf16) — verify by
+    # comparing the seeded reward/EV trajectory to the uncompiled run.
+    if getattr(args, "compile_env", False) and device.type == "cuda":
+        env.step = torch.compile(env.step, fullgraph=False)
+        print("torch.compile ENABLED on env.step (fullgraph=False)")
 
     model = EntityTransformer(cfg.model).to(device)
     print(f"Model params: {count_params(model):,}")
+    _resume_optim_sd = None
     if args.resume:
         sd = torch.load(args.resume, map_location="cpu", weights_only=False)
+        # Warm-optimizer resume (default ON): carry the Adam moments across the resume.
+        # A mature policy through a COLD Adam (moments=0) takes large undamped first steps
+        # and gets kicked off its optimum — a root cause of the noopkl2 collapse (see
+        # docs/training.md). --cold-optimizer restores the old behaviour.
+        if isinstance(sd, dict) and "optimizer" in sd and not args.cold_optimizer:
+            _resume_optim_sd = sd["optimizer"]
         if "model" in sd: sd = sd["model"]
         _load_phase4_compatible(model, sd, "--resume")
         print(f"Resumed from {Path(args.resume).resolve()}")
@@ -622,7 +660,28 @@ def train(args):
                 _m.reset_parameters()
             print("  CONTROL: scalar critic re-initialised fresh (warm policy kept).")
 
+    # torch.compile (inductor) fuses the transformer + pairwise-scorer small ops and cuts
+    # kernel launches — targets the PPO-update phase (see docs/perf.md). First iters pay a
+    # warmup compile cost; read steady-state SPS from the `timing | ... wall` line, not the
+    # cumulative Final SPS. Two input shapes hit it (rollout N vs minibatch TN/mb) → two
+    # compiles. Only the learner path is compiled; pool self-models (unused at pool_fraction 0)
+    # stay eager.
+    if getattr(args, "compile", False) and device.type == "cuda":
+        model = torch.compile(model)
+        print("torch.compile ENABLED (inductor, default mode)")
+
+    # torch.compile the (already-pure) get_features — bit-identical drop-in, ~+33% rollout
+    # (see docs/perf.md). Disable the guarded _obs_* diagnostics (the only mutation / graph-break
+    # source); reset_reinforce_stats re-arms them each rollout, so the loop re-nulls below.
+    if getattr(args, "compile_features", False) and device.type == "cuda":
+        env._obs_calls = None
+        env.get_features = torch.compile(env.get_features)
+        print("torch.compile ENABLED on env.get_features (bit-identical; _obs diagnostics off)")
+
     learner = PPOLearner(model, cfg, device=device)
+    # bf16 autocast for the PPO update forward/backward (the dominant phase — see docs/perf.md).
+    learner.amp_enabled = _amp_enabled
+    learner.amp_dtype = torch.bfloat16
 
     # LR scheduler: warmup + cosine decay over total updates.
     # On --resume, skip warmup by default (the model is already trained — no
@@ -634,9 +693,16 @@ def train(args):
     # for the default full cosine decay to zero.
     lr_schedule_steps = args.lr_schedule_steps if args.lr_schedule_steps > 0 else args.total_steps
     lr_total_updates = (lr_schedule_steps // (args.num_envs * args.rollout_steps)) * updates_per_batch
+    # --lr-offset-steps: env steps the schedule should treat as already consumed. For staged
+    # runs (the winners' pattern — decay ACROSS stages, not per stage), pass the checkpoint's
+    # step count together with a full-horizon --lr-schedule-steps: the resumed stage then
+    # CONTINUES the cosine mid-decay instead of restarting at peak. Converted to updates with
+    # THIS run's batch geometry (matches the lr_schedule_steps conversion above).
+    lr_offset_updates = (args.lr_offset_steps // (args.num_envs * args.rollout_steps)) * updates_per_batch
     skip_warmup = (args.resume and not args.with_warmup) or args.skip_warmup
     warmup = 0 if skip_warmup else cfg.ppo.lr_warmup_steps
     def lr_lambda(step):
+        step = step + lr_offset_updates
         if step < warmup:
             return (step + 1) / max(warmup, 1)
         progress = (step - warmup) / max(lr_total_updates - warmup, 1)
@@ -644,7 +710,20 @@ def train(args):
     scheduler = torch.optim.lr_scheduler.LambdaLR(learner.optimizer, lr_lambda)
     print(f"LR schedule: warmup={warmup} updates (skip_warmup={skip_warmup}), "
           f"total_updates={total_updates}, lr_schedule_steps={lr_schedule_steps}, "
-          f"peak_lr={cfg.ppo.learning_rate}")
+          f"lr_offset_updates={lr_offset_updates}, peak_lr={cfg.ppo.learning_rate}")
+    if _resume_optim_sd is not None:
+        # Load AFTER scheduler creation so LambdaLR's base_lrs come from the CLI config,
+        # then re-sync param-group lr from the schedule (load_state_dict restores the
+        # checkpoint's lr, which this run's --learning-rate must override).
+        try:
+            learner.optimizer.load_state_dict(_resume_optim_sd)
+            for g, lr in zip(learner.optimizer.param_groups, scheduler.get_last_lr()):
+                g["lr"] = lr
+            print("Optimizer WARM-resumed (Adam moments from checkpoint; LR from this "
+                  "run's schedule). Pass --cold-optimizer for the old fresh-Adam behaviour.")
+        except (ValueError, KeyError, RuntimeError) as e:
+            print(f"WARNING: checkpoint optimizer state incompatible with this run "
+                  f"({e}) — continuing with a cold optimizer.")
 
     # ----------------------------------------------------------------------
     # Opponent pool setup (PFSP self-play with optional external heuristics)
@@ -864,10 +943,11 @@ def train(args):
             "4p with EXTERNAL pool members is not validated — use --pool-mode self "
             "(self-snapshots fill the 3 non-learner seats; that path IS wired/tested).")
 
-    # Pre-allocate rollout buffers on CPU to keep GPU memory free for the model.
-    # Shape leading dims: (T, N, P) so player 0 and player 1 each contribute a
-    # full trajectory per env step. Effective PPO batch size = T*N*P.
-    storage_dev = torch.device("cpu")
+    # Rollout buffers: CPU by default (keeps GPU memory free). --gpu-storage keeps them
+    # ON the GPU, eliminating the per-step D2H feature copy (samp_store) and the per-minibatch
+    # H2D copy (build) — GPU→GPU instead of round-tripping PCIe. Costs ~6-7 GB VRAM at the
+    # 0.5M/512-env config; trivial on an 80 GB+ card. See docs/perf.md.
+    storage_dev = device if getattr(args, "gpu_storage", False) else torch.device("cpu")
     storage = {
         "planet_features": torch.zeros(rollout_T, N, P, 48, cfg.model.planet_feature_dim, device=storage_dev),
         "fleet_features":  torch.zeros(rollout_T, N, P, 128, cfg.model.fleet_feature_dim, device=storage_dev),
@@ -996,11 +1076,23 @@ def train(args):
 
         raise ValueError(f"unknown opponent kind: {opp.kind}")
 
+    # --profile-sync: cuda-synchronize at phase boundaries so each timing bucket owns
+    # the GPU work it launched (without it, async kernels land at whichever bucket
+    # syncs next — historically inflating estep). Overhead is acceptable for profiling
+    # only. No-op when the flag is off or the device is not CUDA.
+    _prof = bool(args.profile_sync)
+    if _prof:
+        args.log_timing = True
+    _sync = torch.cuda.synchronize if (_prof and device.type == "cuda") else (lambda: None)
+
     def forward_player(player: int):
         """Run model forward for given player, return outputs + features dict."""
+        _t0 = time.perf_counter()
         feats = env.get_features(player, max_planets=cfg.env.max_planets, max_fleets=128)
+        _sync(); _t_acc["gf"] += time.perf_counter() - _t0
         owned_count = feats["owned_count"]
-        with torch.no_grad():
+        _t0 = time.perf_counter()
+        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=_amp_enabled):
             outs = model(
                 feats["planet_features"], feats["fleet_features"],
                 feats["global_features"], feats["planet_mask"],
@@ -1011,6 +1103,7 @@ def train(args):
                 owned_count=owned_count,
                 pairwise_features=feats.get("pairwise_features"),
             )
+        _sync(); _t_acc["fwd"] += time.perf_counter() - _t0
         return feats, outs
 
     print(f"\nStarting self-play training (target {args.total_steps:,} env steps)")
@@ -1089,6 +1182,8 @@ def train(args):
         # reinforce/fire launches per (env,player); combined with train_mask below). Unconditional
         # so overask_rate logs for non-reinforce runs too; reinforce-specific counts stay gated.
         env.reset_reinforce_stats()
+        if getattr(args, "compile_features", False):
+            env._obs_calls = None   # re-null after reset_reinforce_stats re-armed the diagnostics
 
         # Hoard milestones (player 0): snapshot garrison/planets when an env is AT
         # episode-step 16/32/50/100. Controlled-time + scale-free → replaces the
@@ -1100,20 +1195,24 @@ def train(args):
 
         # --- Rollout collection (no grad) -----------------------------------
         # Per-rollout wall-time breakdown (SPS patch A): attributes main-thread time to
-        # policy_forward / external obs-build / worker-wait / move-convert / env_step /
-        # ppo_update so the diag line shows where the per-step tax actually is. CPU
-        # perf_counter (no cuda.synchronize) → GPU-async work lands at the next sync; that
-        # is exactly the main-thread wall-time we are trying to reduce.
-        _t_acc = {"pf": 0.0, "ext_obs": 0.0, "ext_wait": 0.0, "ext_conv": 0.0,
-                  "estep": 0.0, "upd": 0.0}
+        # get_features / model-forward / sample+D2H-store / pool (ext_* ⊂ pool) / env_step /
+        # post (milestones, done handling, reward store) / bootstrap / gae / batch-build
+        # (flatten + minibatch H2D) / ppo_update (upd_fwd/bwd/opt ⊂ upd). Default: CPU
+        # perf_counter only → GPU-async work lands at the next sync point. With
+        # --profile-sync each bucket owns its own GPU work (true phase attribution).
+        _t_acc = {k: 0.0 for k in (
+            "gf", "fwd", "samp_store", "pool", "ext_obs", "ext_wait", "ext_conv",
+            "estep", "post", "boot", "gae", "build", "upd", "upd_fwd", "upd_bwd",
+            "upd_opt")}
+        _t_iter0 = time.perf_counter()
         model.eval()
         for t in range(rollout_T):
             actions_per_player = {}
             feats_by_player = {}   # reused for self-pool opponents (avoid recomputing get_features)
-            _t_pf = time.perf_counter()
             for p in range(P):
-                feats_p, outs_p = forward_player(p)
+                feats_p, outs_p = forward_player(p)   # accumulates gf/fwd internally
                 feats_by_player[p] = feats_p
+                _t_ss = time.perf_counter()
                 fire_p, angle_p, ship_p, target_p, lpf_p, lps_p, lpt_p = sample_action_batched(
                     outs_p, feats_p["fire_mask"], feats_p.get("target_mask")
                 )
@@ -1139,7 +1238,7 @@ def train(args):
                 storage["values"][t, :, p].copy_(outs_p["value"].squeeze(-1), non_blocking=True)
                 # angle_p is zeros (unused in target-decode); env needs 4-col action tensor.
                 actions_per_player[p] = torch.stack([fire_p, angle_p, ship_p, target_p], dim=-1)
-            _t_acc["pf"] += time.perf_counter() - _t_pf
+                _sync(); _t_acc["samp_store"] += time.perf_counter() - _t_ss
 
             # Pool opponent override: for each pool env, replace its opp-seat action
             # (opp_seat = 1 - the env's assigned seat) with that env's assigned member's
@@ -1148,6 +1247,7 @@ def train(args):
             # so we group by (member, opp_seat) and call compute_pool_actions per group.
             angle_overrides = None
             if N_pool > 0:
+                _t_pool = time.perf_counter()
                 groups: dict = {}  # (id(member), opp_seat) -> [member, opp_seat, [env ids]]
                 for e in range(N):
                     if not env_is_pool[e]:
@@ -1180,10 +1280,12 @@ def train(args):
                                              float("nan"), device=env.device)
                             angle_overrides[os_] = ovr
                         ovr[ids_t] = opp_cont.to(ovr.dtype)
+                _sync(); _t_acc["pool"] += time.perf_counter() - _t_pool
 
             _t_es = time.perf_counter()
             state, rewards, done = env.step(actions_per_player, angle_overrides=angle_overrides)
-            _t_acc["estep"] += time.perf_counter() - _t_es
+            _sync(); _t_acc["estep"] += time.perf_counter() - _t_es
+            _t_post = time.perf_counter()
             # Hoard milestones: when an env is at episode-step 16/32/50/100, accumulate
             # player-0 garrison (parked) and owned-planet counts for that env.
             ownp = env.planets[:, :, 1].long()                            # (N, P) owner
@@ -1229,10 +1331,12 @@ def train(args):
                         elif field_won:   pool.record_result(env_member[e], "loss")
                         else:             pool.record_result(env_member[e], "draw")
                     env_is_pool[e], env_member[e], env_seat[e] = _draw_assignment(total_env_steps)
+            _sync(); _t_acc["post"] += time.perf_counter() - _t_post
 
         # Bootstrap value at end of rollout — for both players
+        _t_boot = time.perf_counter()
         next_value_p = torch.zeros(N, P, device=storage_dev)
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=_amp_enabled):
             for p in range(P):
                 feats_final = env.get_features(p, max_planets=cfg.env.max_planets, max_fleets=128)
                 outs_final = model(
@@ -1245,8 +1349,10 @@ def train(args):
                     owned_count=feats_final["owned_count"],
                     pairwise_features=feats_final.get("pairwise_features"),
                 )
-                next_value_p[:, p] = outs_final["value"].squeeze(-1).cpu()
+                next_value_p[:, p] = outs_final["value"].squeeze(-1).to(storage_dev)
+        _sync(); _t_acc["boot"] += time.perf_counter() - _t_boot
 
+        _t_gae = time.perf_counter()
         # --- GAE (run on CPU since storage is on CPU) -----------------------
         # Fold P into the env axis so each player-stream is an independent
         # trajectory: (T, N, P) -> (T, N*P).
@@ -1258,7 +1364,9 @@ def train(args):
             rewards_flat, values_flat, dones_flat,
             next_v_flat, gamma=cfg.ppo.gamma, lam=cfg.ppo.gae_lambda,
         )
+        _t_acc["gae"] += time.perf_counter() - _t_gae
 
+        _t_build = time.perf_counter()
         # --- Flatten (T, N, P, ...) → (T*N*P, ...) for PPO update -----------
         # Pool-opponent slots have train_mask=False — drop them so PPO only
         # learns from samples where current model picked the action.
@@ -1333,9 +1441,10 @@ def train(args):
             print(f"[dump-rollout] saved batch (TN={TN}) -> {args.dump_rollout_and_exit}", flush=True)
             return
 
-        # Minibatches: split TN into num_minibatches chunks. Build on CPU then
-        # move each minibatch to GPU just-in-time inside PPOLearner.update.
-        idx = torch.randperm(TN)
+        # Minibatches: split TN into num_minibatches chunks. Move each to GPU just-in-time
+        # inside PPOLearner.update (a no-op when --gpu-storage keeps them on GPU already).
+        # idx must live on storage_dev so advanced-indexing `v[mi]` matches v's device.
+        idx = torch.randperm(TN, device=storage_dev)
         mb_size = TN // cfg.ppo.num_minibatches
         minibatches = []
         for mb in range(cfg.ppo.num_minibatches):
@@ -1352,6 +1461,8 @@ def train(args):
                     sub[k] = v
             minibatches.append(sub)
 
+        _sync(); _t_acc["build"] += time.perf_counter() - _t_build
+
         # PPO update — OR a critic-only warmup step while the BC-warmstart critic is
         # still cold (policy frozen, value head only). The EV-based exit is checked
         # below, after this rollout's EV is computed.
@@ -1362,8 +1473,10 @@ def train(args):
             critic_warmup_count += 1
         else:
             metrics = learner.update(minibatches, scheduler=scheduler,
-                                     kl_target=cfg.ppo.kl_target)
-        _t_acc["upd"] += time.perf_counter() - _t_upd
+                                     kl_target=cfg.ppo.kl_target,
+                                     timers=_t_acc if _prof else None, sync=_sync,
+                                     lean_metrics=args.lean_metrics)
+        _sync(); _t_acc["upd"] += time.perf_counter() - _t_upd
         metrics.update(ms_metrics)
         compute_diagnostics(metrics, train_mask=storage["train_mask"], env=env,
                             model=model, args=args, flat=flat,
@@ -1481,13 +1594,18 @@ def train(args):
                 )
                 if args.log_timing:
                     # SPS patch A: per-rollout wall-time breakdown (where the per-step tax is).
-                    _tt = sum(_t_acc.values()) or 1.0
-                    _ext = _t_acc['ext_obs'] + _t_acc['ext_wait'] + _t_acc['ext_conv']
+                    # ext_* ⊂ pool and upd_fwd/bwd/opt ⊂ upd, so the denominator is this
+                    # iteration's wall-clock, not the bucket sum; "covered" < 100% exposes
+                    # unattributed time (diagnostics, logging, Python glue).
+                    _wall = (now - _t_iter0) or 1.0
+                    _parts = " ".join(f"{k} {v:.1f}" for k, v in _t_acc.items() if v >= 0.05)
+                    _top = sum(_t_acc[k] for k in ("gf", "fwd", "samp_store", "pool",
+                                                   "estep", "post", "boot", "gae",
+                                                   "build", "upd"))
                     print(
-                        f"   timing | pf {_t_acc['pf']:.1f} ext_obs {_t_acc['ext_obs']:.1f} "
-                        f"ext_wait {_t_acc['ext_wait']:.1f} ext_conv {_t_acc['ext_conv']:.1f} "
-                        f"estep {_t_acc['estep']:.1f} upd {_t_acc['upd']:.1f} "
-                        f"(sum {_tt:.1f}s, ext {_ext/_tt*100:.0f}%)"
+                        f"   timing | {_parts} | wall {_wall:.1f}s "
+                        f"covered {_top / _wall * 100:.0f}%"
+                        + (" [synced]" if _prof else "")
                     )
             # W&B logging
             if wb is not None:
@@ -1661,6 +1779,10 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--resume", type=str, default="")
+    parser.add_argument("--cold-optimizer", action="store_true",
+                        help="On --resume, do NOT load the checkpoint's Adam moments "
+                             "(pre-2026-07-10 behaviour). A cold Adam on a mature policy "
+                             "takes large undamped first steps — see docs/training.md.")
     parser.add_argument("--reinit-critic", action="store_true",
                         help="CONTROL: re-initialise the value head after resume "
                              "(warm policy + cold critic) to isolate the VDN "
@@ -1908,6 +2030,14 @@ if __name__ == "__main__":
                              "Set larger than --total-steps for slow/partial decay "
                              "(e.g. 2x total-steps → LR only decays halfway). "
                              "Default 0 = use --total-steps (full decay to zero).")
+    parser.add_argument("--lr-offset-steps", type=int, default=0,
+                        help="Env steps the LR schedule treats as already consumed. For a "
+                             "staged run, pass the resumed checkpoint's step count with a "
+                             "full-horizon --lr-schedule-steps so the cosine CONTINUES "
+                             "mid-decay instead of restarting at peak. Default 0.")
+    parser.add_argument("--kl-target", type=float, default=None,
+                        help="Override PPO KL early-stop threshold. Pass inf to disable early "
+                             "stopping (force full ppo_epochs — used for clean SPS measurement).")
     parser.add_argument("--skip-warmup", action="store_true",
                         help="Skip the LR warmup phase. Auto-enabled when "
                              "--resume is set (use --with-warmup to override).")
@@ -1922,6 +2052,41 @@ if __name__ == "__main__":
     parser.add_argument("--log-timing", action="store_true",
                         help="Print per-rollout timing breakdowns in the console log. "
                              "Off by default; enable only for profiling.")
+    parser.add_argument("--profile-sync", action="store_true",
+                        help="cuda.synchronize at phase boundaries so each timing bucket owns "
+                             "the GPU work it launched (TRUE phase attribution — without it "
+                             "async GPU work lands at the next sync point). Adds overhead; "
+                             "profiling runs only. Implies --log-timing.")
+    parser.add_argument("--precision", choices=["fp32", "tf32", "bf16"], default="fp32",
+                        help="Matmul precision (CUDA throughput lever). fp32 = true fp32; "
+                             "tf32 = tensor-core matmuls behind the fp32 API (near-free); "
+                             "bf16 = autocast model fwd/bwd to bfloat16 (logits upcast to fp32 "
+                             "for the PPO ratio math). Default fp32 preserves prior behavior.")
+    parser.add_argument("--compile", action="store_true",
+                        help="torch.compile (inductor) the model — fuses ops / cuts kernel "
+                             "launches on the update phase. Pays a first-iter warmup cost; "
+                             "read steady SPS from the timing 'wall' line. CUDA only.")
+    parser.add_argument("--gpu-storage", action="store_true",
+                        help="Keep rollout buffers on the GPU instead of CPU — eliminates the "
+                             "per-step D2H feature copy and per-minibatch H2D copy (GPU→GPU). "
+                             "Costs ~6-7 GB VRAM at the 0.5M/512-env config. CUDA only.")
+    parser.add_argument("--compile-features", action="store_true",
+                        help="torch.compile env.get_features (bit-identical drop-in, ~+33% rollout). "
+                             "Disables the _obs_* obs-truncation diagnostics. CUDA only.")
+    parser.add_argument("--compile-env", action="store_true",
+                        help="torch.compile env.step (fullgraph=False) — fuses the physics "
+                             "kernels (env.step is the wall once the update is optimized). "
+                             "Semantics-preserving; verify vs the uncompiled trajectory. CUDA only.")
+    parser.add_argument("--lean-metrics", action="store_true",
+                        help="THROUGHPUT PROBE ONLY: compute the per-minibatch metrics block "
+                             "(~40 .item() GPU->CPU syncs) only ONCE per rollout instead of "
+                             "every update. Gradients unchanged; disables KL early-stop. "
+                             "Use to measure the logging-sync SPS tax, not for real training.")
+    parser.add_argument("--entity-dim", type=int, default=None,
+                        help="Override cfg.model.entity_dim (capacity experiments; default 96). "
+                             "Must be divisible by num_heads=4.")
+    parser.add_argument("--num-layers", type=int, default=None,
+                        help="Override cfg.model.num_layers (capacity experiments; default 3).")
     parser.add_argument("--wandb-project", type=str, default="orbit-wars",
                         help="W&B project name (default: orbit-wars).")
     parser.add_argument("--run-name", type=str, default="",

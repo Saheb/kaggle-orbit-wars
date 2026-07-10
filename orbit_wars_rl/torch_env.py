@@ -87,6 +87,7 @@ COMET_LIFE_NORM = 40.0      # normalize steps-to-departure (comet paths are <= ~
 
 # Discrete action bins (match action_mask.py / model.py)
 from action_mask import SHIP_COUNTS, FRACTION_BIN_VALUES  # single source of truth (re-exported)
+from timeline import project_timeline, timeline_features
 
 NUM_ANGLE_BINS = 144
 ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
@@ -734,10 +735,16 @@ class VecTorchEnv:
         nreg = self.planet_alive[idx][:, :COMET_SLOT_START].sum(dim=1).float()
         self._comet_ids[idx] = nreg.unsqueeze(1) + torch.arange(N_COMET_SLOTS, device=self.device).float()
 
+    @torch._dynamo.disable
     def _lazy_comets(self):
         """Compute any comet spawn an env reaches THIS step (step_count == spawn-1). Cheap check
         (5 scalar compares); the heavy generate_comet_paths runs only for the few envs crossing a
-        spawn boundary, and only for spawns games actually reach."""
+        spawn boundary, and only for spawns games actually reach.
+
+        @torch._dynamo.disable: this path is Python-serial (.tolist()/float()/set()/numpy in
+        _compute_spawn) and torch.compile HARD-ERRORS trying to trace it (not a clean graph
+        break). Disabling dynamo here lets --compile-env compile the surrounding physics while
+        this runs eager (it's rare — only the few envs crossing a spawn boundary)."""
         if self.episode_steps <= COMET_SPAWN_STEPS[0]:
             return
         sc = self.step_count
@@ -847,7 +854,7 @@ class VecTorchEnv:
         """Returns dict of batched tensors for model input.
 
         Output shapes (batched over N envs):
-            planet_features:  (N, max_planets, 20)
+            planet_features:  (N, max_planets, 116) — 20 base + 96 projected-timeline
             fleet_features:   (N, max_fleets, 13)
             global_features:  (N, 11)
             planet_mask:      (N, max_planets) bool
@@ -1032,6 +1039,19 @@ class VecTorchEnv:
 
         # Zero out dead slots so output matches legacy (which leaves them zero).
         pf = pf * planet_alive.unsqueeze(-1).float()
+
+        # Projected-future timeline (writeup lesson 1): per planet, owner one-hot +
+        # log-garrison over the next TIMELINE_K steps assuming no new launches — the raw
+        # resolved timeline the winners let the model read instead of untimed aggregates.
+        # Projects over the FULL fleet set (all slots, not the max_fleets view) so training
+        # matches eval, which sees every fleet in the obs. Comet slots are approximate
+        # (projection assumes circular orbits / no expiry); everywhere else it parity-checks
+        # against stepping the engine K times with no actions (tests/test_timeline_projection).
+        own_ts, garr_ts = project_timeline(
+            planets, planet_alive, self.fleets, self.fleet_alive,
+            self.angular_velocity, num_players=self.num_players)
+        tf = timeline_features(own_ts, garr_ts, player)
+        pf = torch.cat([pf, tf * planet_alive.unsqueeze(-1).float()], dim=2)  # (N, P, 116)
 
         # Fleet features (N, F, 13): add destination decoding (gap 1 from roadmap).
         # For each fleet, find the target planet by projecting all planets onto
@@ -2207,6 +2227,7 @@ class VecTorchEnv:
     # max > 0, else -1.
     # ---------------------------------------------------------------------
 
+    @torch._dynamo.disable
     def _check_done(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (rewards: (N, num_players), done: (N,) bool).
 
@@ -2264,8 +2285,11 @@ class VecTorchEnv:
     # Keeps the running training loop simple — no need for caller-side resets.
     # ---------------------------------------------------------------------
 
+    @torch._dynamo.disable
     def _auto_reset(self, done_mask: torch.Tensor):
-        """Re-generate state for envs where done_mask is True."""
+        """Re-generate state for envs where done_mask is True (Python-serial: .cpu().tolist()
+        + per-env numpy rebuild → @torch._dynamo.disable so --compile-env graph-breaks here
+        cleanly instead of hard-erroring while tracing it)."""
         from kaggle_environments.envs.orbit_wars.orbit_wars import generate_planets
 
         done_idx = torch.where(done_mask)[0].cpu().tolist()

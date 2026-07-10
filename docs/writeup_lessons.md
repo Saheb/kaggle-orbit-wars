@@ -14,9 +14,28 @@ SimJeg 10B, Isaiah 15B). Enabled by env rewrites (Rust/JAX/C) at 15K–40K SPS v
 
 ---
 
-## 1. Projected-future timeline features — ⏳ NEXT UP
+## 1. Projected-future timeline features — ✅ WIRED (2026-07-10), awaiting GPU train
 
-**Status:** studied 2026-07-04, not yet implemented.
+**Status:** studied 2026-07-04. Projection core built + verified 2026-07-09
+(`orbit_wars_rl/timeline.py`): `project_timeline(state, K=24)` → per-planet (owner, garrison)
+over 24 future steps assuming no new launches. Vectorized: resolve fleets→(target,ETA)
+(`resolve_target_eta`, mirrors `_resolve_targets_at`), scatter to (N,K,P,players) arrivals,
+K-step recurrence (production + engine combat/flip mirroring `torch_env_fn.physics_core`).
+**Parity vs stepping the functional env 24× no-action: 100.0% owner agreement, 0.01 garrison
+MAE** (tests/test_timeline_projection.py).
+
+**Wiring DONE 2026-07-10** — planet token dim **20 → 116** (+96 = 4 ch × 24 steps:
+mine/enemy/neutral one-hot + log-garrison, `timeline_features()`):
+- training: `torch_env.get_features` (projects over the FULL fleet set, not the 128 view);
+- eval/export: `features.extract_features(timeline=...)` calls the SAME timeline.py on a
+  batch of 1 (no numpy mirror); eval/export infer the flag from `planet_proj` width, so
+  presres1/stgpr1 (20-wide) stay evaluable/exportable;
+- submission: export_agent inlines timeline.py (made import-free for this);
+- train/eval parity suite: 0 error incl. timeline channels; export smoke both eras ✅.
+Breaks resume of ALL pre-timeline checkpoints (guard added) — next run is from scratch,
+which is the plan anyway (pure self-play + anchoring, docs/training.md).
+NEXT: GPU SPS gate (timeline ≈ 62% of eager get_features on CPU; `--compile-features`
+compiles it, timeline channels bit-identical) → from-scratch GPU run with the LR recipe.
 
 **What they did (5 of 7 writeups; the most universal ingredient):**
 - **SimJeg:** per body, 10 features × 20 future steps — literally steps the env forward with

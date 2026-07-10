@@ -101,6 +101,23 @@ def test_gradient_direction():
     print("=" * 60)
     torch.manual_seed(42)
     cfg = Config(); cfg.device = "cpu"
+    # This test isolates the ADVANTAGE force on the fire head, so the three other forces
+    # in the loss must be off (2026-07-10 repair — the test was vacuous before):
+    # - normalize_advantages: a batch-CONSTANT advantage normalizes to exactly 0, so the
+    #   policy gradient this test claims to measure was zero; every historical pass/fail
+    #   was value-loss trunk drift + entropy side effects (seed-fragile: sign flips on
+    #   seeds 44/45 at HEAD).
+    # - entropy bonus: uncapped force toward p=0.5 (the clipped +adv force saturates at
+    #   ratio 1+eps), sign of its push depends on where the random init lands.
+    # - value loss: returns≠initial value output ⇒ trunk updates whose fire-logit side
+    #   effects have arbitrary sign.
+    # With all three zeroed the +adv delta is +0.25..+0.52 across seeds 42-45 at both
+    # ppo_epochs 2 and 4.
+    cfg.ppo.normalize_advantages = False
+    cfg.ppo.entropy_coef_fire = 0.0
+    cfg.ppo.entropy_coef_target = 0.0
+    cfg.ppo.entropy_coef_ships = 0.0
+    cfg.ppo.value_coef = 0.0
 
     model = EntityTransformer(cfg.model)
     learner = PPOLearner(model, cfg, device="cpu")
@@ -156,7 +173,8 @@ def test_gradient_direction():
             "target": lp_target.detach(),
         },
         "advantages": torch.full((8,), 5.0),
-        "returns":    torch.full((8,), 5.0),
+        # returns/old_values are inert (value_coef=0 above) — kept for batch-shape realism.
+        "returns":    torch.zeros(8),
         "old_values": torch.zeros(8),
     }
 
@@ -168,11 +186,11 @@ def test_gradient_direction():
     prob_after = torch.sigmoid(fl1[:, 0])
     delta = (prob_after - prob_before).mean().item()
     print(f"  Fire prob[slot 0] mean delta (after-before): {delta:+.4f}")
-    # Direction is the property under test. The magnitude saturates: old_log_probs are
-    # fixed across the 4 update calls, so the PPO ratio clip caps total movement
-    # (~+0.04 at the current clip/LR config).
-    ok = delta > 0.02
-    print("PASS" if ok else "FAIL", "— +adv must push fire prob up by >0.02")
+    # Direction is the property under test. With the competing forces zeroed (see cfg
+    # overrides above) the isolated +adv push measures +0.25..+0.52 across seeds; the
+    # 0.1 gate leaves wide margin while still failing on any sign/plumbing regression.
+    ok = delta > 0.1
+    print("PASS" if ok else "FAIL", "— +adv must push fire prob up by >0.1")
     assert ok
     return ok
 

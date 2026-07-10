@@ -37,6 +37,10 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
 
     ckpt_cfg = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
     sd = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+    # Strip torch.compile's "_orig_mod." key prefix — checkpoints from --compile training runs
+    # (pre-ppo.py fix) carry it and would otherwise fail the strict load below.
+    if any(k.startswith("_orig_mod.") for k in sd):
+        sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
 
     # --- head / bin dims from saved config or weight shapes ---
     if "num_ship_bins" in ckpt_cfg:
@@ -249,6 +253,9 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
     # resets (new game / new seat run), so a prior game's edges never mis-block the next.
     _cd_K = int(getattr(model, "reverse_edge_cooldown", 0))
     _cd = {"last": {}, "prev_step": -1}
+    # Projected-timeline channels: feed them iff the checkpoint was trained with them
+    # (planet_proj input width 116 vs the pre-timeline 20).
+    _timeline = int(model.planet_proj.in_features) > 20
 
     def agent_fn(obs):
         # obs may be a dict or an Observation namedtuple depending on caller
@@ -273,7 +280,8 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
             if step_now <= _cd["prev_step"]:
                 _cd["last"].clear()
             _cd["prev_step"] = step_now
-        features = extract_features(obs, player, num_players=num_players)
+        features = extract_features(obs, player, num_players=num_players,
+                                    timeline=_timeline)
         masks = compute_action_masks(obs, player)
 
         with torch.no_grad():

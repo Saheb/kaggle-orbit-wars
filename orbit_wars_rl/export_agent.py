@@ -62,6 +62,7 @@ _GLOBAL_DIM = {global_feature_dim}
 _MAX_PLANETS = 48
 _MAX_FLEETS = 128
 _PAIRWISE_DIM = {pairwise_feature_dim}
+_TIMELINE = {timeline_features}  # projected-timeline planet channels (dim 116 vs 20)
 _FIRE_THRESHOLD = {fire_threshold}
 _SHIP_BIN_MODE = {ship_bin_mode}
 _TARGET_DECODE = {target_decode}
@@ -273,6 +274,11 @@ def _get_model():
     return m
 
 
+# --- Projected-timeline features (inlined from timeline.py) ---
+
+{timeline_code}
+
+
 # --- Feature extraction (inlined from features.py; blessed-2026-07 semantics hard-coded) ---
 
 {features_code}
@@ -321,7 +327,7 @@ def agent(obs, cfg=None):
         if _step_now <= _CD["prev_step"]:
             _CD["last"].clear()
         _CD["prev_step"] = _step_now
-    features = extract_features(obs, player, num_players=2)
+    features = extract_features(obs, player, num_players=2, timeline=_TIMELINE)
     masks = compute_action_masks(obs, player)
 
     with torch.no_grad():
@@ -456,6 +462,10 @@ def _apply_checkpoint_model_config(checkpoint, cfg: Config) -> dict:
 
     if "ship_bin_mode" in ckpt_cfg:
         cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
+    # Planet input width from the weights (mirrors eval.load_checkpoint): 116 = timeline-era,
+    # 20 = pre-timeline. Decides both the model shape and the exported _TIMELINE flag.
+    if isinstance(state_dict, dict) and "planet_proj.weight" in state_dict:
+        cfg.model.planet_feature_dim = int(state_dict["planet_proj.weight"].shape[1])
     # Blessed feature config guard (2026-07 cleanup): the inlined extractor hard-codes
     # game-phase 15-global + precise resolver; refuse checkpoints trained otherwise. An ABSENT
     # pressure_precise_resolver counts as OFF (same as eval/train_torch — a 15-global corridor
@@ -554,6 +564,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     features_code = _read_module_body(os.path.join(src_dir, "features.py"))
     action_mask_code = _read_module_body(os.path.join(src_dir, "action_mask.py"))
     reinforce_cooldown_code = _read_module_body(os.path.join(src_dir, "reinforce_cooldown.py"))
+    timeline_code = _read_module_body(os.path.join(src_dir, "timeline.py"))
 
     m = cfg.model
     # Auto-detect reinforcement from the checkpoint so the exported mask matches how
@@ -596,6 +607,8 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         features_code=features_code,
         action_mask_code=action_mask_code,
         reinforce_cooldown_code=reinforce_cooldown_code,
+        timeline_code=timeline_code,
+        timeline_features=(m.planet_feature_dim > 20),
     )
 
     with open(output_path, "w") as f:

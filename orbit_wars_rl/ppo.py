@@ -7,6 +7,7 @@ value clipping, and gradient clipping.
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 
 import torch
@@ -34,6 +35,10 @@ class PPOLearner:
         self.model = model.to(device)
         self.cfg = cfg
         self.device = device
+        # bf16 autocast for the update forward (set by the trainer; default off). No GradScaler:
+        # bf16 shares fp32's exponent range so gradients don't underflow the way fp16's do.
+        self.amp_enabled = False
+        self.amp_dtype = torch.bfloat16
 
         self.phase4_residual_lr_mult = float(getattr(cfg.ppo, "phase4_residual_lr_mult", 1.0))
         residual_prefixes = (
@@ -96,14 +101,23 @@ class PPOLearner:
         pairwise = batch.get("pairwise_features")
         if pairwise is not None:
             pairwise = to_dev(pairwise)
-        outputs = self.model(
-            planet_features, fleet_features, global_features,
-            planet_mask, fleet_mask,
-            fire_mask=fire_mask,
-            slot_valid=slot_valid_2d, owned_indices=owned_indices,
-            owned_count=batch.get("owned_count"),
-            pairwise_features=pairwise,
-        )
+        # Autocast the model forward to bf16 (the dominant matmul cost). Then upcast the
+        # float outputs back to fp32 so the log-prob/ratio/exp arithmetic below runs in fp32
+        # (bf16's 8-bit mantissa would inject noise into PPO ratios). The bf16 matmuls and
+        # their backward graph are unaffected — the upcast is just a cast node the gradient
+        # flows back through. No-op when amp is off (outputs already fp32).
+        with torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.amp_enabled):
+            outputs = self.model(
+                planet_features, fleet_features, global_features,
+                planet_mask, fleet_mask,
+                fire_mask=fire_mask,
+                slot_valid=slot_valid_2d, owned_indices=owned_indices,
+                owned_count=batch.get("owned_count"),
+                pairwise_features=pairwise,
+            )
+        if self.amp_enabled:
+            outputs = {k: (v.float() if torch.is_tensor(v) and v.is_floating_point() else v)
+                       for k, v in outputs.items()}
 
         fire_logits_target = outputs["fire_logits"]
         ship_logits_target = outputs["ship_logits"]
@@ -320,33 +334,66 @@ class PPOLearner:
         return loss
 
     def update(self, batches, scheduler=None, ppo_epochs=None,
-               kl_target: float = 0.05):
+               kl_target: float = 0.05, timers=None, sync=None,
+               lean_metrics: bool = False):
         """Run PPO update on a list of minibatches.
 
         kl_target:  stop epoch loop early if mean approx-KL exceeds this value,
                     preventing destructive policy updates.
                     Good range: 0.01–0.05. Pass float('inf') to disable.
+        timers:     optional dict accumulating wall-time into "upd_fwd" (compute_loss,
+                    incl. metrics .item() syncs), "upd_bwd" (backward), "upd_opt"
+                    (grad-clip + optimizer/scheduler step). `sync` is called at each
+                    boundary (pass torch.cuda.synchronize for true attribution).
+        lean_metrics: THROUGHPUT PROBE ONLY. Skip the per-minibatch metrics block
+                    (~40 .item() GPU→CPU syncs each) on all but the final update, so
+                    only ONE full metrics dict is computed per rollout. Gradients/loss
+                    are byte-identical (metrics are no_grad + detached) — this isolates
+                    the logging-sync tax. Disables KL early-stopping (needs per-minibatch
+                    KL). Do NOT use for real training runs (loses the KL guard).
         """
         cfg = self.cfg.ppo
         epochs = ppo_epochs or cfg.ppo_epochs
+        if sync is None:
+            sync = lambda: None
 
         sum_metrics: dict[str, float] = {}
         n_updates = 0
+        n_metrics = 0
         early_stopped = False
 
         for epoch in range(epochs):
             epoch_kl = 0.0
-            for batch in batches:
-                ppo_loss, metrics = self.compute_loss(batch, return_metrics=True)
+            last_epoch = epoch == epochs - 1
+            for i, batch in enumerate(batches):
+                # Lean mode: only the very last update of the rollout carries metrics.
+                want_metrics = (not lean_metrics) or (last_epoch and i == len(batches) - 1)
+                _t0 = time.perf_counter()
+                if want_metrics:
+                    ppo_loss, metrics = self.compute_loss(batch, return_metrics=True)
+                else:
+                    ppo_loss = self.compute_loss(batch, return_metrics=False)
+                    metrics = None
                 total_loss = ppo_loss
+                if timers is not None:
+                    sync(); timers["upd_fwd"] += time.perf_counter() - _t0
+                    _t0 = time.perf_counter()
 
                 self.optimizer.zero_grad()
                 total_loss.backward()
+                if timers is not None:
+                    sync(); timers["upd_bwd"] += time.perf_counter() - _t0
+                    _t0 = time.perf_counter()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.max_grad_norm)
                 self.optimizer.step()
                 if scheduler is not None:
                     scheduler.step()
+                if timers is not None:
+                    sync(); timers["upd_opt"] += time.perf_counter() - _t0
 
+                n_updates += 1
+                if metrics is None:
+                    continue
                 for k, v in metrics.items():
                     if isinstance(v, list):
                         # Element-wise sum for list-valued metrics (per-slot etc.)
@@ -358,15 +405,16 @@ class PPOLearner:
                     else:
                         sum_metrics[k] = sum_metrics.get(k, 0.0) + v
                 epoch_kl += metrics.get("approx_kl", 0.0)
-                n_updates += 1
+                n_metrics += 1
 
             # KL early stopping: if this epoch's mean KL exceeded the target,
             # bail out before the next epoch to prevent policy collapse.
-            if (epoch_kl / max(len(batches), 1)) > kl_target:
+            # (Skipped under lean_metrics — no per-minibatch KL available.)
+            if not lean_metrics and (epoch_kl / max(len(batches), 1)) > kl_target:
                 early_stopped = True
                 break
 
-        n = max(n_updates, 1)
+        n = max(n_metrics, 1)
         avg_metrics = {
             k: ([x / n for x in v] if isinstance(v, list) else v / n)
             for k, v in sum_metrics.items()
@@ -434,6 +482,8 @@ class PPOLearner:
                 "game_phase_features": True,
                 "pressure_precise_resolver": True,
                 "feature_config": "blessed-2026-07",
+                # Projected-future timeline channels (planet dim 20→116, 2026-07-10).
+                "timeline_features": True,
                 # Reinforce / sufficient-commit DISCIPLINE — eval & export must mask the SAME way
                 # the ckpt was trained or the policy self-sabotages. Persist so they auto-load
                 # instead of relying on CLI flags being remembered (a panel/submission footgun).
@@ -446,8 +496,12 @@ class PPOLearner:
                 "ship_overflow_mode": str(getattr(model_cfg, "ship_overflow_mode", "drop")),
                 "phase4_residual_init_std": float(getattr(model_cfg, "phase4_residual_init_std", 0.0)),
             }
+        # Save the UNCOMPILED model's state_dict. torch.compile wraps the model and prefixes
+        # every key with "_orig_mod." — persisting that breaks eval/export/resume (which load
+        # plain uncompiled models). Unwrap so checkpoints are always canonical.
+        save_model = getattr(self.model, "_orig_mod", self.model)
         return {
-            "model": self.model.state_dict(),
+            "model": save_model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "total_steps": self.total_steps,
             "update_count": self.update_count,

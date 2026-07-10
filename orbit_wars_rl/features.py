@@ -4,9 +4,10 @@ Converts raw observations into padded entity tensors with baked-in
 geometric features (ADR-003: geometry is exact, strategy is learned).
 
 Features per entity type:
-- Planet (20 features): position, owner, radius, ships, production, orbit info,
-  pressure, capture cost, distance to nearest owned, connectivity counts,
-  is_home, active mask
+- Planet (116 features): 20 base — position, owner, radius, ships, production, orbit
+  info, pressure, capture cost, distance to nearest owned, connectivity counts,
+  is_home, active mask — plus 96 projected-timeline channels (timeline.py: owner
+  one-hot + log-garrison over the next 24 steps assuming no new launches)
 - Fleet (13 features): position, owner, angle, ships, speed, dist_to_sun,
   fleet destination ETA/dist, threatens_owned, target_production, mask
 - Global (15 features): player, step, angular_velocity, economy stats,
@@ -40,6 +41,8 @@ from __future__ import annotations
 import math
 import numpy as np
 import torch
+
+from timeline import project_timeline, timeline_features
 
 # Blessed feature config (2026-07 cleanup; presres1 lineage — the final submissions):
 # - friendly-coverage roi-deflation: ALWAYS ON
@@ -133,10 +136,14 @@ MAX_OWNED_PLANETS = 16  # hard cap for owned-planet slots; matches config.ModelC
 
 
 def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
-                     max_owned=MAX_OWNED_PLANETS):
+                     max_owned=MAX_OWNED_PLANETS, timeline=True):
     """Extract entity features from observation dict.
 
     Returns dict of torch tensors (no batch dim).
+
+    timeline=True appends the 96 projected-timeline channels to planet_features
+    (dim 20 → 116). Pass False only for pre-timeline checkpoints (planet_proj
+    20-wide) — eval.py infers this from the checkpoint's weight shapes.
     """
     planets = obs["planets"]
     fleets = obs["fleets"]
@@ -461,6 +468,32 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         enemy_mass_soon=enemy_mass_soon, threat_imminence=threat_imminence,
         comet_ids=comet_planet_ids,
     )
+
+    # --- Projected-future timeline (96 = 4 ch × 24 steps; planet dim 20 → 116) ---
+    # Runs the SAME timeline.py code the training path uses (batch of 1), so both paths
+    # encode identically by construction. Projects over ALL fleets in the obs (no
+    # max_fleets truncation — matches torch_env, which projects its full fleet set).
+    # timeline=False serves pre-timeline checkpoints (planet_proj 20-wide; eval infers).
+    if timeline:
+        pl_arr = np.zeros((max_planets, 7), dtype=np.float32)
+        n_tp = min(n_planets, max_planets)
+        if n_tp > 0:
+            pl_arr[:n_tp] = np.array([p[:7] for p in planets[:n_tp]], dtype=np.float32)
+        if len(fleets) > 0:
+            fl_arr = np.array([f[:7] for f in fleets], dtype=np.float32)
+        else:
+            fl_arr = np.zeros((1, 7), dtype=np.float32)  # one dead slot; masked out below
+        own_ts, garr_ts = project_timeline(
+            torch.from_numpy(pl_arr).unsqueeze(0),
+            torch.from_numpy(planet_mask).unsqueeze(0),
+            torch.from_numpy(fl_arr).unsqueeze(0),
+            torch.tensor([[len(fleets) > 0] * fl_arr.shape[0]], dtype=torch.bool),
+            torch.tensor([angular_velocity], dtype=torch.float32),
+            num_players=num_players,
+        )
+        tl_feats = timeline_features(own_ts, garr_ts, player)[0].numpy()  # (max_planets, 96)
+        tl_feats *= planet_mask[:, np.newaxis]
+        planet_feats = np.concatenate([planet_feats, tl_feats], axis=1)  # (max_planets, 116)
 
     return {
         "planet_features": torch.from_numpy(planet_feats),
