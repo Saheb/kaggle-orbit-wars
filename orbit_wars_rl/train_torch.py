@@ -1662,10 +1662,15 @@ def train(args):
                     "policy/reinforce_rate": metrics.get("reinforce_rate", 0),
                     "policy/target_share_neutral": metrics.get("target_share_neutral", 0),
                     "policy/target_share_enemy": metrics.get("target_share_enemy", 0),
-                    # Entropy
+                    # Entropy (raw, per-head scale) + fraction-of-uniform-max (0-1,
+                    # cross-head comparable; target's moving ceiling logged alongside)
                     "entropy/fire": metrics.get("fire_entropy", 0),
                     "entropy/ship": metrics.get("ship_entropy", 0),
                     "entropy/target": metrics.get("target_entropy", 0),
+                    "entropy/fire_frac": metrics.get("fire_entropy_frac", 0),
+                    "entropy/ship_frac": metrics.get("ship_entropy_frac", 0),
+                    "entropy/target_frac": metrics.get("target_entropy_frac", 0),
+                    "entropy/target_max": metrics.get("target_entropy_max", 0),
                     # Value / return stats
                     "value/mean": metrics.get("old_value_mean", 0),
                     "value/std": metrics.get("old_value_std", 0),

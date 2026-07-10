@@ -259,6 +259,14 @@ class PPOLearner:
                 ship_target_var = (((ship_target_scores - ship_target_mean.unsqueeze(-1)).masked_fill(~target_valid, 0.0) ** 2).sum(dim=-1)
                                    / target_valid.float().sum(dim=-1).clamp(min=1.0))
                 ship_target_std = ((ship_target_var * sv).sum() / sv_sum).sqrt()
+                # Entropy ceiling for the target head: its uniform max is ln(#legal
+                # targets), which moves with game state — batch mean over valid slots.
+                # Fire (ln 2) and ship (ln num_bins) ceilings are constants; all three
+                # are logged as entropy/*_frac so the wandb curves read as
+                # fraction-of-uniform-max on one 0-1 scale (raw entropies are NOT
+                # cross-head comparable: ln2 vs ~ln40 vs ln32).
+                tgt_legal = target_valid.float().sum(dim=-1).clamp(min=1.0)   # (B, MO)
+                target_entropy_max = (tgt_legal.log() * sv).sum() / sv_sum
                 fire_prior = outputs.get("_phase4_fire_prior")
                 fire_residual = outputs.get("_phase4_fire_residual")
                 ship_prior = outputs.get("_phase4_ship_prior")
@@ -302,6 +310,12 @@ class PPOLearner:
                 "fire_entropy": fire_entropy.item(),
                 "target_entropy": target_entropy.item(),
                 "ship_entropy": ship_entropy.item(),
+                # Normalized to each head's uniform ceiling (same numerator conventions
+                # as the raw entropies above) — cross-head comparable, 1.0 = uniform.
+                "fire_entropy_frac": fire_entropy.item() / math.log(2.0),
+                "target_entropy_frac": target_entropy.item() / max(target_entropy_max.item(), 1e-6),
+                "ship_entropy_frac": ship_entropy.item() / math.log(ship_logits.shape[-1]),
+                "target_entropy_max": target_entropy_max.item(),
                 "noop_kl": float(noop_kl.item() if torch.is_tensor(noop_kl) else noop_kl),
                 "mean_launch_rate": mean_launch_rate,
                 "clip_frac": clip_frac.item(),
