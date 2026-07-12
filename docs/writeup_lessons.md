@@ -14,7 +14,12 @@ SimJeg 10B, Isaiah 15B). Enabled by env rewrites (Rust/JAX/C) at 15K–40K SPS v
 
 ---
 
-## 1. Projected-future timeline features — ✅ WIRED (2026-07-10), awaiting GPU train
+## 1. Projected-future timeline features — ✅ CONFIRMED (tl100m, 2026-07-12)
+
+**Verdict:** 100M from-scratch pure self-play with the timeline (sparse ±1, no shaping,
+noop-KL 0.3): **Ajay full panel 0% → 74.6% (best 77.7% @96.5M)** vs 57.4% pre-timeline best
+(stgpr1, spray-inflated) — and clean (launch_rate 0.092, discipline learned, no collapse).
+Full run record + stage-2 continuation in docs/training.md "tl100m".
 
 **Status:** studied 2026-07-04. Projection core built + verified 2026-07-09
 (`orbit_wars_rl/timeline.py`): `project_timeline(state, K=24)` → per-planet (owner, garrison)
@@ -34,8 +39,8 @@ mine/enemy/neutral one-hot + log-garrison, `timeline_features()`):
 - train/eval parity suite: 0 error incl. timeline channels; export smoke both eras ✅.
 Breaks resume of ALL pre-timeline checkpoints (guard added) — next run is from scratch,
 which is the plan anyway (pure self-play + anchoring, docs/training.md).
-NEXT: GPU SPS gate (timeline ≈ 62% of eager get_features on CPU; `--compile-features`
-compiles it, timeline channels bit-identical) → from-scratch GPU run with the LR recipe.
+GPU SPS gate + from-scratch run both DONE — see verdict above (tl100m ran
+`--compile-features`, ~537 SPS on L4 at 116-dim).
 
 **What they did (5 of 7 writeups; the most universal ingredient):**
 - **SimJeg:** per body, 10 features × 20 future steps — literally steps the env forward with

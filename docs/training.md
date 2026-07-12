@@ -115,7 +115,7 @@ diagnostics, not real runs.
 
 ---
 
-## tl100m — first timeline run (LAUNCHED 2026-07-10, verdict pending)
+## tl100m — first timeline run (VERDICT 2026-07-12: CONFIRMED — Ajay 0% → 74.6%)
 
 **The lever under test: projected-future timeline features** (writeup lesson 1, planet token
 20→116 — see docs/writeup_lessons.md §1 for the wiring). First run at 100M steps (~10–20×
@@ -140,6 +140,42 @@ expect ~0% for a long while (from scratch), judge the back-half trend.
 - Launch: GCP L4 `orbit-wars-tl100m` us-west1-a (asia-south1-b/c + europe-west4-a/b/c were
   STOCKOUT), ~705 SPS steady (~40 h / ~$45), wandb run `gfiwzpf4`, checkpoints every 1M,
   watchers = controller sync + held-out Ajay. Script: `gpu_run_artifacts/tl100m/start_training.sh`.
+
+**10M readout (256-game Ajay panels):** 0/0/0.4/2.0/5.5/—/9.0/12.5/6.6/**14.5%** at 1..10M —
+from-scratch sparse already near corrpack3e's old-era 18% (which had lineage + full shaping);
+pre-timeline from-scratch comparables were 0.8–3%. **Watch item — launch discipline:** eval
+launch_rate 0.253 (Isaiah ref 0.036), 112 atk-launches/game at 0.21 cap/atk, ship0 11% —
+expected consequence of dropping the commit mask (discipline must be LEARNED now); WON games
+are far cleaner (fire_frac 0.21, cap/atk 0.58) so the disciplined mode exists. TRIPWIRE: if
+launch_rate ~0.25 persists with ship0 >15% by 30–40M → raise noop_kl_coef toward 0.5 (Jake's
+early value) / restore commit mask / jump to intent sizing (experiments.md #4).
+
+**100M verdict (2026-07-12):** completed 100,007,936 steps in ~52 h (537 SPS settled).
+**Ajay full panel: 74.6% final, best 77.7% @ 96.5M** — previous best was 57.4% (stgpr1 0.5M,
+spray-inflated head-to-head; README cross-eval). And tl100m gets there with launch_rate 0.092,
+not spray — the WR is not style-inflated. Pure sparse self-play held for the whole run — no
+collapse (EV 0.98, KL 0.013, estop 0 throughout; the noopkl2 failure mode never appeared).
+**Not plateaued at 100M:** 10M-window Ajay averages ~65% (75–85M) → ~68% (80–90M) → ~73%
+(90–100M), still ~+5pp per 10M at the tail. Launch-discipline tripwire never fired: final
+diag launch_rate 0.092, ship0 0.12, fire_frac 0.29 — discipline was learned, as hoped.
+H_fire drifted to ~0.027 (low but stable), H_ship 3.28, H_tgt 1.55.
+
+### tl100m_s2 — stage-2 continuation (+100M, LAUNCHED 2026-07-12)
+
+**One change: nothing.** Same flags; only the resume + stage-2 LR. Hypothesis: Ajay WR keeps
+ratcheting (~+5pp/10M decelerating); held-out panel is the collapse guard as always.
+- **Resume from `torch_step_99549184`** (NOT `_final`): interval ckpts carry warm Adam
+  moments AND have an adjacent `pool_step_*` file, so the 20-member PFSP pool carries over —
+  the `_final` ckpt has optimizer state but NO pool file (pool would rebuild from scratch).
+- **LR: stage-2 cosine continuing where stage 1 ended** — peak 2.4e-5 (stage-1 cosine's value
+  at 100M), `--lr-schedule-steps 200000000`, NO `--lr-offset-steps` → decays 2.4e-5 → ~1.2e-5
+  over the stage, headroom for a stage 3. (A plain re-resume of the stage-1 schedule clamps to
+  LR 0 at 120M — 80% of the extension would learn nothing. The re-warm alternative, horizon
+  240M + offset 100M, jumps LR back to ~1.9e-4 into a mature policy — rejected given the
+  collapse history.)
+- Same instance (`orbit-wars-tl100m` us-west1-a, code untouched since stage-1 launch),
+  run-name `tl100m_s2`, script `gpu_run_artifacts/tl100m_s2/start_training_s2.sh`,
+  watchers restarted for the new run.
 
 ---
 

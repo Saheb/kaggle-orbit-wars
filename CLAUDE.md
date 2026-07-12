@@ -126,7 +126,7 @@ archive/                   ← dead code, old logs (ignore unless archaeology)
 ## GPU Instances
 
 **Primary:** GCP L4 (`g2-standard-8`, ~$1.13/hr) — use `bash gpu_run_artifacts/launch_gpu_gcp.sh`
-**Secondary:** Jarvis H100 spot (₹112/hr, ~4250 SPS) — use `jl` CLI, see JARVIS_RUNBOOK.md
+**Secondary:** Jarvis H100/H200 spot (₹112/hr; ~1,300 fp32 / ~1,600 bf16 SPS at 0.5M-param — the old "~4250" figure was a pre-pairwise model, see docs/perf.md) — use `jl` CLI, see JARVIS_RUNBOOK.md
 
 **Hard rules:**
 - GCP: always DELETE (not stop) instances after training — `gcloud compute instances delete`
@@ -180,14 +180,20 @@ Opponent paths relative to repo root. Always `--target-decode` for Phase 1.
 
 ## Current Baselines (full panel, 256 games vs Ajay)
 
-| Checkpoint | Zach | Ajay | LB | Notes |
-|---|---|---|---|---|
-| Rev31 10M | 84.8% | — | **918.8** | LB record |
-| Rev32b 6M | **88.7%** | 0.8% | pending | Best Zach (pre-corrpack) |
-| Rev35c 1M | — | 3.1% | — | Old best Ajay (pre-corrpack) |
-| **corrpack3e 4.7M** | **98.8%** | **18.0%** | — | ⭐ Best Ajay AND Zach ever (self-anchor re-anchor + LR 1e-4 climbed to 6M). Wall still intact (out-massed ~96%) — numeric not structural. Base for Lever A (decmass1) |
+**The competition is OVER — no leaderboard, no submissions.** This is post-competition
+learning: apply what the winner writeups teach, one lesson at a time
+(`docs/writeup_lessons.md`), measured on held-out panels — Ajay primary; Ender = top-10
+stretch reference (north star: open<50 cap/atk 0.58→0.75, see `docs/metrics.md`).
 
-Target: Top 10 LB is **above 1500** (1153 is only ~top-100; #1 Isaiah ≈ 1751). Our LB record is 918.8 → the gap to top-10 is **~600+ points** (a large gap; goal is 900→1500+).
+| Checkpoint | Ajay | Notes |
+|---|---|---|
+| stgpr1 0.5M (final submission) | 57.4% | Pre-timeline best (spray-inflated head-to-head; README cross-eval) |
+| **tl100m 100M (2026-07-12)** | **74.6%** (best 77.7% @96.5M) | ⭐ Timeline features, from-scratch pure self-play, sparse ±1, no shaping — clean win (launch_rate 0.09). See docs/training.md |
+| tl100m_s2 (+100M) | running | Stage-2 continuation from 99.5M; cosine 2.4e-5 → ~1.2e-5 |
+
+Competition-era numbers (Rev31 "918.8 LB", Rev32b 88.7% Zach, corrpack3e "18% Ajay") are an
+**older eval era and not comparable** to current panels — see README and archive docs for
+that history; don't cite them as prior-best.
 
 Note: checkpoints above that predate the blessed feature config (everything before the presres
 lineage, incl. corrpack3e) are refused by HEAD's feature-semantics guards — resume/eval/export
@@ -210,6 +216,7 @@ feed 20-dim features (`extract_features(timeline=False)`).
 5. **BC aux at bc-coef=0.05** — too small to move the needle but can disrupt conversion (Rev34: us_first_cap 14→136 after 1M). *(BC/IL machinery removed in C5 — pre-cleanup tag if needed.)*
 6. **Pool mask gating** — SSDR should only apply to self-play envs, not pool envs (was `env.set_ssdr_mask`; removed in C4 with SSDR). Slows regression but doesn't stop it.
 7. **PFSP death-spiral**: small N games → noisy wr → never sampled. Fix: `--pool-pfsp-min-games 30`.
-8. **LR=0.000025** is the mature-run rate (halved twice). Use LR=0.0001 for fresh BC warmstarts.
+8. **LR** *(competition-era rule of thumb: 2.5e-5 mature, 1e-4 warmstart)* — current recipe is a cosine from peak 3e-4 across the full multi-stage horizon, continued on resume with a stage-2 cosine or `--lr-offset-steps`; see docs/training.md "Learning rate". `--resume` warm-loads Adam by default (cold Adam kicked mature policies off their optimum — the noopkl2 collapse).
 9. **BC warmstart from partial/diagnostic checkpoints** causes clip_frac=0 (frozen policy). Always use a strong PPO checkpoint as `--resume`. *(BC aux `--bc-samples` removed in C5.)*
-10. **Export**: always use `--target-decode` for Phase 1 checkpoints. Run 10/10 vs random before submitting.
+10. **Export**: always use `--target-decode` for Phase 1 checkpoints. Run 10/10 vs random before trusting an export.
+11. **Scale + observability beat reward shaping** (tl100m, 2026-07-12): 100M from-scratch pure self-play with timeline features, sparse ±1 reward and NO shaping went 0→74.6% vs Ajay — past the shaped lineage's 57.4% best. Launch discipline (rate 0.09) was *learned*, not masked in; the shaping levers of lessons 3–4 were 5M-budget band-aids. Resume from interval checkpoints (they carry Adam + `pool_step` files), not `_final` (no pool file).

@@ -86,6 +86,20 @@ Snapshot in [`docs/current-state.md`](docs/current-state.md); standing diagnosis
   next move is **structural** (an opponent/curriculum that punishes spray and forces holding), steered by
   `launch_rate → ~0.04` / `peel↓` / `hold↑` rather than by spray-inflated Ajay WR.
 
+## Post-competition: what the winners knew (2026-07)
+
+The competition ended; the project continued as a study of the top-100 writeups
+([`docs/writeup_lessons.md`](docs/writeup_lessons.md)), applying one lesson at a time. The first
+structural lesson — **projected-future timeline features** (per-planet ownership/garrison rolled
+24 steps forward, the most universal ingredient across winner writeups) — plus a 10–20× step
+budget answered the open finding above:
+
+- **`tl100m`** (2026-07-12): 100M steps from scratch, *pure self-play, sparse ±1 reward, no
+  shaping* — **74.6% vs Ajay** (best panel 77.7%), past the shaped lineage's 57.4%, and clean:
+  launch discipline (`launch_rate` 0.09) was *learned*, not masked in. The spray Nash that every
+  competition-era retrain fell back into simply doesn't form when bad launches are visible to the
+  critic the step they happen. Run record: [`docs/training.md`](docs/training.md).
+
 ## Repo navigation
 
 | Where | What |
