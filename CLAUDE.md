@@ -176,6 +176,13 @@ CUDA_VISIBLE_DEVICES="" python3 orbit_wars_rl/eval.py \
 
 Opponent paths relative to repo root. Always `--target-decode` for Phase 1.
 
+**Always write eval output to a file — never pipe to bare `tail`/in-memory.** `eval.py` writes
+no file itself (the Ajay CSVs come from the watcher, not eval.py). For one-off panels:
+`PYTHONUNBUFFERED=1 … eval.py … 2>&1 | tee gpu_run_artifacts/<run>/eval_<opp>_<step>.log`
+(unbuffered → live progress; tee → survives session death). Slow opponents (Ender ≈ 1h+/panel
+on CPU) make a buffered pipe an hour of unrecoverable compute. Opponents tracked repeatedly
+belong in the watcher: `run_watchers.sh add-eval <run> <opp.py> [from-latest]` (CSV + wandb).
+
 ---
 
 ## Current Baselines (full panel, 256 games vs Ajay)
