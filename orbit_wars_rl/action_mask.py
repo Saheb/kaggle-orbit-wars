@@ -703,6 +703,7 @@ def _apply_defensive_reinforce_overlay(
 def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_target, masks, obs, player,
                                fire_threshold=0.5, sample: bool = False,
                                ship_bin_mode: str = "absolute",
+                               pairwise_features=None,   # (MO, P, >=26) — intent mode reads resolved sizes ch22-25
                                reserve_frac: float = 0.0,
                                allow_reinforce: bool = False,
                                reinforce_gate_min_planets: int = 0,
@@ -827,7 +828,18 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
             continue
         src_id = int(planets[pidx][0])
         tidx = int(target_indices[slot])
-        decoded_ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
+        if ship_bin_mode == "intent" and pairwise_features is not None:
+            # ship_bins[slot] is the chosen INTENT; read its resolved ship count from the chosen
+            # target's row of the pairwise table (ch22-25 = capture/capture-defend/maintain/all-in,
+            # normalized /200). Same numbers the env used at train time (parity via the resolver).
+            intent = int(ship_bins[slot])
+            if 0 <= tidx < pairwise_features.shape[1] and 0 <= intent < NUM_INTENTS:
+                decoded_ships = int(round(float(pairwise_features[slot, tidx, 22 + intent]) * 200.0))
+            else:
+                decoded_ships = 0
+            decoded_ships = min(decoded_ships, int(max_ships[slot]))
+        else:
+            decoded_ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
         slot_intents[src_id] = {
             "fired": bool(fire_decisions[slot]),
             "fire_prob": float(fire_prob_values[slot]) if not sample else None,

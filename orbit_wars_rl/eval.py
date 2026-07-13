@@ -309,6 +309,8 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 fire_threshold=fire_threshold,
                 sample=sample,
                 ship_bin_mode=ship_bin_mode,
+                pairwise_features=(features["pairwise_features"].cpu().numpy()
+                                   if "pairwise_features" in features else None),
                 reserve_frac=reserve_frac,
                 allow_reinforce=getattr(model, "allow_reinforce", allow_reinforce),
                 reinforce_gate_min_planets=getattr(model, "reinforce_gate_min_planets", 0),
