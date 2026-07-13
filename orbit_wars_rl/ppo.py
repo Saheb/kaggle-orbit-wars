@@ -6,6 +6,7 @@ value clipping, and gradient clipping.
 
 from __future__ import annotations
 
+import functools
 import math
 import time
 from collections import deque
@@ -14,8 +15,21 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS
+from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, SHIP_COUNTS
 from config import Config
+
+
+@functools.lru_cache(maxsize=8)
+def _ship_log_prior_cpu(exp: float, num_bins: int) -> torch.Tensor:
+    """Log of the full-send-biased ship-size prior: w_i ∝ SHIP_COUNTS[i]**exp, normalized.
+    Cached (fixed vector); moved to the loss device/dtype by _ship_log_prior."""
+    counts = torch.tensor(SHIP_COUNTS[:num_bins], dtype=torch.float64)
+    w = counts ** exp
+    return (w / w.sum()).log().float()
+
+
+def _ship_log_prior(exp: float, num_bins: int, device, dtype) -> torch.Tensor:
+    return _ship_log_prior_cpu(float(exp), int(num_bins)).to(device=device, dtype=dtype)
 
 
 def _gather_target_logits(per_target_logits: torch.Tensor, target_idx: torch.Tensor) -> torch.Tensor:
@@ -197,6 +211,18 @@ class PPOLearner:
                        + (1.0 - p_bar) * ((1.0 - p_bar) / (1.0 - q)).log())
             mean_launch_rate = p_bar.detach().item()
 
+        # Ship-size KL-to-prior (Ender lever): pull the per-draw ship-count distribution toward a
+        # full-send-biased prior (w_i ∝ SHIP_COUNTS[i]**ship_kl_prior_exp), on fired slots only.
+        # KL(π ‖ prior) = Σ π_i (log π_i − log prior_i). Replaces (set entropy_coef_ships=0) the
+        # uniform-seeking ship entropy bonus — see the ship_kl_coef config note.
+        ship_kl = 0.0
+        if cfg.ship_kl_coef > 0.0:
+            log_prior = _ship_log_prior(cfg.ship_kl_prior_exp, ship_logits.shape[-1],
+                                        ship_logits.device, ship_logits.dtype)   # (num_bins,)
+            log_q = torch.log_softmax(ship_logits, dim=-1)                        # (B, MO, num_bins)
+            kl_per_slot = (log_q.exp() * (log_q - log_prior)).sum(dim=-1)         # (B, MO)
+            ship_kl = (kl_per_slot * fired_slots).sum() / fired_slots.sum().clamp(min=1)
+
         if value_only:
             loss = cfg.value_coef * value_loss
         else:
@@ -207,6 +233,8 @@ class PPOLearner:
                     - cfg.entropy_coef_ships * ship_entropy)
             if cfg.noop_kl_coef > 0.0:
                 loss = loss + cfg.noop_kl_coef * noop_kl
+            if cfg.ship_kl_coef > 0.0:
+                loss = loss + cfg.ship_kl_coef * ship_kl
 
         if return_metrics:
             clip_frac = ((ratio - 1.0).abs() > cfg.clip_eps).float().mean()
@@ -318,6 +346,7 @@ class PPOLearner:
                 "target_entropy_max": target_entropy_max.item(),
                 "noop_kl": float(noop_kl.item() if torch.is_tensor(noop_kl) else noop_kl),
                 "mean_launch_rate": mean_launch_rate,
+                "ship_kl": float(ship_kl.item() if torch.is_tensor(ship_kl) else ship_kl),
                 "clip_frac": clip_frac.item(),
                 "clip_frac_fire": clip_frac_fire.item(),
                 "approx_kl": (old_log_prob - new_log_prob).mean().item(),

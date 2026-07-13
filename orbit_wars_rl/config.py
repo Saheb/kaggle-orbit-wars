@@ -90,6 +90,14 @@ class PPOConfig:
     # the fire entropy bonus. See docs/writeup_lessons.md Lesson 3.
     noop_kl_coef: float = 0.0
     noop_target_launch_rate: float = 0.10   # target mean fire probability the KL anchors to
+    # Ship-size KL-to-prior (Ender lever): replace the uniform-seeking ship entropy bonus with a
+    # KL from the ship-count distribution toward a full-send-biased prior over the 32 bins
+    # (w_i ∝ SHIP_COUNTS[i] ** ship_kl_prior_exp). Unlike noop_kl (batch-MEAN launch RATE), this
+    # shapes each per-draw SIZE distribution — it starves the 1-3 ship spray tail while keeping
+    # small bins learnable (reward can still buy a genuine probe). 0 = off. When ON, set
+    # entropy_coef_ships=0 (Ender REPLACES entropy, doesn't stack). See docs/writeup_lessons.md.
+    ship_kl_coef: float = 0.0
+    ship_kl_prior_exp: float = 1.0   # prior w_i ∝ SHIP_COUNTS[i]**exp; 1.0=linear-in-count, higher=more full-send-biased
     kl_target: float = 0.05   # KL early-stop threshold per epoch; inf = disabled
     value_coef: float = 0.5
     # Critic-only warmup (for BC warmstarts: trained policy + UNtrained critic).

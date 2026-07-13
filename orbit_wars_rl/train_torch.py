@@ -496,6 +496,8 @@ def train(args):
         cfg.ppo.critic_warmup_max_updates = args.critic_warmup_max_updates
     cfg.ppo.noop_kl_coef = args.noop_kl_coef
     cfg.ppo.noop_target_launch_rate = args.noop_target_launch_rate
+    cfg.ppo.ship_kl_coef = args.ship_kl_coef
+    cfg.ppo.ship_kl_prior_exp = args.ship_kl_prior_exp
     print(f"PPO config: lr={cfg.ppo.learning_rate}, ppo_epochs={cfg.ppo.ppo_epochs}, "
           f"num_minibatches={cfg.ppo.num_minibatches}, clip_eps={cfg.ppo.clip_eps}, "
           f"entropy_coef_fire={cfg.ppo.entropy_coef_fire}, gae_lambda={cfg.ppo.gae_lambda}, "
@@ -507,6 +509,9 @@ def train(args):
     if cfg.ppo.noop_kl_coef > 0.0:
         print(f"No-op KL bias: coef={cfg.ppo.noop_kl_coef} → mean launch rate "
               f"{cfg.ppo.noop_target_launch_rate} (anti-spray, adds to fire entropy)")
+    if cfg.ppo.ship_kl_coef > 0.0:
+        print(f"Ship-size KL-to-prior: coef={cfg.ppo.ship_kl_coef} exp={cfg.ppo.ship_kl_prior_exp} "
+              f"(full-send-biased; REPLACES ship entropy — entropy_coef_ships={cfg.ppo.entropy_coef_ships})")
     print(f"Action decode: {args.action_decode}")
     print(f"Reinforcement (own planets as targets): {'ON' if args.allow_reinforce else 'off'}")
     if args.allow_reinforce and args.reinforce_anneal_frac > 0.0:
@@ -919,6 +924,8 @@ def train(args):
                     "staging_topk": args.staging_topk,
                     "entropy_coef_fire": args.entropy_coef_fire,
                     "noop_kl_coef": args.noop_kl_coef,
+                    "ship_kl_coef": args.ship_kl_coef,
+                    "ship_kl_prior_exp": args.ship_kl_prior_exp,
                     "noop_target_launch_rate": args.noop_target_launch_rate,
                 },
                 resume="allow",
@@ -1820,6 +1827,16 @@ if __name__ == "__main__":
     parser.add_argument("--noop-target-launch-rate", type=float, default=0.10,
                         help="Target mean fire probability the no-op KL anchors to (default 0.10, "
                              "the winners' ~10%% launch rate). Only active with --noop-kl-coef > 0.")
+    parser.add_argument("--ship-kl-coef", type=float, default=0.0,
+                        help="Ship-size KL-to-prior (Ender anti-spray lever): coefficient on a KL "
+                             "that pulls each per-draw ship-count distribution toward a full-send-"
+                             "biased prior (w_i ∝ SHIP_COUNTS[i]**--ship-kl-prior-exp). Starves the "
+                             "1-3 ship spray tail; keeps small bins learnable. REPLACES the ship "
+                             "entropy bonus — pass --entropy-coef-ships 0 with it. 0 = off. Try ~0.01.")
+    parser.add_argument("--ship-kl-prior-exp", type=float, default=1.0,
+                        help="Exponent of the ship-size prior w_i ∝ SHIP_COUNTS[i]**exp "
+                             "(default 1.0 = linear-in-count; higher = more full-send-biased). "
+                             "Only active with --ship-kl-coef > 0.")
     parser.add_argument("--phase4-residual-init-std", type=float, default=None,
                         help="Stddev for Phase 4 residual output-layer init. "
                              "0.0 = exact parity; small nonzero values let the "
