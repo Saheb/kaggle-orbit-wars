@@ -1501,6 +1501,17 @@ class VecTorchEnv:
         else:
             imminence_b = torch.zeros(N, MO, P, device=device)
 
+        # Intent-sizing resolved sizes (ch 22-25): exact ships for capture / capture-defend /
+        # maintain / all-in, clamped to source garrison. Torch twin of features.py; read back at
+        # decode. reach_em / enemy_mass_soon are used RAW here (not the /100 normalized channels).
+        src_ships_b = src[:, :, 5].unsqueeze(-1).expand(-1, -1, P)               # (N, MO, P)
+        reach_em_raw_b = reach_em.unsqueeze(1).expand(-1, MO, -1)                # (N, MO, P)
+        mass_soon_raw = (enemy_mass_soon if enemy_mass_soon is not None
+                         else torch.zeros(N, P, device=device)).unsqueeze(1).expand(-1, MO, -1)
+        intent_sizes = _resolve_intent_sizes(
+            cap_at_arr, reach_em_raw_b, mass_soon_raw, src_ships_b, owner_exp == player)  # (N,MO,P,4)
+        intent_sizes_n = (intent_sizes.clamp(max=500.0) / 200.0)                 # (N, MO, P, 4)
+
         # Stack channels
         out = torch.stack([
             sin_a, cos_a, dist / BOARD_SIZE, 1.0 / (eta + 1.0),
@@ -1509,6 +1520,7 @@ class VecTorchEnv:
             target_value_b, reactive_roi_40, friendly_reach_b, keepability_b,
             mass_soon_b, imminence_b,
         ], dim=-1)  # (N, MO, P, 22)
+        out = torch.cat([out, intent_sizes_n], dim=-1)  # (N, MO, P, 26) — + intent resolved sizes
 
         # Zero out invalid owned slots AND invalid target planets (match kaggle path)
         slot_valid_b = slot_valid.unsqueeze(-1).unsqueeze(-1).float()    # (N, MO, 1, 1)

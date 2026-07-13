@@ -43,6 +43,7 @@ import numpy as np
 import torch
 
 from timeline import project_timeline, timeline_features
+from action_mask import resolve_intent_sizes_np
 
 # Blessed feature config (2026-07 cleanup; presres1 lineage — the final submissions):
 # - friendly-coverage roi-deflation: ALWAYS ON
@@ -509,7 +510,7 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
 
 # Number of pairwise features per (owned-slot, target-planet) pair.
 # Keep in sync with compute_pairwise_features() and ModelConfig.pairwise_feature_dim.
-PAIRWISE_FEATURE_DIM = 22
+PAIRWISE_FEATURE_DIM = 26   # 22 base + 4 intent-sizing resolved-size channels (ch 22-25)
 
 # Typical fleet size used to estimate an ETA prior (matches teacher MIN_SHIP_FLOOR ~ 10
 # but in practice ETA varies modestly with size since speed is log-shaped).
@@ -779,5 +780,16 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
             out[slot, :n_p, 20] = np.minimum(enemy_mass_soon[:n_p], 500.0) / 100.0  # enemy mass landing soon
         if threat_imminence is not None:
             out[slot, :n_p, 21] = threat_imminence[:n_p]                            # 1/(min_enemy_eta+1)
+
+        # Intent-sizing resolved sizes (ch 22-25): exact ships for capture / capture-defend /
+        # maintain / all-in, clamped to source garrison. The head chooses the semantic; these
+        # feed it each option's cost (Jake's resolved-size table) and are read back at decode.
+        S_arr = np.full(n_p, float(src[5]), dtype=np.float32)
+        mass_soon_arr = (enemy_mass_soon[:n_p].astype(np.float32)
+                         if enemy_mass_soon is not None else np.zeros(n_p, dtype=np.float32))
+        intent_sizes = resolve_intent_sizes_np(
+            cap_cost_at_arrival, reach_em[:n_p], mass_soon_arr,
+            S_arr, is_mine[:n_p].astype(bool))                                      # (n_p, 4)
+        out[slot, :n_p, 22:26] = np.minimum(intent_sizes, 500.0) / 200.0
 
     return out

@@ -44,7 +44,7 @@ class ModelConfig:
     # MUST match the BC label scheme that produced the checkpoint.
     # Default "absolute" preserves legacy checkpoint behaviour.
     ship_bin_mode: str = "absolute"
-    pairwise_feature_dim: int = 22   # see features.PAIRWISE_FEATURE_DIM
+    pairwise_feature_dim: int = 26   # see features.PAIRWISE_FEATURE_DIM (22 base + 4 intent-sizing)
     max_planets: int = 48            # for target_head output size; matches EnvConfig
     # Phase 4 residual output init scale. 0.0 = exact parity (legacy Stage A/B);
     # small nonzero values preserve near-parity while letting the residual path
