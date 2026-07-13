@@ -1658,6 +1658,10 @@ def train(args):
                     "ppo/approx_kl": metrics.get("approx_kl", 0),
                     "ppo/value_loss": metrics.get("value_loss", 0),
                     "ppo/early_stop": metrics.get("kl_early_stop", 0),
+                    # Anti-spray KL levers (0 when their coef is off)
+                    "ppo/ship_kl": metrics.get("ship_kl", 0),
+                    "ppo/noop_kl": metrics.get("noop_kl", 0),
+                    "policy/mean_launch_rate": metrics.get("mean_launch_rate", 0),
                     # Policy behaviour — the key kill-signal metrics
                     "policy/fire_0": slot0,
                     "policy/fire_rest_max": slot_rest_max,
