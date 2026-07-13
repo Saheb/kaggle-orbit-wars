@@ -212,3 +212,42 @@ self-play anchoring fix above, so the comparison isn't riding a drift.
   unloadable by eval/export/resume (all use uncompiled models). Affected *any* `--compile`
   run. Fixed both ends: `ppo.state_dict` now unwraps `_orig_mod` before saving (future
   checkpoints canonical); `eval.py` strips the prefix on load (handles existing ones).
+
+## ship-KL probe verdict + conversion diagnosis + #4 hypothesis (2026-07-13)
+
+**Ship-size KL-to-prior (Ender lever, experiments.md-adjacent to #2/#4):** replace the
+uniform-seeking ship-entropy bonus with a KL toward a full-send-biased prior
+(`--ship-kl-coef 0.01 --ship-kl-prior-exp 1.0 --entropy-coef-ships 0`). Resumed tl100m_s2
+@36.5M, warm Adam.
+
+**Verdict — small, real, FRONT-LOADED, plateaued (not a breakthrough):**
+- Behavior changed immediately: `ship0` 0.13→0.01, `mean_ship_bin` ~16→23 (training diag).
+- **Ajay 76.7% → ~80%** (8×256 held-out, ~3σ vs the 33-ckpt flat baseline; `mid_capatk_WON`
+  0.55→0.61-0.64). Clean but modest +3pp.
+- **yijie ~6%** (8×256, dead flat 1M→8M). Up from a 1.6% point estimate, but that baseline was
+  only 64 games (CI overlaps) — treat the yijie gain as suggestive, the FLATNESS as robust.
+- Kept in the recipe (net positive, removes the 1-ship pathology), but does NOT close the gap.
+
+**Why so small — the step-by-step conversion diagnosis (all data-backed vs yijie):**
+1. **Losses are economic, not a holding failure.** Force-share is **0.44 at the first
+   captured-planet loss** (5/5 losing games are "force-first": the material deficit precedes
+   planet loss). Holding is downstream — only ~28% of retakes had reinforcing force nearby,
+   because we're globally out-massed. So it's NOT wrong-target and NOT can't-decide-what-to-save.
+2. **The force deficit comes from non-converting attacks.** `cap/atk` ~0.13; we throw ~most
+   attack-launches at planets we don't take, bleeding ships.
+3. **The non-converting attacks are UNDER-COMMITTED, not mis-timed.** Of attacks vs yijie:
+   **83% send fewer ships than the target's defense AT LAUNCH** (89% of wasted ships); only
+   **1% out-raced** by arrival-time reinforcement. Timing (#9) is ruled out; sizing (#4) confirmed.
+4. **Root cause:** the ship head sizes relative to the SOURCE ("how much of my garrison"), not
+   the TARGET ("enough to beat its defense"). It is target-CONDITIONED (gathers ship logits at
+   the chosen target, weights `cap_gap` ch11) but NOT target-RELATIVE — it emits an absolute
+   count it must LEARN to calibrate, and symmetric self-play never punishes under-commitment, so
+   it never learns to. The ship-KL made source-commits fuller (small help) but can't fix a
+   source-relative reference point.
+
+**Next: #4 Intent ship sizing.** Hypothesis: a `capture / capture-defend / maintain` intent that
+RESOLVES to an exact ship count via timeline.py's defense math (+ resolved-size table as
+features) makes commitment target-relative BY CONSTRUCTION — removing the under-commit degree of
+freedom rather than hoping self-play rewards good calibration (same principle as N<10th all-in).
+Predicted chain: under-commit↓ → conversion (cap/atk)↑ → force bleed↓ → out-massed↓ → yijie WR↑.
+Measure on the yijie held-out panel (Ajay is saturated/blind). Verdict to follow.
