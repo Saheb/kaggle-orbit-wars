@@ -1029,3 +1029,34 @@ def _ship_bin_to_count(bin_idx, max_ships, mode: str = "absolute"):
         return max(1, min(ships, max_ships))
     # absolute (legacy)
     return min(SHIP_COUNTS[bin_idx], max_ships)
+
+
+# --- Intent ship-sizing resolver (target-relative sizing; experiments.md #4) ---------------
+# The policy chooses a SEMANTIC (capture / capture-defend / maintain / all-in); this resolver
+# fills in the exact integer ship count from the target's requirement, so the head cannot
+# under-commit on a capture (the measured 83%-of-attacks failure). Inputs are the already
+# parity-exact pairwise quantities (cap_cost_at_arrival, reachable_enemy_mass ch15,
+# enemy_mass_soon ch20, source garrison); the SAME formula runs in torch_env._resolve_intent_sizes
+# (training) and here (eval/export — inlined). Keep the two in lockstep; tests/ has a fuzz parity.
+INTENT_CAPTURE, INTENT_CAPTURE_DEFEND, INTENT_MAINTAIN, INTENT_ALL_IN = 0, 1, 2, 3
+NUM_INTENTS = 4
+_INTENT_CEIL_EPS = 1e-3   # snap near-integer costs before ceil so GPU-float and numpy round identically
+
+
+def resolve_intent_sizes_np(cap_cost, reach_em, mass_soon, src_ships, is_own):
+    """Raw integer ships per intent → shape (..., 4), each clamped to [0, src_ships].
+
+    capture       = cap_cost_at_arrival             (D+1 — exact ships to flip)
+    capture-defend= cap_cost + reachable_enemy_mass (capture + survive the counter, ch15)
+    maintain      = incoming_threat + 1  (own tgt)  (cover enemy_mass_soon, ch20; else 0)
+    all-in        = source garrison                 (send everything — the un-under-committable floor)
+    Args broadcast to a common shape; is_own is a bool array. `ceil(x - eps)` snaps costs within
+    1e-3 of an integer so float32(GPU)/float64(numpy) produce identical integers.
+    """
+    S = np.clip(src_ships, 0.0, None).astype(np.float32)
+    ceil_snap = lambda x: np.ceil(x - _INTENT_CEIL_EPS)
+    capture = np.clip(ceil_snap(cap_cost), 0.0, S)
+    cap_def = np.clip(ceil_snap(cap_cost + reach_em), 0.0, S)
+    maintain = np.where(is_own, np.clip(ceil_snap(mass_soon) + 1.0, 0.0, S), 0.0)
+    all_in = S
+    return np.stack([capture, cap_def, maintain, all_in], axis=-1).astype(np.float32)

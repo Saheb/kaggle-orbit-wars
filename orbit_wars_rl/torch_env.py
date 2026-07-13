@@ -213,6 +213,23 @@ def _ship_speed(ships: torch.Tensor) -> torch.Tensor:
     return torch.clamp(speed, max=MAX_SHIP_SPEED)
 
 
+_INTENT_CEIL_EPS = 1e-3   # matches action_mask._INTENT_CEIL_EPS (integer-parity snap)
+
+
+def _resolve_intent_sizes(cap_cost, reach_em, mass_soon, src_ships, is_own):
+    """Torch twin of action_mask.resolve_intent_sizes_np — raw integer ships per intent,
+    shape (..., 4), each clamped to [0, src_ships]. capture / capture-defend / maintain / all-in.
+    Same formula + ceil-snap so GPU float32 and numpy produce identical integers (fuzz-parity test)."""
+    S = src_ships.clamp(min=0.0)
+    ceil_snap = lambda x: torch.ceil(x - _INTENT_CEIL_EPS)
+    capture = ceil_snap(cap_cost).clamp(min=0.0).minimum(S)
+    cap_def = ceil_snap(cap_cost + reach_em).clamp(min=0.0).minimum(S)
+    maintain = torch.where(is_own, (ceil_snap(mass_soon) + 1.0).clamp(min=0.0).minimum(S),
+                           torch.zeros_like(S))
+    all_in = S
+    return torch.stack([capture, cap_def, maintain, all_in], dim=-1)
+
+
 class VecTorchEnv:
     """Vectorized Orbit Wars environment running N games in parallel."""
 
