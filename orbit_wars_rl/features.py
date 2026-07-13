@@ -13,7 +13,7 @@ Features per entity type:
 - Global (15 features): player, step, angular_velocity, economy stats,
   enemy ships split (on_planets / in_fleets), mode, game-phase channels
 
-Pairwise features (20 per owned-slot × target-planet pair):
+Pairwise features (26 per owned-slot × target-planet pair):
   0: sin of arrival direction   (corrected for rotation on orbiting targets)
   1: cos of arrival direction   (corrected for rotation on orbiting targets)
   2: arrival dist / BOARD_SIZE  (corrected for rotation on orbiting targets)
@@ -34,6 +34,7 @@ Pairwise features (20 per owned-slot × target-planet pair):
   19: keepability_margin/100    friendly support minus enemy contest/reaction, clipped [-5,5]
   20: enemy_mass_soon/100       enemy fleet mass landing within _THREAT_ETA_WINDOW steps (clamp 5)
   21: threat_imminence          1/(min_enemy_eta+1); urgency in (0,0.5], 0 if no enemy inbound
+  22-25: resolved ships for capture / capture-defend / maintain / all-in, divided by 200
 """
 
 from __future__ import annotations
@@ -508,9 +509,18 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
     }
 
 
-# Number of pairwise features per (owned-slot, target-planet) pair.
-# Keep in sync with compute_pairwise_features() and ModelConfig.pairwise_feature_dim.
-PAIRWISE_FEATURE_DIM = 26   # 22 base + 4 intent-sizing resolved-size channels (ch 22-25)
+# Stable names for telemetry and audits. Position is the feature contract: keep this tuple in
+# lock-step with compute_pairwise_features(), the torch_env twin, and ModelConfig.
+PAIRWISE_FEATURE_NAMES = (
+    "arrival_sin", "arrival_cos", "arrival_distance", "arrival_closeness",
+    "sun_safe", "is_mine", "is_enemy", "is_neutral", "target_production",
+    "target_valid", "ships_at_arrival", "capture_gap", "roi_20", "roi_50",
+    "enemy_contest", "reachable_enemy_mass", "capture_value", "reactive_roi",
+    "friendly_reachable_mass", "keepability_margin", "enemy_mass_soon",
+    "threat_imminence", "intent_capture_ships", "intent_capture_defend_ships",
+    "intent_maintain_ships", "intent_all_in_ships",
+)
+PAIRWISE_FEATURE_DIM = len(PAIRWISE_FEATURE_NAMES)
 
 # Typical fleet size used to estimate an ETA prior (matches teacher MIN_SHIP_FLOOR ~ 10
 # but in practice ETA varies modestly with size since speed is log-shaped).

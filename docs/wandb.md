@@ -1,6 +1,6 @@
 # W&B Tracking — How To
 
-W&B is **on by default**. Every training run logs ~60 metrics organized by prefix.
+W&B is **on by default**. Training metrics are organized by prefix.
 This doc covers setup, the panels that matter, and the decisions you make from them.
 
 ---
@@ -32,7 +32,26 @@ command and runs log natively. (Ensure `wandb login` has been run locally first.
 Metrics are grouped by prefix — W&B auto-organizes them into sections. You only
 pin the panels you care about. Here are the ones that matter, by purpose:
 
-### PBRS run — the 5 panels to pin
+### Current intent runs
+
+| Prefix | What it contains | How to use it |
+|--------|------------------|---------------|
+| `intent/` | Sampled capture/capture-defend/maintain/all-in shares, resolved ship counts, attack commitment ratio, under-commit rate | Primary intent-sizing mechanism check. Shares are semantic actions, not legacy ship bins. |
+| `features/` | Input standard deviations plus one learned-use norm for each of the 26 pairwise features | Verify inputs are live and whether the model is learning to use each channel. The norm combines all direct consumers: pairwise attention plus target, fire, and ship scorers. |
+| `target_conditioning/` | Target logit spread, residual-to-prior ratio, and decision-flip rate for fire/ship | Health of the active target-conditioned action path. This was historically called `phase4/`; it is core architecture now, not a staged experiment. |
+| `policy/` | Launch rate, fire fraction, target-owner shares, reinforcement | General action discipline. Legacy `mean_ship_bin`/`ship_bin0_rate` are omitted in intent mode because indices 0-3 are semantics, not ship quantities. |
+
+The four `features/input_std_*` curves are activity checks. The 26
+`features/use_norm_*` curves measure learned use; resolved intent sizes are the final four:
+`intent_capture_ships`, `intent_capture_defend_ships`, `intent_maintain_ships`, and
+`intent_all_in_ships`.
+
+### Optional PBRS staging runs
+
+`staging/phi` is emitted only when `--staging-shaping-coef` is nonzero. Its absence in a
+sparse-reward run is expected; a constant zero panel used to be logged even when PBRS was off.
+
+For a PBRS experiment, these are the five panels to pin:
 
 | Panel | Metric | What it tells you | Decision |
 |-------|--------|-------------------|----------|
@@ -48,11 +67,13 @@ pin the panels you care about. Here are the ones that matter, by purpose:
 |--------|-------------|--------------|
 | `ppo/` | clip_frac, approx_kl, value_loss | PPO divergence (clip>0.3, kl>0.05) |
 | `entropy/` | fire, ship, target | Collapse (any →0) or spray (fire too high) |
-| `policy/` | fire_0, ship_bin0_rate, reinforce_rate | Degenerate behavior (slot0>0.8, bin0>0.5) |
+| `policy/` | fire_0, fire_fraction, mean_launch_rate, reinforce_rate | Degenerate source selection or launch discipline |
+| `intent/` | action shares, resolved_ships_mean, attack_undercommit_rate | Intent collapse or failure to resolve sufficient capture mass |
+| `features/` | input_std_*, use_norm_* | Dead inputs or feature channels the model never uses |
+| `target_conditioning/` | *_logit_spread, *_residual_to_prior, *_decision_flip | Whether target context materially changes fire/ship decisions |
 | `value/` | mean, std, adv_std | Critic scale drift |
-| `dm/` | gap, cross, ratio, nearmiss | Force-concentration diagnostic (decisive-mass floor) |
-| `il/` | kl, coef | IL anchor (zero when anchor off) |
 | `train/` | sps, lr | Throughput + LR schedule |
+| `staging/` | phi | PBRS experiments only; absent when staging shaping is disabled |
 
 ---
 

@@ -34,6 +34,7 @@ except ImportError:
     _wandb = None
 
 from config import Config
+from features import PAIRWISE_FEATURE_NAMES
 from model import EntityTransformer, count_params, PHASE4_COMPAT_MISSING_KEYS
 from opponent_pool import OpponentPool, PoolMember
 from ppo import PPOLearner
@@ -117,12 +118,21 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
     return fire_a.long(), angle_a, ship_a, target_a, lp_fire, lp_ship, lp_target
 
 
-def decode_ship_bins(ship_bins: torch.Tensor, max_ships: torch.Tensor, ship_bin_mode: str) -> torch.Tensor:
+def decode_ship_bins(ship_bins: torch.Tensor, max_ships: torch.Tensor, ship_bin_mode: str,
+                     *, target_bins: torch.Tensor | None = None,
+                     intent_sizes: torch.Tensor | None = None) -> torch.Tensor:
     """Decode sampled ship bins to ship counts using the same semantics as VecTorchEnv."""
     if ship_bin_mode == "intent":
-        # Intent mode resolves the count per-target INSIDE the env (needs the chosen target);
-        # this standalone diagnostic buffer (ship_count_a, unread) isn't meaningful here.
-        return torch.zeros_like(ship_bins, dtype=torch.float32)
+        if target_bins is None or intent_sizes is None:
+            raise ValueError("intent decode requires target_bins and intent_sizes")
+        target_idx = target_bins.long().clamp(0, intent_sizes.shape[2] - 1)
+        intent_idx = ship_bins.long().clamp(0, intent_sizes.shape[3] - 1)
+        target_row = torch.gather(
+            intent_sizes, 2,
+            target_idx.unsqueeze(-1).unsqueeze(-1).expand(
+                -1, -1, 1, intent_sizes.shape[3]),
+        ).squeeze(2)
+        return torch.gather(target_row, 2, intent_idx.unsqueeze(-1)).squeeze(-1).clamp(min=1.0)
     if ship_bin_mode == "fraction":
         frac_t = torch.tensor(FRACTION_BIN_VALUES, dtype=torch.float32, device=ship_bins.device)
         idx = ship_bins.long().clamp(0, len(FRACTION_BIN_VALUES) - 1)
@@ -132,6 +142,46 @@ def decode_ship_bins(ship_bins: torch.Tensor, max_ships: torch.Tensor, ship_bin_
     counts_t = torch.tensor(SHIP_COUNTS, dtype=torch.float32, device=ship_bins.device)
     idx = ship_bins.long().clamp(0, len(SHIP_COUNTS) - 1)
     return counts_t[idx]
+
+
+def intent_rollout_metrics(flat: dict) -> dict[str, float]:
+    """Intent action mix and resolved commitment from actions actually sampled this rollout."""
+    fired = (flat["fire_a"] > 0) & flat["slot_valid"].bool()
+    fired_count = fired.sum().clamp(min=1)
+    intent = flat["ship_a"].long()
+    names = ("capture", "capture_defend", "maintain", "all_in")
+    metrics = {
+        f"intent_{name}_share": float((((intent == i) & fired).sum() / fired_count).item())
+        for i, name in enumerate(names)
+    }
+
+    resolved = flat["ship_count_a"].float()
+    metrics["intent_resolved_ships_mean"] = float(
+        ((resolved * fired).sum() / fired_count).item())
+
+    pairwise = flat.get("pairwise_features")
+    if pairwise is None:
+        return metrics
+    target = flat["target_a"].long().clamp(0, pairwise.shape[2] - 1)
+    chosen = torch.gather(
+        pairwise, 2,
+        target.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, pairwise.shape[-1]),
+    ).squeeze(2)
+    is_enemy = chosen[..., 6] > 0.5
+    is_neutral = chosen[..., 7] > 0.5
+    attack = fired & (is_enemy | is_neutral)
+    attack_count = attack.sum().clamp(min=1)
+    ships_at_arrival = chosen[..., 10] * 200.0
+    production = chosen[..., 8] * 5.0
+    required = ships_at_arrival + is_enemy.float() * production * 3.0 + 1.0
+    commit_ratio = (resolved / required.clamp(min=1.0)).clamp(max=2.0)
+    metrics["intent_attack_resolved_ships_mean"] = float(
+        ((resolved * attack).sum() / attack_count).item())
+    metrics["intent_attack_commit_ratio_capped2"] = float(
+        ((commit_ratio * attack).sum() / attack_count).item())
+    metrics["intent_attack_undercommit_rate"] = float(
+        ((((resolved + 1e-3) < required) & attack).sum() / attack_count).item())
+    return metrics
 
 
 def index_features(feats: dict, ids: torch.Tensor) -> dict:
@@ -189,7 +239,7 @@ def compute_diagnostics(metrics, *, train_mask, env, model, args, flat, flat_adv
 
     Read-only w.r.t. training state — every value is derived from the just-finished
     rollout's env accumulators, the flattened batch (`flat`/`flat_adv`/`flat_ret`), and
-    the current model weights. W&B logs all keys; the console prints a curated subset.
+    the current model weights. W&B and the console each publish a curated subset.
 
     `train_mask` is storage["train_mask"] (T, N, P): its per-slot time-fraction weights the
     env's rollout-SUMMED accumulators. Under per-episode assignment a slot's learning-ness can
@@ -273,32 +323,26 @@ def compute_diagnostics(metrics, *, train_mask, env, model, args, flat, flat_adv
         metrics["global_feat_std"] = float(flat["global_features"].std(unbiased=False).item())
         if "pairwise_features" in flat:
             metrics["pairwise_feat_std"] = float(flat["pairwise_features"].std(unbiased=False).item())
-        # Per-feature input-weight norms on the pairwise cross-attention. Track whether
-        # newer target-value / keepability columns actually get used after a padded
-        # checkpoint resume (norm climbing toward the original geometry/owner channels)
-        # vs staying inert near zero.
-        if hasattr(model, "pair_kv"):
-            fw = model.pair_kv.weight          # [2D, D + F_pair]
-            D = fw.shape[0] // 2
-            feat_cols = fw[:, D:]              # [2D, F_pair]
-            if feat_cols.shape[1] >= 15:
-                metrics["wnorm_roi20"] = float(feat_cols[:, 12].norm().item())
-                metrics["wnorm_roi50"] = float(feat_cols[:, 13].norm().item())
-                metrics["wnorm_enemy_contest"] = float(feat_cols[:, 14].norm().item())
-                metrics["wnorm_pw_orig"] = float(feat_cols[:, :12].norm(dim=0).mean().item())
-            if feat_cols.shape[1] >= 20:
-                metrics["wnorm_reachable_enemy"] = float(feat_cols[:, 15].norm().item())
-                metrics["wnorm_capture_value"] = float(feat_cols[:, 16].norm().item())
-                metrics["wnorm_reactive_roi"] = float(feat_cols[:, 17].norm().item())
-                metrics["wnorm_friendly_reach"] = float(feat_cols[:, 18].norm().item())
-                metrics["wnorm_keepability"] = float(feat_cols[:, 19].norm().item())
-        if hasattr(model, "fire_q"):
-            metrics["phase4_fire_q_norm"] = float(model.fire_q.weight.norm().item())
-            metrics["phase4_fire_k_norm"] = float(model.fire_k.weight.norm().item())
-            metrics["phase4_ship_q_norm"] = float(model.ship_q.weight.norm().item())
-            metrics["phase4_ship_k_norm"] = float(model.ship_k.weight.norm().item())
-            metrics["phase4_fire_resid_out_norm"] = float(model.fire_scorer[2].weight.norm().item())
-            metrics["phase4_ship_resid_out_norm"] = float(model.ship_scorer[2].weight.norm().item())
+        # One norm per pairwise feature across every direct consumer: pairwise attention plus
+        # the target, fire, and ship scorers. The old telemetry covered only nine attention
+        # columns, which missed the intent-size channels and their most direct users. Copy all
+        # norms to CPU once to avoid one GPU sync per feature.
+        metric_model = getattr(model, "_orig_mod", model)
+        if hasattr(metric_model, "pair_kv"):
+            pair_weight = metric_model.pair_kv.weight
+            D = pair_weight.shape[0] // 2
+            feature_dim = min(pair_weight.shape[1] - D, len(PAIRWISE_FEATURE_NAMES))
+            consumers = (
+                pair_weight[:, -feature_dim:],
+                metric_model.target_scorer[0].weight[:, -feature_dim:],
+                metric_model.fire_scorer[0].weight[:, -feature_dim:],
+                metric_model.ship_scorer[0].weight[:, -feature_dim:],
+            )
+            use_norms = torch.cat(consumers, dim=0).norm(dim=0).detach().cpu().tolist()
+            for name, norm in zip(PAIRWISE_FEATURE_NAMES[:feature_dim], use_norms):
+                metrics[f"pairwise_use_norm_{name}"] = float(norm)
+        if getattr(metric_model, "intent_sizing", False):
+            metrics.update(intent_rollout_metrics(flat))
 
 
 # In-training eval was removed: vs-frozen-initial gave false positives
@@ -1235,7 +1279,12 @@ def train(args):
                 fire_p, angle_p, ship_p, target_p, lpf_p, lps_p, lpt_p = sample_action_batched(
                     outs_p, feats_p["fire_mask"], feats_p.get("target_mask")
                 )
-                ship_count_p = decode_ship_bins(ship_p, feats_p["max_ships"], cfg.model.ship_bin_mode)
+                ship_count_p = decode_ship_bins(
+                    ship_p, feats_p["max_ships"], cfg.model.ship_bin_mode,
+                    target_bins=target_p,
+                    intent_sizes=(env._intent_sizes.get(p)
+                                  if cfg.model.ship_bin_mode == "intent" else None),
+                )
                 storage["planet_features"][t, :, p].copy_(feats_p["planet_features"], non_blocking=True)
                 storage["fleet_features"][t, :, p].copy_(feats_p["fleet_features"], non_blocking=True)
                 storage["global_features"][t, :, p].copy_(feats_p["global_features"], non_blocking=True)
@@ -1557,13 +1606,34 @@ def train(args):
                     f"tgt n/e {metrics.get('target_share_neutral', 0):.2f}/"
                     f"{metrics.get('target_share_enemy', 0):.2f} | "
                 ) if args.allow_reinforce else ""
+                if cfg.model.ship_bin_mode == "intent":
+                    shipstr = (
+                        f"intent c/cd/m/ai {metrics.get('intent_capture_share', 0):.2f}/"
+                        f"{metrics.get('intent_capture_defend_share', 0):.2f}/"
+                        f"{metrics.get('intent_maintain_share', 0):.2f}/"
+                        f"{metrics.get('intent_all_in_share', 0):.2f} "
+                        f"resolvedμ {metrics.get('intent_resolved_ships_mean', 0):.1f} "
+                        f"under {metrics.get('intent_attack_undercommit_rate', 0):.2f} | "
+                    )
+                    featurestr = (
+                        "intent-use c/cd/m/ai "
+                        f"{metrics.get('pairwise_use_norm_intent_capture_ships', 0):.3f}/"
+                        f"{metrics.get('pairwise_use_norm_intent_capture_defend_ships', 0):.3f}/"
+                        f"{metrics.get('pairwise_use_norm_intent_maintain_ships', 0):.3f}/"
+                        f"{metrics.get('pairwise_use_norm_intent_all_in_ships', 0):.3f}"
+                    )
+                else:
+                    shipstr = (
+                        f"ship0 {metrics.get('ship_bin0_rate', 0):.2f} "
+                        f"meanshipbin {metrics.get('mean_ship_bin', 0):.1f} | "
+                    )
+                    featurestr = ""
                 print(
                     f"   diag | fire[0] {slot0:.2f} rest_max {slot_rest_max:.2f} | "
                     f"fire_frac {metrics.get('fire_fraction', 0):.2f} "
                     f"launch_rate {metrics.get('mean_launch_rate', 0):.3f} "
                     f"owned {metrics.get('owned_planets', 0):.1f} "
-                    f"ship0 {metrics.get('ship_bin0_rate', 0):.2f} "
-                    f"meanshipbin {metrics.get('mean_ship_bin', 0):.1f} | "
+                    f"{shipstr}"
                     f"pl@16/32/50/100 {metrics.get('planets@16',0):.0f}/{metrics.get('planets@32',0):.0f}/"
                     f"{metrics.get('planets@50',0):.0f}/{metrics.get('planets@100',0):.0f} "
                     f"shipspp@50 {metrics.get('ships_per_planet@50',0):.0f} | "
@@ -1584,32 +1654,15 @@ def train(args):
                     f"{metrics.get('fleet_feat_std', 0):.2f}/"
                     f"{metrics.get('global_feat_std', 0):.2f}/"
                     f"{metrics.get('pairwise_feat_std', 0):.2f} | "
-                    f"wnorm roi20/roi50/ec {metrics.get('wnorm_roi20', 0):.3f}/"
-                    f"{metrics.get('wnorm_roi50', 0):.3f}/"
-                    f"{metrics.get('wnorm_enemy_contest', 0):.3f} "
-                    f"val/keep {metrics.get('wnorm_capture_value', 0):.3f}/"
-                    f"{metrics.get('wnorm_keepability', 0):.3f} "
-                    f"(orig~{metrics.get('wnorm_pw_orig', 0):.2f})"
+                    f"{featurestr}"
                 )
                 print(
-                    f"   p4   | fire/ship tgtσ {metrics.get('fire_target_std', 0):.3f}/"
+                    f"   cond | fire/ship tgtσ {metrics.get('fire_target_std', 0):.3f}/"
                     f"{metrics.get('ship_target_std', 0):.3f} | "
-                    f"prior_rms {metrics.get('phase4_fire_prior_rms', 0):.3f}/"
-                    f"{metrics.get('phase4_ship_prior_rms', 0):.3f} | "
-                    f"resid_rms {metrics.get('phase4_fire_resid_rms', 0):.3f}/"
-                    f"{metrics.get('phase4_ship_resid_rms', 0):.3f} | "
-                    f"ρ {metrics.get('phase4_fire_resid_ratio', 0):.3f}/"
+                    f"resid/prior {metrics.get('phase4_fire_resid_ratio', 0):.3f}/"
                     f"{metrics.get('phase4_ship_resid_ratio', 0):.3f} | "
-                    f"|resid|μ {metrics.get('phase4_fire_resid_abs_mean', 0):.3f}/"
-                    f"{metrics.get('phase4_ship_resid_abs_mean', 0):.3f} | "
                     f"flip f/s {metrics.get('phase4_fire_decision_flip', 0):.3f}/"
-                    f"{metrics.get('phase4_ship_decision_flip', 0):.3f} | "
-                    f"qk f {metrics.get('phase4_fire_q_norm', 0):.2f}/"
-                    f"{metrics.get('phase4_fire_k_norm', 0):.2f} "
-                    f"s {metrics.get('phase4_ship_q_norm', 0):.2f}/"
-                    f"{metrics.get('phase4_ship_k_norm', 0):.2f} | "
-                    f"out {metrics.get('phase4_fire_resid_out_norm', 0):.3f}/"
-                    f"{metrics.get('phase4_ship_resid_out_norm', 0):.3f}"
+                    f"{metrics.get('phase4_ship_decision_flip', 0):.3f}"
                 )
                 if args.log_timing:
                     # SPS patch A: per-rollout wall-time breakdown (where the per-step tax is).
@@ -1628,43 +1681,15 @@ def train(args):
                     )
             # W&B logging
             if wb is not None:
-                wb.log({
+                wandb_metrics = {
                     # Core training
                     "train/steps": total_env_steps,
                     "train/sps": sps,
                     "train/reward_p0": avg_r,
                     "train/reward_p1": avg_r1,
                     "train/lr": metrics["learning_rate"],
-                    "train/phase4_residual_lr": metrics.get("phase4_residual_learning_rate", metrics["learning_rate"]),
                     # PPO health
                     "ppo/explained_variance": metrics.get("explained_variance", 0),
-                    "feat/wnorm_roi20": metrics.get("wnorm_roi20", 0),
-                    "feat/wnorm_roi50": metrics.get("wnorm_roi50", 0),
-                    "feat/wnorm_enemy_contest": metrics.get("wnorm_enemy_contest", 0),
-                    "feat/wnorm_reachable_enemy": metrics.get("wnorm_reachable_enemy", 0),
-                    "feat/wnorm_capture_value": metrics.get("wnorm_capture_value", 0),
-                    "feat/wnorm_reactive_roi": metrics.get("wnorm_reactive_roi", 0),
-                    "feat/wnorm_friendly_reach": metrics.get("wnorm_friendly_reach", 0),
-                    "feat/wnorm_keepability": metrics.get("wnorm_keepability", 0),
-                    "feat/wnorm_pw_orig": metrics.get("wnorm_pw_orig", 0),
-                    "phase4/fire_target_std": metrics.get("fire_target_std", 0),
-                    "phase4/ship_target_std": metrics.get("ship_target_std", 0),
-                    "phase4/fire_prior_rms": metrics.get("phase4_fire_prior_rms", 0),
-                    "phase4/ship_prior_rms": metrics.get("phase4_ship_prior_rms", 0),
-                    "phase4/fire_resid_rms": metrics.get("phase4_fire_resid_rms", 0),
-                    "phase4/ship_resid_rms": metrics.get("phase4_ship_resid_rms", 0),
-                    "phase4/fire_resid_ratio": metrics.get("phase4_fire_resid_ratio", 0),
-                    "phase4/ship_resid_ratio": metrics.get("phase4_ship_resid_ratio", 0),
-                    "phase4/fire_resid_abs_mean": metrics.get("phase4_fire_resid_abs_mean", 0),
-                    "phase4/ship_resid_abs_mean": metrics.get("phase4_ship_resid_abs_mean", 0),
-                    "phase4/fire_decision_flip": metrics.get("phase4_fire_decision_flip", 0),
-                    "phase4/ship_decision_flip": metrics.get("phase4_ship_decision_flip", 0),
-                    "phase4/fire_q_norm": metrics.get("phase4_fire_q_norm", 0),
-                    "phase4/fire_k_norm": metrics.get("phase4_fire_k_norm", 0),
-                    "phase4/ship_q_norm": metrics.get("phase4_ship_q_norm", 0),
-                    "phase4/ship_k_norm": metrics.get("phase4_ship_k_norm", 0),
-                    "phase4/fire_resid_out_norm": metrics.get("phase4_fire_resid_out_norm", 0),
-                    "phase4/ship_resid_out_norm": metrics.get("phase4_ship_resid_out_norm", 0),
                     "ppo/clip_frac": avg_cf,
                     "ppo/clip_frac_fire": metrics.get("clip_frac_fire", 0),
                     "ppo/approx_kl": metrics.get("approx_kl", 0),
@@ -1679,8 +1704,6 @@ def train(args):
                     "policy/fire_rest_max": slot_rest_max,
                     "policy/fire_fraction": metrics.get("fire_fraction", 0),
                     "policy/owned_planets": metrics.get("owned_planets", 0),
-                    "policy/ship_bin0_rate": metrics.get("ship_bin0_rate", 0),
-                    "policy/mean_ship_bin": metrics.get("mean_ship_bin", 0),
                     **{f"hoard/{k}": v for k, v in ms_metrics.items()},
                     "policy/reinforce_rate": metrics.get("reinforce_rate", 0),
                     "policy/target_share_neutral": metrics.get("target_share_neutral", 0),
@@ -1702,17 +1725,53 @@ def train(args):
                     # Reward stats
                     "reward/mean": metrics.get("reward_mean", 0),
                     "reward/nonzero_frac": metrics.get("reward_nonzero", 0),
-                    # IL (zero when not active)
-                    # PBRS staging potential (is the agent staging toward neutrals?)
-                    "staging/phi": metrics.get("staging_phi", 0),
-                }, step=total_env_steps)
+                    # Input activity + learned use across attention/target/fire/ship consumers.
+                    "features/input_std_planet": metrics.get("planet_feat_std", 0),
+                    "features/input_std_fleet": metrics.get("fleet_feat_std", 0),
+                    "features/input_std_global": metrics.get("global_feat_std", 0),
+                    "features/input_std_pairwise": metrics.get("pairwise_feat_std", 0),
+                    **{
+                        f"features/use_norm_{name}": metrics.get(f"pairwise_use_norm_{name}", 0)
+                        for name in PAIRWISE_FEATURE_NAMES
+                    },
+                    # Historical internal names still say phase4 for checkpoint compatibility;
+                    # this is the active target-conditioned fire/ship path, not a dormant phase.
+                    "target_conditioning/fire_logit_spread": metrics.get("fire_target_std", 0),
+                    "target_conditioning/ship_logit_spread": metrics.get("ship_target_std", 0),
+                    "target_conditioning/fire_residual_to_prior": metrics.get("phase4_fire_resid_ratio", 0),
+                    "target_conditioning/ship_residual_to_prior": metrics.get("phase4_ship_resid_ratio", 0),
+                    "target_conditioning/fire_decision_flip": metrics.get("phase4_fire_decision_flip", 0),
+                    "target_conditioning/ship_decision_flip": metrics.get("phase4_ship_decision_flip", 0),
+                }
+                if cfg.model.ship_bin_mode == "intent":
+                    wandb_metrics.update({
+                        "intent/capture_share": metrics.get("intent_capture_share", 0),
+                        "intent/capture_defend_share": metrics.get("intent_capture_defend_share", 0),
+                        "intent/maintain_share": metrics.get("intent_maintain_share", 0),
+                        "intent/all_in_share": metrics.get("intent_all_in_share", 0),
+                        "intent/resolved_ships_mean": metrics.get("intent_resolved_ships_mean", 0),
+                        "intent/attack_resolved_ships_mean": metrics.get("intent_attack_resolved_ships_mean", 0),
+                        "intent/attack_commit_ratio_capped2": metrics.get("intent_attack_commit_ratio_capped2", 0),
+                        "intent/attack_undercommit_rate": metrics.get("intent_attack_undercommit_rate", 0),
+                    })
+                else:
+                    wandb_metrics.update({
+                        "policy/ship_bin0_rate": metrics.get("ship_bin0_rate", 0),
+                        "policy/mean_ship_bin": metrics.get("mean_ship_bin", 0),
+                    })
+                if args.phase4_residual_lr_mult != 1.0:
+                    wandb_metrics["target_conditioning/lr"] = metrics.get(
+                        "phase4_residual_learning_rate", metrics["learning_rate"])
+                if args.staging_shaping_coef != 0.0 and "staging_phi" in metrics:
+                    wandb_metrics["staging/phi"] = metrics["staging_phi"]
+                wb.log(wandb_metrics, step=total_env_steps)
 
             # Collapse warnings — flag early instead of finding via replay at 10M
             if iter_count > 20:  # skip BC-resume noise
                 if slot0 > 0.8 and slot_rest_max < 0.1:
                     print("  ⚠ slot-0-only firing: slot 0 fire_prob>0.8 while all "
                           "other slots <0.1 — fire-head is collapsing to one source")
-                if metrics.get("ship_bin0_rate", 0) > 0.5:
+                if cfg.model.ship_bin_mode != "intent" and metrics.get("ship_bin0_rate", 0) > 0.5:
                     print(f"  ⚠ ship-bin-0 collapse: {metrics['ship_bin0_rate']:.0%} of fires "
                           f"argmax to bin 0 (1 ship). 1-ship fleets can't capture neutrals.")
 

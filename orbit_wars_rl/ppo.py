@@ -299,8 +299,8 @@ class PPOLearner:
                 fire_residual = outputs.get("_phase4_fire_residual")
                 ship_prior = outputs.get("_phase4_ship_prior")
                 ship_residual = outputs.get("_phase4_ship_residual")
-                fire_prior_rms = fire_resid_rms = fire_resid_ratio = fire_resid_abs_mean = 0.0
-                ship_prior_rms = ship_resid_rms = ship_resid_ratio = ship_resid_abs_mean = 0.0
+                fire_prior_rms = fire_resid_rms = fire_resid_ratio = 0.0
+                ship_prior_rms = ship_resid_rms = ship_resid_ratio = 0.0
                 fire_decision_flip = ship_decision_flip = 0.0
                 if fire_prior is not None and fire_residual is not None:
                     valid_targets = target_valid & slot_valid_2d.unsqueeze(-1)
@@ -309,7 +309,6 @@ class PPOLearner:
                     fire_prior_rms = (((fire_prior * valid_targets_f) ** 2).sum() / vt_sum).sqrt()
                     fire_resid_rms = (((fire_residual * valid_targets_f) ** 2).sum() / vt_sum).sqrt()
                     fire_resid_ratio = fire_resid_rms / fire_prior_rms.clamp(min=1e-6)
-                    fire_resid_abs_mean = (fire_residual.abs() * valid_targets_f).sum() / vt_sum
                     fire_prior_logits = _gather_target_logits(fire_prior, target_action)
                     fire_decision_flip = (
                         (((fire_prior_logits > 0) != (fire_logits > 0)).float() * sv).sum()
@@ -322,7 +321,6 @@ class PPOLearner:
                     ship_prior_rms = (((ship_prior * valid_targets_bins_f) ** 2).sum() / vtb_sum).sqrt()
                     ship_resid_rms = (((ship_residual * valid_targets_bins_f) ** 2).sum() / vtb_sum).sqrt()
                     ship_resid_ratio = ship_resid_rms / ship_prior_rms.clamp(min=1e-6)
-                    ship_resid_abs_mean = (ship_residual.abs() * valid_targets_bins_f).sum() / vtb_sum
                     ship_prior_logits = _gather_target_ship_logits(ship_prior, target_action)
                     ship_slots = (((fire_logits > 0) | (fire_prior_logits > 0)).float() * sv
                                   if fire_prior is not None else sv)
@@ -360,14 +358,8 @@ class PPOLearner:
                 "mean_ship_bin": mean_ship_bin.item(),
                 "fire_target_std": fire_target_std.item(),
                 "ship_target_std": ship_target_std.item(),
-                "phase4_fire_prior_rms": float(fire_prior_rms),
-                "phase4_ship_prior_rms": float(ship_prior_rms),
-                "phase4_fire_resid_rms": float(fire_resid_rms),
-                "phase4_ship_resid_rms": float(ship_resid_rms),
                 "phase4_fire_resid_ratio": float(fire_resid_ratio),
                 "phase4_ship_resid_ratio": float(ship_resid_ratio),
-                "phase4_fire_resid_abs_mean": float(fire_resid_abs_mean),
-                "phase4_ship_resid_abs_mean": float(ship_resid_abs_mean),
                 "phase4_fire_decision_flip": float(fire_decision_flip),
                 "phase4_ship_decision_flip": float(ship_decision_flip),
                 "per_slot_fire_probs": per_slot_fire.detach().cpu().tolist(),
