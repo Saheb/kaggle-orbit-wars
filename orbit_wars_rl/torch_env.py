@@ -1888,25 +1888,42 @@ class VecTorchEnv:
         new_id_within_env = (target_valid.long().cumsum(dim=1) - 1).clamp(min=0)
         new_ids = self.next_fleet_id.unsqueeze(1) + new_id_within_env  # (N, MAX_OWNED)
 
-        # Vectorized scatter into fleets tensor — advanced indexing in one shot.
-        env_arange = torch.arange(N, device=self.device).unsqueeze(1).expand(N, MAX_OWNED)
-        flat_env = env_arange[target_valid]                            # (K,)
-        flat_slot = target_slot[target_valid]                          # (K,)
-        self.fleets[flat_env, flat_slot, 0] = new_ids[target_valid].float()
-        self.fleets[flat_env, flat_slot, 1] = float(owner_id)
-        self.fleets[flat_env, flat_slot, 2] = start_x[target_valid]
-        self.fleets[flat_env, flat_slot, 3] = start_y[target_valid]
-        self.fleets[flat_env, flat_slot, 4] = angle[target_valid]
-        self.fleets[flat_env, flat_slot, 5] = src[..., 0][target_valid]
-        self.fleets[flat_env, flat_slot, 6] = ship_count[target_valid]
-        self.fleet_alive[flat_env, flat_slot] = True
+        # Maskless scatter: invalid launches write to scratch slot F, which is dropped.
+        # Valid target slots are unique within each env by construction above.
+        safe_slot = torch.where(target_valid, target_slot, torch.full_like(target_slot, F))
+        fleet_pad = torch.cat([
+            self.fleets,
+            torch.zeros(N, 1, 7, dtype=self.fleets.dtype, device=self.device),
+        ], dim=1)
+        new_fleets = torch.stack([
+            new_ids.float(),
+            torch.full_like(start_x, float(owner_id)),
+            start_x,
+            start_y,
+            angle,
+            src[..., 0],
+            ship_count,
+        ], dim=2)
+        fleet_pad = fleet_pad.scatter(
+            1, safe_slot.unsqueeze(2).expand(-1, -1, 7), new_fleets)
+        self.fleets = fleet_pad[:, :F]
+        alive_pad = torch.cat([
+            self.fleet_alive,
+            torch.zeros(N, 1, dtype=torch.bool, device=self.device),
+        ], dim=1)
+        self.fleet_alive = alive_pad.scatter(
+            1, safe_slot, torch.ones_like(safe_slot, dtype=torch.bool))[:, :F]
         self.next_fleet_id = self.next_fleet_id + target_valid.long().sum(dim=1)
         # Resolve the new fleets' targets ONCE, on the (N, MAX_OWNED) launch grid — the ray
         # and the planets' orbits are fixed at launch (see _fleet_targets). Uses the final
         # angle (post intercept/override) and final ship_count (speed), i.e. exactly what
         # was written into the fleet slots above.
         new_tgt = self._resolve_targets_at(start_x, start_y, angle, ship_count)  # (N, MAX_OWNED)
-        self.fleet_tgt[flat_env, flat_slot] = new_tgt[target_valid]
+        target_pad = torch.cat([
+            self.fleet_tgt,
+            torch.full((N, 1), -1, dtype=self.fleet_tgt.dtype, device=self.device),
+        ], dim=1)
+        self.fleet_tgt = target_pad.scatter(1, safe_slot, new_tgt)[:, :F]
 
     def reset_reinforce_stats(self):
         """Zero the reinforce_rate accumulators. Call once per rollout (before the
@@ -2115,8 +2132,8 @@ class VecTorchEnv:
         env_idx = torch.arange(N, device=self.device).unsqueeze(1).expand(N, F)
         flat_idx = (env_idx * P + hit_planet_idx) * self.num_players + fleet_owner_long
         attacker_ships = attacker_ships.view(-1).scatter_add(
-            0, flat_idx[combat_mask].view(-1),
-            ships_contrib[combat_mask].view(-1),
+            0, flat_idx.reshape(-1),
+            ships_contrib.reshape(-1),
         ).view(N, P, self.num_players)
 
         # Top owner per (N, P): top_ships, top_owner; second_ships
