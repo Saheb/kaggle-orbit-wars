@@ -63,6 +63,14 @@ class ModelConfig:
     # Set to entity_dim when loading pre-Phase-1 checkpoints (old mean-pool head).
     value_head_in: int = 0
 
+    def __post_init__(self):
+        # Intent sizing (experiments.md #4): the ship head emits 4 target-relative SEMANTICS
+        # (capture/capture-defend/maintain/all-in), not 32 absolute counts. Force the head width
+        # to NUM_INTENTS so model/PPO/q-head build correctly regardless of caller.
+        if self.ship_bin_mode == "intent":
+            from action_mask import NUM_INTENTS
+            self.num_ship_bins = NUM_INTENTS
+
 
 @dataclass
 class PPOConfig:

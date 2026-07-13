@@ -86,7 +86,7 @@ COMET_FEAT_LOOKAHEAD = 5    # path-position lookahead (matches the planet 5-turn
 COMET_LIFE_NORM = 40.0      # normalize steps-to-departure (comet paths are <= ~40 steps)
 
 # Discrete action bins (match action_mask.py / model.py)
-from action_mask import SHIP_COUNTS, FRACTION_BIN_VALUES  # single source of truth (re-exported)
+from action_mask import SHIP_COUNTS, FRACTION_BIN_VALUES, NUM_INTENTS  # single source of truth (re-exported)
 from timeline import project_timeline, timeline_features
 
 NUM_ANGLE_BINS = 144
@@ -369,6 +369,9 @@ class VecTorchEnv:
         # See ModelConfig.ship_bin_mode. "absolute" uses SHIP_COUNTS lookup;
         # "fraction" uses round(FRAC_VALUES[bin] * src_ships).
         self.ship_bin_mode = ship_bin_mode
+        # Intent sizing (#4): per-player raw resolved-size table {player: (N,MO,P,4)}, stashed by
+        # get_features and read at decode (_apply_actions) to turn a chosen intent → exact ships.
+        self._intent_sizes = {}
         # What to do when a launch's ship_count exceeds the source garrison:
         #   "drop"  — legacy: void the whole launch (valid_ships = src_ships >= ship_count)
         #   "clamp" — send min(ship_count, src_ships), i.e. the whole garrison — MATCHES EVAL
@@ -1263,6 +1266,9 @@ class VecTorchEnv:
             threat_imminence=threat_imminence,
             planet_dist=dpp,                         # (N, P, P) pairwise dists computed above
         )
+        # Stash this player's raw resolved-size table for intent decode (_apply_actions reads it).
+        if self.ship_bin_mode == "intent":
+            self._intent_sizes[player] = self._pw_intent_sizes
 
         return {
             "planet_features": pf,
@@ -1521,6 +1527,7 @@ class VecTorchEnv:
             mass_soon_b, imminence_b,
         ], dim=-1)  # (N, MO, P, 22)
         out = torch.cat([out, intent_sizes_n], dim=-1)  # (N, MO, P, 26) — + intent resolved sizes
+        self._pw_intent_sizes = intent_sizes            # (N, MO, P, 4) raw — for decode read-back
 
         # Zero out invalid owned slots AND invalid target planets (match kaggle path)
         slot_valid_b = slot_valid.unsqueeze(-1).unsqueeze(-1).float()    # (N, MO, 1, 1)
@@ -1639,7 +1646,11 @@ class VecTorchEnv:
         # Decode ship_bin -> ship count. "absolute" uses fixed table; "fraction"
         # scales by max sendable ships, matching compute_action_masks() and
         # bc_frac.py labels: keep one ship behind when possible.
-        if self.ship_bin_mode == "fraction":
+        if self.ship_bin_mode == "intent":
+            # Intent index; the exact ship count is resolved AFTER the target is decoded (needs
+            # the chosen target's resolved-size row). Placeholder = source garrison until then.
+            ship_count = src_ships.clamp(min=1.0)
+        elif self.ship_bin_mode == "fraction":
             num_bins = len(FRACTION_BIN_VALUES)
             ship_bin = actions[:, :, 2].long().clamp(0, num_bins - 1)
             frac = self._frac_bins_t[ship_bin]                    # (N, MAX_OWNED)
@@ -1658,6 +1669,17 @@ class VecTorchEnv:
             raw_target_idx = actions[:, :, 3].long()
             use_target_decode = raw_target_idx >= 0
             target_idx = raw_target_idx.clamp(0, self.planets.shape[1] - 1)
+            # Intent sizing (#4): resolve intent → exact ships from the chosen target's row of the
+            # per-player resolved-size table stashed by get_features. Overrides the placeholder.
+            if self.ship_bin_mode == "intent":
+                isz = self._intent_sizes.get(owner_id)
+                if isz is not None:
+                    intent = actions[:, :, 2].long().clamp(0, NUM_INTENTS - 1)          # (N, MO)
+                    ti = target_idx.clamp(0, isz.shape[2] - 1)
+                    row = torch.gather(
+                        isz, 2, ti.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, NUM_INTENTS)
+                    ).squeeze(2)                                                          # (N, MO, 4)
+                    ship_count = torch.gather(row, 2, intent.unsqueeze(-1)).squeeze(2).clamp(min=1.0)
             target_gather = target_idx.unsqueeze(-1).expand(-1, -1, 7)
             tgt = self.planets.gather(1, target_gather)
             target_owner = tgt[:, :, 1].long()

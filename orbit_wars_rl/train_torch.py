@@ -119,6 +119,10 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
 
 def decode_ship_bins(ship_bins: torch.Tensor, max_ships: torch.Tensor, ship_bin_mode: str) -> torch.Tensor:
     """Decode sampled ship bins to ship counts using the same semantics as VecTorchEnv."""
+    if ship_bin_mode == "intent":
+        # Intent mode resolves the count per-target INSIDE the env (needs the chosen target);
+        # this standalone diagnostic buffer (ship_count_a, unread) isn't meaningful here.
+        return torch.zeros_like(ship_bins, dtype=torch.float32)
     if ship_bin_mode == "fraction":
         frac_t = torch.tensor(FRACTION_BIN_VALUES, dtype=torch.float32, device=ship_bins.device)
         idx = ship_bins.long().clamp(0, len(FRACTION_BIN_VALUES) - 1)
@@ -596,6 +600,14 @@ def train(args):
 
     if args.phase4_residual_init_std is not None:
         cfg.model.phase4_residual_init_std = args.phase4_residual_init_std
+    # Ship-bin-mode CLI override (from-scratch intent runs; __post_init__ already ran at cfg
+    # construction, so set num_ship_bins here too). Takes precedence over any checkpoint value.
+    if args.ship_bin_mode is not None:
+        cfg.model.ship_bin_mode = args.ship_bin_mode
+        if args.ship_bin_mode == "intent":
+            from action_mask import NUM_INTENTS
+            cfg.model.num_ship_bins = NUM_INTENTS
+            print(f"Ship-bin-mode=intent → num_ship_bins={NUM_INTENTS} (target-relative intent sizing)")
     cfg.model.action_decode = args.action_decode
     cfg.model.allow_reinforce = args.allow_reinforce
     # Persist the reinforce/sufficient-commit DISCIPLINE on cfg.model so the checkpoint records
@@ -1841,6 +1853,12 @@ if __name__ == "__main__":
                         help="Exponent of the ship-size prior w_i ∝ SHIP_COUNTS[i]**exp "
                              "(default 1.0 = linear-in-count; higher = more full-send-biased). "
                              "Only active with --ship-kl-coef > 0.")
+    parser.add_argument("--ship-bin-mode", type=str, default=None,
+                        choices=["absolute", "fraction", "intent"],
+                        help="Ship-head action space. 'absolute' (32 count bins, default), "
+                             "'fraction' (10 source-fraction bins), or 'intent' (#4: 4 target-relative "
+                             "semantics capture/capture-defend/maintain/all-in resolved to exact ships). "
+                             "Intent forces num_ship_bins=4. From-scratch only (head shape differs).")
     parser.add_argument("--phase4-residual-init-std", type=float, default=None,
                         help="Stddev for Phase 4 residual output-layer init. "
                              "0.0 = exact parity; small nonzero values let the "
