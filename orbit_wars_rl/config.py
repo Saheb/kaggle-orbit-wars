@@ -41,6 +41,7 @@ class ModelConfig:
     # How to decode a ship-bin index into an absolute ship count:
     #   "absolute" — bin → SHIP_COUNTS[bin]  (32-entry hybrid linear-log table)
     #   "fraction" — bin → round(FRACTION_BIN_VALUES[bin] * max_ships)
+    #   "binary"   — fire head chooses NOOP/COMMIT; ships are resolved deterministically
     # MUST match the BC label scheme that produced the checkpoint.
     # Default "absolute" preserves legacy checkpoint behaviour.
     ship_bin_mode: str = "absolute"

@@ -757,6 +757,12 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
         return min(math.hypot(px - ex, py - ey) for ex, ey in enemy_xy)
 
     cd_on = (reverse_edge_cooldown > 0 and cooldown_last is not None)
+    binary_sizes = None
+    binary_can_fire = np.ones(target_logits.shape[1], dtype=np.bool_)
+    if ship_bin_mode == "binary":
+        if pairwise_features is None:
+            raise ValueError("binary ship mode requires pairwise_features")
+        binary_sizes, binary_feasible = resolve_binary_commit_np(pairwise_features, max_ships)
 
     def _own_reinforce_illegal(src_planet, tgt_planet):
         """True if an own (reinforce) target is barred by gate / forward-staging / reverse-edge cooldown."""
@@ -786,12 +792,25 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
                 illegal = _own_reinforce_illegal(planets[pidx], tgt)
             if illegal:
                 target_logits[:, slot, tidx] = -1e9
+        if ship_bin_mode == "binary":
+            n_tgt = min(len(planets), target_logits.shape[-1], binary_feasible.shape[1])
+            base_legal = target_logits[0, slot, :n_tgt] > -1e8
+            legal_commit = base_legal.cpu().numpy() & binary_feasible[slot, :n_tgt]
+            if legal_commit.any():
+                illegal_commit = torch.as_tensor(~legal_commit, device=target_logits.device)
+                target_logits[:, slot, :n_tgt].masked_fill_(illegal_commit.unsqueeze(0), -1e9)
+            else:
+                # Keep a valid categorical row for the unused target sample; force NOOP below.
+                binary_can_fire[slot] = False
 
     if sample:
         target_dist = torch.distributions.Categorical(logits=target_logits)
         target_indices = target_dist.sample().cpu().numpy().squeeze(0)
         target_idx_t = torch.as_tensor(target_indices, device=target_logits.device).unsqueeze(0)
         chosen_fire_logits = torch.gather(fire_logits_target, -1, target_idx_t.unsqueeze(-1)).squeeze(-1)
+        if ship_bin_mode == "binary":
+            chosen_fire_logits = chosen_fire_logits.masked_fill(
+                ~torch.as_tensor(binary_can_fire, device=chosen_fire_logits.device).unsqueeze(0), -1e9)
         chosen_ship_logits = torch.gather(
             ship_logits_target,
             2,
@@ -806,6 +825,9 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
         target_indices = torch.argmax(target_logits, dim=-1).cpu().numpy().squeeze(0)
         target_idx_t = torch.as_tensor(target_indices, device=target_logits.device).unsqueeze(0)
         chosen_fire_logits = torch.gather(fire_logits_target, -1, target_idx_t.unsqueeze(-1)).squeeze(-1)
+        if ship_bin_mode == "binary":
+            chosen_fire_logits = chosen_fire_logits.masked_fill(
+                ~torch.as_tensor(binary_can_fire, device=chosen_fire_logits.device).unsqueeze(0), -1e9)
         chosen_ship_logits = torch.gather(
             ship_logits_target,
             2,
@@ -828,7 +850,9 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
             continue
         src_id = int(planets[pidx][0])
         tidx = int(target_indices[slot])
-        if ship_bin_mode == "intent" and pairwise_features is not None:
+        if ship_bin_mode == "binary":
+            decoded_ships = int(round(float(binary_sizes[slot, tidx])))
+        elif ship_bin_mode == "intent" and pairwise_features is not None:
             # ship_bins[slot] is the chosen INTENT; read its resolved ship count from the chosen
             # target's row of the pairwise table (ch22-25 = capture/capture-defend/maintain/all-in,
             # normalized /200). Same numbers the env used at train time (parity via the resolver).
@@ -1052,6 +1076,7 @@ def _ship_bin_to_count(bin_idx, max_ships, mode: str = "absolute"):
 # (training) and here (eval/export — inlined). Keep the two in lockstep; tests/ has a fuzz parity.
 INTENT_CAPTURE, INTENT_CAPTURE_DEFEND, INTENT_MAINTAIN, INTENT_ALL_IN = 0, 1, 2, 3
 NUM_INTENTS = 4
+MIN_BINARY_COMMIT_SHIPS = 5
 _INTENT_CEIL_EPS = 1e-3   # snap near-integer costs before ceil so GPU-float and numpy round identically
 
 
@@ -1072,3 +1097,23 @@ def resolve_intent_sizes_np(cap_cost, reach_em, mass_soon, src_ships, is_own):
     maintain = np.where(is_own, np.clip(ceil_snap(mass_soon) + 1.0, 0.0, S), 0.0)
     all_in = S
     return np.stack([capture, cap_def, maintain, all_in], axis=-1).astype(np.float32)
+
+
+def resolve_binary_commit_np(pairwise_features, src_ships):
+    """Deterministic NOOP/COMMIT plan from normalized pairwise features.
+
+    Non-owned targets commit the full source garrison, but only when that single source can
+    afford the projected capture cost. Owned targets use the existing maintain/defend amount.
+    Any commit below five ships is infeasible, so the learned fire bit becomes NOOP.
+    """
+    pw = np.asarray(pairwise_features, dtype=np.float32)
+    S = np.asarray(src_ships, dtype=np.float32)[..., np.newaxis]
+    is_own = pw[..., 5] > 0.5
+    is_enemy = pw[..., 6] > 0.5
+    capture_required = pw[..., 10] * 200.0 + is_enemy.astype(np.float32) * pw[..., 8] * 5.0 * 3.0 + 1.0
+    defend = np.rint(pw[..., 24] * 200.0).astype(np.float32)
+    attack_ok = (S >= MIN_BINARY_COMMIT_SHIPS) & (S + 1e-3 >= capture_required)
+    defend_ok = (defend >= MIN_BINARY_COMMIT_SHIPS) & (S + 1e-3 >= defend)
+    feasible = np.where(is_own, defend_ok, attack_ok)
+    ships = np.where(is_own, defend, S)
+    return np.where(feasible, ships, 0.0).astype(np.float32), feasible

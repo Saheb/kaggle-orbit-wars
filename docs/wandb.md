@@ -46,6 +46,14 @@ The four `features/input_std_*` curves are activity checks. The 26
 `intent_capture_ships`, `intent_capture_defend_ships`, `intent_maintain_ships`, and
 `intent_all_in_ships`.
 
+### Binary NOOP/COMMIT runs
+
+`binary/` contains `actionable_source_rate`, `noop_rate`, `commit_ships_mean`, and
+`attack_share`. The unused ship head is deliberately absent from the sampled action and PPO
+loss, so ship entropy, ship KL, ship-bin, intent-share, and ship-conditioning panels are omitted.
+Use `policy/mean_launch_rate` and the binary metrics for training health; use held-out Yijie
+conversion and win rate for the experiment verdict.
+
 ### Optional PBRS staging runs
 
 `staging/phi` is emitted only when `--staging-shaping-coef` is nonzero. Its absence in a

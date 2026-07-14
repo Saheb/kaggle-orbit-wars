@@ -251,3 +251,25 @@ features) makes commitment target-relative BY CONSTRUCTION — removing the unde
 freedom rather than hoping self-play rewards good calibration (same principle as N<10th all-in).
 Predicted chain: under-commit↓ → conversion (cap/atk)↑ → force bleed↓ → out-massed↓ → yijie WR↑.
 Measure on the yijie held-out panel (Ajay is saturated/blind). Verdict to follow.
+
+## Binary NOOP/COMMIT experiment (2026-07-14)
+
+**Hypothesis:** the four intent choices still alias when a source cannot afford them, so the
+policy can repeatedly drain one-ship sources. Collapse the effective action to the winners'
+hard-commit pattern: the fire head chooses NOOP/COMMIT, the target head chooses only a feasible
+target, and the resolver deterministically sends all available ships to a non-owned target or
+the projected maintain amount to an owned target. Commits below five ships and attacks that a
+single source cannot afford are masked before sampling. The legacy ship head remains in the
+checkpoint only for weight-shape compatibility and receives no policy loss.
+
+**Decoder counterfactual on the 30.1M intent checkpoint (64 fixed-panel games each):**
+- Yijie: 2/64 (3.1%, baseline full panel 2.7%); attack launches 108.8→24.3/game and cap/attack
+  0.162→0.798.
+- Ajay: 33/64 (51.6%, baseline full panel 52.3%); attack launches 97.4→42.3/game and cap/attack
+  0.351→0.894.
+
+The immediate WR is flat because the untrained target/fire policy proposes many unaffordable
+actions, but the conversion mechanism changes by ~2.5-5× without retraining. Train the binary
+policy from the intent checkpoint with warm Adam. **Primary verdict is Yijie**, with Ajay as the
+regression guard. Tripwires: one-ship launches must remain exactly zero; actionable-source rate,
+NOOP rate, mean commit ships, attack share, launch rate, and cap/attack must remain non-degenerate.

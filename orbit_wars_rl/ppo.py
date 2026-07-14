@@ -59,23 +59,24 @@ class PPOLearner:
             "fire_q.", "fire_k.", "fire_scorer.",
             "ship_q.", "ship_k.", "ship_scorer.",
         )
-        residual_param_ids = {
-            id(p) for name, p in model.named_parameters()
-            if any(name.startswith(prefix) for prefix in residual_prefixes)
-        }
-        base_params = []
-        residual_params = []
-        for p in model.parameters():
-            if not p.requires_grad:
-                continue
-            (residual_params if id(p) in residual_param_ids else base_params).append(p)
-
-        param_groups = [{"params": base_params, "lr": cfg.ppo.learning_rate}]
-        if residual_params:
-            param_groups.append({
-                "params": residual_params,
-                "lr": cfg.ppo.learning_rate * self.phase4_residual_lr_mult,
-            })
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        if self.phase4_residual_lr_mult == 1.0:
+            # Preserve the legacy single-group parameter order so mature checkpoints
+            # can warm-resume their Adam moments. A second group has no effect at x1.
+            param_groups = [{"params": trainable_params, "lr": cfg.ppo.learning_rate}]
+        else:
+            residual_param_ids = {
+                id(p) for name, p in model.named_parameters()
+                if any(name.startswith(prefix) for prefix in residual_prefixes)
+            }
+            base_params = [p for p in trainable_params if id(p) not in residual_param_ids]
+            residual_params = [p for p in trainable_params if id(p) in residual_param_ids]
+            param_groups = [{"params": base_params, "lr": cfg.ppo.learning_rate}]
+            if residual_params:
+                param_groups.append({
+                    "params": residual_params,
+                    "lr": cfg.ppo.learning_rate * self.phase4_residual_lr_mult,
+                })
 
         self.optimizer = torch.optim.Adam(param_groups, eps=1e-5)
         self.total_steps = 0
@@ -115,6 +116,8 @@ class PPOLearner:
         pairwise = batch.get("pairwise_features")
         if pairwise is not None:
             pairwise = to_dev(pairwise)
+        policy_model = getattr(self.model, "_orig_mod", self.model)
+        binary_mode = getattr(policy_model.cfg, "ship_bin_mode", "absolute") == "binary"
         # Autocast the model forward to bf16 (the dominant matmul cost). Then upcast the
         # float outputs back to fp32 so the log-prob/ratio/exp arithmetic below runs in fp32
         # (bf16's 8-bit mantissa would inject noise into PPO ratios). The bf16 matmuls and
@@ -153,20 +156,25 @@ class PPOLearner:
         target_dist = torch.distributions.Categorical(logits=target_logits)
 
         # Target is part of the sampled joint action even when fire=0.
-        slot_valid  = slot_valid_2d.unsqueeze(-1)   # (B, max_owned, 1)
-        fired_slots = fire_action.float() * slot_valid.squeeze(-1)
+        slot_valid = slot_valid_2d.unsqueeze(-1)   # (B, max_owned, 1)
+        decision_valid = fire_mask.float() if binary_mode else slot_valid.squeeze(-1)
+        fired_slots = fire_action.float() * decision_valid
 
-        new_log_prob_fire   = fire_dist.log_prob(fire_action.float()) * slot_valid.squeeze(-1)
-        new_log_prob_ships  = ship_dist.log_prob(ship_action)  * fired_slots
-        new_log_prob_target = target_dist.log_prob(target_action) * slot_valid.squeeze(-1)
+        new_log_prob_fire = fire_dist.log_prob(fire_action.float()) * decision_valid
+        new_log_prob_ships = (torch.zeros_like(new_log_prob_fire) if binary_mode
+                              else ship_dist.log_prob(ship_action) * fired_slots)
+        new_log_prob_target = target_dist.log_prob(target_action) * (
+            fired_slots if binary_mode else slot_valid.squeeze(-1))
 
         # Sum across planet slots: (B, max_owned) -> (B,)
         new_log_prob = (new_log_prob_fire + new_log_prob_ships + new_log_prob_target).sum(dim=-1)
 
         # Old log probs (stored at rollout time)
-        old_fire   = to_dev(batch["old_log_probs"]["fire"])  * slot_valid.squeeze(-1)
-        old_ships  = to_dev(batch["old_log_probs"]["ships"]) * fired_slots
-        old_target = to_dev(batch["old_log_probs"]["target"]) * slot_valid.squeeze(-1)
+        old_fire = to_dev(batch["old_log_probs"]["fire"]) * decision_valid
+        old_ships = (torch.zeros_like(old_fire) if binary_mode
+                     else to_dev(batch["old_log_probs"]["ships"]) * fired_slots)
+        old_target = to_dev(batch["old_log_probs"]["target"]) * (
+            fired_slots if binary_mode else slot_valid.squeeze(-1))
         old_log_prob = (old_fire + old_ships + old_target).sum(dim=-1)  # (B,)
 
         # Advantages
@@ -192,9 +200,13 @@ class PPOLearner:
             value_loss = ((values - returns) ** 2).mean()
 
         # Entropy bonuses (direction = target)
-        fire_entropy   = fire_dist.entropy().mean()
-        ship_entropy   = ship_dist.entropy().mean()
-        target_entropy = target_dist.entropy().mean()
+        fire_entropy = ((fire_dist.entropy() * decision_valid).sum() / decision_valid.sum().clamp(min=1)
+                        if binary_mode else fire_dist.entropy().mean())
+        ship_entropy = (torch.zeros((), device=ship_logits.device) if binary_mode
+                        else ship_dist.entropy().mean())
+        target_entropy = (((target_dist.entropy() * decision_valid).sum()
+                           / decision_valid.sum().clamp(min=1))
+                          if binary_mode else target_dist.entropy().mean())
 
         # No-op KL bias (Jake Will Rank-2 lever): anchor the BATCH-MEAN launch rate to a low
         # prior. p_bar = mean fire prob over valid owned slots (WITH grad); KL(Bern(p_bar) ‖
@@ -204,7 +216,7 @@ class PPOLearner:
         noop_kl = 0.0
         if cfg.noop_kl_coef > 0.0:
             q = cfg.noop_target_launch_rate
-            sv_lr = slot_valid_2d.float()                              # (B, MO)
+            sv_lr = decision_valid if binary_mode else slot_valid_2d.float()  # (B, MO)
             p_bar = (torch.sigmoid(fire_logits) * sv_lr).sum() / sv_lr.sum().clamp(min=1)
             p_bar = p_bar.clamp(1e-6, 1.0 - 1e-6)
             noop_kl = (p_bar * (p_bar / q).log()
@@ -216,7 +228,7 @@ class PPOLearner:
         # KL(π ‖ prior) = Σ π_i (log π_i − log prior_i). Replaces (set entropy_coef_ships=0) the
         # uniform-seeking ship entropy bonus — see the ship_kl_coef config note.
         ship_kl = 0.0
-        if cfg.ship_kl_coef > 0.0:
+        if cfg.ship_kl_coef > 0.0 and not binary_mode:
             log_prior = _ship_log_prior(cfg.ship_kl_prior_exp, ship_logits.shape[-1],
                                         ship_logits.device, ship_logits.dtype)   # (num_bins,)
             log_q = torch.log_softmax(ship_logits, dim=-1)                        # (B, MO, num_bins)
@@ -244,12 +256,13 @@ class PPOLearner:
             # present (16 slots × per-slot Δlog_p summing up), so this per-slot metric
             # gives a calibrated read of actual policy change per decision.
             with torch.no_grad():
-                new_lp_fire_s = fire_dist.log_prob(fire_action.float()) * slot_valid_2d
-                old_lp_fire_s = to_dev(batch["old_log_probs"]["fire"]) * slot_valid_2d
+                fire_valid = decision_valid if binary_mode else slot_valid_2d.float()
+                new_lp_fire_s = fire_dist.log_prob(fire_action.float()) * fire_valid
+                old_lp_fire_s = to_dev(batch["old_log_probs"]["fire"]) * fire_valid
                 ratio_fire_s = torch.exp(
                     new_lp_fire_s - torch.clamp(old_lp_fire_s, min=-50)
                 )
-                sv_f = slot_valid_2d.float()
+                sv_f = fire_valid
                 clip_frac_fire = (
                     ((ratio_fire_s - 1.0).abs() > cfg.clip_eps).float() * sv_f
                 ).sum() / sv_f.sum().clamp(min=1)
