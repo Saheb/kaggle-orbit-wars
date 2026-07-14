@@ -269,7 +269,65 @@ checkpoint only for weight-shape compatibility and receives no policy loss.
   0.351→0.894.
 
 The immediate WR is flat because the untrained target/fire policy proposes many unaffordable
-actions, but the conversion mechanism changes by ~2.5-5× without retraining. Train the binary
-policy from the intent checkpoint with warm Adam. **Primary verdict is Yijie**, with Ajay as the
+actions, but the conversion mechanism changes by ~2.5-5× without retraining. The first launch
+resumed the intent checkpoint, but that was rejected as a confounded test; the decisive run below
+started the binary policy and optimizer from scratch. **Primary verdict is Yijie**, with Ajay as the
 regression guard. Tripwires: one-ship launches must remain exactly zero; actionable-source rate,
 NOOP rate, mean commit ships, attack share, launch rate, and cap/attack must remain non-degenerate.
+
+### From-scratch result — mechanism PASS, strategic hypothesis FAIL
+
+Run `binary100m_scratch_rtxpro6000_20260714_073829`: 1,280 envs × 64 steps,
+32 minibatches, PPO epochs 2, bf16 + compiled model/features + GPU storage, self-play pool 0.5,
+no-op KL 0.3. It was stopped after the 50,790,400 checkpoint; the model and pool checkpoint were
+checksum-verified locally and the Jarvis instance was destroyed.
+
+| checkpoint | Yijie WR (256g) | Ajay WR (256g) |
+|---:|---:|---:|
+| 5.08M | 0.0% | 1.2% |
+| 10.16M | 0.0% | 9.0% |
+| 15.24M | 0.8% | 18.0% |
+| 20.32M | 1.6% | 27.7% |
+| 25.40M | 0.8% | 35.5% |
+| 30.47M | **2.3%** | 47.7% |
+| 35.55M | 1.2% | 48.8% |
+| 40.63M | 1.2% | 43.4% |
+| 45.71M | 2.0% | 48.4% |
+| 50.79M | 1.2% | **49.2%** |
+
+**Mechanism PASS:** one-ship launches stayed exactly zero; actionable-source rate stayed
+0.72-0.87, NOOP 0.88-0.92, mean resolved commit ~44→90 ships, and neither head collapsed
+(`H_fire` ~0.13-0.24, `H_tgt` ~1.2-1.7). The final Yijie panel confirms that the resolver
+removed under-committed spray and brought local launch discipline close to winner references:
+
+| metric | ship-KL reference vs Yijie | binary 50.79M vs Yijie | winner behavioural reference |
+|---|---:|---:|---:|
+| capture / attack launch | 0.204 | **0.665** | Jake 0.710 |
+| attack launches / capture | 4.89 | **1.50** | Jake 1.41 |
+| opening capture / attack launch | 0.512 | **0.668** | Jake 0.700 |
+| launch rate | 0.232 | **0.054** | Isaiah 0.036; Jake 0.081 |
+| ships / capture | **82** | 92 | Jake 83 |
+| reinforce share | 0.35 | **0.21** | Jake 0.56 |
+| planets at step 50 | 8 | **6** | Jake 8 |
+| capture peel rate | 0.94 | **0.98** | Ender 0.41 |
+
+The winner columns are behavioural references from different replay/eval populations, not a
+controlled opponent-matched A/B. They establish scale, not causal equivalence. In the
+opponent-matched Yijie comparison, capture/launch improved 3.26× and launches/capture fell 69%; the
+binary result is within 6% of Jake on capture/launch. Its won-game fire fraction was also 0.20,
+close to the 0.17 winner reference, so the result is not explained by firing every source.
+
+**Strategic hypothesis FAIL:** Yijie was flat at 0-2.3% for ten full panels and ended the
+trajectory at 1.2%, below the ship-KL continuation's stable ~5-7%. Better conversion did not
+produce better empire economics: the final binary policy made only 11.7 captures/game
+(ship-KL 18.8), reached only 6 planets at step 50 (8), reinforced less (0.21 vs 0.35), lost
+98% of captures (94%), and ended 99% of losses at zero material. Ajay ended at 49.2%, so the
+policy learned and the guardrail did not collapse; the primary held-out opponent did not improve.
+
+**Evidence-bounded conclusion:** launch sizing/under-commit is no longer the demonstrated
+bottleneck. The remaining evidence points to target allocation, reinforcement, post-capture
+retention, and expansion. This run does **not** isolate all-in as their cause: it jointly changed
+the action space, masks, ship-head loss, initialization, and training lineage. All-in remains a
+plausible source-drain mechanism, but replacing it should first be justified by either (a) a
+same-checkpoint, same-seed decoder counterfactual measuring source survival and capture retention,
+or (b) a matched from-scratch binary-all-in versus binary-sufficient/holdable training A/B.

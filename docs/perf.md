@@ -17,6 +17,31 @@ modest sample-efficiency cost from the epoch change (the other three are numeric
 `--compile` / `--gpu-storage` are CUDA-only, opt-in flags — launch scripts must pass them.
 Baseline: fp32/4-epoch ≈ 1,300 SPS → this stack ≈ 3,000+ SPS on an H200 at 0.5M.
 
+## Production GPU throughput — intent/binary runs (2026-07-13/14)
+
+These are long-run, steady-state `train_torch.py` numbers with the production feature bundle,
+self-play pool fraction 0.5, rollout length 64, 32 minibatches, PPO epochs 2, bf16, compiled
+model/features, and GPU-resident rollout storage. They are the numbers to use for capacity
+planning; the earlier microbenchmarks below isolate individual levers.
+
+| host / GPU | action mode | envs | batch/update | steady SPS | representative phase times |
+|---|---|---:|---:|---:|---|
+| GCP L4 24 GB | intent | 384 | 49,152 | **767-768** | `gf` 2.3s, `pool` 8.1s, `estep` 8.6s, `upd` 14.7s, wall 35.1s |
+| Jarvis A100 80 GB | intent | 1,280 | 163,840 | **2,591-2,601** | `gf` 1.4s, `pool` 2.3s, `estep` 15.0s, `upd` 12.5s, wall 32.1s |
+| Jarvis RTX PRO 6000 96 GB | binary | 1,280 | 163,840 | **4,082-4,101** | `gf` 1.1s, `pool` 2.6s, `estep` 8.3-8.9s, `upd` 8.0-8.2s, wall 20.6-21.1s |
+
+The RTX production run sustained **4,082 SPS through 50.79M steps**, 1.57× the A100 run and
+5.3× the L4 run in logged env-steps/sec. The L4 comparison is not geometry-matched: VRAM
+limited it to 384 envs, so it paid much more pool/update overhead per env-step. The A100 and RTX
+runs do match at 1,280 envs, but they are still not a pure GPU A/B: the RTX run used the binary
+NOOP/COMMIT action space, which removes ship-head sampling/PPO loss and suppresses the tiny-fleet
+population that makes `env.step` expensive. Consistent with that mixed hardware/workload change,
+RTX improved both major buckets (`env.step` 15.0→8.3-8.9s and PPO update 12.5→8.0-8.2s).
+
+**Operational choice:** for this 0.53M-parameter production model, RTX PRO 6000 at 1,280 envs
+is the best measured single-GPU throughput. Do not generalise the 1.57× ratio to arbitrary
+models or action spaces until an identical-checkpoint, identical-action-mode A/B is run.
+
 **TL;DR — the loop is model/PPO-compute-bound, and more so as the model grows. A JAX
 rewrite will not reach 10k SPS.** The top teams hit 10k because their bottleneck was a
 cheap CPU env that XLA fusion crushed; ours is a heavy model (the mandatory
