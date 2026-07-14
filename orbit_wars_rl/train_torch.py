@@ -1,15 +1,9 @@
-"""Self-play PPO training on VecTorchEnv.
-
-Pure self-play from scratch (no heuristic warm-start, no shaping). Both players
-use the current policy. Trains on player 0's perspective; player 1's actions
-are sampled from the same policy using player 1's view of state.
+"""GPU self-play PPO training on the vectorized Orbit Wars environment.
 
 Usage:
-    python train_torch.py --num-envs 512 --total-steps 100_000_000
+    python orbit_wars_rl/train_torch.py --device cuda --action-decode target
 
-Targets:
-    M4 MPS:  ~6,000 SPS  (3M steps ≈ 8 min, 100M steps ≈ 4.5h)
-    5090:   ~15,000+ SPS
+See docs/perf.md for measured throughput and recommended configurations.
 """
 
 from __future__ import annotations
@@ -27,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-# wandb is optional — only imported when --wandb flag is passed
+# W&B is optional for local tests and offline runs.
 try:
     import wandb as _wandb
 except ImportError:
@@ -42,8 +36,6 @@ from ppo import PPOLearner
 from torch_env import (
     VecTorchEnv,
     MAX_OWNED,
-    NUM_ANGLE_BINS,
-    NUM_SHIP_BINS,
     SHIP_COUNTS,
     FRACTION_BIN_VALUES,
 )
@@ -66,7 +58,8 @@ def atomic_torch_save(obj, path: str | os.PathLike) -> None:
             tmp_path.unlink()
 
 
-def _load_phase4_compatible(model: EntityTransformer, state_dict: dict, label: str) -> None:
+def _load_target_conditioning_compatible(model: EntityTransformer,
+                                         state_dict: dict, label: str) -> None:
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     bad_missing = [k for k in missing if k not in PHASE4_COMPAT_MISSING_KEYS]
     if bad_missing or unexpected:
@@ -78,14 +71,9 @@ def _load_phase4_compatible(model: EntityTransformer, state_dict: dict, label: s
 def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
                           target_mask: torch.Tensor | None = None,
                           ship_bin_mode: str = "absolute"):
-    """Sample fire/ship/target actions for a batch of envs (target-decode only).
+    """Sample target-conditioned actions for a batch of environments.
 
-    Angle is not part of the executed policy — the env computes the aim direction
-    from the sampled target planet index.  A zero tensor is returned for angle_a
-    so the action tensor passed to env.step keeps its expected 4-column shape
-    [fire, angle, ship, target].
-
-    Returns: (fire_a, angle_a, ship_a, target_a, lp_fire, lp_ship, lp_target)
+    Returns: (fire_a, direction_a, ship_a, target_a, lp_fire, lp_ship, lp_target)
     """
     fire_logits_target = outputs["fire_logits"]
     ship_logits_target = outputs["ship_logits"]
@@ -101,13 +89,13 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
         fire_a = action_a > 0
         target_a = (action_a - 1).clamp(min=0)
         ship_a = torch.zeros_like(target_a)
-        angle_a = torch.zeros_like(target_a)
+        direction_a = torch.zeros_like(target_a)
         lp_action = binary_taken_log_prob(
             log_noop, log_commit, fire_a, target_a) * fire_mask.float()
         zeros = torch.zeros_like(lp_action)
         # lp_fire stores the complete binary executed-action likelihood; the legacy
         # ship/target fields remain zero so the rollout storage contract stays stable.
-        return fire_a.long(), angle_a, ship_a, target_a, lp_action, zeros, zeros
+        return fire_a.long(), direction_a, ship_a, target_a, lp_action, zeros, zeros
 
     target_dist = torch.distributions.Categorical(logits=target_logits)
 
@@ -124,8 +112,7 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
     fire_a   = fire_dist.sample()    # (N, MAX_OWNED)
     ship_dist = torch.distributions.Categorical(logits=ship_logits)
     ship_a = ship_dist.sample()  # (N, MAX_OWNED)
-    # Angle is unused in target-decode; zeros satisfy env.step's action shape.
-    angle_a  = torch.zeros_like(fire_a)
+    direction_a = torch.zeros_like(fire_a)
 
     # Target is part of the sampled joint action even when fire=0.
     slot_valid = fire_mask.float()
@@ -134,7 +121,7 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
     lp_ship = ship_dist.log_prob(ship_a) * fired
     lp_target = target_dist.log_prob(target_a) * slot_valid
 
-    return fire_a.long(), angle_a, ship_a, target_a, lp_fire, lp_ship, lp_target
+    return fire_a.long(), direction_a, ship_a, target_a, lp_fire, lp_ship, lp_target
 
 
 def decode_ship_bins(ship_bins: torch.Tensor, max_ships: torch.Tensor, ship_bin_mode: str,
@@ -400,24 +387,9 @@ def compute_diagnostics(metrics, *, train_mask, env, model, args, flat, flat_adv
             metrics.update(binary_rollout_metrics(flat))
 
 
-# In-training eval was removed: vs-frozen-initial gave false positives
-# (degenerate policies "improved" over the unchanged baseline). Source of
-# truth is local eval (eval.py) on downloaded checkpoints against raw
-# Suneet/Zach/Rahul. See docs/bugs.md.
-#
-# _heuristic_moves_to_action_tensor is kept — pool-mode=mixed uses it to
-# convert external-heuristic Python moves into the action tensor format.
-
-
 # ----------------------------------------------------------------------------
-# Multiprocessing pool for external heuristic opponents.
-#
-# Without this, a pool rollout serializes N agent_fn(obs) calls on one CPU.
-# Suneet (3239 LoC forward-search) at 51 envs × 64 steps drops SPS from
-# ~1500 to ~260 on g5.2xlarge. Each call is independent and stateless across
-# turns, so we fan them out to a worker pool that pre-loads the agent module
-# once via fork — Suneet's per-call cost is unchanged but parallelism scales
-# with vCPUs. Expected gain: ~5-7× on 8 vCPUs.
+# External Python opponents are CPU-bound, so persistent worker processes load
+# each agent once and evaluate independent environments concurrently.
 # ----------------------------------------------------------------------------
 
 import multiprocessing as _mp
@@ -428,10 +400,7 @@ _WORKER_AGENT_FN = None  # populated per-worker in _heur_worker_init
 def _heur_worker_init(agent_path: str):
     """Each worker fork loads the agent module once and stashes its agent fn."""
     import importlib.util, sys
-    # Pin each worker to ONE torch thread. With N workers each defaulting to
-    # multi-threaded intra-op parallelism on an 8-vCPU box, they oversubscribe
-    # the cores and thrash — a planner call measured 280ms vs 40ms pinned (7x).
-    # Only the workers are pinned; the main (GPU-feeding) process keeps its threads.
+    # Prevent worker processes from oversubscribing Torch's intra-op CPU threads.
     import torch
     torch.set_num_threads(1)
     spec = importlib.util.spec_from_file_location("worker_agent", agent_path)
@@ -485,16 +454,11 @@ def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device, *,
                                       owned_idx=None, slot_valid=None, src_pids=None):
     """Convert list-of-lists [[from_pid, angle_rad, ships], ...] per env into
     a (num_envs, MAX_OWNED, 3) action tensor plus a (num_envs, MAX_OWNED) float
-    tensor of the raw continuous angles (NaN where no launch). The continuous
-    angles let the env bypass 144-bin quantization for these aiming-heavy
-    opponents (see torch_env._apply_actions angle_override).
+    tensor of continuous direction overrides (NaN where no launch).
 
-    Fast path (SPS patch C): the rollout already holds this seat's `owned_idx`/`slot_valid`
-    in its feature dict (get_features calls owned_indices_for, so they are IDENTICAL), and the
-    source planet ids per owned slot can be gathered once. Pass them as `owned_idx`/`slot_valid`/
-    `src_pids` to skip the redundant `env.owned_indices_for()` recompute AND the full
-    `env.planets.cpu()` 7-column copy. When omitted, they are derived from `env` exactly as
-    before (the path frozen_vs_deb_torch.py relies on)."""
+    Callers may pass the indices already produced by get_features() to avoid
+    recomputing ownership and copying the full planet tensor to the CPU.
+    """
     from torch_env import MAX_OWNED, NUM_ANGLE_BINS, ANGLE_BIN_WIDTH, SHIP_COUNTS
     import math as _math
 
@@ -509,7 +473,7 @@ def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device, *,
     fire = torch.zeros(N, MAX_OWNED, dtype=torch.long)
     angle_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
     ship_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
-    cont_angle = torch.full((N, MAX_OWNED), float("nan"), dtype=torch.float32)
+    direction_override = torch.full((N, MAX_OWNED), float("nan"), dtype=torch.float32)
 
     for e in range(N):
         moves = moves_per_env[e]
@@ -535,8 +499,9 @@ def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device, *,
             fire[e, slot] = 1
             angle_bin[e, slot] = ab
             ship_bin[e, slot] = best
-            cont_angle[e, slot] = ang
-    return torch.stack([fire, angle_bin, ship_bin], dim=-1).to(device), cont_angle.to(device)
+            direction_override[e, slot] = ang
+    return (torch.stack([fire, angle_bin, ship_bin], dim=-1).to(device),
+            direction_override.to(device))
 
 
 # ----------------------------------------------------------------------------
@@ -606,7 +571,8 @@ def train(args):
           f"entropy_coef_fire={cfg.ppo.entropy_coef_fire}, gae_lambda={cfg.ppo.gae_lambda}, "
           f"kl_target={cfg.ppo.kl_target}")
     if cfg.ppo.phase4_residual_lr_mult != 1.0:
-        print(f"Phase4 residual LR multiplier: x{cfg.ppo.phase4_residual_lr_mult:.3g}")
+        print("Target-conditioning residual LR multiplier: "
+              f"x{cfg.ppo.phase4_residual_lr_mult:.3g}")
     print(f"Entropy coefs: fire={cfg.ppo.entropy_coef_fire}, target={cfg.ppo.entropy_coef_target}, "
           f"ships={cfg.ppo.entropy_coef_ships} | max_grad_norm={cfg.ppo.max_grad_norm}")
     if cfg.ppo.noop_kl_coef > 0.0:
@@ -710,8 +676,6 @@ def train(args):
         elif args.ship_bin_mode == "binary":
             print("Ship-bin-mode=binary → fire head is NOOP/COMMIT; ship head is not sampled")
     cfg.model.action_decode = args.action_decode
-    if cfg.model.ship_bin_mode == "binary" and args.action_decode != "target":
-        raise ValueError("ship_bin_mode=binary requires --action-decode target")
     cfg.model.allow_reinforce = args.allow_reinforce
     # Persist the reinforce/sufficient-commit DISCIPLINE on cfg.model so the checkpoint records
     # them (ppo.state_dict) and eval/export auto-load them — they must match training or the
@@ -769,7 +733,7 @@ def train(args):
         if isinstance(sd, dict) and "optimizer" in sd and not args.cold_optimizer:
             _resume_optim_sd = sd["optimizer"]
         if "model" in sd: sd = sd["model"]
-        _load_phase4_compatible(model, sd, "--resume")
+        _load_target_conditioning_compatible(model, sd, "--resume")
         print(f"Resumed from {Path(args.resume).resolve()}")
         if getattr(args, "reinit_critic", False):
             # CONTROL: re-initialise the value head to a fresh state while keeping
@@ -780,19 +744,14 @@ def train(args):
                 _m.reset_parameters()
             print("  CONTROL: scalar critic re-initialised fresh (warm policy kept).")
 
-    # torch.compile (inductor) fuses the transformer + pairwise-scorer small ops and cuts
-    # kernel launches — targets the PPO-update phase (see docs/perf.md). First iters pay a
-    # warmup compile cost; read steady-state SPS from the `timing | ... wall` line, not the
-    # cumulative Final SPS. Two input shapes hit it (rollout N vs minibatch TN/mb) → two
-    # compiles. Only the learner path is compiled; pool self-models (unused at pool_fraction 0)
-    # stay eager.
+    # The rollout and PPO minibatch shapes compile separately. Pool snapshot models
+    # stay eager; see docs/perf.md for the measured trade-off.
     if getattr(args, "compile", False) and device.type == "cuda":
         model = torch.compile(model)
         print("torch.compile ENABLED (inductor, default mode)")
 
-    # torch.compile the (already-pure) get_features — bit-identical drop-in, ~+33% rollout
-    # (see docs/perf.md). Disable the guarded _obs_* diagnostics (the only mutation / graph-break
-    # source); reset_reinforce_stats re-arms them each rollout, so the loop re-nulls below.
+    # get_features is pure once the optional observation diagnostics are disabled.
+    # reset_reinforce_stats re-arms them, so the rollout loop clears them again.
     if getattr(args, "compile_features", False) and device.type == "cuda":
         env._obs_calls = None
         env.get_features = torch.compile(env.get_features)
@@ -918,8 +877,8 @@ def train(args):
                 added += 1
             print(f"  pool preseeded: {added} self-checkpoints from {preseed_dir}")
 
-        # Pinned RL champions: fixed strong opponents (e.g. rev38, rev53b), never
-        # FIFO-evicted. Appended even on resume; skip if a same-named pin already
+        # Pinned RL champions are never FIFO-evicted. Append them even on resume;
+        # skip if a same-named pin already
         # exists (e.g. restored from the saved pool).
         if args.pool_seed_rl:
             existing_pins = {m.name for m in pool.members if getattr(m, "pinned", False)}
@@ -934,8 +893,8 @@ def train(args):
                 sd = torch.load(path, map_location="cpu", weights_only=False)
                 if "model" in sd:
                     sd = sd["model"]
-                # Drop keys the current model doesn't have (e.g. rev38's deleted
-                # angle_head); fail fast if it's missing any the model needs.
+                # Ignore parameters removed from the current architecture; fail fast
+                # if the checkpoint lacks anything the current model requires.
                 model_keys = set(model.state_dict().keys())
                 sd = {k: v for k, v in sd.items() if k in model_keys}
                 missing = model_keys - set(sd.keys())
@@ -1119,7 +1078,7 @@ def train(args):
 
     def compute_pool_actions(opp: PoolMember, player: int, env_ids: torch.Tensor,
                              cached_feats: dict | None = None) -> torch.Tensor:
-        """Return (action tensor, cont_angle|None) for the opponent playing `player`
+        """Return an action tensor and optional direction override for an opponent
         in the envs listed in `env_ids` (1-D LongTensor). Supports 'self' (frozen RL
         model on GPU) and 'external_heuristic' (.py agent via CPU worker pool).
 
@@ -1145,16 +1104,15 @@ def train(args):
                     owned_count=sub["owned_count"],
                     pairwise_features=sub.get("pairwise_features"),
                 )
-            fire_a, angle_a, ship_a, target_a, *_ = sample_action_batched(
+            fire_a, direction_a, ship_a, target_a, *_ = sample_action_batched(
                 outs, sub["fire_mask"], sub.get("target_mask"), cfg.model.ship_bin_mode
             )
             # Rows already correspond 1:1 to env_ids (we indexed before the forward).
-            return torch.stack([fire_a, angle_a, ship_a, target_a], dim=-1), None
+            return torch.stack([fire_a, direction_a, ship_a, target_a], dim=-1), None
 
         if opp.kind == "external_heuristic":
             from torch_env import to_legacy_obs_batch
-            # Patch B: ONE batched GPU->CPU copy per field over the group, instead of
-            # ~8 tiny per-env syncs × |ids| (the dominant per-step transport tax).
+            # Convert the whole group to CPU observations in one transfer.
             _t0 = time.perf_counter()
             obs_list = to_legacy_obs_batch(env, env_ids, player)
             _t_acc["ext_obs"] += time.perf_counter() - _t0
@@ -1171,10 +1129,7 @@ def train(args):
                         moves_per_env.append(opp.agent_fn(obs) or [])
                     except Exception:
                         moves_per_env.append([])
-            # Patch C: reuse this seat's already-computed owned_idx/slot_valid (get_features
-            # calls owned_indices_for, so cached_feats holds the IDENTICAL tensors) + one
-            # subset gather for source planet ids, replacing the per-group owned_indices_for
-            # recompute and the full env.planets.cpu() 7-column copy the old _IndexView did.
+            # Reuse ownership tensors already computed for this seat.
             _t0 = time.perf_counter()
             if cached_feats is not None:
                 oi_full, sv_full = cached_feats["owned_indices"], cached_feats["slot_valid"]
@@ -1182,26 +1137,22 @@ def train(args):
                 oi_full, sv_full = env.owned_indices_for(player)
             oi_sub, sv_sub = oi_full[env_ids], sv_full[env_ids]
             src_pids = env.planets[env_ids, :, 0].gather(1, oi_sub)   # (n, MAX_OWNED) planet ids
-            act, cont_angle = _heuristic_moves_to_action_tensor(
+            act, direction_override = _heuristic_moves_to_action_tensor(
                 moves_per_env, env, player, device,
                 owned_idx=oi_sub, slot_valid=sv_sub, src_pids=src_pids)
             _t_acc["ext_conv"] += time.perf_counter() - _t0
-            if args.action_decode == "target":
-                # Target_idx = -1 sentinel so VecTorchEnv keeps angle decoding for these
-                # rows (not target decoding). The continuous angle (cont_angle) is applied
-                # separately via angle_overrides so it bypasses 144-bin quantization.
-                pad_target = torch.full(
-                    act.shape[:-1] + (1,), -1, dtype=act.dtype, device=act.device
-                )
-                act = torch.cat([act, pad_target], dim=-1)
-            return act, cont_angle
+            # A -1 target tells the target-decoding environment to use the external
+            # agent's continuous direction override.
+            pad_target = torch.full(
+                act.shape[:-1] + (1,), -1, dtype=act.dtype, device=act.device
+            )
+            act = torch.cat([act, pad_target], dim=-1)
+            return act, direction_override
 
         raise ValueError(f"unknown opponent kind: {opp.kind}")
 
-    # --profile-sync: cuda-synchronize at phase boundaries so each timing bucket owns
-    # the GPU work it launched (without it, async kernels land at whichever bucket
-    # syncs next — historically inflating estep). Overhead is acceptable for profiling
-    # only. No-op when the flag is off or the device is not CUDA.
+    # Synchronize phase boundaries only when profiling so asynchronous GPU work is
+    # attributed to the phase that launched it.
     _prof = bool(args.profile_sync)
     if _prof:
         args.log_timing = True
@@ -1316,7 +1267,7 @@ def train(args):
         ms_n    = {m: torch.zeros((), device=env.device) for m in _MS}
 
         # --- Rollout collection (no grad) -----------------------------------
-        # Per-rollout wall-time breakdown (SPS patch A): attributes main-thread time to
+        # Per-rollout wall-time breakdown attributes main-thread time to
         # get_features / model-forward / sample+D2H-store / pool (ext_* ⊂ pool) / env_step /
         # post (milestones, done handling, reward store) / bootstrap / gae / batch-build
         # (flatten + minibatch H2D) / ppo_update (upd_fwd/bwd/opt ⊂ upd). Default: CPU
@@ -1335,7 +1286,7 @@ def train(args):
                 feats_p, outs_p = forward_player(p)   # accumulates gf/fwd internally
                 feats_by_player[p] = feats_p
                 _t_ss = time.perf_counter()
-                fire_p, angle_p, ship_p, target_p, lpf_p, lps_p, lpt_p = sample_action_batched(
+                fire_p, direction_p, ship_p, target_p, lpf_p, lps_p, lpt_p = sample_action_batched(
                     outs_p, feats_p["fire_mask"], feats_p.get("target_mask"),
                     cfg.model.ship_bin_mode,
                 )
@@ -1366,8 +1317,8 @@ def train(args):
                 storage["lp_ship"][t, :, p].copy_(lps_p, non_blocking=True)
                 storage["lp_target"][t, :, p].copy_(lpt_p, non_blocking=True)
                 storage["values"][t, :, p].copy_(outs_p["value"].squeeze(-1), non_blocking=True)
-                # angle_p is zeros (unused in target-decode); env needs 4-col action tensor.
-                actions_per_player[p] = torch.stack([fire_p, angle_p, ship_p, target_p], dim=-1)
+                actions_per_player[p] = torch.stack(
+                    [fire_p, direction_p, ship_p, target_p], dim=-1)
                 _sync(); _t_acc["samp_store"] += time.perf_counter() - _t_ss
 
             # Pool opponent override: for each pool env, replace its opp-seat action
@@ -1375,7 +1326,7 @@ def train(args):
             # action, and mark the slot not-trainable so PPO ignores it. Per-episode
             # assignment means different envs may hold different members/seats this step,
             # so we group by (member, opp_seat) and call compute_pool_actions per group.
-            angle_overrides = None
+            direction_overrides = None
             if N_pool > 0:
                 _t_pool = time.perf_counter()
                 groups: dict = {}  # (id(member), opp_seat) -> [member, opp_seat, [env ids]]
@@ -1400,20 +1351,19 @@ def train(args):
                     dst[ids_t] = opp_action.to(dst.dtype)
                     storage["train_mask"][t, ids_t, os_] = False
                     if opp_cont is not None:
-                        # Continuous-angle override for an external member's envs (NaN
-                        # elsewhere) → bypasses 144-bin quantization for its aiming.
-                        if angle_overrides is None:
-                            angle_overrides = {}
-                        ovr = angle_overrides.get(os_)
+                        if direction_overrides is None:
+                            direction_overrides = {}
+                        ovr = direction_overrides.get(os_)
                         if ovr is None:
                             ovr = torch.full(actions_per_player[os_].shape[:2],
                                              float("nan"), device=env.device)
-                            angle_overrides[os_] = ovr
+                            direction_overrides[os_] = ovr
                         ovr[ids_t] = opp_cont.to(ovr.dtype)
                 _sync(); _t_acc["pool"] += time.perf_counter() - _t_pool
 
             _t_es = time.perf_counter()
-            state, rewards, done = env.step(actions_per_player, angle_overrides=angle_overrides)
+            _, rewards, done = env.step(
+                actions_per_player, angle_overrides=direction_overrides)
             _sync(); _t_acc["estep"] += time.perf_counter() - _t_es
             _t_post = time.perf_counter()
             # Hoard milestones: when an env is at episode-step 16/32/50/100, accumulate
@@ -1760,7 +1710,6 @@ def train(args):
                         f"{metrics.get('phase4_ship_decision_flip', 0):.3f}"
                     )
                 if args.log_timing:
-                    # SPS patch A: per-rollout wall-time breakdown (where the per-step tax is).
                     # ext_* ⊂ pool and upd_fwd/bwd/opt ⊂ upd, so the denominator is this
                     # iteration's wall-clock, not the bucket sum; "covered" < 100% exposes
                     # unattributed time (diagnostics, logging, Python glue).
@@ -1997,8 +1946,8 @@ if __name__ == "__main__":
     parser.add_argument("--learning-rate", type=float, default=None,
                         help="Override PPO learning rate (default: cfg.ppo.learning_rate=3e-4)")
     parser.add_argument("--phase4-residual-lr-mult", type=float, default=1.0,
-                        help="Multiplier applied only to Phase 4 residual params "
-                             "(fire_q/k/scorer, ship_q/k/scorer). 1.0 = legacy single-LR behavior.")
+                        help="Multiplier applied only to target-conditioned residual params "
+                             "(fire_q/k/scorer, ship_q/k/scorer). 1.0 uses the base LR.")
     parser.add_argument("--ppo-epochs", type=int, default=None,
                         help="Override PPO epochs per rollout (default: 4)")
     parser.add_argument("--clip-eps", type=float, default=None,
@@ -2039,7 +1988,7 @@ if __name__ == "__main__":
                              "deterministically defend). Intent forces num_ship_bins=4; binary reuses "
                              "the checkpoint head shape but does not sample or optimize it.")
     parser.add_argument("--phase4-residual-init-std", type=float, default=None,
-                        help="Stddev for Phase 4 residual output-layer init. "
+                        help="Stddev for target-conditioned residual output-layer init. "
                              "0.0 = exact parity; small nonzero values let the "
                              "per-target residual path affect decisions sooner.")
     parser.add_argument("--max-grad-norm", type=float, default=None,
@@ -2055,11 +2004,9 @@ if __name__ == "__main__":
                              "warm-critic resume (EV already high → 0 warmup steps).")
     parser.add_argument("--critic-warmup-max-updates", type=int, default=None,
                         help="Safety cap on critic-warmup rollouts if EV never reaches the threshold.")
-    parser.add_argument("--action-decode", choices=["angle", "target"], default="angle",
-                        help="Direction component executed during PPO rollouts. "
-                             "angle keeps the legacy free angle-bin action; target "
-                             "samples target_logits and converts the target planet "
-                             "to an intercept angle in VecTorchEnv.")
+    parser.add_argument("--action-decode", choices=["target"], default="target",
+                        help="Target-conditioned action decoding. Retained as an explicit "
+                             "flag for launcher and checkpoint compatibility.")
     parser.add_argument("--allow-reinforce", action="store_true",
                         help="Make OWN planets legal targets (reinforcement) — ships "
                              "arriving at a friendly planet add to its garrison. Top "
@@ -2202,8 +2149,7 @@ if __name__ == "__main__":
     parser.add_argument("--pool-pfsp-min-games", type=int, default=30,
                         help="Minimum games before trusting win-rate for PFSP weight. "
                              "Below this threshold wr=0.5 is assumed, preventing early "
-                             "lucky streaks from sand-bagging an opponent (e.g. Hellburner "
-                             "getting 0.003 PFSP weight after only 17 rollout games).")
+                             "lucky streaks from suppressing an opponent's weight.")
     parser.add_argument("--pool-external-fraction", type=float, default=0.0,
                         help="Fixed fraction of pool samples reserved for external heuristic "
                              "opponents, bypassing PFSP. e.g. 0.4 = 40%% of pool games always "
@@ -2215,17 +2161,16 @@ if __name__ == "__main__":
                         help="Sample the EXTERNAL slice PFSP-weighted (by (1-ema_wr)^alpha) instead "
                              "of UNIFORM, so a multi-rung league (e.g. h10/h12/h14) concentrates "
                              "games on the rungs we lose to most / the matched-difficulty band "
-                             "instead of 1/N each. Default OFF = legacy uniform (the pool's pfsp_w "
+                             "instead of 1/N each. Default OFF = uniform (the pool's pfsp_w "
                              "column is display-only for externals when off). Flag-overridden on "
                              "resume like --pool-external-fraction.")
     parser.add_argument("--pool-pinned-fraction", type=float, default=0.0,
-                        help="TARGET fraction of pool samples reserved for PINNED RL champions "
-                             "(--pool-seed-rl, e.g. rev38), pulling them OUT of PFSP into a fixed "
+                        help="Target fraction of pool samples reserved for pinned RL champions, "
+                             "pulling them out of PFSP into a fixed "
                              "slice. >0 engages 3-way ramp mode: external / pinned-RL / PFSP-over-"
                              "organic-selves. Necessary because PFSP up-samples opponents you lose "
-                             "to, so a weak from-scratch policy would see MORE rev38 early "
-                             "(backwards). 0 = legacy (pins compete inside PFSP). With "
-                             "--pool-fraction 0.75 a target of 0.267 ≈ 0.20 of TOTAL games.")
+                             "to, so a weak from-scratch policy would otherwise over-sample a "
+                             "strong pin early. 0 keeps pins inside PFSP.")
     parser.add_argument("--pool-hard-ramp-steps", type=int, default=0,
                         help="Steps over which the hard opponents (pinned RL + external peeler) "
                              "ramp in 0→target, linearly. Both --pool-pinned-fraction and "
@@ -2240,8 +2185,8 @@ if __name__ == "__main__":
                              "for diluting the heuristic-share early in training "
                              "and for resuming pool diversity across runs.")
     parser.add_argument("--pool-seed-rl", type=str, default="",
-                        help="Comma-separated .pt checkpoints to PIN into the pool as fixed RL "
-                             "champion opponents (e.g. our rev38/rev53b). Run via the GPU 'self' "
+                        help="Comma-separated .pt checkpoints to pin into the pool as fixed RL "
+                             "champion opponents. Run via the GPU 'self' "
                              "path (fast, sim-gap-immune) and NEVER FIFO-evicted, unlike --preseed-pool. "
                              "Must match the current model architecture (pairwise dim etc.).")
     parser.add_argument("--external-opponents", type=str, default="",
@@ -2287,14 +2232,12 @@ if __name__ == "__main__":
                              "for the PPO ratio math). Default fp32 preserves prior behavior.")
     parser.add_argument("--compile", action="store_true",
                         help="torch.compile (inductor) the model — fuses ops / cuts kernel "
-                             "launches on the update phase. Pays a first-iter warmup cost; "
-                             "read steady SPS from the timing 'wall' line. CUDA only.")
+                             "launches on the update phase. CUDA only.")
     parser.add_argument("--gpu-storage", action="store_true",
                         help="Keep rollout buffers on the GPU instead of CPU — eliminates the "
-                             "per-step D2H feature copy and per-minibatch H2D copy (GPU→GPU). "
-                             "Costs ~6-7 GB VRAM at the 0.5M/512-env config. CUDA only.")
+                             "per-step D2H feature copy and per-minibatch H2D copy. CUDA only.")
     parser.add_argument("--compile-features", action="store_true",
-                        help="torch.compile env.get_features (bit-identical drop-in, ~+33% rollout). "
+                        help="torch.compile env.get_features. "
                              "Disables the _obs_* obs-truncation diagnostics. CUDA only.")
     parser.add_argument("--compile-env", action="store_true",
                         help="torch.compile env.step (fullgraph=False) — fuses the physics "

@@ -46,13 +46,13 @@ import torch
 from timeline import project_timeline, timeline_features
 from action_mask import resolve_intent_sizes_np
 
-# Blessed feature config (2026-07 cleanup; presres1 lineage — the final submissions):
+# Canonical feature semantics:
 # - friendly-coverage roi-deflation: ALWAYS ON
 # - pressure channels resolved per-fleet by the lead-aware swept-collision resolver
 #   (torch_env._fleet_target_idx mirror below): ALWAYS ON
 # - game-phase global channels (global dim 15): ALWAYS ON
 # - roi enemy-deflation / zero-roi / surface threat-ETA: removed (never in a blessed run)
-# Pre-cleanup toggles and their alternate code paths live at the pre-cleanup git tag.
+# Older toggle-based variants are intentionally unsupported in this code path.
 _COMET_SPAWN_STEPS = (50, 150, 250, 350, 450)  # MUST match torch_env.COMET_SPAWN_STEPS
 
 
@@ -570,10 +570,9 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
                               comet_ids=None):
     """For each (owned-slot, target-planet) pair return geometric + ownership features.
 
-    These are exactly the quantities the model cannot easily compute from raw (x, y)
-    via attention: angle direction (sin/cos), distance, ETA-at-typical-ships, and
-    sun-cross flag. Prior BC angle-head failure (0.08 reduction vs 0.40 gate) was
-    driven by the model trying to learn trig from gradients; this fills the gap.
+    These are quantities the model cannot easily compute from raw (x, y) via
+    attention: direction (sin/cos), distance, ETA-at-typical-ships, and sun-cross
+    flag. Supplying them avoids reconstructing this geometry from gradients.
 
     For orbiting target planets the direction/distance/ETA are corrected to the
     predicted arrival position (one Newton step): current ETA → predicted arrival
@@ -793,7 +792,7 @@ def compute_pairwise_features(planets, owned_indices, owned_count, player,
 
         # Intent-sizing resolved sizes (ch 22-25): exact ships for capture / capture-defend /
         # maintain / all-in, clamped to source garrison. The head chooses the semantic; these
-        # feed it each option's cost (Jake's resolved-size table) and are read back at decode.
+        # feed it each option's resolved cost and are read back at decode.
         S_arr = np.full(n_p, float(src[5]), dtype=np.float32)
         mass_soon_arr = (enemy_mass_soon[:n_p].astype(np.float32)
                          if enemy_mass_soon is not None else np.zeros(n_p, dtype=np.float32))

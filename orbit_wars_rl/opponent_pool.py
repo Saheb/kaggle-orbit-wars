@@ -12,8 +12,7 @@ win-rate passes a "mastered" threshold are auto-evicted; self-checkpoints stay
 and just get low sampling weight.
 
 Self-checkpoint storage uses FIFO eviction when the pool exceeds
-``max_self_members`` — keeps a rolling window of past selves. With a 1M-step
-cadence and cap=20, the pool spans ~20M steps of training history.
+``max_self_members``, keeping a rolling window of past selves.
 """
 
 from __future__ import annotations
@@ -129,7 +128,7 @@ class OpponentPool:
             self.members.remove(oldest)
 
     def add_pinned_rl(self, name: str, state_dict: dict) -> None:
-        """Add a FIXED RL champion (e.g. rev38, rev53b) as a never-evicted 'self'
+        """Add a fixed RL champion as a never-evicted 'self'
         opponent. Runs through the same GPU 'self' forward path; pinned so organic
         self-snapshot FIFO never drops it. step_saved=-1 keeps it out of FIFO order."""
         cpu_sd = {k: v.detach().cpu().clone() for k, v in state_dict.items()}
@@ -169,10 +168,10 @@ class OpponentPool:
 
         ``pinned_fraction`` engages **ramp mode** (3-way split):
         external slice / **pinned-RL slice** / PFSP over ORGANIC (non-pinned) selves.
-        This pulls pinned RL champions (e.g. rev38) OUT of PFSP into their own fixed
+        This pulls pinned RL champions out of PFSP into their own fixed
         ramped fraction — necessary because PFSP weight ``(1-wr)^α`` *up-samples* an
-        opponent you lose to, so a weak from-scratch policy would otherwise see MORE
-        rev38 early (backwards). When ``pinned_fraction is None`` the legacy 2-way
+        opponent you lose to, so a weak from-scratch policy would otherwise see a
+        strong pinned opponent more often early. When ``pinned_fraction is None`` the 2-way
         behaviour is preserved (pinned members compete inside PFSP with the selves).
         Returns None when the chosen budget falls to PFSP but no organic snapshot
         exists yet (early from-scratch) — the caller then falls back to self-play.
@@ -198,13 +197,13 @@ class OpponentPool:
                 return None
             candidates = organic
         elif externals and ext_frac > 0.0:
-            # Legacy 2-way: fixed external slice vs PFSP over all self-members (incl. pinned).
+            # Two-way mode: fixed external slice vs PFSP over all self-members (including pinned).
             if r.random() < ext_frac:
                 return self._choose_external(externals, r)
             self_members = [m for m in self.members if m.kind == "self"]
             candidates = self_members if self_members else self.members
         else:
-            # Legacy path: PFSP over all members together.
+            # No fixed slices: PFSP over all members together.
             candidates = self.members
 
         weights = [self._pfsp_weight(m) for m in candidates]

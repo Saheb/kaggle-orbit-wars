@@ -1,10 +1,8 @@
-"""Action mask computation for Orbit Wars.
+"""Action masking and target-based action decoding for Orbit Wars.
 
-For each owned planet, determines which of the angle bins are legal
-(don't cross sun, don't go out of bounds). Also computes per-planet
-max sendable ships and ownership masks.
-
-Uses numpy for computation, torch tensors for model input.
+Computes source/target legality, ship commitment constraints, and converts policy
+outputs into engine moves. Uses NumPy for observation-side geometry and returns
+Torch tensors for model input.
 """
 
 from __future__ import annotations
@@ -101,11 +99,9 @@ def _fleet_speed(ships: int, max_speed: float = _MAX_SHIP_SPEED) -> float:
 def _target_intercept_angle(src_planet, target_planet, ships: int, obs) -> float:
     """Aim from src at target's lead (intercept) position.
 
-    Iterative continuous lead, matching the engine. Adopted from the aim-benchmark
-    reference (~95% vs our prior ~73% on reachable shots): predict the target from
-    its CURRENT orbit position, subtract the source+target surface gap from the
-    flight distance, and run 8 continuous (non-quantised) lead iterations. The old
-    aimer over-led (full centre-to-centre distance, integer-ceil ETA, 4 iters).
+    Iterative continuous lead, matching the engine: predict the target from its
+    current orbit position, subtract the source and target surface gap from the
+    flight distance, and run 8 non-quantised lead iterations.
     """
     sx, sy, s_r = float(src_planet[2]), float(src_planet[3]), float(src_planet[4])
     tx0, ty0, t_r = float(target_planet[2]), float(target_planet[3]), float(target_planet[4])

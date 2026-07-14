@@ -1,5 +1,6 @@
-"""Projected-future timeline features (writeup lesson 1 — kiyotah/SimJeg/Ender's most
-universal ingredient). Per planet, a K-step projection of owner + garrison assuming NO new
+"""Projected-future timeline features.
+
+Per planet, a K-step projection of owner + garrison assuming no new
 launches: resolve each in-flight fleet to its target + arrival step, then run a vectorized
 K-step recurrence (production + engine combat/flip). This is NOT "run the env K times" — it's
 a single scatter + a K-iteration tensor recurrence, pure/compile-friendly.
@@ -127,10 +128,8 @@ def project_timeline(planets, planet_alive, fleets, fleet_alive, angular_velocit
 def timeline_features(owner_ts, garr_ts, player: int):
     """Encode a projection into model input channels: (N, P, TIMELINE_DIM).
 
-    Channel-major layout [mine(K) | enemy(K) | neutral(K) | log1p(garrison)/8 (K)] —
-    the projected-ownership one-hot (kiyotah: "a planet becoming enemy-owned in three
-    steps is not the same as one changing in twenty") plus the garrison trace
-    (ships_for_capture per step falls out of it). Shared by torch_env.get_features
+    Channel-major layout [mine(K) | enemy(K) | neutral(K) | log1p(garrison)/8 (K)]:
+    projected ownership plus the garrison trace. Shared by torch_env.get_features
     (training) and features.extract_features (eval/export) so both paths encode
     identically by construction.
     """

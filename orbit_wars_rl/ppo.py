@@ -17,7 +17,7 @@ import numpy as np
 
 from binary_policy import (binary_action_entropy, binary_action_log_probs,
                            binary_taken_log_prob)
-from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, SHIP_COUNTS
+from model import SHIP_COUNTS
 from config import Config
 
 
@@ -106,8 +106,8 @@ class PPOLearner:
         )
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         if self.phase4_residual_lr_mult == 1.0:
-            # Preserve the legacy single-group parameter order so mature checkpoints
-            # can warm-resume their Adam moments. A second group has no effect at x1.
+            # Preserve the single-group parameter order so existing optimizer states
+            # can restore their Adam moments. A second group has no effect at x1.
             param_groups = [{"params": trainable_params, "lr": cfg.ppo.learning_rate}]
         else:
             residual_param_ids = {
@@ -267,7 +267,7 @@ class PPOLearner:
             ship_entropy = ship_dist.entropy().mean()
             target_entropy = target_dist.entropy().mean()
 
-        # No-op KL bias (Jake Will Rank-2 lever): anchor the BATCH-MEAN launch rate to a low
+        # No-op KL bias: anchor the batch-mean launch rate to a low
         # prior. p_bar = mean fire prob over valid owned slots (WITH grad); KL(Bern(p_bar) ‖
         # Bern(q)) pulls it toward q. Anchoring the MEAN (not per-sample) lets individual turns
         # fire at 100% as long as others average out — kills spray without killing decisiveness.
@@ -283,7 +283,7 @@ class PPOLearner:
                        + (1.0 - p_bar) * ((1.0 - p_bar) / (1.0 - q)).log())
             mean_launch_rate = p_bar.detach().item()
 
-        # Ship-size KL-to-prior (Ender lever): pull the per-draw ship-count distribution toward a
+        # Ship-size KL-to-prior: pull the per-draw ship-count distribution toward a
         # full-send-biased prior (w_i ∝ SHIP_COUNTS[i]**ship_kl_prior_exp), on fired slots only.
         # KL(π ‖ prior) = Σ π_i (log π_i − log prior_i). Replaces (set entropy_coef_ships=0) the
         # uniform-seeking ship entropy bonus — see the ship_kl_coef config note.
@@ -468,8 +468,8 @@ class PPOLearner:
                     (grad-clip + optimizer/scheduler step). `sync` is called at each
                     boundary (pass torch.cuda.synchronize for true attribution).
         lean_metrics: THROUGHPUT PROBE ONLY. Skip the per-minibatch metrics block
-                    (~40 .item() GPU→CPU syncs each) on all but the final update, so
-                    only ONE full metrics dict is computed per rollout. Gradients/loss
+                    on all but the final update, so only one full metrics dict is
+                    computed per rollout. Gradients/loss
                     are byte-identical (metrics are no_grad + detached) — this isolates
                     the logging-sync tax. Disables KL early-stopping (needs per-minibatch
                     KL). Do NOT use for real training runs (loses the KL guard).
@@ -600,15 +600,15 @@ class PPOLearner:
                 "ship_bin_mode": str(getattr(model_cfg, "ship_bin_mode", "absolute")),
                 "action_decode": str(getattr(model_cfg, "action_decode", "angle")),
                 "allow_reinforce": bool(getattr(model_cfg, "allow_reinforce", False)),
-                # Blessed feature semantics (2026-07 cleanup): recorded so loaders can verify.
+                # Persist feature semantics so loaders can reject incompatible checkpoints.
                 "game_phase_features": True,
                 "pressure_precise_resolver": True,
                 "feature_config": "blessed-2026-07",
-                # Projected-future timeline channels (planet dim 20→116, 2026-07-10).
+                # Projected-future timeline channels (planet dim 20→116).
                 "timeline_features": True,
                 # Reinforce / sufficient-commit DISCIPLINE — eval & export must mask the SAME way
                 # the ckpt was trained or the policy self-sabotages. Persist so they auto-load
-                # instead of relying on CLI flags being remembered (a panel/submission footgun).
+                # instead of relying on CLI flags being remembered.
                 "reinforce_gate_min_planets": int(getattr(model_cfg, "reinforce_gate_min_planets", 0)),
                 "reinforce_forward_only": bool(getattr(model_cfg, "reinforce_forward_only", False)),
                 "reverse_edge_cooldown": int(getattr(model_cfg, "reverse_edge_cooldown", 0)),

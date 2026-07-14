@@ -1,10 +1,7 @@
 """Vectorized Orbit Wars environment in PyTorch.
 
-Runs N games in parallel as batched tensor operations. Designed for self-play
-training at 5,000+ SPS — replaces the per-env Python loop in fast_env.py.
-
-PHASE 0 (this file): planet orbital motion + fleet movement (no combat yet).
-Validates the tensor-physics approach against fast_env via parity test.
+Runs complete games in parallel as batched tensor operations for self-play
+training, including action decoding, orbital motion, combat, rewards, and resets.
 
 State layout (batched over N envs):
     planets       (N, P, 7)  → [id, owner, x, y, radius, ships, production]
@@ -100,7 +97,7 @@ _COMET_T_ARR = None  # cached dense-sample parameter grid (t), built on first us
 
 def _comet_paths_fast(initial_planets, angular_velocity, spawn_step,
                       comet_planet_ids=None, comet_speed=4.0, rng=None):
-    """Vectorized drop-in for kaggle's generate_comet_paths — byte-identical output, ~30x faster.
+    """Vectorized drop-in for kaggle's generate_comet_paths with byte-identical output.
     Only the two 5000-iteration loops (dense ellipse sampling + arc-length resample) are
     vectorized with numpy; the RNG draw order (e, a, phi per attempt) and the validity check are
     preserved exactly, so `comet_ships` (drawn after) and accept/reject decisions are unchanged.
@@ -278,10 +275,10 @@ class VecTorchEnv:
         fleet_target_refresh_every: int = 4,
     ):
         self.num_envs = num_envs
-        # Comets kill-switch (2026-07-05 SPS decision): training may disable comets
+        # Training may disable comets
         # entirely (no spawns, no schedule compute). The real kaggle game HAS comets —
         # eval/export always keep them — so this trades a training-distribution gap
-        # for SPS. Default ON.
+        # for throughput. Default ON.
         self.enable_comets = bool(enable_comets)
         # Launch-cache staleness bound: every K ticks step() re-resolves ALL cached fleet
         # targets from current state (see _fleet_targets). Measured accuracy vs the true
@@ -290,18 +287,16 @@ class VecTorchEnv:
         # long-range lead error vs rotating planets drifts. K=4 = ~1/4 the resolver cost
         # for a 2pp accuracy dip. 1 ≈ fresh every tick, 0 = never refresh.
         self.fleet_target_refresh_every = int(fleet_target_refresh_every)
-        # Blessed feature config (2026-07 cleanup): game-phase globals (dim 15) always on;
+        # Canonical feature config: game-phase globals (dim 15) always on;
         # pressure channels always routed through the lead-aware swept-collision resolver
         # (_fleet_target_idx, one fleet → one target); threat ETA to planet CENTER; friendly
         # roi-deflation always on; enemy-deflate/zero-roi removed. Must match features.py
         # (parity test test_torch_env_features).
         # Reinforcement: when True, own planets (except the launch source) are LEGAL
         # targets — ships arriving at a friendly planet add to its garrison (physics
-        # already implemented in step()). EDA of top players: ~57% of fleets reinforce;
-        # beginner agents 0%. Default False = attack-only (backward-compatible).
+        # already implemented in step()). Default False = attack-only.
         self.allow_reinforce = bool(allow_reinforce)
-        # Reinforcement discipline (rev56 lesson: costless reinforcement floods — the
-        # curriculum times availability but adds no cost, so any fire incentive → flood).
+        # Reinforcement discipline prevents costless reinforcement floods.
         #   #1 GARRISON FLOOR: a reinforce launch may not drain its source below this
         #      many ships. Pure training-time mask (veto), NOT a penalty → no Nash risk.
         #      Kills the "drain a planet, then lose it" regression. The real Kaggle env
@@ -318,15 +313,13 @@ class VecTorchEnv:
         self.reinforce_cost = float(reinforce_cost)
         #   #3 EMPIRE-SIZE GATE: own planets become legal reinforce targets only once the
         #      player owns >= this many planets. Below it, attack-only (must expand first).
-        #      Grounded in top-player replays: reinforce_rate ≈0 at 1 planet, ~0.1 at 2,
-        #      then ramps with empire size. A pure action mask (no Nash risk) that makes
+        #      Reinforcement should ramp with empire size. A pure action mask that makes
         #      the early flood impossible by construction. 0 = off (no gate). Training-only,
         #      like the garrison floor — the policy internalises it.
         self.reinforce_gate_min_planets = int(reinforce_gate_min_planets)
         #   #4 FORWARD-STAGING GATE: an own (reinforce) target is legal only if it sits
         #      closer to the nearest enemy planet than the launch source — reinforcement
-        #      flows rear→front (staging), never into a safe rear hoard. Top-player
-        #      replays stage forward 66-70% of the time; a rear hoard is the costless
+        #      flows rear→front (staging), never into a safe rear hoard. A rear hoard is the costless
         #      safe-fire outlet that floods symmetric self-play. Pure mask (no Nash risk),
         #      training-only, internalised at inference. 0/False = off. Enemy/neutral
         #      targets are never constrained.
@@ -341,8 +334,8 @@ class VecTorchEnv:
         #   ship_count <= target's current defense × this factor → fragments fired under a
         #   target's garrison become impossible by construction, forcing concentration
         #   (attack only a target you can actually take, else accumulate first). Fixes the
-        #   opening under-commitment that caps conversion (open<50 cap/atk ~0.38 vs winner
-        #   0.51). 1.0 = strict (need strictly more than current defense); 0.6 = relaxed
+        #   opening under-commitment that caps conversion. 1.0 = strict (need strictly
+        #   more than current defense); 0.6 = relaxed
         #   fallback if it over-constrains; 0.0 = off. Exact for neutrals (they don't regrow),
         #   approximate for enemy planets (reinforce in transit). Pure training-time mask
         #   (no reward tax → no fire=0 Nash); the policy internalises it, parity at eval/export.
@@ -405,8 +398,8 @@ class VecTorchEnv:
         self.win_margin_coeff = float(win_margin_coeff)
         # Expansion shaping: potential-based reward on OWNED PRODUCTION (sum of
         # planet production rates owned). Unlike material (ships), production only
-        # changes when planets change hands — so a passive hoarder gets 0 from it
-        # (avoids the rev8 material-shaping trap). Rewards winning the planet/economy
+        # changes when planets change hands, so a passive hoarder gets 0 from it.
+        # Rewards winning the planet/economy
         # race that decides snowball games. 0.0 = off (default).
         self.expansion_coef = float(expansion_coef)
         # Early capture shaping: per-step bonus for each net new planet owned above
@@ -566,7 +559,7 @@ class VecTorchEnv:
 
     def _resolve_targets_at(self, fleet_x, fleet_y, fleet_angle, fleet_ships) -> torch.Tensor:
         """Resolver core for arbitrary fleet states (each arg (N, K)) → (N, K) target idx or -1.
-        Used per-launch on the (N, MAX_OWNED) grid (the SPS path) and by _fleet_target_idx for
+        Used per-launch on the (N, MAX_OWNED) grid and by _fleet_target_idx for
         full-fleet re-resolution (comet transitions, externally-poked fleets, direct test calls)."""
         fx = fleet_x.unsqueeze(2)                                      # (N, K, 1)
         fy = fleet_y.unsqueeze(2)
@@ -601,13 +594,14 @@ class VecTorchEnv:
         return torch.where(has_candidate, tgt_idx, torch.full_like(tgt_idx, -1))
 
     def _fleet_targets(self) -> torch.Tensor:
-        """(N, F) resolved target planet per fleet slot; -1 = hits nothing. LAUNCH-TIME CACHE
-        (2026-07-05 SPS decision, parity deliberately dropped): a fleet's ray and every planet's
+        """(N, F) resolved target planet per fleet slot; -1 = hits nothing.
+
+        A fleet's ray and every planet's
         orbit are fixed at launch, so the target is resolved ONCE in _apply_actions on the
         (N, MAX_OWNED) launch grid instead of the (N, 256, P) full cube every tick (was >50% of
         env wall time). Mid-flight the cached answer can drift from a fresh per-tick resolve
         (features.py on the kaggle side re-resolves from current obs each step; the acceptance
-        test perp < r+0.5 is evaluated from the current fleet position) — accepted for SPS.
+        test perp < r+0.5 is evaluated from the current fleet position).
 
         Staleness bound: step() re-resolves ALL targets every fleet_target_refresh_every ticks
         (unconditional, sync-free), which also covers comet spawn/expiry changing who a ray
@@ -808,8 +802,7 @@ class VecTorchEnv:
         are byte-identical; folds spawn+advance into the per-step lookup (position, alive,
         check=collision-tested, ships0 at activation)."""
         S, T1 = COMET_SPAWN_STEPS[si], self.episode_steps + 1
-        # One batched device→CPU readback for all spawning envs; the old per-planet
-        # .item()/.tolist()/bool() reads were ~100 syncs per env (the spawn-step stall).
+        # One batched device-to-CPU readback for all spawning environments.
         idx_t = torch.tensor(env_indices, dtype=torch.long, device=self.device)
         self._comet_spawn_done[idx_t, si] = True
         ip_cpu = self.init_planets[idx_t, :COMET_SLOT_START].cpu().numpy()
@@ -831,8 +824,7 @@ class VecTorchEnv:
             # path_index k = step_count-(S-1). k in [0,L-1]=on-path; k==L = kaggle's
             # stay-put expiry tick (still collidable), then gone. All 4 paths are
             # symmetries of the same visible arc, so they share one length L.
-            # Stage the whole schedule in numpy and write per-env slices in a few ops
-            # (the old per-(t,c) element writes were ~700 device ops per env).
+            # Stage the whole schedule in NumPy and write per-environment slices.
             L = len(paths[0])
             t0 = S - 1
             span = min(L + 1, T1 - t0)
@@ -1571,7 +1563,7 @@ class VecTorchEnv:
     def owned_indices_for(self, player: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (owned_idx: (N, MAX_OWNED) long, slot_valid: (N, MAX_OWNED) bool).
 
-        SOURCE SELECTION (2026-06-15): when more than MAX_OWNED planets are owned, the 16
+        When more than MAX_OWNED planets are owned, the 16
         source slots are the highest-GARRISON owned planets (ties → lowest array index), NOT
         the first 16 by array index. Owning >16 happens ~16% of steps (up to 30 owned), and
         firing only from the lowest-index 16 left up to 14 force-bearing planets inert. Ranking
@@ -1604,12 +1596,10 @@ class VecTorchEnv:
     ) -> torch.Tensor:
         """Vectorised target->launch-angle intercept.
 
-        Mirrors action_mask._target_intercept_angle (the aim-benchmark-validated
-        ~95% aimer) so TRAINING and INFERENCE aim identically: predict the target
+        Mirrors action_mask._target_intercept_angle so training and inference aim
+        identically: predict the target
         from its CURRENT orbit position, subtract the src+tgt surface gap, and run
-        8 continuous (non-quantised) lead iterations. The old version over-led
-        (centre-to-centre distance, integer-ceil ETA, 4 iters) — ~73% on the
-        benchmark.
+        8 continuous (non-quantised) lead iterations.
         """
         P = self.planets.shape[1]
         target_idx = target_idx.long().clamp(0, P - 1)
@@ -1804,7 +1794,7 @@ class VecTorchEnv:
                 self._reinforce_ships[:, owner_id] = self._reinforce_ships[:, owner_id] + reinforce_ships
             # reinforce_rate metric: per-(env,player) counts of realized launches (post
             # floor-veto) and how many were reinforcement. train_torch combines these with
-            # train_mask → the current policy's reinforce_rate (target 0.4-0.6, Vadasz 0.57).
+            # train_mask used for the current policy's reinforce-rate telemetry.
             if self._fire_launch_count is not None:
                 fire_per = can_fire.sum(dim=1).float()                       # (N,)
                 reinf_per = (can_fire & is_reinforce).sum(dim=1).float()     # (N,)
@@ -1993,9 +1983,6 @@ class VecTorchEnv:
 
     # ---------------------------------------------------------------------
     # Step — pure tensor ops, runs all N envs in one pass.
-    # Phase 2 scope: orbital motion + collision/combat + action processing.
-    # ---------------------------------------------------------------------
-
     def step(self, actions=None, angle_overrides=None) -> dict:
         """Advance all N envs by one tick.
 
@@ -2229,9 +2216,7 @@ class VecTorchEnv:
             terminal_rewards = terminal_rewards + self.expansion_coef * expansion_rewards
         # Delta-capture shaping: time-decayed reward for CAPTURING planets (delta in owned
         # count), NOT for holding them. Fires as a spike when a planet changes hands.
-        # Rev30 capture reward: symmetric delta + exponential decay with permanent floor.
-        #
-        # Key changes from Rev28:
+        # Symmetric delta + exponential decay with a permanent floor:
         #   1. SYMMETRIC: planet_delta tracks both gains (+) and losses (-), clamped to [-1, 1].
         #      Losing a planet now costs as much as gaining one. This eliminates the "planet
         #      tennis" arbitrage in self-play where both agents trade planets for free reward.
@@ -2283,10 +2268,9 @@ class VecTorchEnv:
             self.prev_staging_phi = phi_now                      # done envs fixed post-reset
             self._staging_phi_acc += float(phi_now.mean().item())
             self._staging_phi_n += 1
-        # Reinforcement transit cost (#2): price the ships each player sent to its own
-        # planets this step. Costless reinforcement floods (rev56, ~30× launch volume);
-        # this prunes the wasteful tail. Calibrate reinforce_cost so reinforce_rate
-        # settles ~0.4-0.6 (Vadasz-like), not 0 (over-suppressed) and not 0.8 (flood).
+        # Reinforcement transit cost: price the ships each player sent to its own
+        # planets this step, pruning the wasteful tail. Calibrate reinforce_cost so
+        # reinforcement is neither suppressed nor allowed to flood.
         if self.allow_reinforce and self.reinforce_cost > 0.0:
             terminal_rewards = terminal_rewards - self.reinforce_cost * self._reinforce_ships
         # 12. Auto-reset done envs in-place — must come AFTER capturing rewards
@@ -2519,9 +2503,7 @@ def to_legacy_obs_batch(env: VecTorchEnv, env_ids, player: int = 0) -> list[dict
     """Batched `to_legacy_obs` for a group of envs (1-D LongTensor or list of ids).
 
     Produces the SAME per-env obs dicts as ``[to_legacy_obs(env, e, player) for e in ids]``
-    but with ONE GPU->CPU copy per field (over all ids) instead of ~8 tiny syncs per env.
-    At ~96 external-opponent envs/step that collapses hundreds of per-step syncs into a
-    handful — the dominant per-step transport tax. Pure transport: identical bytes out
+    but with one GPU-to-CPU copy per field over all ids. Pure transport: identical bytes out
     (verified by tests/test_to_legacy_obs_batch.py)."""
     # Keep the ids ON-DEVICE for indexing — a .tolist() here (then re-tensoring) would force
     # an extra GPU->CPU->GPU round-trip per external group; the only sync we want is the

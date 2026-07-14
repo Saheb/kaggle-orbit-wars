@@ -11,7 +11,7 @@ import torch
 import numpy as np
 
 from config import Config
-from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, PHASE4_COMPAT_MISSING_KEYS
+from model import EntityTransformer, PHASE4_COMPAT_MISSING_KEYS
 from features import extract_features, _ETA_PROBE_SPEED, PAIRWISE_FEATURE_DIM
 from action_mask import (compute_action_masks, actions_from_target_policy, _fleet_speed,
                          _ship_bin_to_count, _target_intercept_angle, MAX_OWNED_PLANETS)
@@ -27,8 +27,7 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
 
     Returns (state_dict, action_decode).  Modifies cfg.model in-place so that
     EntityTransformer(cfg.model) builds the correct architecture for this
-    checkpoint — regardless of what config.py currently says.  This lets old
-    (pre-Phase-1) checkpoints be evaluated after the config has been bumped.
+    checkpoint, regardless of what config.py currently says.
     """
     try:
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
@@ -77,7 +76,7 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     action_decode = str(ckpt_cfg.get("action_decode", "angle"))
     # Reinforcement: eval must mask targets the SAME way the checkpoint was trained.
     cfg.model.allow_reinforce = bool(ckpt_cfg.get("allow_reinforce", False))
-    # Blessed feature config guard (2026-07 cleanup): feature semantics are hard-coded in
+    # Feature semantics are hard-coded in
     # features.py (game-phase 15-global ON, precise pressure resolver ON, friendly deflation ON,
     # enemy-deflate/zero-roi/surface-threat REMOVED). Evaluating a checkpoint trained under
     # different semantics would silently feed it wrong features — refuse instead.
@@ -337,7 +336,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
             return moves
 
         raise NotImplementedError(
-            "angle-decode path removed (angle head deleted); Phase 1 checkpoints "
+            "angle-decode path removed (angle head deleted); target-based checkpoints "
             "use target-decode. Pass target_decode=True (--target-decode)."
         )
 
@@ -768,7 +767,7 @@ def _fmt_conversion(acc):
             (f"{nm} {100*s1[i]/lp[i]:.0f}%(mean{ss[i]/lp[i]:.0f},n{lp[i]})" if lp[i] else f"{nm} —(n0)")
             for i, nm in enumerate(("early<50", "mid50-100", "late>=100")))
     s0wl = (f"\n     WON  {_s0('_won')}\n     LOST {_s0('_lost')}" if (gw + gl) > 0 else "")
-    # ── Trusted core only (aggressive prune 2026-07-06; git history has the full dump). ──
+    # Trusted core only; detailed proxy diagnostics live in git history.
     # Cut: the force-concentration-wall microscopy (decisive-mass, hold-floor, triage, om32,
     # failed-attack), the reinf-* deep-dives, hoard-vs-Isaiah, near-vs-far, launch-waste
     # (self-flagged non-discriminating) — all elaborations of proxies that saturate vs strong
@@ -799,10 +798,8 @@ def _fmt_tier_summary(acc):
     gw, gl = acc["games_won"], acc["games_lost"]
     wr = gw / max(gw + gl, 1)
     _med = lambda h: (sorted(h)[len(h) // 2] if h else 0)
-    # T2 — the wall, OUTCOME-grounded only. The model-based dm family (gap/take-rate/overkill/med,
-    # take+hold/can't-hold/too-few, waste) and out-massed% were CULLED 2026-07: model-based, non-
-    # discriminating in matched play, and take+hold was contradicted by observed retention. Keep
-    # only what is grounded in the actual game outcome and tracks skill. [[project-ender-...]]
+    # Outcome-grounded metrics only; model-based force proxies were not
+    # discriminating in matched play.
     lostmat = acc["lost_material"]
     lmed = _med(lostmat) if lostmat else 0
     wiped = (100 * sum(1 for m in lostmat if m <= 0) / len(lostmat)) if lostmat else 0.0
@@ -1294,7 +1291,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     model.allow_reinforce = bool(getattr(cfg.model, "allow_reinforce", False))
     # Reinforce-discipline masks (gate / forward-staging / garrison floor) — MUST match
     # the training env, else the policy reinforces where it was masked and self-sabotages.
-    # Not stored in the checkpoint config, so they come from CLI flags.
+    # Values are auto-loaded from checkpoint metadata unless explicitly overridden.
     model.reinforce_gate_min_planets = int(reinforce_gate_min_planets)
     model.reinforce_forward_only = bool(reinforce_forward_only)
     # Reverse-edge cooldown auto-loads from the checkpoint (persisted, stateful — eval keeps the
@@ -1407,19 +1404,18 @@ if __name__ == "__main__":
                              "Use when the mode is degenerate but distribution mass "
                              "is on competent bins (1-ship-fleet trap).")
     parser.add_argument("--target-decode", action="store_true",
-                        help="Aim with target_logits plus orbital intercept instead "
-                             "of directly using the angle head.")
+                        help="Aim with target_logits plus orbital intercept.")
     parser.add_argument("--reinforce-gate-min-planets", type=int, default=None,
                         help="Reinforce-discipline parity: own targets legal only at "
                              ">= this many owned planets. Default=auto-load from checkpoint; "
-                             "pass to override. MUST match training (p2rev1=3).")
+                             "pass to override. MUST match training.")
     parser.add_argument("--reinforce-forward-only", action=argparse.BooleanOptionalAction, default=None,
                         help="Reinforce-discipline parity: own target legal only if closer "
                              "to the nearest enemy than the source. Default=auto-load from ckpt; "
                              "pass --reinforce-forward-only / --no-reinforce-forward-only to override.")
     parser.add_argument("--reinforce-garrison-floor", type=float, default=None,
                         help="Reinforce-discipline parity: veto a reinforce that drains the "
-                             "source below this. Default=auto-load from ckpt (p2rev1=10).")
+                             "source below this. Default=auto-load from checkpoint.")
     parser.add_argument("--sufficient-commit-factor", type=float, default=None,
                         help="Sufficient-commit parity: veto an attack whose ships <= target "
                              "defense × this factor. Default=auto-load from ckpt (1.0 = strict).")

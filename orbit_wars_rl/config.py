@@ -22,15 +22,13 @@ class EnvConfig:
 class ModelConfig:
     max_entities: int = 64
     max_owned_planets: int = 16
-    # 20 base channels + 96 projected-timeline (timeline.TIMELINE_DIM: 4 ch × 24 steps —
-    # writeup lesson 1, adopted 2026-07-10). Pre-timeline checkpoints are 20-wide; eval
-    # infers the width from planet_proj.weight and feeds matching features.
+    # 20 base channels + 96 projected-timeline channels
+    # (timeline.TIMELINE_DIM: 4 channels × 24 steps). Eval infers the width from
+    # planet_proj.weight when loading an older checkpoint.
     planet_feature_dim: int = 116
     fleet_feature_dim: int = 13
-    # Global features: 11 base + 4 game-phase channels (phase one-hot early/mid/late +
-    # normalized steps-to-next-comet-spawn). Always on since the 2026-07 cleanup; the
-    # pre-toggle era (11-global checkpoints, roi/resolver/threat toggles) lives at the
-    # pre-cleanup git tag.
+    # Global features: 11 base + 4 game-phase channels (phase one-hot
+    # early/mid/late + normalized steps-to-next-comet-spawn).
     global_feature_dim: int = 15
     entity_dim: int = 96
     num_heads: int = 4
@@ -47,9 +45,8 @@ class ModelConfig:
     ship_bin_mode: str = "absolute"
     pairwise_feature_dim: int = 26   # see features.PAIRWISE_FEATURE_DIM (22 base + 4 intent-sizing)
     max_planets: int = 48            # for target_head output size; matches EnvConfig
-    # Phase 4 residual output init scale. 0.0 = exact parity (legacy Stage A/B);
-    # small nonzero values preserve near-parity while letting the residual path
-    # influence behavior before PPO has to move a zeroed output layer off dead-zero.
+    # Target-conditioned fire/ship residual output init scale. The phase4 name is
+    # retained in the checkpoint and CLI contract. 0.0 starts the residual at zero.
     phase4_residual_init_std: float = 0.0
     # Target-decode discipline. These are persisted in checkpoints so train/eval/export
     # do not silently disagree about own-target legality or attack concentration vetoes.
@@ -60,14 +57,13 @@ class ModelConfig:
     reverse_edge_cooldown: int = 0
     sufficient_commit_factor: float = 0.0
     dropout: float = 0.0
-    # Value head input width. 0 = auto (2*entity_dim, new concat head).
-    # Set to entity_dim when loading pre-Phase-1 checkpoints (old mean-pool head).
+    # Value head input width. 0 = auto (2*entity_dim concat head). Eval sets this
+    # to entity_dim when loading an older mean-pool checkpoint.
     value_head_in: int = 0
 
     def __post_init__(self):
-        # Intent sizing (experiments.md #4): the ship head emits 4 target-relative SEMANTICS
-        # (capture/capture-defend/maintain/all-in), not 32 absolute counts. Force the head width
-        # to NUM_INTENTS so model/PPO/q-head build correctly regardless of caller.
+        # Intent sizing emits target-relative semantics rather than absolute counts.
+        # Force the head width so model, PPO, and Q-head construction agree.
         if self.ship_bin_mode == "intent":
             from action_mask import NUM_INTENTS
             self.num_ship_bins = NUM_INTENTS
@@ -76,17 +72,16 @@ class ModelConfig:
 @dataclass
 class PPOConfig:
     learning_rate: float = 3e-4
-    # Multiplier applied only to the Phase 4 residual path parameters
-    # (fire_q/k/scorer, ship_q/k/scorer). 1.0 = legacy single-LR behavior.
+    # Multiplier applied only to target-conditioned fire/ship residual parameters.
+    # The phase4 name is retained for checkpoint and CLI compatibility.
     phase4_residual_lr_mult: float = 1.0
     lr_warmup_steps: int = 5000
     lr_decay: str = "cosine"
     total_env_steps: int = 500_000_000
     batch_size: int = 2048
     num_minibatches: int = 4
-    # 2 epochs = Jake Will (Rank-2) hyperparameter, adopted 2026-07-09. Halves the PPO-update
-    # phase vs the old default of 4 (≈ +30% SPS) at a modest sample-efficiency cost. See
-    # docs/perf.md (lever ladder). Override per-run with --ppo-epochs.
+    # Two epochs is the throughput-oriented default; see docs/perf.md. Override
+    # per run with --ppo-epochs when additional sample reuse is worth the cost.
     ppo_epochs: int = 2
     clip_eps: float = 0.2
     gamma: float = 0.995
@@ -94,17 +89,17 @@ class PPOConfig:
     entropy_coef_fire: float = 0.01
     entropy_coef_target: float = 0.02   # entropy bonus on the target head (was misnamed entropy_coef_angle)
     entropy_coef_ships: float = 0.01
-    # No-op KL bias (Jake Will Rank-2 lever): pull the BATCH-MEAN launch rate toward a low
+    # No-op KL bias: pull the batch-mean launch rate toward a low
     # prior so the policy saves ships instead of spraying. 0 = off. Adds to (not replaces)
     # the fire entropy bonus. See docs/writeup_lessons.md Lesson 3.
     noop_kl_coef: float = 0.0
     noop_target_launch_rate: float = 0.10   # target mean fire probability the KL anchors to
-    # Ship-size KL-to-prior (Ender lever): replace the uniform-seeking ship entropy bonus with a
+    # Ship-size KL-to-prior: replace the uniform-seeking ship entropy bonus with a
     # KL from the ship-count distribution toward a full-send-biased prior over the 32 bins
     # (w_i ∝ SHIP_COUNTS[i] ** ship_kl_prior_exp). Unlike noop_kl (batch-MEAN launch RATE), this
     # shapes each per-draw SIZE distribution — it starves the 1-3 ship spray tail while keeping
     # small bins learnable (reward can still buy a genuine probe). 0 = off. When ON, set
-    # entropy_coef_ships=0 (Ender REPLACES entropy, doesn't stack). See docs/writeup_lessons.md.
+    # entropy_coef_ships=0 because this replaces rather than stacks with entropy.
     ship_kl_coef: float = 0.0
     ship_kl_prior_exp: float = 1.0   # prior w_i ∝ SHIP_COUNTS[i]**exp; 1.0=linear-in-count, higher=more full-send-biased
     kl_target: float = 0.05   # KL early-stop threshold per epoch; inf = disabled

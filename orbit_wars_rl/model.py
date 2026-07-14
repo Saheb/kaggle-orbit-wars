@@ -1,13 +1,8 @@
-"""Entity Transformer in PyTorch for Orbit Wars.
+"""Entity Transformer policy and value model for Orbit Wars.
 
-Architecture (ADR-001/002/003 documented):
-- 72-bin discretized angles (ADR-001)
-- Shared backbone + mode token for 2p/4p (ADR-002)
-- Baked-in geometric features, discovered strategy (ADR-003)
-
-Phase 1 feature dims: planet=20, fleet=13, global=11, pairwise=20, max_owned=16.
-Value head: concat(global_token, owned_pool) → 2D → D → D/2 → 1.
-~350K params: 3 layers, 96 dim, 4 heads, 3x MLP expansion.
+The shared entity backbone encodes planets, fleets, and global state. Per-source
+action heads select a target and condition fire/ship decisions on pairwise
+source-target features. Launch direction is resolved geometrically from the target.
 """
 
 import math
@@ -20,6 +15,7 @@ from action_mask import SHIP_COUNTS  # single source of truth; re-exported for `
 NUM_ANGLE_BINS = 144
 NUM_SHIP_BINS = len(SHIP_COUNTS)
 ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
+# Angle constants remain exported for older checkpoint/export tooling.
 PHASE4_COMPAT_MISSING_KEYS = {
     "fire_q.weight", "fire_q.bias",
     "fire_k.weight", "fire_k.bias",
@@ -86,8 +82,7 @@ class EntityTransformer(nn.Module):
         ])
 
         # Pairwise cross-attention: for each owned slot, attend to all planets using
-        # explicit (src, tgt) geometric features. Closes the trig gap exposed by the
-        # prior BC angle-head failure (0.08 reduction vs 0.40 gate).
+        # explicit source-target geometric features.
         F_pair = getattr(cfg, "pairwise_feature_dim", 0)
         assert F_pair > 0, (
             "pairwise_feature_dim must be > 0 — the pairwise cross-attention target head "
@@ -101,10 +96,8 @@ class EntityTransformer(nn.Module):
 
         # Action heads (per owned planet)
         self.fire_head = nn.Linear(D, 1)
-        # NB: the angle head was removed — Phase 1 decodes fire direction from the
-        # target via orbital-intercept geometry (target-decode), so the head was
-        # dead weight (never sampled, no gradient). NUM_ANGLE_BINS is still used by
-        # the env/action-mask geometry.
+        # Launch direction is decoded from the selected target via orbital-intercept
+        # geometry; there is no learned angle head.
         # Ship head: bin count is configurable so the fraction-head experiment
         # can swap to 10 fraction bins. Default 32 = legacy absolute counts.
         self.num_ship_bins = getattr(cfg, "num_ship_bins", NUM_SHIP_BINS)
@@ -226,9 +219,8 @@ class EntityTransformer(nn.Module):
         planet_emb_post = x[:, 1:1 + planet_features.shape[1], :]
         owned_enriched = owned_entities
 
-        # Pairwise cross-attention: enrich each slot with explicit (src, tgt) geometry
-        # for fire/angle/ship heads. Target head scores per-(slot, target) directly
-        # from the same per-target inputs — see docs/bugs.md.
+        # Enrich each source slot with explicit source-target geometry. The target
+        # head scores each pair directly from the same inputs.
         if pairwise_features is not None:
             N_p = planet_features.shape[1]
             planet_per_slot = planet_emb_post.unsqueeze(1).expand(-1, max_owned, -1, -1)
@@ -321,9 +313,9 @@ class EntityTransformer(nn.Module):
                 device=owned_enriched.device, dtype=owned_enriched.dtype,
             )
 
-        # Action heads. Fire/ship now condition on the chosen target via the same
-        # per-(slot, target) pairwise path as target selection. The legacy slot-only
-        # heads remain as residual priors so old checkpoints keep step-0 behavior.
+        # Fire/ship decisions condition on the chosen target through the same
+        # pairwise path as target selection. Slot-only heads remain as residual
+        # priors for checkpoint compatibility.
         fire_logits_slot = self.fire_head(owned_enriched).squeeze(-1)  # (B, max_owned)
         ship_logits_slot = self.ship_head(owned_enriched)  # (B, max_owned, num_ship_bins)
         fire_prior = fire_logits_slot.unsqueeze(-1).expand(-1, -1, self.max_planets)
@@ -477,7 +469,8 @@ class EntityTransformer(nn.Module):
         # new feature contributes nothing at step 0 (decode + log-prob match the source model).
         # New channels are appended LAST (pairwise is the last block in [q, k, pairwise]; phase
         # globals are extend()-ed after the base globals) → right-pad. Same parity-init idea as
-        # the Phase 4 heads. global_proj/mode_proj both consume the global vector (see forward).
+        # the target-conditioned heads. global_proj/mode_proj both consume the
+        # global vector (see forward).
         own = self.state_dict()
         for name in ("pair_kv.weight", "target_scorer.0.weight",
                      "fire_scorer.0.weight", "ship_scorer.0.weight",
