@@ -38,7 +38,7 @@ pin the panels you care about. Here are the ones that matter, by purpose:
 |--------|------------------|---------------|
 | `intent/` | Sampled capture/capture-defend/maintain/all-in shares, resolved ship counts, attack commitment ratio, under-commit rate | Primary intent-sizing mechanism check. Shares are semantic actions, not legacy ship bins. |
 | `features/` | Input standard deviations plus one learned-use norm for each of the 26 pairwise features | Verify inputs are live and whether the model is learning to use each channel. The norm combines all direct consumers: pairwise attention plus target, fire, and ship scorers. |
-| `target_conditioning/` | Target logit spread, residual-to-prior ratio, and decision-flip rate for fire/ship | Health of the active target-conditioned action path. This was historically called `phase4/`; it is core architecture now, not a staged experiment. |
+| `target_conditioning/` | Target logit spread, residual-to-prior ratio, target-policy-weighted actionable fire flips (with direction), fire target-straddle rate, and ship decision flips | Health of the active target-conditioned action path. Fire flips use unmasked `prior + residual` logits over feasible sources, so legality masks cannot register as target-conditioning decisions. This was historically called `phase4/`; it is core architecture now, not a staged experiment. |
 | `policy/` | Launch rate, fire fraction, target-owner shares, reinforcement | General action discipline. Legacy `mean_ship_bin`/`ship_bin0_rate` are omitted in intent mode because indices 0-3 are semantics, not ship quantities. |
 
 The four `features/input_std_*` curves are activity checks. The 26
@@ -48,8 +48,10 @@ The four `features/input_std_*` curves are activity checks. The 26
 
 ### Binary NOOP/COMMIT runs
 
-`binary/` contains `actionable_source_rate`, `noop_rate`, `commit_ships_mean`, and
-`attack_share`. The unused ship head is deliberately absent from the sampled action and PPO
+`binary/` contains `actionable_source_rate`, `noop_rate`, `commit_ships_mean`, `attack_share`,
+and exact `action_entropy` (plus its normalized fraction and moving maximum). The entropy is over
+`{NOOP, COMMIT(target)}`; separate fire/target entropy curves would not describe the optimized
+action distribution. The unused ship head is deliberately absent from the sampled action and PPO
 loss, so ship entropy, ship KL, ship-bin, intent-share, and ship-conditioning panels are omitted.
 Use `policy/mean_launch_rate` and the binary metrics for training health; use held-out Yijie
 conversion and win rate for the experiment verdict.
@@ -78,7 +80,7 @@ For a PBRS experiment, these are the five panels to pin:
 | `policy/` | fire_0, fire_fraction, mean_launch_rate, reinforce_rate | Degenerate source selection or launch discipline |
 | `intent/` | action shares, resolved_ships_mean, attack_undercommit_rate | Intent collapse or failure to resolve sufficient capture mass |
 | `features/` | input_std_*, use_norm_* | Dead inputs or feature channels the model never uses |
-| `target_conditioning/` | *_logit_spread, *_residual_to_prior, *_decision_flip | Whether target context materially changes fire/ship decisions |
+| `target_conditioning/` | `*_logit_spread`, `*_residual_to_prior`, `fire_actionable_flip_prob`, directional fire flips, `fire_target_straddle_rate`, `ship_decision_flip` | Whether target context materially changes fire/ship decisions; fire metrics exclude infeasible sources and average over the target policy rather than one sampled target |
 | `value/` | mean, std, adv_std | Critic scale drift |
 | `train/` | sps, lr | Throughput + LR schedule |
 | `staging/` | phi | PBRS experiments only; absent when staging shaping is disabled |

@@ -10,7 +10,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from action_mask import (actions_from_target_policy, compute_action_masks,
                          resolve_binary_commit_np)
-from torch_env import _resolve_binary_commit
+from binary_policy import (binary_action_entropy, binary_action_log_probs,
+                           binary_taken_log_prob)
+from config import Config
+from model import EntityTransformer
+from ppo import PPOLearner
+from torch_env import VecTorchEnv, _resolve_binary_commit
 from train_torch import binary_rollout_metrics, sample_action_batched
 
 
@@ -80,7 +85,7 @@ def test_binary_sampler_has_no_ship_action_and_no_idle_target_credit():
         "fire_logits": torch.tensor([[[100.0, 100.0], [-100.0, -100.0]]]),
         "ship_logits": torch.randn(1, 2, 2, 4),
     }
-    fire, _, ship, _, _, lp_ship, lp_target = sample_action_batched(
+    fire, _, ship, _, lp_action, lp_ship, lp_target = sample_action_batched(
         outputs, torch.ones(1, 2, dtype=torch.bool),
         torch.ones(1, 2, 2, dtype=torch.bool), "binary",
     )
@@ -88,6 +93,68 @@ def test_binary_sampler_has_no_ship_action_and_no_idle_target_credit():
     assert torch.equal(ship, torch.zeros_like(ship))
     assert torch.equal(lp_ship, torch.zeros_like(lp_ship))
     assert lp_target[0, 1] == 0
+    assert torch.isclose(lp_action[0, 0].exp(), torch.tensor(0.5), atol=1e-5)
+    assert torch.isclose(lp_action[0, 1], torch.tensor(0.0), atol=1e-5)
+
+
+def test_binary_executed_action_distribution_is_exactly_marginalized():
+    target_logits = torch.log(torch.tensor([[[0.75, 0.25]]]))
+    fire_logits = torch.logit(torch.tensor([[[0.10, 0.90]]]))
+    log_noop, log_commit = binary_action_log_probs(
+        target_logits, fire_logits, fire_mask=torch.tensor([[True]]))
+
+    assert torch.allclose(log_commit.exp(), torch.tensor([[[0.075, 0.225]]]), atol=1e-6)
+    assert torch.allclose(log_noop.exp(), torch.tensor([[0.700]]), atol=1e-6)
+    assert torch.allclose(
+        log_noop.exp() + log_commit.exp().sum(dim=-1), torch.ones_like(log_noop), atol=1e-6)
+    assert torch.allclose(
+        binary_taken_log_prob(log_noop, log_commit, torch.tensor([[0]]), torch.tensor([[1]])).exp(),
+        torch.tensor([[0.700]]), atol=1e-6)
+    expected_h = -(torch.tensor([0.700, 0.075, 0.225])
+                   * torch.tensor([0.700, 0.075, 0.225]).log()).sum()
+    assert torch.allclose(binary_action_entropy(log_noop, log_commit), expected_h.view(1, 1))
+
+
+def test_binary_rollout_and_ppo_log_prob_parity():
+    torch.manual_seed(7)
+    cfg = Config()
+    cfg.device = "cpu"
+    cfg.model.ship_bin_mode = "binary"
+    model = EntityTransformer(cfg.model)
+    learner = PPOLearner(model, cfg, device="cpu")
+    env = VecTorchEnv(num_envs=4, num_players=2, device="cpu", episode_steps=100,
+                      action_decode="target", ship_bin_mode="binary")
+    env.reset(seeds=[10, 11, 12, 13])
+    feats = env.get_features(0)
+    outputs = model(
+        feats["planet_features"], feats["fleet_features"], feats["global_features"],
+        feats["planet_mask"], feats["fleet_mask"], fire_mask=feats["fire_mask"],
+        slot_valid=feats["slot_valid"], owned_indices=feats["owned_indices"],
+        owned_count=feats["owned_count"], pairwise_features=feats["pairwise_features"],
+    )
+    fire, _, ship, target, lp_action, lp_ship, lp_target = sample_action_batched(
+        outputs, feats["fire_mask"], feats["target_mask"], "binary")
+    batch = {
+        "planet_features": feats["planet_features"],
+        "fleet_features": feats["fleet_features"],
+        "global_features": feats["global_features"],
+        "planet_mask": feats["planet_mask"],
+        "fleet_mask": feats["fleet_mask"],
+        "fire_mask": feats["fire_mask"],
+        "target_mask": feats["target_mask"],
+        "slot_valid": feats["slot_valid"],
+        "owned_indices": feats["owned_indices"],
+        "owned_count": feats["owned_count"],
+        "pairwise_features": feats["pairwise_features"],
+        "actions": {"fire": fire, "ship": ship, "target": target},
+        "old_log_probs": {"fire": lp_action.detach(), "ships": lp_ship.detach(),
+                          "target": lp_target.detach()},
+        "advantages": torch.zeros(4),
+        "returns": torch.zeros(4),
+        "old_values": outputs["value"].detach(),
+    }
+    _, metrics = learner.compute_loss(batch, return_metrics=True)
+    assert abs(metrics["approx_kl"]) < 1e-6
 
 
 def test_binary_metrics_report_actionable_noop_and_commit_mass():

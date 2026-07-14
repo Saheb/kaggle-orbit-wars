@@ -14,6 +14,7 @@ import os
 import numpy as np
 import torch
 
+from binary_policy import binary_action_log_probs
 from reinforce_cooldown import is_blocked as _cd_is_blocked, record as _cd_record, on_ownership_loss as _cd_on_loss
 
 # --- ship-commitment audit (probe-only; enable via action_mask._SHIP_AUDIT["on"]=True) ---
@@ -803,14 +804,30 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
                 # Keep a valid categorical row for the unused target sample; force NOOP below.
                 binary_can_fire[slot] = False
 
-    if sample:
+    if ship_bin_mode == "binary":
+        actionable = torch.as_tensor(binary_can_fire, device=target_logits.device).unsqueeze(0)
+        log_noop, log_commit = binary_action_log_probs(
+            target_logits, fire_logits_target, fire_mask=actionable)
+        action_logits = torch.cat([log_noop.unsqueeze(-1), log_commit], dim=-1)
+        action_dist = torch.distributions.Categorical(logits=action_logits)
+        action = (action_dist.sample() if sample else torch.argmax(action_logits, dim=-1))
+        fire_t = action > 0
+        target_idx_t = (action - 1).clamp(min=0)
+        target_indices = target_idx_t.cpu().numpy().squeeze(0)
+        fire_decisions = fire_t.cpu().numpy().squeeze(0)
+        fire_prob_values = log_commit.exp().sum(dim=-1).cpu().numpy().squeeze(0)
+        ship_bins = np.zeros_like(target_indices)
+        chosen_ship_logits = torch.gather(
+            ship_logits_target,
+            2,
+            target_idx_t.unsqueeze(-1).unsqueeze(-1).expand(
+                -1, -1, 1, ship_logits_target.shape[-1]),
+        ).squeeze(2)
+    elif sample:
         target_dist = torch.distributions.Categorical(logits=target_logits)
         target_indices = target_dist.sample().cpu().numpy().squeeze(0)
         target_idx_t = torch.as_tensor(target_indices, device=target_logits.device).unsqueeze(0)
         chosen_fire_logits = torch.gather(fire_logits_target, -1, target_idx_t.unsqueeze(-1)).squeeze(-1)
-        if ship_bin_mode == "binary":
-            chosen_fire_logits = chosen_fire_logits.masked_fill(
-                ~torch.as_tensor(binary_can_fire, device=chosen_fire_logits.device).unsqueeze(0), -1e9)
         chosen_ship_logits = torch.gather(
             ship_logits_target,
             2,
@@ -825,9 +842,6 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
         target_indices = torch.argmax(target_logits, dim=-1).cpu().numpy().squeeze(0)
         target_idx_t = torch.as_tensor(target_indices, device=target_logits.device).unsqueeze(0)
         chosen_fire_logits = torch.gather(fire_logits_target, -1, target_idx_t.unsqueeze(-1)).squeeze(-1)
-        if ship_bin_mode == "binary":
-            chosen_fire_logits = chosen_fire_logits.masked_fill(
-                ~torch.as_tensor(binary_can_fire, device=chosen_fire_logits.device).unsqueeze(0), -1e9)
         chosen_ship_logits = torch.gather(
             ship_logits_target,
             2,
@@ -867,8 +881,10 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
         slot_intents[src_id] = {
             "fired": bool(fire_decisions[slot]),
             "fire_prob": float(fire_prob_values[slot]) if not sample else None,
-            "target_id": int(planets[tidx][0]) if 0 <= tidx < len(planets) else None,
-            "target_owner": int(planets[tidx][1]) if 0 <= tidx < len(planets) else None,
+            "target_id": (int(planets[tidx][0]) if 0 <= tidx < len(planets)
+                          and (ship_bin_mode != "binary" or fire_decisions[slot]) else None),
+            "target_owner": (int(planets[tidx][1]) if 0 <= tidx < len(planets)
+                             and (ship_bin_mode != "binary" or fire_decisions[slot]) else None),
             "ships": int(decoded_ships),
             "max_ships": int(max_ships[slot]),
             "target_scores": [float(x) for x in target_logits[0, slot, :len(planets)].detach().cpu().tolist()],

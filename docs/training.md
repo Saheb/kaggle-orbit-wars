@@ -331,3 +331,30 @@ the action space, masks, ship-head loss, initialization, and training lineage. A
 plausible source-drain mechanism, but replacing it should first be justified by either (a) a
 same-checkpoint, same-seed decoder counterfactual measuring source survival and capture retention,
 or (b) a matched from-scratch binary-all-in versus binary-sufficient/holdable training A/B.
+
+### Exact-marginal binary PPO — matched follow-up (experiment contract, 2026-07-14)
+
+**Single delta:** make the binary policy optimize the action the environment actually executes.
+The model remains target-first and target-conditioned, but rollout sampling, PPO likelihood,
+entropy, no-op KL, launch diagnostics, and deterministic eval now use the collapsed distribution
+
+`P(COMMIT(t)) = P(t) P(COMMIT | t)` and
+`P(NOOP) = sum_t P(t) P(NOOP | t)`.
+
+Previously, PPO included `log P(t)` only for COMMIT and treated NOOP as just
+`log P(NOOP | sampled t)`. That assigns target credit on one branch while conditioning the other
+on a latent target sample, so the likelihood is not the probability of the executed action. The
+corrected sampler draws once from `{NOOP, COMMIT(t_1), ..., COMMIT(t_k)}` and PPO recomputes that
+exact likelihood.
+
+Everything else matches `binary100m_scratch_rtxpro6000`: fresh initialization and optimizer,
+100M schedule, seed, 1,280 envs x 64, 32 minibatches, two PPO epochs, binary resolver and masks,
+reward, reinforcement gates, self-play pool, no-op KL 0.3, and 5M checkpoint cadence. Primary
+verdict remains the 256-game Yijie trajectory; Ajay is the regression guard. The experiment is
+worth keeping only if it lifts the prior 0-2.3% Yijie floor without losing the already-verified
+conversion discipline. Mechanism gates are rollout/PPO likelihood parity (unit-tested), finite
+joint KL/clip, non-collapsed exact action entropy, launch rate, NOOP rate, capture/attack,
+reinforcement share, planets at step 50, and capture retention.
+
+Launch order is A100-80GB spot, A100-80GB on-demand, then RTX PRO 6000. Hardware is a throughput
+choice rather than an algorithm delta; the training configuration remains matched.

@@ -34,6 +34,7 @@ except ImportError:
     _wandb = None
 
 from config import Config
+from binary_policy import binary_action_log_probs, binary_taken_log_prob
 from features import PAIRWISE_FEATURE_NAMES
 from model import EntityTransformer, count_params, PHASE4_COMPAT_MISSING_KEYS
 from opponent_pool import OpponentPool, PoolMember
@@ -91,6 +92,23 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
     target_logits = outputs["target_logits"]
     if target_mask is not None:
         target_logits = target_logits.masked_fill(~target_mask, -1e9)
+    if ship_bin_mode == "binary":
+        log_noop, log_commit = binary_action_log_probs(
+            target_logits, fire_logits_target, target_mask, fire_mask)
+        action_logits = torch.cat([log_noop.unsqueeze(-1), log_commit], dim=-1)
+        action_dist = torch.distributions.Categorical(logits=action_logits)
+        action_a = action_dist.sample()
+        fire_a = action_a > 0
+        target_a = (action_a - 1).clamp(min=0)
+        ship_a = torch.zeros_like(target_a)
+        angle_a = torch.zeros_like(target_a)
+        lp_action = binary_taken_log_prob(
+            log_noop, log_commit, fire_a, target_a) * fire_mask.float()
+        zeros = torch.zeros_like(lp_action)
+        # lp_fire stores the complete binary executed-action likelihood; the legacy
+        # ship/target fields remain zero so the rollout storage contract stays stable.
+        return fire_a.long(), angle_a, ship_a, target_a, lp_action, zeros, zeros
+
     target_dist = torch.distributions.Categorical(logits=target_logits)
 
     target_a = target_dist.sample()  # (N, MAX_OWNED)
@@ -104,11 +122,8 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
     ).squeeze(2)
     fire_dist = torch.distributions.Bernoulli(logits=fire_logits)
     fire_a   = fire_dist.sample()    # (N, MAX_OWNED)
-    if ship_bin_mode == "binary":
-        ship_a = torch.zeros_like(fire_a, dtype=torch.long)
-    else:
-        ship_dist = torch.distributions.Categorical(logits=ship_logits)
-        ship_a = ship_dist.sample()  # (N, MAX_OWNED)
+    ship_dist = torch.distributions.Categorical(logits=ship_logits)
+    ship_a = ship_dist.sample()  # (N, MAX_OWNED)
     # Angle is unused in target-decode; zeros satisfy env.step's action shape.
     angle_a  = torch.zeros_like(fire_a)
 
@@ -116,10 +131,8 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
     slot_valid = fire_mask.float()
     fired      = (fire_a > 0.5).float() * slot_valid
     lp_fire   = fire_dist.log_prob(fire_a) * slot_valid
-    lp_ship = (torch.zeros_like(fire_a) if ship_bin_mode == "binary"
-               else ship_dist.log_prob(ship_a) * fired)
-    # In binary mode the target is part of the environment action only on COMMIT.
-    lp_target = target_dist.log_prob(target_a) * (fired if ship_bin_mode == "binary" else slot_valid)
+    lp_ship = ship_dist.log_prob(ship_a) * fired
+    lp_target = target_dist.log_prob(target_a) * slot_valid
 
     return fire_a.long(), angle_a, ship_a, target_a, lp_fire, lp_ship, lp_target
 
@@ -1628,13 +1641,18 @@ def train(args):
             slot_rest_max = max(psf[1:]) if len(psf) > 1 else 0.0
             # Primary line: the PPO-health decision set. EV / KL / clip_frac are
             # the only three signals that tell you whether training will work;
-            # H_fire because entropy is an active lever. Everything else is
+            # action entropy because it is an active lever. Everything else is
             # diagnostic and lives on the periodic 'diag' line + W&B.
+            entropy_health = (
+                f"H_action {metrics.get('target_entropy', 0):.3f}"
+                if cfg.model.ship_bin_mode == "binary" else
+                f"H_fire {metrics.get('fire_entropy', 0):.3f}"
+            )
             print(
                 f"iter {iter_count:5d} | steps {total_env_steps:>11,} | SPS {sps:>7,.0f} | "
                 f"EV {metrics.get('explained_variance', 0):.3f} | KL {metrics.get('approx_kl', 0):.4f} | "
                 f"clip {avg_cf:.3f}(fire {metrics.get('clip_frac_fire', 0):.3f}) | "
-                f"H_fire {metrics.get('fire_entropy', 0):.3f} | "
+                f"{entropy_health} | "
                 f"V_loss {metrics.get('value_loss', 0):.4f} | "
                 f"r_p0 {avg_r:+.3f} r_p1 {avg_r1:+.3f} | "
                 f"LR {metrics['learning_rate']:.6f}"
@@ -1691,7 +1709,7 @@ def train(args):
                     )
                     featurestr = ""
                 entropystr = (
-                    f"H_tgt {metrics.get('target_entropy', 0):.2f}"
+                    f"H_action {metrics.get('target_entropy', 0):.2f}"
                     if cfg.model.ship_bin_mode == "binary" else
                     f"H_ship {metrics.get('ship_entropy', 0):.2f} "
                     f"H_tgt {metrics.get('target_entropy', 0):.2f}"
@@ -1727,7 +1745,10 @@ def train(args):
                     print(
                         f"   cond | fire tgtσ {metrics.get('fire_target_std', 0):.3f} | "
                         f"resid/prior {metrics.get('phase4_fire_resid_ratio', 0):.3f} | "
-                        f"flip {metrics.get('phase4_fire_decision_flip', 0):.3f}"
+                        f"flip Eπ {metrics.get('fire_target_flip_prob', 0):.3f} "
+                        f"(n→c {metrics.get('fire_target_noop_to_commit_prob', 0):.3f}/"
+                        f"c→n {metrics.get('fire_target_commit_to_noop_prob', 0):.3f}) "
+                        f"straddle {metrics.get('fire_target_straddle_rate', 0):.3f}"
                     )
                 else:
                     print(
@@ -1735,7 +1756,7 @@ def train(args):
                         f"{metrics.get('ship_target_std', 0):.3f} | "
                         f"resid/prior {metrics.get('phase4_fire_resid_ratio', 0):.3f}/"
                         f"{metrics.get('phase4_ship_resid_ratio', 0):.3f} | "
-                        f"flip f/s {metrics.get('phase4_fire_decision_flip', 0):.3f}/"
+                        f"flip Eπ f/s {metrics.get('fire_target_flip_prob', 0):.3f}/"
                         f"{metrics.get('phase4_ship_decision_flip', 0):.3f}"
                     )
                 if args.log_timing:
@@ -1814,7 +1835,10 @@ def train(args):
                     "target_conditioning/ship_logit_spread": metrics.get("ship_target_std", 0),
                     "target_conditioning/fire_residual_to_prior": metrics.get("phase4_fire_resid_ratio", 0),
                     "target_conditioning/ship_residual_to_prior": metrics.get("phase4_ship_resid_ratio", 0),
-                    "target_conditioning/fire_decision_flip": metrics.get("phase4_fire_decision_flip", 0),
+                    "target_conditioning/fire_actionable_flip_prob": metrics.get("fire_target_flip_prob", 0),
+                    "target_conditioning/fire_noop_to_commit_prob": metrics.get("fire_target_noop_to_commit_prob", 0),
+                    "target_conditioning/fire_commit_to_noop_prob": metrics.get("fire_target_commit_to_noop_prob", 0),
+                    "target_conditioning/fire_target_straddle_rate": metrics.get("fire_target_straddle_rate", 0),
                     "target_conditioning/ship_decision_flip": metrics.get("phase4_ship_decision_flip", 0),
                 }
                 if cfg.model.ship_bin_mode == "intent":
@@ -1834,10 +1858,15 @@ def train(args):
                         "binary/noop_rate": metrics.get("binary_noop_rate", 0),
                         "binary/commit_ships_mean": metrics.get("binary_commit_ships_mean", 0),
                         "binary/attack_share": metrics.get("binary_attack_share", 0),
+                        "binary/action_entropy": metrics.get("target_entropy", 0),
+                        "binary/action_entropy_frac": metrics.get("target_entropy_frac", 0),
+                        "binary/action_entropy_max": metrics.get("target_entropy_max", 0),
                     })
                     for key in (
                         "ppo/ship_kl",
+                        "entropy/fire", "entropy/fire_frac",
                         "entropy/ship", "entropy/ship_frac",
+                        "entropy/target", "entropy/target_frac", "entropy/target_max",
                         "target_conditioning/ship_logit_spread",
                         "target_conditioning/ship_residual_to_prior",
                         "target_conditioning/ship_decision_flip",

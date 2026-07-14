@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+from binary_policy import (binary_action_entropy, binary_action_log_probs,
+                           binary_taken_log_prob)
 from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, SHIP_COUNTS
 from config import Config
 
@@ -42,6 +44,49 @@ def _gather_target_ship_logits(per_target_logits: torch.Tensor, target_idx: torc
         2,
         target_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, per_target_logits.shape[-1]),
     ).squeeze(2)
+
+
+def _fire_target_conditioning_metrics(target_logits: torch.Tensor,
+                                      fire_prior: torch.Tensor,
+                                      fire_residual: torch.Tensor,
+                                      fire_mask: torch.Tensor,
+                                      slot_valid: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Target-policy-weighted fire flips on sources that can actually commit.
+
+    Uses the unmasked conditioned logit (prior + residual), so legality masks cannot
+    masquerade as target-conditioning decisions. A flip means crossing the 0-logit
+    / 0.5-probability boundary relative to the slot-only prior.
+    """
+    valid_targets = target_logits > -1e8
+    actionable = fire_mask.bool() & slot_valid.bool() & valid_targets.any(dim=-1)
+    actionable_f = actionable.float()
+    denom = actionable_f.sum().clamp(min=1.0)
+
+    target_probs = torch.softmax(target_logits.masked_fill(~valid_targets, -1e9), dim=-1)
+    target_probs = target_probs * valid_targets.float()
+    target_probs = target_probs / target_probs.sum(dim=-1, keepdim=True).clamp(min=1.0)
+
+    conditioned = fire_prior + fire_residual
+    prior_commit = fire_prior > 0
+    conditioned_commit = conditioned > 0
+    noop_to_commit = ~prior_commit & conditioned_commit & valid_targets
+    commit_to_noop = prior_commit & ~conditioned_commit & valid_targets
+
+    def expected_rate(events: torch.Tensor) -> torch.Tensor:
+        per_source = (target_probs * events.float()).sum(dim=-1)
+        return (per_source * actionable_f).sum() / denom
+
+    has_commit = (conditioned_commit & valid_targets).any(dim=-1)
+    has_noop = ((~conditioned_commit) & valid_targets).any(dim=-1)
+    straddles = has_commit & has_noop
+    n2c = expected_rate(noop_to_commit)
+    c2n = expected_rate(commit_to_noop)
+    return {
+        "flip_prob": n2c + c2n,
+        "noop_to_commit_prob": n2c,
+        "commit_to_noop_prob": c2n,
+        "straddle_rate": (straddles.float() * actionable_f).sum() / denom,
+    }
 
 
 class PPOLearner:
@@ -160,21 +205,29 @@ class PPOLearner:
         decision_valid = fire_mask.float() if binary_mode else slot_valid.squeeze(-1)
         fired_slots = fire_action.float() * decision_valid
 
-        new_log_prob_fire = fire_dist.log_prob(fire_action.float()) * decision_valid
-        new_log_prob_ships = (torch.zeros_like(new_log_prob_fire) if binary_mode
-                              else ship_dist.log_prob(ship_action) * fired_slots)
-        new_log_prob_target = target_dist.log_prob(target_action) * (
-            fired_slots if binary_mode else slot_valid.squeeze(-1))
+        binary_log_noop = binary_log_commit = binary_launch_probs = None
+        if binary_mode:
+            binary_log_noop, binary_log_commit = binary_action_log_probs(
+                target_logits, fire_logits_target, target_mask, fire_mask)
+            new_log_prob_fire = binary_taken_log_prob(
+                binary_log_noop, binary_log_commit, fire_action, target_action) * decision_valid
+            new_log_prob_ships = torch.zeros_like(new_log_prob_fire)
+            new_log_prob_target = torch.zeros_like(new_log_prob_fire)
+            binary_launch_probs = binary_log_commit.exp().sum(dim=-1)
+        else:
+            new_log_prob_fire = fire_dist.log_prob(fire_action.float()) * decision_valid
+            new_log_prob_ships = ship_dist.log_prob(ship_action) * fired_slots
+            new_log_prob_target = target_dist.log_prob(target_action) * slot_valid.squeeze(-1)
 
         # Sum across planet slots: (B, max_owned) -> (B,)
         new_log_prob = (new_log_prob_fire + new_log_prob_ships + new_log_prob_target).sum(dim=-1)
 
         # Old log probs (stored at rollout time)
         old_fire = to_dev(batch["old_log_probs"]["fire"]) * decision_valid
-        old_ships = (torch.zeros_like(old_fire) if binary_mode
-                     else to_dev(batch["old_log_probs"]["ships"]) * fired_slots)
-        old_target = to_dev(batch["old_log_probs"]["target"]) * (
-            fired_slots if binary_mode else slot_valid.squeeze(-1))
+        old_ships = (torch.zeros_like(old_fire) if binary_mode else
+                     to_dev(batch["old_log_probs"]["ships"]) * fired_slots)
+        old_target = (torch.zeros_like(old_fire) if binary_mode else
+                      to_dev(batch["old_log_probs"]["target"]) * slot_valid.squeeze(-1))
         old_log_prob = (old_fire + old_ships + old_target).sum(dim=-1)  # (B,)
 
         # Advantages
@@ -200,13 +253,19 @@ class PPOLearner:
             value_loss = ((values - returns) ** 2).mean()
 
         # Entropy bonuses (direction = target)
-        fire_entropy = ((fire_dist.entropy() * decision_valid).sum() / decision_valid.sum().clamp(min=1)
-                        if binary_mode else fire_dist.entropy().mean())
-        ship_entropy = (torch.zeros((), device=ship_logits.device) if binary_mode
-                        else ship_dist.entropy().mean())
-        target_entropy = (((target_dist.entropy() * decision_valid).sum()
-                           / decision_valid.sum().clamp(min=1))
-                          if binary_mode else target_dist.entropy().mean())
+        if binary_mode:
+            # One exact entropy over the executed {NOOP, COMMIT(target)} distribution.
+            # It is a categorical target choice with NOOP as an extra category, so the
+            # existing target entropy coefficient controls it; fire/ship terms are zero.
+            fire_entropy = torch.zeros((), device=ship_logits.device)
+            ship_entropy = torch.zeros((), device=ship_logits.device)
+            per_source_action_entropy = binary_action_entropy(binary_log_noop, binary_log_commit)
+            target_entropy = ((per_source_action_entropy * decision_valid).sum()
+                              / decision_valid.sum().clamp(min=1))
+        else:
+            fire_entropy = fire_dist.entropy().mean()
+            ship_entropy = ship_dist.entropy().mean()
+            target_entropy = target_dist.entropy().mean()
 
         # No-op KL bias (Jake Will Rank-2 lever): anchor the BATCH-MEAN launch rate to a low
         # prior. p_bar = mean fire prob over valid owned slots (WITH grad); KL(Bern(p_bar) ‖
@@ -217,7 +276,8 @@ class PPOLearner:
         if cfg.noop_kl_coef > 0.0:
             q = cfg.noop_target_launch_rate
             sv_lr = decision_valid if binary_mode else slot_valid_2d.float()  # (B, MO)
-            p_bar = (torch.sigmoid(fire_logits) * sv_lr).sum() / sv_lr.sum().clamp(min=1)
+            launch_probs = binary_launch_probs if binary_mode else torch.sigmoid(fire_logits)
+            p_bar = (launch_probs * sv_lr).sum() / sv_lr.sum().clamp(min=1)
             p_bar = p_bar.clamp(1e-6, 1.0 - 1e-6)
             noop_kl = (p_bar * (p_bar / q).log()
                        + (1.0 - p_bar) * ((1.0 - p_bar) / (1.0 - q)).log())
@@ -257,7 +317,8 @@ class PPOLearner:
             # gives a calibrated read of actual policy change per decision.
             with torch.no_grad():
                 fire_valid = decision_valid if binary_mode else slot_valid_2d.float()
-                new_lp_fire_s = fire_dist.log_prob(fire_action.float()) * fire_valid
+                new_lp_fire_s = (new_log_prob_fire if binary_mode else
+                                 fire_dist.log_prob(fire_action.float()) * fire_valid)
                 old_lp_fire_s = to_dev(batch["old_log_probs"]["fire"]) * fire_valid
                 ratio_fire_s = torch.exp(
                     new_lp_fire_s - torch.clamp(old_lp_fire_s, min=-50)
@@ -269,7 +330,8 @@ class PPOLearner:
             with torch.no_grad():
                 sv = slot_valid_2d.float()                              # (B, MO)
                 sv_sum = sv.sum().clamp(min=1)
-                fire_probs = torch.sigmoid(fire_logits)                 # (B, MO)
+                fire_probs = (binary_launch_probs if binary_mode else
+                              torch.sigmoid(fire_logits))                # (B, MO)
                 slot_valid_count = sv.sum(dim=0).clamp(min=1)           # (MO,)
                 per_slot_fire = (fire_probs * sv).sum(dim=0) / slot_valid_count
                 fired_mask = (fire_probs > 0.5).float() * sv
@@ -307,14 +369,20 @@ class PPOLearner:
                 # fraction-of-uniform-max on one 0-1 scale (raw entropies are NOT
                 # cross-head comparable: ln2 vs ~ln40 vs ln32).
                 tgt_legal = target_valid.float().sum(dim=-1).clamp(min=1.0)   # (B, MO)
-                target_entropy_max = (tgt_legal.log() * sv).sum() / sv_sum
+                if binary_mode:
+                    tgt_legal = tgt_legal + 1.0  # NOOP is an additional executed action
+                    target_entropy_max = ((tgt_legal.log() * decision_valid).sum()
+                                          / decision_valid.sum().clamp(min=1.0))
+                else:
+                    target_entropy_max = (tgt_legal.log() * sv).sum() / sv_sum
                 fire_prior = outputs.get("_phase4_fire_prior")
                 fire_residual = outputs.get("_phase4_fire_residual")
                 ship_prior = outputs.get("_phase4_ship_prior")
                 ship_residual = outputs.get("_phase4_ship_residual")
                 fire_prior_rms = fire_resid_rms = fire_resid_ratio = 0.0
                 ship_prior_rms = ship_resid_rms = ship_resid_ratio = 0.0
-                fire_decision_flip = ship_decision_flip = 0.0
+                fire_flip_prob = fire_noop_to_commit = fire_commit_to_noop = fire_straddle_rate = 0.0
+                ship_decision_flip = 0.0
                 if fire_prior is not None and fire_residual is not None:
                     valid_targets = target_valid & slot_valid_2d.unsqueeze(-1)
                     valid_targets_f = valid_targets.float()
@@ -322,11 +390,12 @@ class PPOLearner:
                     fire_prior_rms = (((fire_prior * valid_targets_f) ** 2).sum() / vt_sum).sqrt()
                     fire_resid_rms = (((fire_residual * valid_targets_f) ** 2).sum() / vt_sum).sqrt()
                     fire_resid_ratio = fire_resid_rms / fire_prior_rms.clamp(min=1e-6)
-                    fire_prior_logits = _gather_target_logits(fire_prior, target_action)
-                    fire_decision_flip = (
-                        (((fire_prior_logits > 0) != (fire_logits > 0)).float() * sv).sum()
-                        / sv_sum
-                    )
+                    fire_conditioning = _fire_target_conditioning_metrics(
+                        target_logits, fire_prior, fire_residual, fire_mask, slot_valid_2d)
+                    fire_flip_prob = fire_conditioning["flip_prob"]
+                    fire_noop_to_commit = fire_conditioning["noop_to_commit_prob"]
+                    fire_commit_to_noop = fire_conditioning["commit_to_noop_prob"]
+                    fire_straddle_rate = fire_conditioning["straddle_rate"]
                 if ship_prior is not None and ship_residual is not None:
                     valid_targets_bins = target_valid.unsqueeze(-1) & slot_valid_2d.unsqueeze(-1).unsqueeze(-1)
                     valid_targets_bins_f = valid_targets_bins.float()
@@ -335,6 +404,8 @@ class PPOLearner:
                     ship_resid_rms = (((ship_residual * valid_targets_bins_f) ** 2).sum() / vtb_sum).sqrt()
                     ship_resid_ratio = ship_resid_rms / ship_prior_rms.clamp(min=1e-6)
                     ship_prior_logits = _gather_target_ship_logits(ship_prior, target_action)
+                    fire_prior_logits = (_gather_target_logits(fire_prior, target_action)
+                                         if fire_prior is not None else None)
                     ship_slots = (((fire_logits > 0) | (fire_prior_logits > 0)).float() * sv
                                   if fire_prior is not None else sv)
                     ship_decision_flip = (
@@ -373,7 +444,10 @@ class PPOLearner:
                 "ship_target_std": ship_target_std.item(),
                 "phase4_fire_resid_ratio": float(fire_resid_ratio),
                 "phase4_ship_resid_ratio": float(ship_resid_ratio),
-                "phase4_fire_decision_flip": float(fire_decision_flip),
+                "fire_target_flip_prob": float(fire_flip_prob),
+                "fire_target_noop_to_commit_prob": float(fire_noop_to_commit),
+                "fire_target_commit_to_noop_prob": float(fire_commit_to_noop),
+                "fire_target_straddle_rate": float(fire_straddle_rate),
                 "phase4_ship_decision_flip": float(ship_decision_flip),
                 "per_slot_fire_probs": per_slot_fire.detach().cpu().tolist(),
             }
