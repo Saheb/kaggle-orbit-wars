@@ -8,8 +8,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from action_mask import (actions_from_target_policy, compute_action_masks,
-                         resolve_binary_commit_np)
+from action_mask import (MIN_BINARY_COMMIT_SHIPS, actions_from_target_policy,
+                         compute_action_masks, resolve_binary_commit_np)
 from binary_policy import (binary_action_entropy, binary_action_log_probs,
                            binary_taken_log_prob)
 from config import Config
@@ -47,6 +47,48 @@ def test_binary_resolver_semantics_and_torch_parity():
         assert np.array_equal(np_sizes, t_sizes.numpy())
         assert np.array_equal(np_ok, t_ok.numpy())
         assert np_sizes[0, 1] == expected_target
+
+
+def test_minimal_gates_open_what_full_gates_block_and_stay_in_torch_parity():
+    """gates='minimal': COMMIT is all-in at ANY target; the only gate is S >= MIN_COMMIT.
+
+    The two cases that matter are the ones 'full' blocks and the measured data says cost us:
+    the unaffordable single-source attack (the pincer wall — 62.2% of attack options) and the
+    unthreatened own planet (the reinforce wall — 73.3% of reinforce options).
+    """
+    cases = [
+        # (pairwise, source, expect_full, expect_minimal)
+        (_pairwise(1, 0), 1, 0, 0),                       # below the floor: NOOP either way
+        (_pairwise(10, 6), 10, 10, 10),                   # affordable attack: unchanged
+        (_pairwise(5, 6), 5, 0, 5),                       # PINCER: full blocks, minimal all-ins
+        (_pairwise(10, 0, own=True), 10, 0, 10),          # REINFORCE: full blocks (maintain=1),
+                                                          # minimal sends the whole garrison
+    ]
+    for pw, source, expect_full, expect_minimal in cases:
+        S = np.array([source], dtype=np.float32)
+        full_sizes, _ = resolve_binary_commit_np(pw, S, gates="full")
+        min_sizes, min_ok = resolve_binary_commit_np(pw, S, gates="minimal")
+        assert full_sizes[0, 1] == expect_full, (source, full_sizes[0, 1], expect_full)
+        assert min_sizes[0, 1] == expect_minimal, (source, min_sizes[0, 1], expect_minimal)
+        # torch twin must agree exactly — training vs eval divergence is silent otherwise
+        t_sizes, t_ok = _resolve_binary_commit(
+            torch.from_numpy(pw), torch.tensor([source], dtype=torch.float32), gates="minimal")
+        assert np.array_equal(min_sizes, t_sizes.numpy()), (min_sizes, t_sizes.numpy())
+        assert np.array_equal(min_ok, t_ok.numpy())
+
+
+def test_minimal_gates_still_respect_the_min_commit_floor():
+    """The one surviving constant: a source below MIN_BINARY_COMMIT_SHIPS cannot commit, so
+    'minimal' does not reopen the 1-ship-probe pathology."""
+    for source in range(0, MIN_BINARY_COMMIT_SHIPS):
+        sizes, ok = resolve_binary_commit_np(
+            _pairwise(source, 6), np.array([source], dtype=np.float32), gates="minimal")
+        assert not ok.any(), f"source={source} should be infeasible below the floor"
+        assert sizes.sum() == 0.0
+    sizes, ok = resolve_binary_commit_np(
+        _pairwise(MIN_BINARY_COMMIT_SHIPS, 6),
+        np.array([MIN_BINARY_COMMIT_SHIPS], dtype=np.float32), gates="minimal")
+    assert ok.any() and sizes[0, 1] == MIN_BINARY_COMMIT_SHIPS
 
 
 def _decode(source_ships, attack_sizing="all-in", projected_hold_sizes=None):

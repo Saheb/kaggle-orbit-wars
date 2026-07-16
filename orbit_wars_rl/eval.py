@@ -110,6 +110,9 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
 
     if "ship_bin_mode" in ckpt_cfg:
         cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
+    # Binary commit gates are a MASK contract: evaluating a "minimal"-trained checkpoint under
+    # "full" would delete 80% of the actions it learned to use. Absent => legacy "full".
+    cfg.model.binary_commit_gates = str(ckpt_cfg.get("binary_commit_gates", "full"))
 
     # --- feature projection dims: always infer from weight shapes ---
     if "planet_proj.weight" in sd:
@@ -320,6 +323,9 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
     _timeline = int(model.planet_proj.in_features) > 20
     # Same for the projected economy series (global_proj width 63 vs the earlier 15).
     _global_econ = int(model.global_proj.in_features) > 15
+    # Binary commit gates — a MASK contract that must match training. Read off the model (set by
+    # evaluate_checkpoint from the checkpoint), like allow_reinforce above.
+    _binary_gates = str(getattr(model, "binary_commit_gates", "full"))
 
     def agent_fn(obs):
         # obs may be a dict or an Observation namedtuple depending on caller
@@ -378,6 +384,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 sample=sample,
                 ship_bin_mode=ship_bin_mode,
                 binary_attack_sizing=binary_attack_sizing,
+                binary_commit_gates=_binary_gates,
                 projected_hold_sizes=(
                     features["projected_hold_sizes"].cpu().numpy()
                     if "projected_hold_sizes" in features else None),
@@ -1558,6 +1565,8 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     # Carry the checkpoint's reinforcement setting onto the model so the agent's
     # target masking matches training (build_agent_fn reads it off the model).
     model.allow_reinforce = bool(getattr(cfg.model, "allow_reinforce", False))
+    # Binary commit gates — persisted mask contract (see load_checkpoint).
+    model.binary_commit_gates = str(getattr(cfg.model, "binary_commit_gates", "full"))
     # Reinforce-discipline masks (gate / forward-staging / garrison floor) — MUST match
     # the training env, else the policy reinforces where it was masked and self-sabotages.
     # Values are auto-loaded from checkpoint metadata unless explicitly overridden.

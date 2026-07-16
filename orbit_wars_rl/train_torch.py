@@ -36,6 +36,7 @@ from ppo import PPOLearner
 from torch_env import (
     VecTorchEnv,
     MAX_OWNED,
+    MIN_BINARY_COMMIT_SHIPS,
     SHIP_COUNTS,
     FRACTION_BIN_VALUES,
 )
@@ -703,9 +704,18 @@ def train(args):
     # PROVENANCE only (eval always clamps via _ship_bin_to_count, so this doesn't change the eval
     # contract) — but record how the ckpt was trained (drop vs clamp) so it's never ambiguous.
     cfg.model.ship_overflow_mode = args.ship_overflow_mode
+    if args.binary_commit_gates is not None:
+        cfg.model.binary_commit_gates = args.binary_commit_gates
+    if cfg.model.ship_bin_mode == "binary":
+        print(f"Binary commit gates: {cfg.model.binary_commit_gates}"
+              + ("  (COMMIT = all-in at ANY target; only gate is S >= "
+                 f"{MIN_BINARY_COMMIT_SHIPS} ships)"
+                 if cfg.model.binary_commit_gates == "minimal"
+                 else "  (legacy: capture_required affordability + maintain/defend_ok)"))
     env = VecTorchEnv(num_envs=args.num_envs, num_players=args.num_players,
                       device=device, episode_steps=500,
                       ship_bin_mode=cfg.model.ship_bin_mode,
+                      binary_commit_gates=cfg.model.binary_commit_gates,
                       ship_overflow_mode=args.ship_overflow_mode,
                       action_decode=args.action_decode,
                       allow_reinforce=args.allow_reinforce,
@@ -2089,6 +2099,17 @@ if __name__ == "__main__":
                         help="Checkpoint to seed the anchor from. Default: the run's starting "
                              "weights (from-scratch: the random init, which the first promotion "
                              "replaces almost immediately).")
+    parser.add_argument("--binary-commit-gates", type=str, default=None,
+                        choices=["full", "minimal"],
+                        help="Binary-mode commit legality. 'full' (default) = the legacy "
+                             "capture_required affordability gate + maintain/defend_ok, which "
+                             "MEASURED removes 80.2%% of the action space (62.2%% of attacks — "
+                             "pincers inexpressible; 73.3%% of reinforces — no pre-emptive "
+                             "consolidation). 'minimal' = COMMIT sends the full garrison at ANY "
+                             "target, gated only on having MIN_BINARY_COMMIT_SHIPS ships "
+                             "(SimJeg's shipped design; matches Ender's measured 97.7%% all-in). "
+                             "Persisted in the checkpoint — eval/export auto-match. See "
+                             "docs/training.md 'THE REINFORCEMENT LEGALITY WALL'.")
     parser.add_argument("--ship-bin-mode", type=str, default=None,
                         choices=["absolute", "fraction", "intent", "binary"],
                         help="Ship-head action space. 'absolute' (32 count bins, default), "

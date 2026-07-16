@@ -66,6 +66,7 @@ _TIMELINE = {timeline_features}  # projected-timeline planet channels (dim 116 v
 _GLOBAL_ECON = {global_econ}  # projected economy-series global channels (dim 63 vs 15)
 _FIRE_THRESHOLD = {fire_threshold}
 _SHIP_BIN_MODE = {ship_bin_mode}
+_BINARY_COMMIT_GATES = {binary_commit_gates}  # mask contract — MUST match training
 _TARGET_DECODE = {target_decode}
 _ALLOW_REINFORCE = {allow_reinforce}
 # Reinforce-DISCIPLINE masks — MUST match training values (not stored in the checkpoint).
@@ -359,6 +360,7 @@ def agent(obs, cfg=None):
             obs, player,
             fire_threshold=_FIRE_THRESHOLD,
             ship_bin_mode=_SHIP_BIN_MODE,
+            binary_commit_gates=_BINARY_COMMIT_GATES,
             allow_reinforce=_ALLOW_REINFORCE,
             reinforce_gate_min_planets=_REINFORCE_GATE_MIN,
             reinforce_forward_only=_REINFORCE_FORWARD_ONLY,
@@ -468,6 +470,7 @@ def _apply_checkpoint_model_config(checkpoint, cfg: Config) -> dict:
 
     if "ship_bin_mode" in ckpt_cfg:
         cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
+    cfg.model.binary_commit_gates = str(ckpt_cfg.get("binary_commit_gates", "full"))
     # Planet input width from the weights (mirrors eval.load_checkpoint): 116 = timeline-era,
     # 20 = pre-timeline. Decides both the model shape and the exported _TIMELINE flag.
     if isinstance(state_dict, dict) and "planet_proj.weight" in state_dict:
@@ -606,6 +609,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         pairwise_feature_dim=m.pairwise_feature_dim,
         fire_threshold=fire_threshold,
         ship_bin_mode=repr(m.ship_bin_mode),
+        binary_commit_gates=repr(getattr(m, "binary_commit_gates", "full")),
         target_decode=target_decode,
         allow_reinforce=allow_reinforce,
         reinforce_gate_min_planets=reinforce_gate_min_planets,

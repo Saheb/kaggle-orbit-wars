@@ -701,6 +701,7 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
                                fire_threshold=0.5, sample: bool = False,
                                ship_bin_mode: str = "absolute",
                                binary_attack_sizing: str = "all-in",
+                               binary_commit_gates: str = "full",
                                projected_hold_sizes=None,
                                projected_hold_feasible=None,
                                projected_hold_stats: dict = None,
@@ -765,7 +766,7 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
             raise ValueError("binary ship mode requires pairwise_features")
         binary_sizes, binary_feasible = resolve_binary_commit_np(
             pairwise_features, max_ships, attack_sizing=binary_attack_sizing,
-            projected_hold_sizes=projected_hold_sizes)
+            projected_hold_sizes=projected_hold_sizes, gates=binary_commit_gates)
 
     def _own_reinforce_illegal(src_planet, tgt_planet):
         """True if an own (reinforce) target is barred by gate / forward-staging / reverse-edge cooldown."""
@@ -1126,12 +1127,23 @@ def resolve_intent_sizes_np(cap_cost, reach_em, mass_soon, src_ships, is_own):
 
 
 def resolve_binary_commit_np(pairwise_features, src_ships, attack_sizing="all-in",
-                             projected_hold_sizes=None):
+                             projected_hold_sizes=None, gates="full"):
     """Deterministic NOOP/COMMIT plan from normalized pairwise features.
 
-    Non-owned targets commit the full source garrison, but only when that single source can
-    afford the projected capture cost. Owned targets use the existing maintain/defend amount.
-    Any commit below five ships is infeasible, so the learned fire bit becomes NOOP.
+    ``gates="full"`` (legacy): non-owned targets commit the full source garrison, but only when
+    that single source can afford the projected capture cost; owned targets commit the
+    maintain/defend amount and are legal only when that amount is >= MIN_BINARY_COMMIT_SHIPS.
+
+    ``gates="minimal"``: COMMIT means send the whole garrison at ANY target; the only gate is
+    having MIN_BINARY_COMMIT_SHIPS ships. Measured on 758 real own-target / 12,192 attack cells,
+    "full" removes 80.2% of the action space — capture_required alone blocks 62.2% of attacks
+    (so multi-source pincers are inexpressible) and maintain<5 blocks 73.3% of reinforces (so a
+    planet cannot be reinforced until >=4 enemy ships are already <=6 steps out, i.e. pre-emptive
+    consolidation is impossible). Both gates compute a verdict from features the model already
+    sees (ch10 cap-cost, ch20 mass-soon, ch22-25 resolved sizes) and then delete the actions it
+    might disagree with — the pattern writeup_lessons §1 warns about, and Isaiah reported masking
+    made his model WORSE. "minimal" is SimJeg's shipped design: two actions per body, no-op or
+    all-in. See docs/training.md "THE REINFORCEMENT LEGALITY WALL".
 
     Non-default attack sizing is eval-only: feasibility and the policy's NOOP/target
     distribution stay all-in-identical, while only the executed non-owned amount changes.
@@ -1139,15 +1151,23 @@ def resolve_binary_commit_np(pairwise_features, src_ships, attack_sizing="all-in
     """
     if attack_sizing not in ("all-in", "capture-defend", "projected-hold"):
         raise ValueError(f"unknown binary attack sizing: {attack_sizing}")
+    if gates not in ("full", "minimal"):
+        raise ValueError(f"unknown binary commit gates: {gates}")
     pw = np.asarray(pairwise_features, dtype=np.float32)
     S = np.asarray(src_ships, dtype=np.float32)[..., np.newaxis]
     is_own = pw[..., 5] > 0.5
     is_enemy = pw[..., 6] > 0.5
     capture_required = pw[..., 10] * 200.0 + is_enemy.astype(np.float32) * pw[..., 8] * 5.0 * 3.0 + 1.0
     defend = np.rint(pw[..., 24] * 200.0).astype(np.float32)
-    attack_ok = (S >= MIN_BINARY_COMMIT_SHIPS) & (S + 1e-3 >= capture_required)
-    defend_ok = (defend >= MIN_BINARY_COMMIT_SHIPS) & (S + 1e-3 >= defend)
-    feasible = np.where(is_own, defend_ok, attack_ok)
+    if gates == "minimal":
+        # Only gate: do you have ships. Own targets lose the maintain sizing too — COMMIT is
+        # all-in everywhere, which is what Ender actually does (measured 99.1% all-in reinforce).
+        feasible = np.broadcast_to(S >= MIN_BINARY_COMMIT_SHIPS, is_own.shape).copy()
+        defend = np.broadcast_to(S, defend.shape).astype(np.float32)
+    else:
+        attack_ok = (S >= MIN_BINARY_COMMIT_SHIPS) & (S + 1e-3 >= capture_required)
+        defend_ok = (defend >= MIN_BINARY_COMMIT_SHIPS) & (S + 1e-3 >= defend)
+        feasible = np.where(is_own, defend_ok, attack_ok)
     if attack_sizing == "projected-hold":
         if projected_hold_sizes is None:
             raise ValueError("projected-hold sizing requires projected_hold_sizes")

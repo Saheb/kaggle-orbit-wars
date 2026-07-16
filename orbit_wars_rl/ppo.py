@@ -676,6 +676,7 @@ class PPOLearner:
                 "num_ship_bins": int(getattr(model_cfg, "num_ship_bins", 32)),
                 "pairwise_feature_dim": int(getattr(model_cfg, "pairwise_feature_dim", 0)),
                 "ship_bin_mode": str(getattr(model_cfg, "ship_bin_mode", "absolute")),
+                "binary_commit_gates": str(getattr(model_cfg, "binary_commit_gates", "full")),
                 "action_decode": str(getattr(model_cfg, "action_decode", "angle")),
                 "allow_reinforce": bool(getattr(model_cfg, "allow_reinforce", False)),
                 # Persist feature semantics so loaders can reject incompatible checkpoints.

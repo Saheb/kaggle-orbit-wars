@@ -229,11 +229,15 @@ def _resolve_intent_sizes(cap_cost, reach_em, mass_soon, src_ships, is_own):
     return torch.stack([capture, cap_def, maintain, all_in], dim=-1)
 
 
-def _resolve_binary_commit(pairwise_features, src_ships):
-    """Torch twin of action_mask.resolve_binary_commit_np."""
+def _resolve_binary_commit(pairwise_features, src_ships, gates="full"):
+    """Torch twin of action_mask.resolve_binary_commit_np (see it for the gates rationale)."""
     S = src_ships.unsqueeze(-1).float()
     is_own = pairwise_features[..., 5] > 0.5
     is_enemy = pairwise_features[..., 6] > 0.5
+    if gates == "minimal":
+        feasible = (S >= MIN_BINARY_COMMIT_SHIPS).expand_as(is_own)
+        ships = S.expand_as(is_own).float()
+        return torch.where(feasible, ships, torch.zeros_like(ships)), feasible
     capture_required = (pairwise_features[..., 10] * 200.0
                         + is_enemy.float() * pairwise_features[..., 8] * 5.0 * 3.0 + 1.0)
     defend = torch.round(pairwise_features[..., 24] * 200.0)
@@ -254,6 +258,9 @@ class VecTorchEnv:
         device: str | torch.device = "cpu",
         episode_steps: int = 500,
         ship_bin_mode: str = "absolute",
+        # "full" = capture_required + maintain/defend_ok gates (legacy); "minimal" = COMMIT is
+        # all-in at any target, gated only on having MIN_BINARY_COMMIT_SHIPS. Binary mode only.
+        binary_commit_gates: str = "full",
         ship_overflow_mode: str = "clamp",   # matches eval (_ship_bin_to_count clamps); "drop"=legacy bug
         action_decode: str = "angle",
         win_margin_coeff: float = 0.0,
@@ -379,6 +386,9 @@ class VecTorchEnv:
         # See ModelConfig.ship_bin_mode. "absolute" uses SHIP_COUNTS lookup;
         # "fraction" uses round(FRAC_VALUES[bin] * src_ships).
         self.ship_bin_mode = ship_bin_mode
+        if binary_commit_gates not in ("full", "minimal"):
+            raise ValueError(f"unknown binary_commit_gates: {binary_commit_gates}")
+        self.binary_commit_gates = binary_commit_gates
         # Intent sizing (#4): per-player raw resolved-size table {player: (N,MO,P,4)}, stashed by
         # get_features and read at decode (_apply_actions) to turn a chosen intent → exact ships.
         self._intent_sizes = {}
@@ -1302,7 +1312,8 @@ class VecTorchEnv:
         if self.ship_bin_mode == "intent":
             self._intent_sizes[player] = self._pw_intent_sizes
         elif self.ship_bin_mode == "binary":
-            commit_sizes, commit_feasible = _resolve_binary_commit(pairwise, max_ships)
+            commit_sizes, commit_feasible = _resolve_binary_commit(
+                pairwise, max_ships, gates=self.binary_commit_gates)
             legal_commit = target_mask & commit_feasible
             has_commit = legal_commit.any(dim=-1)
             # Rows with no feasible commit retain a valid but unused target categorical;

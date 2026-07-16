@@ -696,15 +696,52 @@ at any time. The binary lineage (Yijie **1.2–4.3%**) ADDED this wall. That is 
 mechanistic candidate for "binary bought Ajay and cost Yijie" — Ajay does not punish an
 un-consolidated empire; Ender and Yijie do.
 
-**Fix candidates (one delta each, in preference order):**
-1. Make own targets **all-in-legal**: `feasible_own = (S >= 5)`, ships = S (exactly Ender's 99.1%
-   all-in reinforce). Smallest possible change; removes the wall without adding an action.
-2. Keep `maintain` sizing but drop the legality gate to `S >= 5`, so pre-emptive reinforcement is
-   legal at the trickle size.
-3. Widen `_THREAT_ETA_WINDOW` for the maintain computation only (weakest — still reactive).
-
 **What remains true regardless:** 61.6% of captures land out-massed, churn 1.76×, production
 +0@32 → −34@100.
+
+### `--binary-commit-gates minimal` — BUILT 2026-07-16 (the Arm-B cleanup)
+
+Measured on 758 own-target + 12,192 attack cells from champion-vs-Ender play, the legacy gates
+remove **80.2%** of the action space:
+
+| | cells | legal | blocked by |
+|---|---:|---:|---|
+| attacks | 12,192 | **21.3%** | `capture_required` **62.2%** · `S<5` 16.5% |
+| reinforces | 2,140 | **11.4%** | `maintain<5` **73.3%** · `S<5` 15.3% |
+| all | 14,332 | **19.8%** | |
+
+`--binary-commit-gates minimal` (default stays `full`; persisted in the checkpoint so eval/export
+auto-match) makes COMMIT mean **send the whole garrison at ANY target**, gated only on
+`S >= MIN_BINARY_COMMIT_SHIPS`. Verified on the SAME states: **19.8% → 83.7% legal.**
+
+- **Removed:** `capture_required` (pincers become expressible), `maintain`/`defend`/`defend_ok`
+  (pre-emptive reinforcement becomes expressible).
+- **Kept:** the 2 binary actions (unchanged), ch10/ch20/ch22-25 **as features** (the model can
+  still *see* cap-cost, mass-soon and the resolved sizes — it just isn't overruled by them), the
+  reinforce masks (gate/floor/cooldown — orthogonal), `_THREAT_ETA_WINDOW` (feature-only; it no
+  longer touches actions at all once `maintain` leaves the resolver), intent mode (untouched).
+- **The one surviving constant:** `MIN_BINARY_COMMIT_SHIPS = 5`, kept as the anti-1-ship-probe
+  floor. `tests/test_binary_commit.py` locks it (a source below the floor stays infeasible) plus
+  np/torch twin parity on the exact cases `full` blocked.
+
+**This is SimJeg's shipped design** (two actions per body: no-op or all-in, ~top 5) and it matches
+Ender's *measured* behaviour (97.7% all-in overall; 99.1% on reinforces).
+
+**The bar this arm must clear: Yijie ~6–7%** — the ship-KL/absolute plateau (§ship-KL verdict:
+"dead flat 1M→8M", "does NOT close the gap"), which is the best this repo has produced. Beating
+the binary lineage's 3–4% is NOT success; that lineage is the suspect.
+
+**What it bets against:** `capture_required` was the binary experiment's deliberate anti-under-commit
+mechanism ("attacks that a single source cannot afford are masked before sampling"), and it is what
+produced the mechanism PASS (cap/atk 0.665 vs Jake 0.710). **Expect cap/atk to fall.** That is the
+trade: cap/atk is a means, and it already rose while Yijie fell. Ajay may regress too — the gates
+are effectively tuned for Ajay-ish play, which is what 80.5% was buying.
+
+**Tripwires:** `ship0` must stay ~0 (the floor should hold); launch_rate should rise off 0.09 but
+not toward spray (noop-KL 0.3 still governs the mean); NOOP rate falls (measured 0.88–0.92 → ~0.44
+in a CPU smoke) because more actions are actionable — that is expected, not degeneracy.
+**Primary evidence: Yijie 256-game trajectory + planets@50/100 + churn + production delta@50/100.
+Ajay is the regression guard, NOT the objective.**
 
 ⚠ Caveat on `enemy_reach`: it sums every enemy planet's garrison within `REACH_K=15` steps plus
 resolved inbound fleets — an upper bound (the enemy will not send everything), so "60% out-massed"

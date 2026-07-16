@@ -71,13 +71,15 @@ cannot pre-emptively reinforce; only react within a 6-step window.** `ship_bin_m
 
 ## Next in line
 
-0. ⭐ **Remove the reinforcement legality wall** (docs/training.md). Binary mode makes 85.4% of
-   reinforce options ILLEGAL — pre-emptive consolidation is inexpressible. Smallest delta:
-   own targets become all-in-legal (`feasible_own = S >= 5`, ships = S), which is exactly Ender's
-   measured 99.1%-all-in reinforce behaviour. Predicted chain: pre-emptive reinforce becomes
-   legal → fresh captures get garrisoned → out-massed-at-capture ↓, churn ↓, planets@100 ↑ →
-   Yijie ↑. Primary evidence: Yijie panel + planets@50/100 + churn; Ajay as regression guard.
-   This is a mask/resolver change, not a reward or an action-space addition.
+0. ⭐ **`--binary-commit-gates minimal`** — **BUILT 2026-07-16, ready to launch.** Deletes the two
+   hand-tuned walls (`capture_required`, `maintain`/`defend_ok`); COMMIT = all-in at any target,
+   gated only on `S >= MIN_BINARY_COMMIT_SHIPS`. Measured: action space **19.8% → 83.7%** legal on
+   the same states. Nothing new is added — it is pure deletion; ch10/ch20/ch22-25 remain as
+   FEATURES so the model still sees cap-cost/threat/resolved-sizes, it just isn't overruled by
+   them. This is SimJeg's shipped design and matches Ender's measured 97.7% all-in.
+   **Bar: Yijie ~6–7%** (the ship-KL/absolute plateau — the repo's best). Beating binary's 3–4% is
+   not success. Expect cap/atk and possibly Ajay to fall; that is the trade. Full contract,
+   tripwires and the "what it bets against" in docs/training.md.
 
 1. ~~**Best-ckpt anchor + promotion gate**~~ **BUILT 2026-07-16** (`--anchor-kl-coef`,
    `--anchor-value-coef`, `--anchor-promote-winrate/-min-games`, `--anchor-from`). KL(live ‖

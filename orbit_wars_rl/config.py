@@ -46,6 +46,12 @@ class ModelConfig:
     # MUST match the BC label scheme that produced the checkpoint.
     # Default "absolute" preserves legacy checkpoint behaviour.
     ship_bin_mode: str = "absolute"
+    # Binary-mode commit gates. "full" = legacy (capture_required affordability + maintain/
+    # defend_ok); "minimal" = COMMIT is all-in at ANY target, gated only on having
+    # MIN_BINARY_COMMIT_SHIPS. Measured, "full" removes 80.2% of the action space and makes
+    # pre-emptive reinforcement inexpressible — see docs/training.md "THE REINFORCEMENT LEGALITY
+    # WALL". Persisted in the checkpoint: eval/export MUST mask the same way training did.
+    binary_commit_gates: str = "full"
     pairwise_feature_dim: int = 36   # 22 base + 4 intent + 6 target-CF + 4 source-CF
     max_planets: int = 48            # for target_head output size; matches EnvConfig
     # Target-conditioned fire/ship residual output init scale. The phase4 name is
