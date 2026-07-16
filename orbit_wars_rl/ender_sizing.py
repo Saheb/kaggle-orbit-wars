@@ -86,26 +86,62 @@ def _show(name, hist):
         print(f"    {lab:>16}  {100*n/tot:5.1f}%  {bar}")
 
 
+def _checkpoint_agent(path, gate_min_planets=2, garrison_floor=0.0):
+    """Load one of OUR checkpoints as an agent_fn, so its sizing is directly comparable to a
+    path-agent's on the same histogram.
+
+    ⚠ build_agent_fn reads allow_reinforce and the discipline masks OFF THE MODEL OBJECT
+    (eval.py:391 / :1560), NOT from its own kwargs. Forgetting to set them silently disables
+    reinforcement and makes any reinforce-related measurement garbage. Defaults mirror the
+    eval/watcher masks (gate2/floor0).
+    """
+    import torch
+    from config import Config
+    from model import EntityTransformer
+    cfg = Config(); cfg.device = "cpu"
+    device = torch.device("cpu")
+    sd, action_decode = ev.load_checkpoint(path, cfg)
+    model = EntityTransformer(cfg.model).to(device)
+    model.load_state_dict(sd)
+    model.eval()
+    model.allow_reinforce = bool(getattr(cfg.model, "allow_reinforce", False))
+    model.reinforce_gate_min_planets = int(gate_min_planets)
+    model.reinforce_forward_only = bool(getattr(cfg.model, "reinforce_forward_only", False))
+    model.reverse_edge_cooldown = int(getattr(cfg.model, "reverse_edge_cooldown", 0))
+    model.reinforce_garrison_floor = float(garrison_floor)
+    model.sufficient_commit_factor = float(getattr(cfg.model, "sufficient_commit_factor", 0.0))
+    print(f"  [checkpoint agent] allow_reinforce={model.allow_reinforce} "
+          f"gate>={model.reinforce_gate_min_planets} floor={model.reinforce_garrison_floor} "
+          f"cooldown={model.reverse_edge_cooldown} mode={cfg.model.ship_bin_mode}")
+    return ev.build_agent_fn(model, device, fire_threshold=0.5,
+                             ship_bin_mode=cfg.model.ship_bin_mode,
+                             target_decode=(action_decode == "target"), num_players=2)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=8)
     ap.add_argument("--agent", default=ENDER)
     ap.add_argument("--opponent", default=AJAY)
+    ap.add_argument("--agent-checkpoint", default=None,
+                    help="measure one of OUR checkpoints instead of a path agent")
     args = ap.parse_args()
+    agent = _checkpoint_agent(args.agent_checkpoint) if args.agent_checkpoint else args.agent
 
     atk, reinf = Counter(), Counter()
     phase = [Counter(), Counter(), Counter()]
     raw = []
     for seed in range(args.seeds):
         for my_seat in (0, 1):
-            agents = ([args.agent, args.opponent] if my_seat == 0
-                      else [args.opponent, args.agent])
+            agents = ([agent, args.opponent] if my_seat == 0
+                      else [args.opponent, agent])
             env = make("orbit_wars", configuration={"seed": seed}, debug=False)
             env.run(agents)
             collect(env.steps, my_seat, atk, reinf, phase, raw)
             print(f"  seed={seed} seat={my_seat} launches={len(raw)}", flush=True)
 
-    print(f"\n=== {args.agent} launch sizing vs {args.opponent} "
+    who = args.agent_checkpoint or args.agent
+    print(f"\n=== {who} launch sizing vs {args.opponent} "
           f"({2*args.seeds} games, {len(raw)} launches) ===")
     _show("ATTACK launches (target not owned)", atk)
     _show("REINFORCE launches (own target)", reinf)

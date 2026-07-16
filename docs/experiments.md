@@ -15,15 +15,33 @@ One line per experiment, in rough priority order. One change per run; record hyp
 | Ender launch sizing | **Measurement** | Ender all-in 97.3% vs Ajay · **97.7% vs itself** | Kills learned commitment (#3) |
 | Champion vs Ender panel | **Measurement** | **0/256**, peel 0.99, wiped 100%, prod +0@32 → −34@100 | Retention is the gap |
 
-## The budget caveat that qualifies every verdict above
+## ⛔ "Just train longer" — CHECKED AGAINST OUR OWN CURVES, AND IT DOES NOT HOLD (2026-07-16)
 
-Every arm in this table ran 25–55M steps. Yijie trained **13B** samples and reports his
-from-scratch run only *caught up* to an imitation warm start at 10–20k updates (~1.3–2.6B
-samples). tl100m was still gaining ~+5pp/10M at 100M when it stopped. So "flat Yijie at 0–6%"
-is a verdict drawn at ~0.4% of the winning budget — it bounds nothing. kiyotah's advice applies
-verbatim: *"run fewer experiments for longer; learning curves change substantially later."*
-This is why the anchor + promotion gate is the gating item: it is not just a stability fix, it
-is the precondition for running one arm long enough for its verdict to mean anything.
+The tempting story is that every flat Yijie verdict is a budget artifact (25–55M vs Yijie's 13B).
+**Our own data refutes it.** `tl100m_s2` continued tl100m from 99.5M for **+35M more steps**:
+
+| cumulative steps | ~100M | ~110M | ~120M | ~130M | ~135M |
+|---|---:|---:|---:|---:|---:|
+| Ajay | 74.6 | 76.6 | 73.0 | 81.2 | 78.1 |
+
+That is a **plateau at ~77% ±4**, i.e. ~+1pp/10M — not the "+5pp/10M at the tail" the stage-1 note
+projected (that read the noise band of a saturating metric as a trend). And the Yijie curves are
+flat over long stretches within a lineage: `binarymarg` 1.2 → 4.3 over 45M; `binary100m_scratch`
+Ajay **plateaued at 48–49% from 30M through 50M** while Yijie sat at 1–2%.
+
+**So plateaus are real and we do detect them.** Budget is not the free explanation. What the
+curves also show, and this is the uncomfortable one:
+
+| lineage | style | Yijie |
+|---|---|---:|
+| `shipkl_probe` (ship-KL on the tl100m timeline lineage, ~136M cumulative) | spray-ier, reinf 0.35 | **5.9–7.0%** |
+| `binarymarg` / binary all-in (~70M cumulative) | disciplined, reinf 0.21–0.36 | **1.2–4.3%** |
+
+**The binary all-in program bought Ajay (57→80%) and appears to have COST Yijie (~7%→~3%).**
+Confounded by cumulative budget (136M vs 70M) and lineage, so it is not a clean A/B — but it is the
+opposite of what a "we're on the right track, just under-trained" story predicts, and it is the
+single most important open question in this table. The pre-binary lineage was closer to the winners
+on reinforce share AND better against the strong opponent.
 
 ## Measurement: we are flying with two broken instruments
 

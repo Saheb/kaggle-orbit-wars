@@ -637,20 +637,36 @@ informative against opponents we sometimes beat — vs Ajay it is 0.59 — but i
 | competitive **&** out-massed at capture | n=16, median hold **16st** | |
 | competitive **& NOT** out-massed at capture | n=66, median hold **55st** | **we CAN hold what lands safely — 3.4× longer** |
 | captures landing already out-massed | **60.0%** | |
-| lost captures we **never reinforced** | **91.9%** | ⇒ the actual mechanism |
+| lost captures we **never reinforced** | **63.9%** | high, but see the correction below |
 
-**Verdict — neither A nor B; it is FOLLOW-UP.** When a capture lands safe and the game is even we
-hold it 55 steps, so target selection and holding are not broken per se. But **60% of captures
-land already out-massed** and **92% of lost captures never receive a single reinforcing launch**.
-We capture and abandon. Note the sting: our reinforce share vs Ender is 0.42 — we ARE reinforcing,
-just not the conquests that are about to be peeled (home/initial planets are excluded from the
-capture set by construction, so that 42% is going to the core). Ender, by contrast, spends **70.8%**
-of its launches reinforcing and ends with 18.5 planets.
+**Verdict — neither A nor B.** When a capture lands safe and the game is even we hold it **57
+steps** vs **14** for one that lands out-massed, so holding is not broken; we hold what lands
+safely. The standing fact is that **61.6% of captures land already out-massed** and we re-take the
+same planet **1.76×**. Selection into unholdable positions + churn, not sizing and not a late
+collapse.
 
-Mechanistic suspicion (untested): after an all-in capture the source is empty, so the follow-up
-must come from a *different* planet — which requires the cross-planet coordination our fully
-parallel per-source decoding cannot express (writeup_lessons §2: "our force-concentration wall").
-Ender all-ins too, but sustains a bigger producing empire that refills sources.
+⚠️ **MEASUREMENT BUG — a first version of this section claimed "92% of lost captures never
+reinforced" and blamed follow-up. That was MY bug, not the agent's.** `build_agent_fn` reads
+`allow_reinforce` and the discipline masks **off the model object** (eval.py:391 / :1560); the
+probe never set them, so reinforcement was disabled in the measurement. Corrected: never-reinforced
+is **63.9%**, and the probes now set the masks and refuse to run on `allow_reinforce=False`. Every
+other number in this table moved <2pp. Lesson: any probe that builds its own agent must configure
+the model exactly as `evaluate_checkpoint` does, or it measures its own configuration.
+
+**Two follow-on hypotheses, both KILLED by measurement (2026-07-16):**
+1. *"Our reinforcements are a trickle."* The resolver is asymmetric in code — attacks send the
+   full garrison, own targets send `maintain = enemy_mass_soon + 1` (a 6-step window). **In play
+   it does not bind:** the threat (median reachable 106) routinely exceeds the source garrison
+   (median 27), so `maintain` clips to S. Measured, our reinforces are **94.6% all-in** vs Ender's
+   **99.1%**. Sizing is not the difference.
+2. *"We can't reinforce until it's too late (defend_ok needs threat ≥ 4)."* Would predict a
+   collapsed reinforce share; measured share vs Ender is **36%** (223 of 619 launches) against
+   Ender's 43.4% vs Ajay. Same ballpark. Not a legality wall.
+
+**What remains after all that:** ours vs Ender is 99.7% all-in attacks / 94.6% all-in reinforces /
+36% reinforce share — a policy shape *close to Ender's* — and we still lose 0/256 while ending at
+0 planets vs its 18.5. The difference is not in the launch primitives. It is WHICH targets and the
+resulting economy: 61.6% of captures land out-massed, churn 1.76×, production +0@32 → −34@100.
 
 ⚠ Caveat on `enemy_reach`: it sums every enemy planet's garrison within `REACH_K=15` steps plus
 resolved inbound fleets — an upper bound (the enemy will not send everything), so "60% out-massed"
