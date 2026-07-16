@@ -743,6 +743,24 @@ in a CPU smoke) because more actions are actionable — that is expected, not de
 **Primary evidence: Yijie 256-game trajectory + planets@50/100 + churn + production delta@50/100.
 Ajay is the regression guard, NOT the objective.**
 
+**LAUNCHED 2026-07-16** — `binarygates100m_l4`, FROM SCRATCH, 100M, GCP L4 `orbit-wars-binarygates`
+**asia-south1-b** (us-west1-a was STOCKOUT). Script:
+`gpu_run_artifacts/binarygates100m_l4/start_training.sh`. Single delta vs the binary L4 recipe:
+`--binary-commit-gates minimal`. 512 envs × 64, mb 32, epochs 2, cosine 3e-4 over a 120M horizon,
+noop-KL 0.3, self-pool 0.5, gate2/cooldown3, bf16 + compile + compile-features, NO `--gpu-storage`
+(L4 OOM), checkpoints every 5M. Deliberately OFF: `--global-econ`, anchor.
+Watchers: controller `start` (sync + Ajay) + `add-eval` Yijie.
+First iterations confirm the mechanism is live: **NOOP 0.61** (gated binary ran 0.88–0.92),
+`actionable 0.65`, launch_rate 0.359 at iter ~2 (from-scratch random policy; noop-KL pulls the
+mean toward 0.10 as it learns — watch it, do not panic at iter 2).
+
+⚠ **Ops gotcha:** `launch_gpu_gcp.sh` hardcodes `PROJECT="orbit-wars-rl"`, but the real project is
+**`orbit-wars-rl-499921`** — the default fails with a confusing "Required
+'compute.instances.create' permission" (it is a wrong-project error, not an IAM one). Pass
+`--project orbit-wars-rl-499921`. The `gcp` watcher platform needs a config-ssh alias:
+`gcloud compute config-ssh --project=orbit-wars-rl-499921` →
+`orbit-wars-binarygates.asia-south1-b.orbit-wars-rl-499921`.
+
 ⚠ Caveat on `enemy_reach`: it sums every enemy planet's garrison within `REACH_K=15` steps plus
 resolved inbound fleets — an upper bound (the enemy will not send everything), so "60% out-massed"
 is generous in absolute terms. It is still internally valid as a *predictor*: it separates 16st

@@ -71,7 +71,8 @@ cannot pre-emptively reinforce; only react within a 6-step window.** `ship_bin_m
 
 ## Next in line
 
-0. ⭐ **`--binary-commit-gates minimal`** — **BUILT 2026-07-16, ready to launch.** Deletes the two
+0. ⭐ **`--binary-commit-gates minimal`** — **RUNNING** (`binarygates100m_l4`, from scratch, 100M,
+   GCP L4 asia-south1-b, launched 2026-07-16). Verdict metric: **Yijie** panel; Ajay = guard. Deletes the two
    hand-tuned walls (`capture_required`, `maintain`/`defend_ok`); COMMIT = all-in at any target,
    gated only on `S >= MIN_BINARY_COMMIT_SHIPS`. Measured: action space **19.8% → 83.7%** legal on
    the same states. Nothing new is added — it is pure deletion; ch10/ch20/ch22-25 remain as
