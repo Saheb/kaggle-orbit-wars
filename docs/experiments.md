@@ -39,9 +39,16 @@ curves also show, and this is the uncomfortable one:
 
 **The binary all-in program bought Ajay (57→80%) and appears to have COST Yijie (~7%→~3%).**
 Confounded by cumulative budget (136M vs 70M) and lineage, so it is not a clean A/B — but it is the
-opposite of what a "we're on the right track, just under-trained" story predicts, and it is the
-single most important open question in this table. The pre-binary lineage was closer to the winners
-on reinforce share AND better against the strong opponent.
+opposite of what a "we're on the right track, just under-trained" story predicts. The pre-binary
+lineage was closer to the winners on reinforce share AND better against the strong opponent.
+
+**A concrete mechanism for that regression now exists — see docs/training.md "THE REINFORCEMENT
+LEGALITY WALL".** Measured on 758 real own-target cells: only **14.6% of reinforce options are
+legal**, because binary mode resolves own targets to `maintain = enemy_mass_soon + 1` and requires
+`>= 5` ships to be feasible — and `enemy_mass_soon` (enemy fleets arriving within **6** steps) is
+**0 in 81.3% of cells**. Infeasible targets are stripped from the target softmax. **Binary mode
+cannot pre-emptively reinforce; only react within a 6-step window.** `ship_bin_mode="absolute"`
+(the better-vs-Yijie lineage) has no such gate. This is now the top experiment.
 
 ## Measurement: we are flying with two broken instruments
 
@@ -63,6 +70,14 @@ on reinforce share AND better against the strong opponent.
   `stgpr1`. The evaluator now requires `DONE/DONE` and hashes the tracked archives before play.
 
 ## Next in line
+
+0. ⭐ **Remove the reinforcement legality wall** (docs/training.md). Binary mode makes 85.4% of
+   reinforce options ILLEGAL — pre-emptive consolidation is inexpressible. Smallest delta:
+   own targets become all-in-legal (`feasible_own = S >= 5`, ships = S), which is exactly Ender's
+   measured 99.1%-all-in reinforce behaviour. Predicted chain: pre-emptive reinforce becomes
+   legal → fresh captures get garrisoned → out-massed-at-capture ↓, churn ↓, planets@100 ↑ →
+   Yijie ↑. Primary evidence: Yijie panel + planets@50/100 + churn; Ajay as regression guard.
+   This is a mask/resolver change, not a reward or an action-space addition.
 
 1. ~~**Best-ckpt anchor + promotion gate**~~ **BUILT 2026-07-16** (`--anchor-kl-coef`,
    `--anchor-value-coef`, `--anchor-promote-winrate/-min-games`, `--anchor-from`). KL(live ‖

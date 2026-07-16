@@ -653,20 +653,58 @@ is **63.9%**, and the probes now set the masks and refuse to run on `allow_reinf
 other number in this table moved <2pp. Lesson: any probe that builds its own agent must configure
 the model exactly as `evaluate_checkpoint` does, or it measures its own configuration.
 
-**Two follow-on hypotheses, both KILLED by measurement (2026-07-16):**
-1. *"Our reinforcements are a trickle."* The resolver is asymmetric in code — attacks send the
-   full garrison, own targets send `maintain = enemy_mass_soon + 1` (a 6-step window). **In play
-   it does not bind:** the threat (median reachable 106) routinely exceeds the source garrison
-   (median 27), so `maintain` clips to S. Measured, our reinforces are **94.6% all-in** vs Ender's
-   **99.1%**. Sizing is not the difference.
-2. *"We can't reinforce until it's too late (defend_ok needs threat ≥ 4)."* Would predict a
-   collapsed reinforce share; measured share vs Ender is **36%** (223 of 619 launches) against
-   Ender's 43.4% vs Ajay. Same ballpark. Not a legality wall.
+### ⭐⭐ THE REINFORCEMENT LEGALITY WALL (2026-07-16) — binary mode cannot pre-emptively reinforce
 
-**What remains after all that:** ours vs Ender is 99.7% all-in attacks / 94.6% all-in reinforces /
-36% reinforce share — a policy shape *close to Ender's* — and we still lose 0/256 while ending at
-0 planets vs its 18.5. The difference is not in the launch primitives. It is WHICH targets and the
-resulting economy: 61.6% of captures land out-massed, churn 1.76×, production +0@32 → −34@100.
+Instrumenting `resolve_binary_commit_np` on **758 real own-target (slot,target) cells** from
+champion-vs-Ender play (scratch probe, seed 3):
+
+| measurement | value |
+|---|---:|
+| own-target cells that are **feasible** (`defend_ok`) | **14.6%** — 85.4% are ILLEGAL |
+| `ch20 enemy_mass_soon` **== 0** | **81.3%** of cells |
+| `defend / S` offered | median **0.10**, mean 0.30 (31% are <5% of source) |
+
+**The mechanism, confirmed end-to-end:**
+- Own targets resolve to `defend` = ch24 = `maintain` = `clip(enemy_mass_soon + 1, 0, S)`, where
+  `enemy_mass_soon` (ch20) counts only enemy **fleets already in flight arriving within
+  `_THREAT_ETA_WINDOW = 6` steps** (features.py:601).
+- `defend_ok = (defend >= MIN_BINARY_COMMIT_SHIPS=5) & (S >= defend)`. With no inbound threat,
+  `maintain = 1 < 5` → **infeasible**.
+- `binary_feasible` gates **target LEGALITY** (action_mask.py:~800: `legal_commit = base_legal &
+  binary_feasible`) — infeasible own targets are stripped from the target softmax *before*
+  sampling.
+
+⇒ **We cannot reinforce a planet unless ≥4 enemy ships are already inbound within 6 steps.**
+Pre-emptive consolidation — garrisoning a fresh capture *before* the counter-attack launches — is
+**not expressible in the binary action space.** By the time it becomes legal, the enemy fleet is
+≤6 steps out and ours may not arrive in time. This is a hard structural constraint, not a policy
+choice, and it is exactly what a 63.9%-never-reinforced / 61.6%-land-out-massed / 1.76×-churn
+profile looks like.
+
+**⚠️ I retracted this finding once and the retraction was WRONG.** The reasoning was: executed
+reinforces are 94.6% all-in, therefore `maintain` "doesn't bind". Backwards. Only 14.6% of
+reinforce options are legal, and they are precisely the heavily-threatened ones where
+`maintain = mass_soon+1` **clips to S** — so all-in-looking executed reinforces are the
+**signature of the wall**, not evidence against it. The trickle sizes (median 10% of S) are real;
+they are simply *masked out as infeasible* and never executed. Never infer the shape of an
+offered distribution from the executed one when the offer is gated.
+
+**Why this is the prime suspect for the Yijie regression.** `ship_bin_mode="absolute"` (the ship-KL
+lineage, Yijie **5.9–7.0%**) has NO `defend_ok` gate — reinforce legality there is governed only by
+the reinforce masks (gate/floor/cooldown), and the ship head may send any amount to any own planet
+at any time. The binary lineage (Yijie **1.2–4.3%**) ADDED this wall. That is a concrete,
+mechanistic candidate for "binary bought Ajay and cost Yijie" — Ajay does not punish an
+un-consolidated empire; Ender and Yijie do.
+
+**Fix candidates (one delta each, in preference order):**
+1. Make own targets **all-in-legal**: `feasible_own = (S >= 5)`, ships = S (exactly Ender's 99.1%
+   all-in reinforce). Smallest possible change; removes the wall without adding an action.
+2. Keep `maintain` sizing but drop the legality gate to `S >= 5`, so pre-emptive reinforcement is
+   legal at the trickle size.
+3. Widen `_THREAT_ETA_WINDOW` for the maintain computation only (weakest — still reactive).
+
+**What remains true regardless:** 61.6% of captures land out-massed, churn 1.76×, production
++0@32 → −34@100.
 
 ⚠ Caveat on `enemy_reach`: it sums every enemy planet's garrison within `REACH_K=15` steps plus
 resolved inbound fleets — an upper bound (the enemy will not send everything), so "60% out-massed"
