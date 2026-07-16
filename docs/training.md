@@ -617,6 +617,53 @@ take planets and cannot keep them, against an opponent that keeps 59% of what it
 north-star `open<50 cap/atk` is **0.517 vs Ender's 0.75** and has NOT moved across the whole
 timeline+binary program (presres1 was 0.58) — Ajay 57.4%→80.5% bought nothing here.
 
+### Peel-rate forensics vs Ender (2026-07-16, `orbit_wars_rl/peel_diagnosis.py`)
+
+**First: peel-rate 0.99 vs Ender is TAUTOLOGICAL and must stop being cited as evidence.**
+`peel = lost_caps/captures`, and we are wiped to 0 material in 100% of games, so every capture is
+lost by construction. Measured directly: 235 episodes, 235 lost, **0 still held at end**. It
+restates "we lose". (metrics.md's claim that peel is "immune to the end→0 degeneracy" is about the
+DENOMINATOR not shrinking; the numerator still →captures under elimination. Peel remains
+informative against opponents we sometimes beat — vs Ajay it is 0.59 — but is vacuous vs Ender.)
+
+12 games, 235 captures, 131 distinct planets (**churn 1.79×** — we re-take the same rock twice).
+
+| discriminator | value | reads as |
+|---|---:|---|
+| hold, lost episodes | median **10st**, mean 23st | bimodal: **34.9% die inside 5st**, but 23.8% live 40–80st |
+| captures made while still competitive (mat Δ > −50) | **34.9%** of all | ⇒ **65% of our captures happen when already losing** (thrash) |
+| ...of those, lost within 20st | **19.5%** | hypothesis A (take-what-we-can't-hold) is NOT dominant |
+| losses landing in the last 20% of the game | **26.4%** | hypothesis B (terminal collapse) is NOT dominant either |
+| competitive **&** out-massed at capture | n=16, median hold **16st** | |
+| competitive **& NOT** out-massed at capture | n=66, median hold **55st** | **we CAN hold what lands safely — 3.4× longer** |
+| captures landing already out-massed | **60.0%** | |
+| lost captures we **never reinforced** | **91.9%** | ⇒ the actual mechanism |
+
+**Verdict — neither A nor B; it is FOLLOW-UP.** When a capture lands safe and the game is even we
+hold it 55 steps, so target selection and holding are not broken per se. But **60% of captures
+land already out-massed** and **92% of lost captures never receive a single reinforcing launch**.
+We capture and abandon. Note the sting: our reinforce share vs Ender is 0.42 — we ARE reinforcing,
+just not the conquests that are about to be peeled (home/initial planets are excluded from the
+capture set by construction, so that 42% is going to the core). Ender, by contrast, spends **70.8%**
+of its launches reinforcing and ends with 18.5 planets.
+
+Mechanistic suspicion (untested): after an all-in capture the source is empty, so the follow-up
+must come from a *different* planet — which requires the cross-planet coordination our fully
+parallel per-source decoding cannot express (writeup_lessons §2: "our force-concentration wall").
+Ender all-ins too, but sustains a bigger producing empire that refills sources.
+
+⚠ Caveat on `enemy_reach`: it sums every enemy planet's garrison within `REACH_K=15` steps plus
+resolved inbound fleets — an upper bound (the enemy will not send everything), so "60% out-massed"
+is generous in absolute terms. It is still internally valid as a *predictor*: it separates 16st
+from 55st holds, a 3.4× split. Do not quote the 60% as a physical claim.
+
+**What this does and does not license:** it does NOT license a reward shaping term for
+reinforcement (lesson 11). The features to see a capture's survival ALREADY EXIST — the target
+counterfactual channels (`held-through-horizon`, `mine-at-arrival`) were built for exactly this
+and scored 74.2% Ajay / 5.9% Yijie at 45M with no promotion. So the honest reading is that we can
+already SEE it and have not trained long enough to ACT on it. That points at budget, and at
+decoding structure (#2) if budget alone stalls.
+
 ### Global economy series — feature contract (2026-07-16)
 
 **The lever:** the global token carried **15 static scalars** — current totals, no projection.

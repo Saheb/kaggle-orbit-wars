@@ -82,8 +82,23 @@ delta **+0 at step 32 → −34 at 100**: level on the economy, then it compound
 shape as the Yijie/Ajay loss replays. `open<50 cap/atk` **0.517 vs Ender 0.75**, unmoved since
 presres1's 0.58 despite Ajay 57.4%→80.5%.
 
-**We take planets and cannot keep them.** That is the gap — not sizing (rejected above), not
-per-launch conversion vs weak play (0.743 vs Ajay).
+**Forensics (`peel_diagnosis.py`, 12 games, 235 captures) — the gap is FOLLOW-UP, not selection
+or holding.** Peel 0.99 is tautological under 100% elimination (235/235 lost, 0 held at end) and
+must stop being cited. What the per-capture data actually says:
+- Captures that land **safe** while the game is even are held **55st** vs **16st** for out-massed
+  ones — **we can hold what lands safely**. Hypothesis "we take what we can't hold" explains only
+  19.5% of competitive captures; "terminal collapse" only 26.4% of losses. Neither dominates.
+- **92% of lost captures never receive a single reinforcing launch**, and 60% land already
+  out-massed. **We capture and abandon.** Our 0.42 reinforce share is going to the core, not the
+  conquests. Ender spends **70.8%** of launches reinforcing and ends at 18.5 planets.
+- 65% of our captures are made when already behind → thrash; churn 1.79× per distinct planet.
+
+⚠ Do NOT respond with a reinforcement reward term (lesson 11). The features that price a
+capture's survival **already exist** (target-CF `held-through-horizon` / `mine-at-arrival`) and
+scored 74.2% Ajay / 5.9% Yijie at 45M with no promotion — we can already SEE it and haven't
+trained long enough to ACT on it. Points at **budget** first, **decoding structure** (#2 —
+follow-up must come from a *different* planet than the emptied source, which parallel per-source
+decoding cannot coordinate) if budget stalls.
 
 ⚠ **Retracted:** the "reinforce share 0.21 vs Jake 0.56" deficit was **opponent-confounded**.
 Like-for-like vs Ajay: **us 0.49, Ender 0.434** — we reinforce slightly more. Never cite a
