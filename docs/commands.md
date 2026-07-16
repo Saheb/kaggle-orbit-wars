@@ -55,6 +55,34 @@ tail -20 gpu_run_artifacts/hellburner_spot/logs/watcher_rev7.log
 
 ---
 
+## 2b. ⭐ Behavioural probes — run these BEFORE proposing a lever
+
+Cheap (minutes), and on 2026-07-16 they killed three beliefs and a ~30h experiment. See
+CLAUDE.md Key Lessons 12–14 and docs/training.md.
+
+```bash
+# What does a top-10 agent actually SEND?  ships_sent / source_garrison histogram.
+# Verdict: Ender all-ins 97.3% vs Ajay, 97.7% vs ITSELF => a learned middle is worth <=3%.
+CUDA_VISIBLE_DEVICES="" python orbit_wars_rl/ender_sizing.py --seeds 6
+CUDA_VISIBLE_DEVICES="" python orbit_wars_rl/ender_sizing.py --seeds 5 \
+    --opponent opponents/candidate_ender.py          # strong-vs-strong control (do not skip)
+CUDA_VISIBLE_DEVICES="" python orbit_wars_rl/ender_sizing.py --seeds 6 \
+    --agent-checkpoint <ckpt.pt> --opponent opponents/candidate_ender.py   # OURS, like-for-like
+
+# Why do we lose captures?  Per-capture forensics; splits "took what we can't hold" from
+# "held fine, out-produced later". Refuses to run on allow_reinforce=False.
+CUDA_VISIBLE_DEVICES="" python orbit_wars_rl/peel_diagnosis.py --seeds 6
+
+# How much of the action space do the hardcoded gates delete?  (was: 80.2%)
+python gpu_run_artifacts/ender_ref/probe_binary_gate_pressure.py
+```
+
+⚠️ **Any probe that builds its own agent must set the model attributes `evaluate_checkpoint` sets**
+(`allow_reinforce`, `reinforce_gate_min_planets`, `reinforce_garrison_floor`,
+`reverse_edge_cooldown`, `sufficient_commit_factor`). `build_agent_fn` reads them **off the model
+object** (eval.py:391/:1560), NOT from its kwargs — forgetting them silently disables
+reinforcement and you measure your own config. See CLAUDE.md Key Lesson 14.
+
 ## 3. Panel eval
 
 ### Full panel (256 games, ~40 min locally)

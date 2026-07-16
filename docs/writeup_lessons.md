@@ -125,17 +125,46 @@ coordination from decoding structure instead.
 crediting target log-prob when fire=0; (b) #99-style proposal context into the ship head;
 (c) full AR micro-steps (biggest change, throughput cost).
 
-### 3. Action-space simplification + KL-to-prior regularization
+### 3. Action-space simplification + KL-to-prior regularization — ⚠️ WE BUILT THE HARD VERSION
 SimJeg reached ~top 5 with TWO actions per body (no-op vs all-in, ETA<20 targets). kiyotah
 same. Ender's fix for the many-small-fleets disease (our spray: launch_rate ~0.38 vs winner
 ~0.04): replace entropy bonus with **KL penalty toward a prior** (halt_prob 0.9, fraction
 ratio 1:1:1:1:10 favoring full send) — "huge immediate improvement". Principled version of
 what our min-ship-bin band-aid groped at.
 
-### 4. Throughput / scale (the env rewrite question)
+**MEASURED 2026-07-16 (`orbit_wars_rl/ender_sizing.py`) — Ender's prior CONVERGES to all-in:**
+
+| population | launches | all-in (≥95%) | middle (5–95%) |
+|---|---:|---:|---:|
+| Ender vs Ajay | 694 | **97.3%** | 2.7% |
+| **Ender vs Ender** (strong-vs-strong control) | 5,706 | **97.7%** (opening attacks **100.0%**) | 2.3% |
+
+His prior *offered* four middle fractions (1:1:1:1:10) and the trained policy learned to
+essentially never use them. ⇒ **A learned middle commitment is worth ≤3% of launches — do not
+spend a run on it** (killed experiments.md #3). Also: Ender reinforces **70.8%** of its launches
+in strong-vs-strong play, at **99.1% all-in**. Sizing is settled; *allocation* is not.
+
+**The trap we fell into:** the lesson is a **soft prior**, and we shipped a **hard mask**. The
+binary resolver made full-send not "10× more likely" but "anything else illegal", *and* disabled
+`ship_kl` (ppo.py:308 `and not binary_mode`), so nothing pulls and everything forbids. Measured
+cost: **80.2% of the action space deleted**. Note lesson 7 below — Isaiah found masking made his
+model WORSE. Timeline fits: `absolute` + soft ship-KL → Yijie 5.9–7.0% (our best); `binary` +
+hard masks → 1.2–4.3%. `--binary-commit-gates minimal` reverts to SimJeg's actual design (two
+actions, no-op or all-in, no affordability gate). See docs/training.md.
+
+### 4. Throughput / scale (the env rewrite question) — ⚠️ NOT the free explanation
 All top agents rewrote the env (Rust/JAX/C+CUDA) → 15K–40K SPS → 400M–15B steps. Decide:
 invest in a rewrite vs accept that our levers get tested under-trained. kiyotah: "run fewer
 experiments for longer; learning curves change substantially later."
+
+**CHECKED 2026-07-16 against our own curves — plateaus are real and we do detect them.**
+`tl100m_s2` continued tl100m for **+35M** steps: Ajay 74.6 → 76.6 → 73.0 → 81.2 → **78.1** =
+a plateau at **~77% ±4** (~+1pp/10M). The stage-1 note's "still +5pp/10M at the tail, not
+plateaued" was reading **the noise band of a saturating metric as a trend**. `binary100m_scratch`
+sat at 48–49% Ajay from 30M through 50M with Yijie 1–2%. So "we're under-trained" must be
+*argued from a curve*, never assumed. (Yijie did train 13B and reports his from-scratch run only
+caught an IL warm start at 10–20k updates — the scale gap is real; it is just not a licence to
+dismiss a flat verdict.)
 
 ### 5. Sparse rewards, no shaping band-aids
 kiyotah: pure −1/0/+1 ("tried production shaping, did not see results"). Ender: 0/1/2
@@ -154,7 +183,22 @@ league of past checkpoints doubles as an Elo progress meter.
   existed (questions our BC-warmstart track).
 - Isaiah: action masking (e.g. no-sun-shots) made his model WORSE — hypothesis: unmasked
   forced better internal physics modeling. Re-masked only for late fine-tune + test time.
-  (Questions our gate/mask stack.)
+  (Questions our gate/mask stack.) ⭐ **VINDICATED 2026-07-16: our mask stack was deleting 80.2%
+  of the action space** — `capture_required` 62.2% of attacks, `maintain<5` 73.3% of reinforces.
+  Both compute a verdict from features the model already sees, then remove what it might disagree
+  with. This is the §1 anti-pattern ("hand-computes conclusions the winners let the model draw
+  from a raw resolved timeline — and each patch carried bugs") applied to ACTIONS instead of
+  features. `--binary-commit-gates minimal` is the fix under test.
+- **The magic-horizon problem** (2026-07-16): `_THREAT_ETA_WINDOW=6`, `_REACH_HORIZON=18`,
+  `_VALUE_HORIZON=40` — three arbitrary answers to "how far ahead should the model look",
+  introduced together in one BC commit (`7bd0ffe`) with **no justification and never ablated**.
+  Why 6 and not 4 or 8? There is no answer in the repo. Meanwhile `TIMELINE_K=24` hands the model
+  the whole resolved future at full resolution — so these scalars add no information, only an
+  unjustified prior about which horizon matters. Yijie runs a 1-D CNN + attention pool over the
+  series *"so the token can focus on the turns that matter"* — **the model picks its own
+  horizon**. Follow-up (after Arm B): delete ch20/ch15's hand-picked summaries in favour of
+  learned pooling (queue #5). If the timeline truly subsumes them, removal is a NO-OP — a cheap,
+  high-information test; if it hurts, the timeline isn't doing its job and that matters too.
 - Ender: exploiters (train a fresh model purely to beat the main one, then fold back into
   league) broke the passive 4p equilibrium; +15–17pp first-place rate. [rank-55 writeup]
 - Novice #99: value-head EV was the turning point (EV −0.9 → +0.92 via 128-step rollouts +

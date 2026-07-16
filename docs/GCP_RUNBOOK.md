@@ -7,10 +7,21 @@ Mirrors the AWS workflow but using `gcloud` instead of `aws`.
 
 ## Prerequisites (one-time)
 
+> ### ⚠️ THE PROJECT ID IS `orbit-wars-rl-499921`, NOT `orbit-wars-rl`
+> Every `orbit-wars-rl` below (and `PROJECT="orbit-wars-rl"` hardcoded in
+> `gpu_run_artifacts/launch_gpu_gcp.sh:36`) is the **wrong** id. The failure is *misleading* —
+> it surfaces as an IAM error, not a not-found one:
+> ```
+> ERROR: Required 'compute.instances.create' permission for
+>        'projects/orbit-wars-rl/zones/.../instances/...'
+> ```
+> That is a wrong-project error. Always pass `--project orbit-wars-rl-499921` to the launcher
+> and to `gcloud`, or `gcloud config set project orbit-wars-rl-499921` once.
+
 ### Auth
 ```bash
 gcloud auth login
-gcloud config set project orbit-wars-rl
+gcloud config set project orbit-wars-rl-499921
 ```
 
 ### Quotas required

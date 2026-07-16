@@ -174,8 +174,12 @@ early value) / restore commit mask / jump to intent sizing (experiments.md #4).
 spray-inflated head-to-head; README cross-eval). And tl100m gets there with launch_rate 0.092,
 not spray — the WR is not style-inflated. Pure sparse self-play held for the whole run — no
 collapse (EV 0.98, KL 0.013, estop 0 throughout; the noopkl2 failure mode never appeared).
-**Not plateaued at 100M:** 10M-window Ajay averages ~65% (75–85M) → ~68% (80–90M) → ~73%
-(90–100M), still ~+5pp per 10M at the tail. Launch-discipline tripwire never fired: final
+**~~Not plateaued at 100M~~ — WRONG, corrected 2026-07-16:** the claim below was 10M-window Ajay
+averages ~65% (75–85M) → ~68% (80–90M) → ~73% (90–100M), read as "still ~+5pp per 10M at the
+tail". **Stage 2 refuted it:** +35M more steps gave ~77% ±4 (≈ +1pp/10M). Those windowed averages
+were **the noise band of a saturating metric**, not a trend — Ajay oscillates ±4pp checkpoint to
+checkpoint. This single sentence was cited for days as "budget will fix it". Read a trend only
+against the metric's own noise, and never off a saturating one. Launch-discipline tripwire never fired: final
 diag launch_rate 0.092, ship0 0.12, fire_frac 0.29 — discipline was learned, as hoped.
 H_fire drifted to ~0.027 (low but stable), H_ship 3.28, H_tgt 1.55.
 

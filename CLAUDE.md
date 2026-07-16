@@ -96,7 +96,9 @@ orbit_wars_rl/          ← ALL active RL code lives here
 opponents/                 ← eval + training opponents
   candidate_hellburner.py
   candidate_zach_public.py   ← primary Zach opponent
-  candidate_ajay_1200.py     ← ⭐ PRIMARY eval metric (1200 LB, harder than Zach)
+  candidate_ajay_1200.py     ← regression GUARD (saturated ~77-80%; NOT the objective)
+  candidate_yijie.py         ← ⭐ PRIMARY eval metric (rank 13, 1640 Elo)
+  candidate_ender.py         ← top-10 reference (we are 0/256)
   candidate_producer_1200.py
   candidate_suneet_lb1200.py
   orbit_lite/                ← dependency for Ajay/Producer (intercept aiming etc.)
@@ -157,8 +159,30 @@ timeout-planet, redundant-target, path-obstruction.
 
 ## Eval
 
-**Primary metric: Ajay** (`opponents/candidate_ajay_1200.py`) — harder than Zach, requires `orbit_lite/`
-**Secondary: Zach** — saturating at ~88-89%, use only as sanity check
+**Primary metric: Yijie** (`opponents/candidate_yijie.py`) — rank 13, 1640 Elo. The verdict.
+**Guard: Ajay** (`opponents/candidate_ajay_1200.py`) — SATURATED ~77–80%; a regression guard, NOT
+an objective (needs `orbit_lite/`). **Reference: Ender** (`candidate_ender.py`) — top-10; we are
+0/256. **Retired: Zach** — saturated ~88-89%.
+
+⚠ **Both instruments are broken in opposite directions.** Ajay saturates; Yijie floors (0–7%, and
+a 256-game panel at 4% has a ±2.5pp band). Nothing reads the 1300–1500 Elo band. So for a graded
+signal use paired **production/material delta @50/100** and **loss-depth** (docs/metrics.md), not
+the Yijie WR alone. Calibration: an agent genuinely +240 Elo over Ajay still scores only ~10–15%
+vs Yijie — single digits are NOT automatically a failure.
+
+**Diagnostic probes** (cheap, run these before proposing a lever — see Key Lesson 13):
+```bash
+# What does a top-10 agent actually SEND? (ships_sent / source_garrison histogram)
+CUDA_VISIBLE_DEVICES="" python orbit_wars_rl/ender_sizing.py --seeds 6            # Ender vs Ajay
+CUDA_VISIBLE_DEVICES="" python orbit_wars_rl/ender_sizing.py --seeds 5 \
+    --opponent opponents/candidate_ender.py                                        # strong-vs-strong
+CUDA_VISIBLE_DEVICES="" python orbit_wars_rl/ender_sizing.py --seeds 6 \
+    --agent-checkpoint <ckpt.pt> --opponent opponents/candidate_ender.py           # OURS, like-for-like
+# Why do we lose captures? (per-capture retention forensics)
+CUDA_VISIBLE_DEVICES="" python orbit_wars_rl/peel_diagnosis.py --seeds 6
+# How much of the action space do the hardcoded gates delete?
+python gpu_run_artifacts/ender_ref/probe_binary_gate_pressure.py
+```
 
 ```bash
 # Full panel (256 games, ~40 min locally)
@@ -185,18 +209,29 @@ belong in the watcher: `run_watchers.sh add-eval <run> <opp.py> [from-latest]` (
 
 ---
 
-## Current Baselines (full panel, 256 games vs Ajay)
+## Current Baselines (full panel, 256 games)
 
 **The competition is OVER — no leaderboard, no submissions.** This is post-competition
 learning: apply what the winner writeups teach, one lesson at a time
-(`docs/writeup_lessons.md`), measured on held-out panels — Ajay primary; Ender = top-10
-stretch reference (north star: open<50 cap/atk 0.58→0.75, see `docs/metrics.md`).
+(`docs/writeup_lessons.md`), measured on held-out panels.
 
-| Checkpoint | Ajay | Notes |
-|---|---|---|
-| stgpr1 0.5M (final submission) | 57.4% | Pre-timeline best (spray-inflated head-to-head; README cross-eval) |
-| **tl100m 100M (2026-07-12)** | **74.6%** (best 77.7% @96.5M) | ⭐ Timeline features, from-scratch pure self-play, sparse ±1, no shaping — clean win (launch_rate 0.09). See docs/training.md |
-| tl100m_s2 (+100M) | running | Stage-2 continuation from 99.5M; cosine 2.4e-5 → ~1.2e-5 |
+**⚠ AJAY IS NOT THE OBJECTIVE — it saturates ~77–80% and is blind to what beats us.**
+Use **Yijie** (rank 13, 1640 Elo) as the verdict metric and Ender as the top-10 reference.
+Our 80.5%-Ajay champion scores **0/256 vs Ender** and 3.9% vs Yijie. Optimizing Ajay bought
++23pp there and **nothing** against strong play — see docs/training.md.
+
+| Checkpoint | Ajay | Yijie | Notes |
+|---|---|---|---|
+| stgpr1 0.5M (final submission) | 57.4% | — | Pre-timeline best (spray-inflated) |
+| tl100m 100M (2026-07-12) | 74.6% | — | ⭐ Timeline features, from-scratch sparse self-play |
+| **tl100m_s2 (+35M → ~135M)** | **~77% ±4 (PLATEAU)** | — | **Stage 2 gained ~+1pp/10M — the "still +5pp/10M at the tail" claim was the noise band of a saturating metric. Budget is NOT the free explanation.** |
+| shipkl_probe (absolute + soft ship-KL, ~136M cum.) | ~80% | **5.9–7.0%** | ⭐ **BEST YIJIE EVER — the bar.** Plateaued ("dead flat 1M→8M") |
+| **binarymarg 40.108M** (binary all-in + gates) | **80.5%** | 3.9% | Best Ajay · **0/256 vs Ender**, wiped 100%, peel 0.99 |
+| binarygates100m_l4 | running | running | ⭐ Arm B: `--binary-commit-gates minimal` (from scratch, 100M) |
+
+**The open question:** the binary all-in program bought Ajay (57→80%) and appears to have
+**cost Yijie (~7%→~3%)**. Confounded by cumulative budget (136M vs 70M), but it is the opposite
+of what "under-trained" predicts. Arm B tests the prime suspect: the hardcoded commit gates.
 
 Competition-era numbers (Rev31 "918.8 LB", Rev32b 88.7% Zach, corrpack3e "18% Ajay") are an
 **older eval era and not comparable** to current panels — see README and archive docs for
@@ -227,3 +262,28 @@ feed 20-dim features (`extract_features(timeline=False)`).
 9. **BC warmstart from partial/diagnostic checkpoints** causes clip_frac=0 (frozen policy). Always use a strong PPO checkpoint as `--resume`. *(BC aux `--bc-samples` removed in C5.)*
 10. **Export**: always use `--target-decode` for Phase 1 checkpoints. Run 10/10 vs random before trusting an export.
 11. **Scale + observability beat reward shaping** (tl100m, 2026-07-12): 100M from-scratch pure self-play with timeline features, sparse ±1 reward and NO shaping went 0→74.6% vs Ajay — past the shaped lineage's 57.4% best. Launch discipline (rate 0.09) was *learned*, not masked in; the shaping levers of lessons 3–4 were 5M-budget band-aids. Resume from interval checkpoints (they carry Adam + `pool_step` files), not `_final` (no pool file).
+    ⚠ **QUALIFIED 2026-07-16:** scale plateaus. tl100m_s2 added 35M for ~+1pp/10M (~77% ±4);
+    binary100m_scratch sat at 48–49% Ajay from 30M–50M. **"Just train longer" is not a valid
+    explanation for a flat verdict — check the curve before invoking budget.**
+12. **⭐ Hardcoded masks delete the action space — MEASURE before believing a lever** (2026-07-16).
+    Binary mode's `capture_required` + `maintain`/`defend_ok` gates removed **80.2%** of all commit
+    options (62.2% of attacks — no multi-source pincers; 73.3% of reinforces — **pre-emptive
+    consolidation literally inexpressible**, since reinforcing needed ≥4 enemy ships already ≤6
+    steps out). They compute a verdict from features the model already sees (ch10/ch20/ch22-25),
+    then delete what it might disagree with. Isaiah reported masking made his model WORSE; the
+    winners use **soft KL priors**, not prohibitions (Ender's 1:1:1:1:10 → converges to 97.7%
+    all-in *on its own*). `--binary-commit-gates minimal` restores 83.7%. docs/training.md.
+13. **Measured, not argued** (2026-07-16) — three beliefs died to cheap probes:
+    - **Ender all-ins 97.3% vs Ajay / 97.7% vs itself** (`ender_sizing.py`) ⇒ learned middle
+      commitment is worth ≤3% of launches. Killed a ~30h experiment.
+    - **peel-rate vs Ender is TAUTOLOGICAL** (we're wiped 100% ⇒ every capture is lost by
+      construction; 235/235). Valid only vs opponents we sometimes beat (0.59 vs Ajay).
+    - **"reinforce share 0.21 vs Jake 0.56" was opponent-confounded.** Like-for-like vs Ajay:
+      us 0.49, Ender 0.434. Never compare a rate across different opponents.
+14. **Probes must configure the model exactly like `evaluate_checkpoint`.** `build_agent_fn` reads
+    `allow_reinforce` + discipline masks **off the model object** (eval.py:391/:1560), NOT its
+    kwargs. Forgetting them silently disables reinforcement — a reinforcement diagnosis then
+    measures your own config (this produced a bogus "92% never reinforced"; true value 63.9%).
+    Corollary: **never infer an offered distribution from the executed one when the offer is
+    gated** — "executed reinforces are 94.6% all-in" looked like evidence the maintain sizing
+    didn't bind; it was the *signature* of the gate (only max-threat options were legal).

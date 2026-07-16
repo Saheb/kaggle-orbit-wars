@@ -140,10 +140,19 @@ Conversion: caps/game X  atk-launch/game X  cap/atk-launch X (open<50 X  mid50-1
   stall-and-win attrition. Symptom of the expansion/hold root, NOT an independent lever — don't bribe
   decisiveness with `speed_coef` (caused the Rev26 ship-bin-0 collapse).
 - **retention** = `peel-rate` (of captured planets, the fraction we then lose = `lost_caps ÷ captures`)
-  + `median-hold` (median steps capture→loss over LOST episodes). Denominator-free (normalized by
-  captures ~14/game, not `end`), so it doesn't inflate as `end→0` on elimination. peel-rate→1 + short
+  + `median-hold` (median steps capture→loss over LOST episodes). peel-rate→1 + short
   hold = capture-and-lose ("can't hold the lead"); low + hold≈game-length = sticky. Home/initial
   planets excluded.
+  ⚠️ **peel-rate is TAUTOLOGICAL against an opponent that eliminates us** (corrected 2026-07-16).
+  The old claim here — "denominator-free … so it doesn't inflate as `end→0` on elimination" — is
+  right about the DENOMINATOR but wrong about the NUMERATOR: when we are wiped to 0 material,
+  every capture is eventually lost **by construction**, so `lost_caps → captures` and peel → 1.0
+  regardless of skill. Measured vs Ender: 235 episodes, 235 lost, 0 held at end → "peel 0.99"
+  restates "we lose 0/256". **Trust peel only against opponents we sometimes beat** (0.59 vs
+  Ajay). Against an eliminator, use the **hold-duration distribution** and `peel_diagnosis.py`
+  instead: it splits captures by whether the game was still competitive AT CAPTURE TIME, which is
+  what separates "took what we can't hold" (median hold 14st when out-massed) from "held fine"
+  (55st when not) — a distinction peel-rate cannot make.
 - **loss-depth** = in LOST games, median final own-material (0 = total wipeout) + `wiped-to-0%`. The
   **graded loss signal** — grades *how badly* we lost, and unlike out-massed% it actually **moves**.
   Want ↑ material as the wall breaks. [[project_ender_opponent_calibration]]
@@ -249,6 +258,19 @@ Read it:
 **GOAL: close the opening `<50` cap/atk-launch — presres1 0.58 → Ender 0.75.** That is the lever; the
 mid-game snowball should follow. Track it every run (it's the `open<50` value on the eval conversion line
 and the T2 `open<50 cap/atk WON`). Regenerate Ender's column with `orbit_wars_rl/ender_ref.py`.
+
+### 2026-07-16 update — the north star has NOT moved, and cap/atk is a means not an end
+
+Full Ender panel on the binary champion (80.5% Ajay, `torch_step_40108032_binarymarg100m_l4_from25m`):
+**0/256**, wiped to 0 material in 100%, `open<50 cap/atk` **0.517** — i.e. *worse* than presres1's
+0.58, across the entire timeline + binary program that took Ajay 57.4% → 80.5%. Planets 8@50 → **4**@100
+(Ender ends 18.5). Production delta **+0 @32 → −34 @100**: level on the economy, then it compounds away.
+
+⚠️ **Do not treat cap/atk as the objective.** The binary all-in program *raised* cap/atk to 0.665–0.743
+(near Jake's 0.710) while Yijie **fell** ~7% → ~3%. High per-launch conversion is achievable by only
+attacking what one source can already take — which is exactly the `capture_required` gate, and it
+forbids the multi-source concentration the north star is really about. Track cap/atk as *colour*;
+decide on **Yijie WR + production delta + planets@100**.
 
 ---
 
