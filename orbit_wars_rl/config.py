@@ -28,11 +28,12 @@ class ModelConfig:
     planet_feature_dim: int = 116
     fleet_feature_dim: int = 13
     # Global features: 11 base + 4 game-phase channels (phase one-hot
-    # early/mid/late + normalized steps-to-next-comet-spawn) + 48 projected
-    # economy-delta channels (timeline.GLOBAL_ECON_DIM: production/material
-    # delta × 24 steps). Eval infers the width from global_proj.weight when
-    # loading a checkpoint from before the economy series (15-wide).
-    global_feature_dim: int = 63
+    # early/mid/late + normalized steps-to-next-comet-spawn) = 15. With
+    # --global-econ, + 48 projected economy-delta channels
+    # (timeline.GLOBAL_ECON_DIM: production/material delta × 24 steps) = 63.
+    # OPT-IN: an unvalidated feature must not ride along in an unrelated arm.
+    # Eval/export infer the width from global_proj.weight.
+    global_feature_dim: int = 15
     entity_dim: int = 96
     num_heads: int = 4
     num_layers: int = 3

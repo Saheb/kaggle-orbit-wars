@@ -20,10 +20,14 @@ from action_mask import compute_action_masks
 from torch_env import VecTorchEnv, to_legacy_obs
 
 
-def run_parity(num_envs: int = 4, after_steps: int = 30):
-    """Step both envs forward, extract features, compare."""
+def run_parity(num_envs: int = 4, after_steps: int = 30, global_econ: bool = False):
+    """Step both envs forward, extract features, compare.
+
+    global_econ exercises the opt-in economy globals (15 -> 63) on BOTH paths; the flag must
+    agree or the two paths emit different widths.
+    """
     seeds = list(range(num_envs))
-    env = VecTorchEnv(num_envs=num_envs, num_players=2, device="cpu")
+    env = VecTorchEnv(num_envs=num_envs, num_players=2, device="cpu", global_econ=global_econ)
     env.reset(seeds=seeds)
 
     # Drive forward a bit with random actions so there are fleets in flight
@@ -49,7 +53,7 @@ def run_parity(num_envs: int = 4, after_steps: int = 30):
             obs = to_legacy_obs(env, env_idx=i, player=player)
             ref = extract_features(obs, player, num_players=2,
                                    max_planets=48, max_fleets=128,
-                                   global_econ=True)
+                                   global_econ=global_econ)
             ref_masks = compute_action_masks(obs, player)
 
             # Compare planet features
@@ -117,6 +121,11 @@ def run_parity(num_envs: int = 4, after_steps: int = 30):
 def test_feature_parity():
     """pytest entry: asserts VecTorchEnv == extract_features (incl. all 22 pairwise channels)."""
     run_parity(num_envs=4, after_steps=30)
+
+
+def test_feature_parity_with_global_econ():
+    """Same, with the opt-in economy globals on (15 -> 63) on both paths."""
+    run_parity(num_envs=4, after_steps=30, global_econ=True)
 
 
 

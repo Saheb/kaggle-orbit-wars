@@ -704,6 +704,11 @@ def train(args):
     # PROVENANCE only (eval always clamps via _ship_bin_to_count, so this doesn't change the eval
     # contract) — but record how the ckpt was trained (drop vs clamp) so it's never ambiguous.
     cfg.model.ship_overflow_mode = args.ship_overflow_mode
+    if args.global_econ:
+        from timeline import GLOBAL_ECON_DIM
+        cfg.model.global_feature_dim = 15 + GLOBAL_ECON_DIM
+        print(f"Global economy series: ON → global_feature_dim="
+              f"{cfg.model.global_feature_dim} (production + material delta × 24 steps)")
     if args.binary_commit_gates is not None:
         cfg.model.binary_commit_gates = args.binary_commit_gates
     if cfg.model.ship_bin_mode == "binary":
@@ -716,6 +721,7 @@ def train(args):
                       device=device, episode_steps=500,
                       ship_bin_mode=cfg.model.ship_bin_mode,
                       binary_commit_gates=cfg.model.binary_commit_gates,
+                      global_econ=args.global_econ,
                       ship_overflow_mode=args.ship_overflow_mode,
                       action_decode=args.action_decode,
                       allow_reinforce=args.allow_reinforce,
@@ -2099,6 +2105,12 @@ if __name__ == "__main__":
                         help="Checkpoint to seed the anchor from. Default: the run's starting "
                              "weights (from-scratch: the random init, which the first promotion "
                              "replaces almost immediately).")
+    parser.add_argument("--global-econ", action="store_true",
+                        help="Append the projected economy series to the global token (dim 15 → "
+                             "63): production + material delta at each of the 24 projected steps "
+                             "(Yijie's global token). Reuses the timeline projection — no second "
+                             "rollout. OFF by default: unvalidated, and it must not ride along in "
+                             "an unrelated arm. Eval/export infer the width from global_proj.")
     parser.add_argument("--binary-commit-gates", type=str, default=None,
                         choices=["full", "minimal"],
                         help="Binary-mode commit legality. 'full' (default) = the legacy "

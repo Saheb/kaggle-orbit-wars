@@ -261,6 +261,7 @@ class VecTorchEnv:
         # "full" = capture_required + maintain/defend_ok gates (legacy); "minimal" = COMMIT is
         # all-in at any target, gated only on having MIN_BINARY_COMMIT_SHIPS. Binary mode only.
         binary_commit_gates: str = "full",
+        global_econ: bool = False,   # append the 48 projected economy-delta globals (15 -> 63)
         ship_overflow_mode: str = "clamp",   # matches eval (_ship_bin_to_count clamps); "drop"=legacy bug
         action_decode: str = "angle",
         win_margin_coeff: float = 0.0,
@@ -389,6 +390,7 @@ class VecTorchEnv:
         if binary_commit_gates not in ("full", "minimal"):
             raise ValueError(f"unknown binary_commit_gates: {binary_commit_gates}")
         self.binary_commit_gates = binary_commit_gates
+        self.global_econ = bool(global_econ)
         # Intent sizing (#4): per-player raw resolved-size table {player: (N,MO,P,4)}, stashed by
         # get_features and read at decode (_apply_actions) to turn a chosen intent → exact ships.
         self._intent_sizes = {}
@@ -1194,12 +1196,13 @@ class VecTorchEnv:
         gf_list += [early, mid, late, comet_cycle]
         gf = torch.stack(gf_list, dim=1)  # (N, 15)
 
-        # 15-62: the passive rollout's economy series (Yijie's global token carries the same
-        # per-turn ship/production differences). Reuses the projection already computed above
-        # for the planet channels — no second rollout.
-        gf = torch.cat([gf, global_economy_features(
-            planets, planet_alive, self.fleets, self.fleet_alive,
-            own_ts, garr_ts, timeline_arrivals, player, self.num_players)], dim=1)  # (N, 63)
+        # 15-62 (opt-in): the passive rollout's economy series (Yijie's global token carries the
+        # same per-turn ship/production differences). Reuses the projection already computed
+        # above for the planet channels — no second rollout.
+        if self.global_econ:
+            gf = torch.cat([gf, global_economy_features(
+                planets, planet_alive, self.fleets, self.fleet_alive,
+                own_ts, garr_ts, timeline_arrivals, player, self.num_players)], dim=1)  # (N, 63)
 
         # Action masks
         owned_idx, slot_valid = self.owned_indices_for(player)
