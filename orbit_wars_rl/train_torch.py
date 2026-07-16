@@ -45,6 +45,15 @@ from torch_env import (
 # Helpers
 # ----------------------------------------------------------------------------
 
+# The frozen previous-best lives in the pool as a pinned member (add_pinned_rl prefixes "seed_").
+ANCHOR_NAME_BASE = "anchor"
+ANCHOR_NAME = f"seed_{ANCHOR_NAME_BASE}"
+
+
+def _anchor_member(pool) -> PoolMember | None:
+    return next((m for m in pool.members if m.name == ANCHOR_NAME), None)
+
+
 def atomic_torch_save(obj, path: str | os.PathLike) -> None:
     """Write a torch checkpoint via atomic rename to avoid partial .pt files."""
     path = Path(path)
@@ -816,6 +825,12 @@ def train(args):
     pool: OpponentPool | None = None
     pool_opp_model: EntityTransformer | None = None  # reusable frozen model for 'self' opponents
     rng = random.Random(args.seed)
+    anchor_enabled = cfg.ppo.anchor_kl_coef > 0.0 or cfg.ppo.anchor_value_coef > 0.0
+    if anchor_enabled and args.pool_mode == "none":
+        raise SystemExit(
+            "--anchor-kl-coef/--anchor-value-coef need an opponent pool: the promotion gate is "
+            "measured on head-to-head games vs the anchor, which is played as a pinned pool "
+            "member. Use --pool-mode self.")
     if args.pool_mode != "none":
         # If --resume points to a checkpoint with a sibling pool file (e.g.
         # checkpoints/pool_step_<N>.pt next to torch_step_<N>.pt), reload it.
@@ -911,6 +926,33 @@ def train(args):
                 pool.add_pinned_rl(name, sd)
                 print(f"  pool pinned RL champion: seed_{name} ({path})")
 
+        # Best-checkpoint anchor: the frozen reference the KL/value terms pull toward, AND a
+        # pinned pool member so the learner actually plays it — the promotion gate reads that
+        # head-to-head EMA. Pinned members already track an EMA win-rate (PoolMember.uses_ema).
+        if anchor_enabled:
+            existing_anchor = _anchor_member(pool)
+            if existing_anchor is not None:
+                anchor_sd = existing_anchor.state_dict
+                print(f"  anchor restored from resumed pool: {ANCHOR_NAME} "
+                      f"(ema_wr {existing_anchor.ema_win_rate:.3f} over "
+                      f"{existing_anchor.ema_games} games)")
+            else:
+                if args.anchor_from:
+                    anchor_sd = torch.load(args.anchor_from, map_location="cpu",
+                                           weights_only=False)
+                    if "model" in anchor_sd:
+                        anchor_sd = anchor_sd["model"]
+                    anchor_sd = {k: v for k, v in anchor_sd.items()
+                                 if k in set(model.state_dict().keys())}
+                    src = args.anchor_from
+                else:
+                    anchor_sd = {k: v.detach().cpu().clone()
+                                 for k, v in model.state_dict().items()}
+                    src = "the run's starting weights"
+                pool.add_pinned_rl(ANCHOR_NAME_BASE, anchor_sd)
+                print(f"  anchor seeded from {src} → pinned pool member {ANCHOR_NAME}")
+            learner.set_anchor(anchor_sd)
+
         # External opponents come from CLI flag — appended even on resume so
         # the user can add new externals without modifying the pool file.
         if args.pool_mode == "mixed" and args.external_opponents:
@@ -964,6 +1006,7 @@ def train(args):
                   f"over {args.pool_hard_ramp_steps:,} steps (true-zero start = self-play early).")
         print()
     last_pool_snapshot_step = 0
+    anchor_promotions = 0
 
     total_env_steps = 0
     iter_count = 0
@@ -1007,6 +1050,10 @@ def train(args):
                     "ship_kl_coef": args.ship_kl_coef,
                     "ship_kl_prior_exp": args.ship_kl_prior_exp,
                     "noop_target_launch_rate": args.noop_target_launch_rate,
+                    "anchor_kl_coef": args.anchor_kl_coef,
+                    "anchor_value_coef": args.anchor_value_coef,
+                    "anchor_promote_winrate": args.anchor_promote_winrate,
+                    "anchor_promote_min_games": args.anchor_promote_min_games,
                 },
                 resume="allow",
             )
@@ -1885,6 +1932,36 @@ def train(args):
         if pool is not None and total_env_steps - last_pool_snapshot_step >= args.pool_checkpoint_interval:
             last_pool_snapshot_step = total_env_steps
             pool.add_self_checkpoint(total_env_steps, model.state_dict())
+
+            # Promotion gate (Isaiah/Yijie both used 70% h2h): adopt the live policy as the new
+            # anchor once it reliably beats the current one. Never adopts a regression, so the
+            # reference ratchets upward instead of cycling. The outgoing anchor stays in the
+            # league as an ordinary snapshot so its play isn't forgotten.
+            if anchor_enabled:
+                am = _anchor_member(pool)
+                if (am is not None
+                        and am.ema_games >= args.anchor_promote_min_games
+                        and am.ema_win_rate >= args.anchor_promote_winrate):
+                    pool.add_self_checkpoint(total_env_steps, am.state_dict)
+                    new_sd = {k: v.detach().cpu().clone()
+                              for k, v in model.state_dict().items()}
+                    print(f"  ANCHOR PROMOTED @ step {total_env_steps:,}: ema_wr "
+                          f"{am.ema_win_rate:.3f} over {am.ema_games} games "
+                          f"(gate {args.anchor_promote_winrate}/"
+                          f"{args.anchor_promote_min_games})")
+                    am.state_dict = new_sd
+                    am.ema_win_rate, am.ema_games = 0.5, 0
+                    am.wins = am.losses = am.draws = 0
+                    learner.set_anchor(new_sd)
+                    anchor_promotions += 1
+                    if wb is not None:
+                        wb.log({"anchor/promotions": anchor_promotions},
+                               step=total_env_steps)
+                elif am is not None:
+                    print(f"  anchor: ema_wr {am.ema_win_rate:.3f} over {am.ema_games} games "
+                          f"(gate {args.anchor_promote_winrate}/"
+                          f"{args.anchor_promote_min_games})")
+
             evicted = pool.maybe_evict_mastered()
             if evicted:
                 print(f"  pool: mastered & evicted external opponents: {evicted}")
@@ -2003,7 +2080,11 @@ if __name__ == "__main__":
                              "regression is never adopted. Only active with an anchor enabled.")
     parser.add_argument("--anchor-promote-min-games", type=int, default=1024,
                         help="Minimum games vs the anchor before the promotion gate may fire "
-                             "(Yijie: 1024). Guards against promoting on a lucky streak.")
+                             "(Yijie: 1024). Guards against promoting on a lucky streak. NOTE: "
+                             "the anchor only accrues games when it is SAMPLED — as one of ~20 "
+                             "pool members it would see ~5%% of the pool slice and the gate would "
+                             "crawl. Pass --pool-pinned-fraction (the anchor is pinned) to give "
+                             "it a dedicated share.")
     parser.add_argument("--anchor-from", type=str, default=None,
                         help="Checkpoint to seed the anchor from. Default: the run's starting "
                              "weights (from-scratch: the random init, which the first promotion "

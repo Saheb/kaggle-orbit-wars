@@ -73,9 +73,28 @@ had no anchor, which is *why it couldn't be safely continued*.
    `ckpt["optimizer"]` (Adam moments) by default; `--cold-optimizer` restores the old
    fresh-Adam behaviour. LR still comes from this run's schedule (re-synced after load).
    Removes cause #2 outright.
-2. **Best-checkpoint anchoring** (structural, the real fix): add policy-KL + value-CE loss
-   terms vs a frozen previous-best; add best-promotion gated on >X% h2h. The pool machinery +
-   PFSP already exist in `opponent_pool.py`; this adds the anchor + gate.
+2. ~~**Best-checkpoint anchoring**~~ **BUILT 2026-07-16** (structural, the real fix). Flags:
+   `--anchor-kl-coef` (KL(live ‖ frozen best) over the **exact executed NOOP/COMMIT
+   distribution** — requires `--ship-bin-mode binary`; factorized anchoring raises rather than
+   silently anchoring the wrong distribution), `--anchor-value-coef` (MSE to the best's value —
+   our scalar-critic analogue of Isaiah's value-CE), `--anchor-promote-winrate` (default 0.70),
+   `--anchor-promote-min-games` (default 1024), `--anchor-from`. The anchor is installed as a
+   **pinned pool member** (`seed_anchor`), which is how the gate gets its head-to-head EMA —
+   pinned members already track one. On promotion the outgoing anchor is demoted into the league
+   as an ordinary snapshot, so its play isn't forgotten, and the EMA resets.
+   - Verified: `tests/test_anchor.py` (identity anchor ⇒ KL exactly 0; loss grows by exactly
+     coef·KL; value term = coef·MSE; **the KL's gradient measurably reduces KL** — the actual
+     anti-drift mechanism; non-binary raises) + an end-to-end CPU run where the gate fires
+     ("ANCHOR PROMOTED @ step 3,072") and resets.
+   - Cost: one extra no-grad forward per minibatch (the loop is update-bound — budget ~15–20%).
+   - ⚠ **Give the anchor a sampling share.** It only accrues gate games when sampled; as 1 of
+     ~20 pool members it sees ~5% of the pool slice (~2.5% of games) and the gate crawls. Use
+     `--pool-pinned-fraction`. Sanity-check the printed `anchor: ema_wr X over N games` line —
+     N must climb fast enough to clear `--anchor-promote-min-games` within a few snapshots.
+   - Note on the EMA: `ema_alpha` 0.01 ⇒ ~100-game memory, so reaching 0.70 needs a *sustained*
+     ~70%, not a streak. That is the intent (Yijie: 70% EMA over ≥1024 games).
+   - **Unrun at scale.** It is a behaviour change to the training objective: A/B it (on vs off,
+     same seed/steps) rather than adopting it silently into the long run.
 3. **Track external WR during the run** (the watcher's Ajay panel) — self-play internal metrics
    look healthy through a collapse, so the held-out panel is the only honest progress signal.
 4. Then a long run with anchoring on; expect a bounded, ratcheting Ajay WR rather than drift.
@@ -538,6 +557,51 @@ not a deterministic third action. If intermediate capital remains worth testing,
 choose it (NOOP / HOLD / ALL-IN) or its resolver must model a conservative opponent response; the
 24-step no-new-launch minimum is not a strategically sufficient hold amount. No PPO run was
 launched from this result.
+
+### Global economy series — feature contract (2026-07-16)
+
+**The lever:** the global token carried **15 static scalars** — current totals, no projection.
+Yijie's #13 global token carries *the ship and production differences at each turn of the passive
+rollout* (1D-CNN encoded). Our own replay diagnosis (§"production race and source drain") found
+projected **production delta** to be the state variable that separates wins from losses: the win
+established a production lead by step 15 and held it; the loss was even at step 50 and then
+compounded away. We were feeding the model everything except the quantity our own analysis named.
+
+**What was added** (`timeline.global_economy_features`, global dim **15 → 63**): at each of the
+24 projected steps, `production_delta` and `material_delta` = ours − Σ enemies (identical to "vs
+the opponent" in 2p; matches the existing global enemy-channel convention), signed-log compressed
+(`sign(x)·log1p|x|/4` and `/8`) so small deltas keep resolution and blowouts don't saturate.
+Material counts in-flight ships (launched − landed-by-k), so it is **conserved across a launch** —
+which is what lets an emptied source register as a source cost rather than a free capture.
+Reuses the projection already computed for the planet channels: **no second rollout**.
+
+**Why this and not more shaping:** same credit-assignment argument that made lesson 1 work — the
+critic sees the economic reversal the step a source-draining launch causes it, instead of 50 steps
+later. It composes with (does not confound) the per-planet counterfactual channels, which price
+one candidate action; this prices the whole board's trajectory.
+
+**Verification (all green before any launch):**
+- Ground truth vs stepping `torch_env_fn.physics_step` 24× with no actions: production **exact on
+  99.7%** of (env, step) cells, MAE 0.013; material MAE 0.41. 15 of 16 envs are *exactly* 0 at
+  every step; the residual is `resolve_target_eta`'s documented intercept slack (the same slack
+  the planet-level parity test tolerates), not an aggregation error.
+- Train/eval parity (`test_torch_env_features`): **0 error** for both seats including the 48 new
+  channels — the training and eval paths run the same code.
+- Normalization: new channels inside the ±3 band (`test_model_shapes`).
+- Backwards compatible: eval/export infer the width from `global_proj` (15 vs 63), so every
+  existing checkpoint stays evaluable/exportable; `model.load_state_dict` right-pads 15→63 with
+  zeros, so a zero-pad warm start is available (parked — confounded side-signal only).
+
+**Not yet run.** Primary evidence when it launches: Yijie 256-game trajectory + production delta
+at 50/100; Ajay as regression guard. Mechanism read: economy-channel weight norms (are they used
+at all), then production delta at 50/100, retention, planets@50.
+
+⚠ Known pre-existing test failure, NOT caused by this change: `test_train_validation.py::
+test_env_symmetry` plays two **random-init** models and asserts the P0 win rate is near 50%. Two
+random policies are not equally strong, so it measures which init got luckier, and ANY input-width
+change reshuffles that draw. Verified on the parent commit: baseline fails at 34.4%/54.7%, this
+change fails at 42.2%/31.2% — both fail, in different directions. The test conflates env symmetry
+with random-model parity and should be rewritten (play one model against itself) or dropped.
 
 ### Submitted-checkpoint cross-eval integrity audit (2026-07-16)
 
