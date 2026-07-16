@@ -85,7 +85,7 @@ COMET_LIFE_NORM = 40.0      # normalize steps-to-departure (comet paths are <= ~
 # Discrete action bins (match action_mask.py / model.py)
 from action_mask import (SHIP_COUNTS, FRACTION_BIN_VALUES, NUM_INTENTS,
                          MIN_BINARY_COMMIT_SHIPS)  # single source of truth (re-exported)
-from timeline import project_timeline, timeline_features
+from timeline import candidate_timeline_features, project_timeline, timeline_features
 
 NUM_ANGLE_BINS = 144
 ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
@@ -1076,9 +1076,10 @@ class VecTorchEnv:
         # matches eval, which sees every fleet in the obs. Comet slots are approximate
         # (projection assumes circular orbits / no expiry); everywhere else it parity-checks
         # against stepping the engine K times with no actions (tests/test_timeline_projection).
-        own_ts, garr_ts = project_timeline(
+        own_ts, garr_ts, timeline_arrivals = project_timeline(
             planets, planet_alive, self.fleets, self.fleet_alive,
-            self.angular_velocity, num_players=self.num_players)
+            self.angular_velocity, num_players=self.num_players,
+            return_arrivals=True)
         tf = timeline_features(own_ts, garr_ts, player)
         pf = torch.cat([pf, tf * planet_alive.unsqueeze(-1).float()], dim=2)  # (N, P, 116)
 
@@ -1275,6 +1276,20 @@ class VecTorchEnv:
             threat_imminence=threat_imminence,
             planet_dist=dpp,                         # (N, P, P) pairwise dists computed above
         )
+        candidate_ships = torch.where(
+            pairwise[..., 5] > 0.5,
+            torch.round(pairwise[..., 24] * 200.0),
+            max_ships.unsqueeze(-1).expand_as(pairwise[..., 5]),
+        )
+        candidate_eta = torch.ceil(
+            pairwise[..., 2] * BOARD_SIZE /
+            _ship_speed(candidate_ships).clamp(min=1e-6)
+        ).clamp(min=1.0)
+        candidate = candidate_timeline_features(
+            planets, planet_alive, timeline_arrivals, own_ts, garr_ts, player,
+            candidate_ships, candidate_eta, owned_idx, slot_valid,
+        )
+        pairwise = torch.cat([pairwise, candidate], dim=-1)
         # Stash this player's raw resolved-size table for intent decode (_apply_actions reads it).
         if self.ship_bin_mode == "intent":
             self._intent_sizes[player] = self._pw_intent_sizes

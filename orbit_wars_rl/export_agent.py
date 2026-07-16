@@ -206,22 +206,25 @@ class _Model(nn.Module):
             )
 
         fl_slot = self.fire_head(oe).squeeze(-1)
-        sl_slot = self.ship_head(oe)
         fl = fl_slot.unsqueeze(-1).expand(-1, -1, _MAX_PLANETS)
-        sl = sl_slot.unsqueeze(2).expand(-1, -1, _MAX_PLANETS, -1)
+        sl = None
+        if _SHIP_BIN_MODE != "binary":
+            sl_slot = self.ship_head(oe)
+            sl = sl_slot.unsqueeze(2).expand(-1, -1, _MAX_PLANETS, -1)
         if pairwise_features is not None:
             q_fire = self.fire_q(oe).unsqueeze(2).expand(-1, -1, n_p, -1)
             k_fire = self.fire_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
             fire_in = torch.cat([q_fire, k_fire, pairwise_features], dim=-1)
             fire_resid = self.fire_scorer(fire_in).squeeze(-1)
-            q_ship = self.ship_q(oe).unsqueeze(2).expand(-1, -1, n_p, -1)
-            k_ship = self.ship_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
-            ship_in = torch.cat([q_ship, k_ship, pairwise_features], dim=-1)
-            ship_resid = self.ship_scorer(ship_in)
             fl = fl.clone()
-            sl = sl.clone()
             fl[..., :n_p] = fl[..., :n_p] + fire_resid
-            sl[..., :n_p, :] = sl[..., :n_p, :] + ship_resid
+            if _SHIP_BIN_MODE != "binary":
+                q_ship = self.ship_q(oe).unsqueeze(2).expand(-1, -1, n_p, -1)
+                k_ship = self.ship_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
+                ship_in = torch.cat([q_ship, k_ship, pairwise_features], dim=-1)
+                ship_resid = self.ship_scorer(ship_in)
+                sl = sl.clone()
+                sl[..., :n_p, :] = sl[..., :n_p, :] + ship_resid
         if pm is not None:
             tgt_mask = pm.unsqueeze(1).expand(-1, max_owned, -1)
             mp = target_logits.shape[-1]
@@ -237,7 +240,8 @@ class _Model(nn.Module):
             fl = fl.masked_fill(~fire_mask.unsqueeze(-1), -100.0)
         if slot_valid is not None:
             fl = fl.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
-            sl = sl.masked_fill(~slot_valid.unsqueeze(-1).unsqueeze(-1), -100.0)
+            if sl is not None:
+                sl = sl.masked_fill(~slot_valid.unsqueeze(-1).unsqueeze(-1), -100.0)
             target_logits = target_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
         global_token = x[:, 0, :]

@@ -105,12 +105,16 @@ Conversion: caps/game X  atk-launch/game X  cap/atk-launch X (open<50 X  mid50-1
   planets@16/32/50/100 a/b/c/d  end X
   game-len  median WON Xst (Ng)  ·  LOST Yst (Ng)
      [planets@N WON/LOST milestone split]
+  relative-economy median Δ ours−opp (% games ahead; terminal carried)
+     WON/LOST prod@32/50/100 ... · material ...
   retention  peel-rate X (lost/total caps)  median-hold Xst
      [retention WON/LOST split]
   loss-depth  median own-material in LOST games X (0 = total wipeout)  ·  wiped-to-0 X%
   fire-rate  launch_rate X  fire_frac X   [ref:Isaiah 0.036 / 0.17]
      WON(Ng) lr X ff X  |  LOST(Ng) lr X ff X   (read WON; ff inflates on losses)
   ship0 1-ship-probe by phase  early<50 X% mid X% late X%
+  ★ already-covered neutral follow-up <100 X% launches, Y% ships
+     WON ... | LOST ... (direction ambiguous; coordination tracker, not a quality score)
 ```
 
 **Definitions** (a "launch" = a legal fire, `sent ≤ source ships`):
@@ -127,6 +131,11 @@ Conversion: caps/game X  atk-launch/game X  cap/atk-launch X (open<50 X  mid50-1
 - **ships/cap** = attack-ships ÷ captures. ⚠️ Deflated by churn (cheap re-captures) — read with
   caps/game vs `end`: caps/game ≫ end = churn.
 - **planets@N** = owned planets at episode-step N (expansion/retention trajectory).
+- **relative-economy** = the per-game paired advantage `ours − opponent` in owned production and
+  total material (planet + fleet ships) at steps 32/50/100, reported as median signed advantage and
+  fraction of games strictly ahead. It is split by outcome; do not pool WON/LOST when their mix
+  changes. An early terminal state is carried forward to later milestones, so `@100` includes early
+  eliminations instead of selecting only games that survived to step 100.
 - **game-len** = **median** length split by outcome. Short WON = decisive snowball; long WON =
   stall-and-win attrition. Symptom of the expansion/hold root, NOT an independent lever — don't bribe
   decisiveness with `speed_coef` (caused the Rev26 ship-bin-0 collapse).
@@ -143,9 +152,15 @@ Conversion: caps/game X  atk-launch/game X  cap/atk-launch X (open<50 X  mid50-1
   inflating "many of few"; winners ~0.19–0.21, losers ~0.31–0.33). The lever is *winning more*
   (retention), not a fire tax.
 - **ship0** = fraction of opening launches that are 1-ship probes, by phase (degeneracy tripwire).
+- **★ already-covered neutral follow-up** = within steps `<100`, the fraction of neutral-target launches
+  (and neutral-target ship mass) sent when visible friendly fleets already resolved to that neutral
+  carry at least `garrison + 1`, with no visible enemy fleet resolved there. This is a narrow
+  coordination-mechanism probe for the binary all-in experiment, **not a waste or skill metric**:
+  simultaneous enemy launches are unknowable at decision time, and extra mass may intentionally
+  defend the capture. Use matched-checkpoint movement plus WR/economy/retention to interpret it.
 
 The **tiered summary** at the end of an eval re-prints the highest-signal reads in priority order:
-win-rate → loss-depth → retention (peel-rate/median-hold) → expansion (planets@50/end, open<50 cap/atk) →
+win-rate → loss-depth/paired relative economy → retention (peel-rate/median-hold) → expansion (planets@50/end, open<50 cap/atk) →
 degeneracy tripwires. All the model-based / saturating / conflated families that used to print
 (decisive-mass gap/cross/overkill/med, take+hold/can't-hold/too-few, out-massed%, hold-floor, triage,
 launch-waste, reinf deep-dives, hoard, near/far, holdable-ROI) were **culled** — definitions in git

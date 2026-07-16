@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
 import os
-from statistics import mean
+from pathlib import Path
+from statistics import mean, median
 
 import torch
 import numpy as np
@@ -20,6 +22,60 @@ from action_mask import (compute_action_masks, actions_from_target_policy, _flee
 from torch_env import (_DM_BETA, _DM_ETA_FREE, _DM_ETA_SCALE, _DM_HORIZON, _DM_OVERHEAD,
                        MAX_SHIP_SPEED as _DM_MAX_SPEED)
 from kaggle_environments.envs.orbit_wars.orbit_wars import CENTER, ROTATION_RADIUS_LIMIT
+
+
+_BUNDLED_OPPONENT_ASSETS = {
+    "candidate_ender.py": {
+        2: ("ender_bundle/checkpoint_2p.pt",),
+        4: ("ender_bundle/checkpoint_4p.pt",),
+    },
+    "candidate_yijie.py": {
+        2: (
+            "yijie_bundle/inference_2p/weights/weights_2p_u53000.npz",
+            "yijie_bundle/inference_2p/weights/weights_2p_u55000.npz",
+        ),
+    },
+    "candidate_sub_presres05.py": {
+        2: ("../final_submissions/submission_presres05.tar.gz",),
+    },
+    "candidate_sub_stgpr1.py": {
+        2: ("../final_submissions/submission_stgpr1.tar.gz",),
+    },
+}
+
+
+def validate_opponent_assets(opponent: str, num_players: int) -> dict[str, str]:
+    """Fail before eval if a path opponent or one of its declared assets is missing."""
+    if opponent == "random":
+        return {}
+    path = Path(opponent).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"opponent agent does not exist: {path}")
+    required = _BUNDLED_OPPONENT_ASSETS.get(path.name, {}).get(num_players, ())
+    if path.name in _BUNDLED_OPPONENT_ASSETS and not required:
+        raise RuntimeError(f"{path.name} has no declared {num_players}-player asset set")
+    assets = [path.parent / rel for rel in required]
+    missing = [p for p in assets if not p.is_file()]
+    if missing:
+        joined = "\n  ".join(str(p) for p in missing)
+        raise FileNotFoundError(
+            f"opponent {path.name} is incomplete; required assets are missing:\n  {joined}\n"
+            "Do not trust this eval. Re-sync bundled opponent assets before retrying."
+        )
+    manifest = {}
+    for name, asset in zip(required, assets):
+        digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+        manifest[name] = digest
+    if manifest:
+        summary = ", ".join(f"{name}={digest[:12]}" for name, digest in manifest.items())
+        print(f"Opponent asset manifest: {summary}", flush=True)
+    return manifest
+
+
+def _assert_game_completed(env, context: str) -> None:
+    statuses = [str(state.status) for state in env.steps[-1]]
+    if any(status != "DONE" for status in statuses):
+        raise RuntimeError(f"{context} ended with agent statuses {statuses}; eval aborted")
 
 
 def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
@@ -120,13 +176,16 @@ def _apply_force_fire(moves, outputs, masks, obs, player, fire_threshold, ship_b
     tgt_arg = torch.argmax(outputs["target_logits"][0], dim=-1).cpu().numpy()
     tgt_idx_t = torch.as_tensor(tgt_arg, device=outputs["target_logits"].device).unsqueeze(0)
     fire_logits = torch.gather(outputs["fire_logits"], -1, tgt_idx_t.unsqueeze(-1)).squeeze(-1)
-    ship_logits = torch.gather(
-        outputs["ship_logits"],
-        2,
-        tgt_idx_t.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, outputs["ship_logits"].shape[-1]),
-    ).squeeze(2)
     fire_p = torch.sigmoid(fire_logits[0]).cpu().numpy()
-    ship_arg = torch.argmax(ship_logits[0], dim=-1).cpu().numpy()
+    ship_arg = None
+    if ship_bin_mode != "binary":
+        ship_logits = torch.gather(
+            outputs["ship_logits"],
+            2,
+            tgt_idx_t.unsqueeze(-1).unsqueeze(-1).expand(
+                -1, -1, 1, outputs["ship_logits"].shape[-1]),
+        ).squeeze(2)
+        ship_arg = torch.argmax(ship_logits[0], dim=-1).cpu().numpy()
     owned_idx = masks["owned_indices"].cpu().numpy()
     max_ships = masks["max_ships"].cpu().numpy().reshape(-1)
     planets = obs["planets"]
@@ -158,7 +217,9 @@ def _apply_force_fire(moves, outputs, masks, obs, player, fire_threshold, ship_b
         head_tgt = planets[ti] if 0 <= ti < len(planets) else None
         use_head = head_tgt is not None and int(head_tgt[1]) != player and int(head_tgt[0]) != int(src[0])
         use_tgt = head_tgt if use_head else best_tgt
-        ships = min(int(_ship_bin_to_count(int(ship_arg[slot]), int(max_ships[slot]), mode=ship_bin_mode)), int(src[5]))
+        ships = (int(src[5]) if ship_bin_mode == "binary" else
+                 min(int(_ship_bin_to_count(int(ship_arg[slot]), int(max_ships[slot]),
+                                            mode=ship_bin_mode)), int(src[5])))
         if ships <= 0:
             continue
         angle = _target_intercept_angle(src, use_tgt, ships, obs)
@@ -227,6 +288,7 @@ def _apply_retarget(moves, obs, player):
 def build_agent_fn(model: EntityTransformer, device: torch.device,
                    fire_threshold: float = 0.5, sample: bool = False,
                    ship_bin_mode: str = "absolute",
+                   binary_attack_sizing: str = "all-in",
                    target_decode: bool = False,
                    num_players: int = 2,
                    reserve_frac: float = 0.0,
@@ -239,7 +301,8 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                    defensive_reinforce_overfill: float = 1.0,
                    defensive_reinforce_stats: dict = None,
                    natural_head_audit_stats: dict = None,
-                   natural_head_audit_beta: float = 2.2):
+                   natural_head_audit_beta: float = 2.2,
+                   projected_hold_stats: dict = None):
     """Return a kaggle_environments-compatible agent function wrapping the model.
 
     sample=True uses Bernoulli/Categorical sampling instead of threshold/argmax —
@@ -279,8 +342,10 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
             if step_now <= _cd["prev_step"]:
                 _cd["last"].clear()
             _cd["prev_step"] = step_now
-        features = extract_features(obs, player, num_players=num_players,
-                                    timeline=_timeline)
+        features = extract_features(
+            obs, player, num_players=num_players, timeline=_timeline,
+            projected_hold=(binary_attack_sizing == "projected-hold"),
+        )
         masks = compute_action_masks(obs, player)
 
         with torch.no_grad():
@@ -302,12 +367,21 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
             moves = actions_from_target_policy(
                 outputs["fire_logits"].cpu(),
                 outputs["target_logits"].cpu(),
-                outputs["ship_logits"].cpu(),
+                (outputs["ship_logits"].cpu()
+                 if outputs["ship_logits"] is not None else None),
                 {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in masks.items()},
                 obs, player,
                 fire_threshold=fire_threshold,
                 sample=sample,
                 ship_bin_mode=ship_bin_mode,
+                binary_attack_sizing=binary_attack_sizing,
+                projected_hold_sizes=(
+                    features["projected_hold_sizes"].cpu().numpy()
+                    if "projected_hold_sizes" in features else None),
+                projected_hold_feasible=(
+                    features["projected_hold_feasible"].cpu().numpy()
+                    if "projected_hold_feasible" in features else None),
+                projected_hold_stats=projected_hold_stats,
                 pairwise_features=(features["pairwise_features"].cpu().numpy()
                                    if "pairwise_features" in features else None),
                 reserve_frac=reserve_frac,
@@ -364,6 +438,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
 
 
 _CONV_MILESTONES = (16, 32, 50, 100)
+_ECONOMY_MILESTONES = (32, 50, 100)
 # The opening window isolates the phase that decides expansion: opening cap/atk-launch and
 # caps_early/atk_early are windowed to <50 (a whole-game fraction is inflated by benign late
 # surplus re-fire in long won games). mid = [50, 100). (phase2 / metrics.md)
@@ -490,6 +565,65 @@ def _friendly_inbound(fleets, tgt, seat):
     return s
 
 
+def _relative_economy_snapshot(obs, seat):
+    """Production/material advantage for one side in a two-player observation.
+
+    Both values are paired differences (ours - opponent), so board-scale differences do not
+    create separate numerator/denominator aggregation artifacts. Material includes ships on
+    planets and in flight.
+    """
+    opponent = 1 - seat
+    planets = obs.get("planets") or []
+    fleets = obs.get("fleets") or []
+    our_prod = sum(float(p[6]) for p in planets if int(p[1]) == seat)
+    opp_prod = sum(float(p[6]) for p in planets if int(p[1]) == opponent)
+    our_material = sum(float(p[5]) for p in planets if int(p[1]) == seat)
+    opp_material = sum(float(p[5]) for p in planets if int(p[1]) == opponent)
+    our_material += sum(float(f[6]) for f in fleets if int(f[1]) == seat)
+    opp_material += sum(float(f[6]) for f in fleets if int(f[1]) == opponent)
+    return our_prod - opp_prod, our_material - opp_material
+
+
+def _relative_economy_milestones(steps, seat):
+    """Paired economy snapshots, carrying terminal state forward after an early finish."""
+    out = {}
+    if not steps or len(steps[0]) != 2:
+        return {ms: None for ms in _ECONOMY_MILESTONES}
+    for ms in _ECONOMY_MILESTONES:
+        state = steps[min(ms, len(steps) - 1)][seat]
+        out[ms] = _relative_economy_snapshot(state.observation, seat)
+    return out
+
+
+def _resolved_inbound_by_side(planets, fleets, tgt, seat):
+    """Friendly/enemy fleet mass whose next resolved planet is `tgt`."""
+    friendly = enemy = 0.0
+    for f in fleets or []:
+        owner = int(f[1])
+        if owner < 0:
+            continue
+        hit = _lead_collision_target(planets, f[2], f[3], f[4], f[6])
+        if hit is None or int(hit[0]) != int(tgt[0]):
+            continue
+        if owner == seat:
+            friendly += float(f[6])
+        else:
+            enemy += float(f[6])
+    return friendly, enemy
+
+
+def _already_covered_neutral(planets, fleets, tgt, seat):
+    """Whether known friendly inbound already flips an uncontested neutral.
+
+    This is deliberately a coordination probe, not a waste label: an opponent can launch a
+    simultaneous counter-wave that is absent from the decision-time observation.
+    """
+    if int(tgt[1]) != -1:
+        return False
+    friendly, enemy = _resolved_inbound_by_side(planets, fleets, tgt, seat)
+    return enemy == 0.0 and friendly >= float(tgt[5]) + 1.0
+
+
 def _ship_speed_py(ships):
     """Scalar mirror of torch_env._ship_speed (kaggle speed formula)."""
     s = max(float(ships), 1.0)
@@ -543,13 +677,22 @@ def game_conversion(steps, seat):
     launches_ph = [0, 0, 0]
     ship1_ph = [0, 0, 0]
     ship_ph_sum = [0, 0, 0]
+    # Coordination mechanism probe for the contested window. An "already-covered" neutral has no
+    # visible enemy inbound and already has enough friendly fleet mass in flight to flip its
+    # current garrison. This does NOT call the extra launch waste; simultaneous counter-launches
+    # are unobservable at decision time.
+    neutral_launches_u100 = neutral_ships_u100 = 0
+    already_covered_neutral_launches_u100 = already_covered_neutral_ships_u100 = 0
+    economy_at = _relative_economy_milestones(steps, seat)
     planets_at = {ms: None for ms in _CONV_MILESTONES}
     prev = {}
     last = None
     for t in range(1, len(steps)):
         if seat >= len(steps[t]) or seat >= len(steps[t - 1]):
             continue
-        p0 = steps[t - 1][seat].observation.get("planets")
+        obs0 = steps[t - 1][seat].observation
+        p0 = obs0.get("planets")
+        fleets0 = obs0.get("fleets") or []
         p1 = steps[t][seat].observation.get("planets")
         acts = steps[t][seat].action or []
         if p1:
@@ -609,6 +752,12 @@ def game_conversion(steps, seat):
                     atk_early += 1
                 elif t < _MID_WINDOW:
                     atk_mid += 1                       # mid-game (50-100) attack launches
+                if t < _MID_WINDOW and int(tgt[1]) == -1:
+                    neutral_launches_u100 += 1
+                    neutral_ships_u100 += sent
+                    if _already_covered_neutral(p0, fleets0, tgt, seat):
+                        already_covered_neutral_launches_u100 += 1
+                        already_covered_neutral_ships_u100 += sent
         if fired_this_step > 0 and owned_dec > 0:
             fire_steps += 1
             fire_frac_sum += fired_this_step / owned_dec
@@ -622,9 +771,17 @@ def game_conversion(steps, seat):
            "glen": len(steps),
            "launch_states": launch_states, "launch_count": launch_count,
            "fire_steps": fire_steps, "fire_frac_sum": fire_frac_sum,
-           "launches_ph": launches_ph, "ship1_ph": ship1_ph, "ship_ph_sum": ship_ph_sum}
+           "launches_ph": launches_ph, "ship1_ph": ship1_ph, "ship_ph_sum": ship_ph_sum,
+           "neutral_launches_u100": neutral_launches_u100,
+           "neutral_ships_u100": neutral_ships_u100,
+           "already_covered_neutral_launches_u100": already_covered_neutral_launches_u100,
+           "already_covered_neutral_ships_u100": already_covered_neutral_ships_u100}
     for ms in _CONV_MILESTONES:
         out[f"p{ms}"] = planets_at[ms]
+    for ms in _ECONOMY_MILESTONES:
+        snap = economy_at[ms]
+        out[f"prod_delta_{ms}"] = snap[0] if snap is not None else None
+        out[f"material_delta_{ms}"] = snap[1] if snap is not None else None
     return out
 
 
@@ -645,6 +802,14 @@ def new_conversion_acc():
            "launches_ph": [0, 0, 0], "ship1_ph": [0, 0, 0], "ship_ph_sum": [0, 0, 0],
            "launches_ph_won": [0, 0, 0], "ship1_ph_won": [0, 0, 0], "ship_ph_sum_won": [0, 0, 0],
            "launches_ph_lost": [0, 0, 0], "ship1_ph_lost": [0, 0, 0], "ship_ph_sum_lost": [0, 0, 0],
+           # Mechanism-only coordination probe. Outcome splits prevent a changing win/loss mix
+           # from masquerading as a policy change.
+           "neutral_launches_u100": 0, "neutral_ships_u100": 0,
+           "already_covered_neutral_launches_u100": 0, "already_covered_neutral_ships_u100": 0,
+           "neutral_launches_u100_won": 0, "neutral_ships_u100_won": 0,
+           "already_covered_neutral_launches_u100_won": 0, "already_covered_neutral_ships_u100_won": 0,
+           "neutral_launches_u100_lost": 0, "neutral_ships_u100_lost": 0,
+           "already_covered_neutral_launches_u100_lost": 0, "already_covered_neutral_ships_u100_lost": 0,
            # retention split by outcome — peel-rate → 1 on elimination (lose every planet because you
            # LOST the game), so the won-game value is the honest "can we hold mid-game?" read.
            "captures_won": 0, "captures_lost": 0, "lost_caps_won": 0, "lost_caps_lost": 0,
@@ -663,6 +828,11 @@ def new_conversion_acc():
         acc[f"p{ms}_n"] = 0
         acc[f"p{ms}_sum_won"] = 0; acc[f"p{ms}_n_won"] = 0
         acc[f"p{ms}_sum_lost"] = 0; acc[f"p{ms}_n_lost"] = 0
+    for ms in _ECONOMY_MILESTONES:
+        for metric in ("prod_delta", "material_delta"):
+            acc[f"{metric}_{ms}"] = []
+            acc[f"{metric}_{ms}_won"] = []
+            acc[f"{metric}_{ms}_lost"] = []
     return acc
 
 
@@ -671,16 +841,19 @@ def add_conversion(acc, conv, won=None, material=None):
         acc["lost_material"].append(material)  # elimination-depth (graded loss signal)
     for k in ("captures", "attack_launches", "reinforce_launches", "attack_ships",
               "end_planets", "atk_early", "caps_early", "atk_mid", "caps_mid", "reinf_early",
-              "lost_caps", "launch_states", "launch_count", "fire_steps", "fire_frac_sum"):
-        acc[k] += conv[k]
+              "lost_caps", "launch_states", "launch_count", "fire_steps", "fire_frac_sum",
+              "neutral_launches_u100", "neutral_ships_u100",
+              "already_covered_neutral_launches_u100", "already_covered_neutral_ships_u100"):
+        acc[k] += conv.get(k, 0)
     # route the fire-rate + conversion fields into won/lost buckets so spray + the opening ramp can
     # be read free of the losing-position confound (won=None from non-eval callers → overall only)
     if won is not None:
         suf = "won" if won else "lost"
         for k in ("launch_states", "launch_count", "fire_steps", "fire_frac_sum",
                   "captures", "lost_caps", "attack_launches", "atk_early", "caps_early",
-                  "atk_mid", "caps_mid"):
-            acc[f"{k}_{suf}"] += conv[k]
+                  "atk_mid", "caps_mid", "neutral_launches_u100", "neutral_ships_u100",
+                  "already_covered_neutral_launches_u100", "already_covered_neutral_ships_u100"):
+            acc[f"{k}_{suf}"] += conv.get(k, 0)
         acc[f"hold_durations_{suf}"].extend(conv["hold_durations"])
         acc[f"game_len_{suf}"].append(conv["glen"])
         acc["games_won" if won else "games_lost"] += 1
@@ -704,6 +877,13 @@ def add_conversion(acc, conv, won=None, material=None):
                 suf = "won" if won else "lost"
                 acc[f"p{ms}_sum_{suf}"] += v
                 acc[f"p{ms}_n_{suf}"] += 1
+    for ms in _ECONOMY_MILESTONES:
+        for metric in ("prod_delta", "material_delta"):
+            v = conv.get(f"{metric}_{ms}")
+            if v is not None:
+                acc[f"{metric}_{ms}"].append(v)
+                if won is not None:
+                    acc[f"{metric}_{ms}_{suf}"].append(v)
 
 
 def _fmt_conversion(acc):
@@ -767,6 +947,44 @@ def _fmt_conversion(acc):
             (f"{nm} {100*s1[i]/lp[i]:.0f}%(mean{ss[i]/lp[i]:.0f},n{lp[i]})" if lp[i] else f"{nm} —(n0)")
             for i, nm in enumerate(("early<50", "mid50-100", "late>=100")))
     s0wl = (f"\n     WON  {_s0('_won')}\n     LOST {_s0('_lost')}" if (gw + gl) > 0 else "")
+    # Per-game paired advantages avoid the two failure modes that motivated this metric: separate
+    # aggregate numerators can hide who was ahead in the same game, and late snapshots can select
+    # only long survivors. Terminal states are carried forward in game_conversion.
+    def _econ(metric, suffix):
+        cells = []
+        for ms in _ECONOMY_MILESTONES:
+            values = acc[f"{metric}_{ms}{suffix}"]
+            if not values:
+                cells.append("—")
+                continue
+            lead = sum(v > 0 for v in values) / len(values)
+            cells.append(f"{median(values):+.0f}({lead:.0%})")
+        return "/".join(cells)
+
+    econ = ""
+    if gw + gl > 0:
+        econ = (
+            "  relative-economy median Δ ours−opp (% games ahead; terminal carried)\n"
+            f"     WON  prod@32/50/100 {_econ('prod_delta', '_won')}  ·  "
+            f"material {_econ('material_delta', '_won')}\n"
+            f"     LOST prod@32/50/100 {_econ('prod_delta', '_lost')}  ·  "
+            f"material {_econ('material_delta', '_lost')}\n"
+        )
+
+    def _already_covered(suffix):
+        launches = acc[f"neutral_launches_u100{suffix}"]
+        ships = acc[f"neutral_ships_u100{suffix}"]
+        covered_launches = acc[f"already_covered_neutral_launches_u100{suffix}"]
+        covered_ships = acc[f"already_covered_neutral_ships_u100{suffix}"]
+        return (f"{covered_launches / max(launches, 1):.1%} launches "
+                f"({covered_launches}/{launches}), {covered_ships / max(ships, 1):.1%} ships")
+
+    already_covered = (
+        "  ★ already-covered neutral follow-up <100 "
+        f"{_already_covered('')}\n"
+        f"     WON {_already_covered('_won')}  |  LOST {_already_covered('_lost')} "
+        "(direction ambiguous; coordination tracker, not a quality score)\n"
+    )
     # Trusted core only; detailed proxy diagnostics live in git history.
     # Cut: the force-concentration-wall microscopy (decisive-mass, hold-floor, triage, om32,
     # failed-attack), the reinf-* deep-dives, hoard-vs-Isaiah, near-vs-far, launch-waste
@@ -783,12 +1001,14 @@ def _fmt_conversion(acc):
             f"  planets@16/32/50/100 {pl(16)}/{pl(32)}/{pl(50)}/{pl(100)}  end {acc['end_planets']/n:.1f}\n"
             f"  game-len  median WON {medlen_w}st ({acc['games_won']}g)  ·  LOST {medlen_l}st ({acc['games_lost']}g)\n"
             f"{pwl}"
+            f"{econ}"
             f"  retention  peel-rate {lost_rate:.2f} ({acc['lost_caps']}/{c} caps lost)  median-hold {med_hold}st\n"
             f"{rwl}"
             f"{ldepth}"
             f"  fire-rate  launch_rate {lr:.3f}  fire_frac {ff:.2f}   [ref:Isaiah 0.036 / 0.17]\n"
             f"{wl}"
-            f"  ship0 1-ship-probe by phase  {_s0('')}{s0wl}")
+            f"  ship0 1-ship-probe by phase  {_s0('')}{s0wl}\n"
+            f"{already_covered}")
 
 
 def _fmt_tier_summary(acc):
@@ -814,6 +1034,12 @@ def _fmt_tier_summary(acc):
     ff_w = acc["fire_frac_sum_won"] / max(acc["fire_steps_won"], 1)
     s0 = sum(acc["ship1_ph"]) / max(sum(acc["launches_ph"]), 1)
     medlen_w = _med(acc["game_len_won"])
+    def _lost_econ(metric):
+        return "/".join(
+            (f"{median(acc[f'{metric}_{ms}_lost']):+.0f}"
+             if acc[f"{metric}_{ms}_lost"] else "—")
+            for ms in _ECONOMY_MILESTONES
+        )
     bar = "─" * 78
     return (
         f"\n{bar}\n"
@@ -821,6 +1047,7 @@ def _fmt_tier_summary(acc):
         f"{bar}\n"
         f"  T1 ARBITER   win-rate {wr:.1%} ({gw}/{gw + gl})   ← the only absolute-regression signal\n"
         f"  T2 THE WALL  loss-depth med-material-in-loss {lmed:.0f} · wiped-to-0 {wiped:.0f}%  (graded; want ↑ material)\n"
+        f"               LOST paired Δ@32/50/100 prod {_lost_econ('prod_delta')} · material {_lost_econ('material_delta')}  (want ↑)\n"
         f"               retention  peel-rate WON {peel_w:.2f} (all {peel:.2f}) · median-hold WON {hold_w}st  (want peel↓)\n"
         f"               expansion  planets@50 WON {p50w:.0f} · end {endp:.1f}   ·   open<50 cap/atk WON {cap_open_w:.2f}\n"
         f"  T3 TRIPWIRE  launch_rate {lr:.3f} (→0 passive)   fire_frac WON {ff_w:.2f} (→1 carpet-bomb)   "
@@ -840,6 +1067,7 @@ def evaluate_against_baseline(
     fire_threshold: float = 0.5,
     sample: bool = False,
     ship_bin_mode: str = "absolute",
+    binary_attack_sizing: str = "all-in",
     target_decode: bool = False,
     defensive_reinforce_k: int = 0,
     defensive_reinforce_beta: float = 2.2,
@@ -857,10 +1085,14 @@ def evaluate_against_baseline(
     """
     from kaggle_environments import make
 
+    validate_opponent_assets(opponent, num_players)
     def_reinf_stats = {}
     natural_head_stats = {} if natural_head_audit else None
+    projected_hold_stats = {} if binary_attack_sizing == "projected-hold" else None
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
-                              ship_bin_mode=ship_bin_mode, target_decode=target_decode,
+                              ship_bin_mode=ship_bin_mode,
+                              binary_attack_sizing=binary_attack_sizing,
+                              target_decode=target_decode,
                               defensive_reinforce_k=defensive_reinforce_k,
                               defensive_reinforce_beta=defensive_reinforce_beta,
                               defensive_reinforce_max_targets=defensive_reinforce_max_targets,
@@ -869,6 +1101,7 @@ def evaluate_against_baseline(
                               defensive_reinforce_stats=def_reinf_stats,
                               natural_head_audit_stats=natural_head_stats,
                               natural_head_audit_beta=natural_head_audit_beta,
+                              projected_hold_stats=projected_hold_stats,
                               num_players=num_players)
     opponents = [opponent] * (num_players - 1)
     agents = [agent_fn] + opponents
@@ -881,6 +1114,7 @@ def evaluate_against_baseline(
     for seed in range(seed_start, seed_start + num_games):
         env = make("orbit_wars", configuration={"seed": seed}, debug=False)
         env.run(agents)
+        _assert_game_completed(env, f"seed={seed}")
         final = env.steps[-1]
         rewards = [s.reward for s in final]
 
@@ -912,6 +1146,7 @@ def evaluate_against_baseline(
         "conversion": conv_tot,
         "defensive_reinforce": def_reinf_stats,
         "natural_head_audit": natural_head_stats or {},
+        "projected_hold": projected_hold_stats or {},
         "results": results,
     }
 
@@ -955,6 +1190,7 @@ def evaluate_panel(
     fire_threshold: float = 0.5,
     sample: bool = False,
     ship_bin_mode: str = "absolute",
+    binary_attack_sizing: str = "all-in",
     target_decode: bool = False,
     defensive_reinforce_k: int = 0,
     defensive_reinforce_beta: float = 2.2,
@@ -977,10 +1213,14 @@ def evaluate_panel(
     from kaggle_environments import make
     from eval_panel import BY_ARCHETYPE
 
+    validate_opponent_assets(opponent, 2)
     def_reinf_stats = {}
     natural_head_stats = {} if natural_head_audit else None
+    projected_hold_stats = {} if binary_attack_sizing == "projected-hold" else None
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
-                              ship_bin_mode=ship_bin_mode, target_decode=target_decode,
+                              ship_bin_mode=ship_bin_mode,
+                              binary_attack_sizing=binary_attack_sizing,
+                              target_decode=target_decode,
                               defensive_reinforce_k=defensive_reinforce_k,
                               defensive_reinforce_beta=defensive_reinforce_beta,
                               defensive_reinforce_max_targets=defensive_reinforce_max_targets,
@@ -988,7 +1228,8 @@ def evaluate_panel(
                               defensive_reinforce_overfill=defensive_reinforce_overfill,
                               defensive_reinforce_stats=def_reinf_stats,
                               natural_head_audit_stats=natural_head_stats,
-                              natural_head_audit_beta=natural_head_audit_beta)
+                              natural_head_audit_beta=natural_head_audit_beta,
+                              projected_hold_stats=projected_hold_stats)
 
     records: list = []
     total_games = sum(len(seeds) for seeds in BY_ARCHETYPE.values()) * 2
@@ -1014,6 +1255,8 @@ def evaluate_panel(
                 agents = [agent_fn, opponent] if my_seat == 0 else [opponent, agent_fn]
                 env = make("orbit_wars", configuration={"seed": seed}, debug=False)
                 env.run(agents)
+                _assert_game_completed(
+                    env, f"archetype={archetype} seed={seed} seat={my_seat}")
                 final = env.steps[-1]
                 rewards = [s.reward if s.reward is not None else 0.0 for s in final]
                 my_reward = rewards[my_seat]
@@ -1036,9 +1279,24 @@ def evaluate_panel(
     result = _accumulate_panel_records(records)
     result["defensive_reinforce"] = def_reinf_stats
     result["natural_head_audit"] = natural_head_stats or {}
+    result["projected_hold"] = projected_hold_stats or {}
     if collect_records:
         result["_records"] = records
     return result
+
+
+def _fmt_projected_hold(stats: dict) -> str:
+    attacks = stats.get("attacks", 0)
+    verified = stats.get("verified", 0)
+    resized = stats.get("resized", 0)
+    all_in = stats.get("all_in_ships", 0)
+    executed = stats.get("executed_ships", 0)
+    return (
+        "Projected hold sizing: "
+        f"verified {verified}/{attacks} ({verified / max(attacks, 1):.1%}) | "
+        f"strictly smaller {resized}/{attacks} ({resized / max(attacks, 1):.1%}) | "
+        f"ships {executed}/{all_in} ({executed / max(all_in, 1):.1%} of all-in)"
+    )
 
 
 def _fmt_defensive_reinforce(stats: dict) -> str:
@@ -1196,6 +1454,8 @@ def print_panel_report(result: dict, opponent: str) -> None:
         print(_fmt_defensive_reinforce(result["defensive_reinforce"]))
     if result.get("natural_head_audit"):
         print(_fmt_natural_head_audit(result["natural_head_audit"]))
+    if result.get("projected_hold"):
+        print(_fmt_projected_hold(result["projected_hold"]))
     print()
     print("Per archetype  (8 games each = 4 seeds × 2 seats):")
     print(f"  {'archetype':<48s}  {'WR':>6s}  {'s0/s1':>10s}  {'mat':>8s}")
@@ -1226,6 +1486,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         opponent: str = "random", fire_threshold: float = 0.5,
                         panel: bool = False, sample: bool = False,
                         target_decode: bool = False,
+                        binary_attack_sizing: str = "all-in",
                         reinforce_gate_min_planets: int = None,
                         reinforce_forward_only: bool = None,
                         reinforce_garrison_floor: float = None,
@@ -1280,6 +1541,11 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
               f"suff={sufficient_commit_factor}")
     if cfg.model.ship_bin_mode != "absolute":
         print(f"Checkpoint ship_bin_mode={cfg.model.ship_bin_mode}")
+    if binary_attack_sizing != "all-in":
+        if cfg.model.ship_bin_mode != "binary":
+            raise ValueError("--binary-attack-sizing requires a binary checkpoint")
+        print("BINARY CAPITAL DIAGNOSTIC: policy/targets unchanged; "
+              f"executed attack sizing={binary_attack_sizing}")
     # Auto-detect action_decode from checkpoint config; CLI --target-decode overrides.
     if not target_decode and ckpt_action_decode == "target":
         target_decode = True
@@ -1335,6 +1601,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         results = evaluate_panel(model, device, opponent=opponent,
                                  fire_threshold=fire_threshold, sample=sample,
                                  ship_bin_mode=cfg.model.ship_bin_mode,
+                                 binary_attack_sizing=binary_attack_sizing,
                                  target_decode=target_decode,
                                  defensive_reinforce_k=defensive_reinforce_k,
                                  defensive_reinforce_beta=defensive_reinforce_beta,
@@ -1352,6 +1619,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     results = evaluate_against_baseline(
         model, device,
         ship_bin_mode=cfg.model.ship_bin_mode,
+        binary_attack_sizing=binary_attack_sizing,
         target_decode=target_decode,
         num_games=num_games,
         seed_start=seed_start,
@@ -1378,6 +1646,8 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         print(_fmt_defensive_reinforce(results["defensive_reinforce"]))
     if results.get("natural_head_audit"):
         print(_fmt_natural_head_audit(results["natural_head_audit"]))
+    if results.get("projected_hold"):
+        print(_fmt_projected_hold(results["projected_hold"]))
     for r in results["results"][:5]:
         print(f"  seed={r['seed']} win={r['win']} "
               f"material={r['material']} rewards={r['rewards']}")
@@ -1405,6 +1675,14 @@ if __name__ == "__main__":
                              "is on competent bins (1-ship-fleet trap).")
     parser.add_argument("--target-decode", action="store_true",
                         help="Aim with target_logits plus orbital intercept.")
+    parser.add_argument("--binary-attack-sizing",
+                        choices=("all-in", "capture-defend", "projected-hold"),
+                        default="all-in",
+                        help="Eval-only binary capital diagnostic. Keep the trained NOOP/source/target "
+                             "distribution unchanged, but execute non-owned commits using either the "
+                             "checkpoint's all-in amount, the existing capture-defend heuristic, "
+                             "or a verified 24-step projected hold amount. "
+                             "Own-target maintain sizing is unchanged.")
     parser.add_argument("--reinforce-gate-min-planets", type=int, default=None,
                         help="Reinforce-discipline parity: own targets legal only at "
                              ">= this many owned planets. Default=auto-load from checkpoint; "
@@ -1497,6 +1775,7 @@ if __name__ == "__main__":
         panel=args.panel,
         sample=args.sample,
         target_decode=args.target_decode,
+        binary_attack_sizing=args.binary_attack_sizing,
         reinforce_gate_min_planets=args.reinforce_gate_min_planets,
         reinforce_forward_only=args.reinforce_forward_only,
         reinforce_garrison_floor=args.reinforce_garrison_floor,
@@ -1519,7 +1798,8 @@ if __name__ == "__main__":
         with open(args.shard_out, "wb") as _f:
             pickle.dump({"records": _eval_result.get("_records", []),
                          "defensive_reinforce": _eval_result.get("defensive_reinforce", {}),
-                         "natural_head_audit": _eval_result.get("natural_head_audit", {})}, _f)
+                         "natural_head_audit": _eval_result.get("natural_head_audit", {}),
+                         "projected_hold": _eval_result.get("projected_hold", {})}, _f)
         _o = _eval_result["overall"]
         print(f"SHARD {args.panel_shard_idx}/{args.panel_shards} → {args.shard_out}: "
               f"{len(_eval_result.get('_records', []))} games, {_o['wins']}/{_o['total']} wins",
@@ -1528,7 +1808,8 @@ if __name__ == "__main__":
         import pickle
         with open(args.panel_out, "wb") as _f:
             pickle.dump({"records": _eval_result.get("_records", []),
-                         "opponent": args.opponent}, _f)
+                         "opponent": args.opponent,
+                         "projected_hold": _eval_result.get("projected_hold", {})}, _f)
         print(f"PANEL RECORDS → {args.panel_out}: "
               f"{len(_eval_result.get('_records', []))} games "
               f"(recompute any metric: python orbit_wars_rl/recompute_panel.py {args.panel_out})",

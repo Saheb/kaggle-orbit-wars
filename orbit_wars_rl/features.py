@@ -13,7 +13,7 @@ Features per entity type:
 - Global (15 features): player, step, angular_velocity, economy stats,
   enemy ships split (on_planets / in_fleets), mode, game-phase channels
 
-Pairwise features (26 per owned-slot × target-planet pair):
+Pairwise features (36 per owned-slot × target-planet pair):
   0: sin of arrival direction   (corrected for rotation on orbiting targets)
   1: cos of arrival direction   (corrected for rotation on orbiting targets)
   2: arrival dist / BOARD_SIZE  (corrected for rotation on orbiting targets)
@@ -35,6 +35,8 @@ Pairwise features (26 per owned-slot × target-planet pair):
   20: enemy_mass_soon/100       enemy fleet mass landing within _THREAT_ETA_WINDOW steps (clamp 5)
   21: threat_imminence          1/(min_enemy_eta+1); urgency in (0,0.5], 0 if no enemy inbound
   22-25: resolved ships for capture / capture-defend / maintain / all-in, divided by 200
+  26-31: candidate-conditioned timeline outcome for the deterministic binary commit
+  32-35: source outcome after deducting that commit, relative to no action
 """
 
 from __future__ import annotations
@@ -43,7 +45,8 @@ import math
 import numpy as np
 import torch
 
-from timeline import project_timeline, timeline_features
+from timeline import (candidate_timeline_features, project_timeline,
+                      projected_hold_sizes, timeline_features)
 from action_mask import resolve_intent_sizes_np
 
 # Canonical feature semantics:
@@ -138,7 +141,8 @@ MAX_OWNED_PLANETS = 16  # hard cap for owned-planet slots; matches config.ModelC
 
 
 def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
-                     max_owned=MAX_OWNED_PLANETS, timeline=True):
+                     max_owned=MAX_OWNED_PLANETS, timeline=True,
+                     projected_hold=False):
     """Extract entity features from observation dict.
 
     Returns dict of torch tensors (no batch dim).
@@ -462,6 +466,26 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
                                         tgt_x_pf, tgt_y_pf, tgt_r_pf, angular_velocity)
             friendly_contest = (ffships[:, np.newaxis] * headed_f).sum(axis=0).astype(np.float32)
 
+    # Resolve the existing in-flight fleets once. Besides the no-action planet timeline,
+    # the arrivals tensor supports source-target counterfactual outcome features below.
+    pl_arr = np.zeros((max_planets, 7), dtype=np.float32)
+    n_tp = min(n_planets, max_planets)
+    if n_tp > 0:
+        pl_arr[:n_tp] = np.array([p[:7] for p in planets[:n_tp]], dtype=np.float32)
+    if len(fleets) > 0:
+        fl_arr = np.array([f[:7] for f in fleets], dtype=np.float32)
+    else:
+        fl_arr = np.zeros((1, 7), dtype=np.float32)
+    pl_t = torch.from_numpy(pl_arr).unsqueeze(0)
+    alive_t = torch.from_numpy(planet_mask).unsqueeze(0)
+    fl_t = torch.from_numpy(fl_arr).unsqueeze(0)
+    fl_alive_t = torch.tensor([[len(fleets) > 0] * fl_arr.shape[0]], dtype=torch.bool)
+    own_ts, garr_ts, arrivals = project_timeline(
+        pl_t, alive_t, fl_t, fl_alive_t,
+        torch.tensor([angular_velocity], dtype=torch.float32),
+        num_players=num_players, return_arrivals=True,
+    )
+
     pairwise = compute_pairwise_features(
         planets, owned_indices, owned_count, player, max_planets=max_planets,
         max_owned=max_owned, angular_velocity=angular_velocity, step=step,
@@ -471,33 +495,54 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         comet_ids=comet_planet_ids,
     )
 
+    src_ships = np.zeros(max_owned, dtype=np.float32)
+    slot_valid = np.zeros(max_owned, dtype=np.bool_)
+    for slot in range(min(owned_count, max_owned)):
+        src_idx = int(owned_indices[slot])
+        if src_idx < len(planets):
+            src_ships[slot] = float(planets[src_idx][5])
+            slot_valid[slot] = True
+    candidate_ships = np.where(
+        pairwise[..., 5] > 0.5,
+        np.rint(pairwise[..., 24] * 200.0),
+        src_ships[:, np.newaxis],
+    ).astype(np.float32)
+    candidate_eta = np.ceil(
+        pairwise[..., 2] * BOARD_SIZE /
+        np.maximum(_ship_speed_np(candidate_ships), 1e-6)
+    ).clip(1, None).astype(np.float32)
+    candidate = candidate_timeline_features(
+        pl_t, alive_t, arrivals, own_ts, garr_ts, player,
+        torch.from_numpy(candidate_ships).unsqueeze(0),
+        torch.from_numpy(candidate_eta).unsqueeze(0),
+        torch.from_numpy(owned_indices).unsqueeze(0),
+        torch.from_numpy(slot_valid).unsqueeze(0),
+    )[0].numpy()
+    pairwise[..., 26:36] = candidate
+
+    hold_sizes = hold_feasible = None
+    if projected_hold:
+        hold_sizes_t, hold_feasible_t = projected_hold_sizes(
+            pl_t, alive_t, arrivals, own_ts, garr_ts, player,
+            torch.from_numpy(src_ships).unsqueeze(0),
+            torch.from_numpy(pairwise[..., 2] * BOARD_SIZE).unsqueeze(0),
+            torch.from_numpy(owned_indices).unsqueeze(0),
+            torch.from_numpy(slot_valid).unsqueeze(0),
+        )
+        hold_sizes = hold_sizes_t[0]
+        hold_feasible = hold_feasible_t[0]
+
     # --- Projected-future timeline (96 = 4 ch × 24 steps; planet dim 20 → 116) ---
     # Runs the SAME timeline.py code the training path uses (batch of 1), so both paths
     # encode identically by construction. Projects over ALL fleets in the obs (no
     # max_fleets truncation — matches torch_env, which projects its full fleet set).
     # timeline=False serves pre-timeline checkpoints (planet_proj 20-wide; eval infers).
     if timeline:
-        pl_arr = np.zeros((max_planets, 7), dtype=np.float32)
-        n_tp = min(n_planets, max_planets)
-        if n_tp > 0:
-            pl_arr[:n_tp] = np.array([p[:7] for p in planets[:n_tp]], dtype=np.float32)
-        if len(fleets) > 0:
-            fl_arr = np.array([f[:7] for f in fleets], dtype=np.float32)
-        else:
-            fl_arr = np.zeros((1, 7), dtype=np.float32)  # one dead slot; masked out below
-        own_ts, garr_ts = project_timeline(
-            torch.from_numpy(pl_arr).unsqueeze(0),
-            torch.from_numpy(planet_mask).unsqueeze(0),
-            torch.from_numpy(fl_arr).unsqueeze(0),
-            torch.tensor([[len(fleets) > 0] * fl_arr.shape[0]], dtype=torch.bool),
-            torch.tensor([angular_velocity], dtype=torch.float32),
-            num_players=num_players,
-        )
         tl_feats = timeline_features(own_ts, garr_ts, player)[0].numpy()  # (max_planets, 96)
         tl_feats *= planet_mask[:, np.newaxis]
         planet_feats = np.concatenate([planet_feats, tl_feats], axis=1)  # (max_planets, 116)
 
-    return {
+    result = {
         "planet_features": torch.from_numpy(planet_feats),
         "fleet_features": torch.from_numpy(fleet_feats),
         "global_features": torch.from_numpy(global_feats),
@@ -507,6 +552,10 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         "owned_count": owned_count,
         "pairwise_features": torch.from_numpy(pairwise),
     }
+    if projected_hold:
+        result["projected_hold_sizes"] = hold_sizes
+        result["projected_hold_feasible"] = hold_feasible
+    return result
 
 
 # Stable names for telemetry and audits. Position is the feature contract: keep this tuple in
@@ -519,6 +568,11 @@ PAIRWISE_FEATURE_NAMES = (
     "friendly_reachable_mass", "keepability_margin", "enemy_mass_soon",
     "threat_imminence", "intent_capture_ships", "intent_capture_defend_ships",
     "intent_maintain_ships", "intent_all_in_ships",
+    "candidate_mine_at_arrival", "candidate_arrival_margin",
+    "candidate_owned_fraction", "candidate_held_to_horizon",
+    "candidate_production_delta", "candidate_terminal_margin_delta",
+    "candidate_source_owned_fraction", "candidate_source_held_to_horizon",
+    "candidate_source_production_delta", "candidate_source_terminal_margin_delta",
 )
 PAIRWISE_FEATURE_DIM = len(PAIRWISE_FEATURE_NAMES)
 

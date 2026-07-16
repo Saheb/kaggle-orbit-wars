@@ -13,12 +13,26 @@ from train_torch import decode_ship_bins, intent_rollout_metrics
 
 
 def test_pairwise_feature_names_cover_intent_channels():
-    assert len(PAIRWISE_FEATURE_NAMES) == 26
-    assert PAIRWISE_FEATURE_NAMES[-4:] == (
+    assert len(PAIRWISE_FEATURE_NAMES) == 36
+    assert PAIRWISE_FEATURE_NAMES[22:26] == (
         "intent_capture_ships",
         "intent_capture_defend_ships",
         "intent_maintain_ships",
         "intent_all_in_ships",
+    )
+    assert PAIRWISE_FEATURE_NAMES[26:32] == (
+        "candidate_mine_at_arrival",
+        "candidate_arrival_margin",
+        "candidate_owned_fraction",
+        "candidate_held_to_horizon",
+        "candidate_production_delta",
+        "candidate_terminal_margin_delta",
+    )
+    assert PAIRWISE_FEATURE_NAMES[32:] == (
+        "candidate_source_owned_fraction",
+        "candidate_source_held_to_horizon",
+        "candidate_source_production_delta",
+        "candidate_source_terminal_margin_delta",
     )
 
 

@@ -182,7 +182,6 @@ class PPOLearner:
                        for k, v in outputs.items()}
 
         fire_logits_target = outputs["fire_logits"]
-        ship_logits_target = outputs["ship_logits"]
         target_logits = outputs["target_logits"]
         if target_mask is not None:
             target_logits = target_logits.masked_fill(~target_mask, -1e9)
@@ -190,15 +189,18 @@ class PPOLearner:
 
         # Actions taken
         fire_action   = to_dev(batch["actions"]["fire"])
-        ship_action   = to_dev(batch["actions"]["ship"])
         target_action = to_dev(batch["actions"]["target"])
-        fire_logits = _gather_target_logits(fire_logits_target, target_action)
-        ship_logits = _gather_target_ship_logits(ship_logits_target, target_action)
-
-        # Action distributions (target-decode: fire, ship, target only — no angle).
-        fire_dist   = torch.distributions.Bernoulli(logits=fire_logits)
-        ship_dist   = torch.distributions.Categorical(logits=ship_logits)
-        target_dist = torch.distributions.Categorical(logits=target_logits)
+        fire_logits = ship_logits_target = ship_logits = None
+        fire_dist = ship_dist = target_dist = None
+        if not binary_mode:
+            ship_action = to_dev(batch["actions"]["ship"])
+            fire_logits = _gather_target_logits(fire_logits_target, target_action)
+            ship_logits_target = outputs["ship_logits"]
+            ship_logits = _gather_target_ship_logits(ship_logits_target, target_action)
+            # Action distributions (target-decode: fire, ship, target only — no angle).
+            fire_dist = torch.distributions.Bernoulli(logits=fire_logits)
+            ship_dist = torch.distributions.Categorical(logits=ship_logits)
+            target_dist = torch.distributions.Categorical(logits=target_logits)
 
         # Target is part of the sampled joint action even when fire=0.
         slot_valid = slot_valid_2d.unsqueeze(-1)   # (B, max_owned, 1)
@@ -257,8 +259,8 @@ class PPOLearner:
             # One exact entropy over the executed {NOOP, COMMIT(target)} distribution.
             # It is a categorical target choice with NOOP as an extra category, so the
             # existing target entropy coefficient controls it; fire/ship terms are zero.
-            fire_entropy = torch.zeros((), device=ship_logits.device)
-            ship_entropy = torch.zeros((), device=ship_logits.device)
+            fire_entropy = torch.zeros((), device=fire_logits_target.device)
+            ship_entropy = torch.zeros((), device=fire_logits_target.device)
             per_source_action_entropy = binary_action_entropy(binary_log_noop, binary_log_commit)
             target_entropy = ((per_source_action_entropy * decision_valid).sum()
                               / decision_valid.sum().clamp(min=1))
@@ -346,22 +348,29 @@ class PPOLearner:
                 firing = (fires_per_state > 0).float()
                 fire_fraction = ((fires_per_state / owned_per_state.clamp(min=1)) * firing).sum() / firing.sum().clamp(min=1)
 
-                ship_argmax = ship_logits.argmax(dim=-1)
-                weighted = (ship_argmax == 0).float() * fired_mask
-                ship_bin0_rate = weighted.sum() / fired_mask.sum().clamp(min=1)
-                mean_ship_bin = (ship_argmax.float() * fired_mask).sum() / fired_mask.sum().clamp(min=1)
                 target_valid = target_logits > -1e8
                 fire_target_mean = (fire_logits_target.masked_fill(~target_valid, 0.0).sum(dim=-1)
                                     / target_valid.float().sum(dim=-1).clamp(min=1.0))
                 fire_target_var = (((fire_logits_target - fire_target_mean.unsqueeze(-1)).masked_fill(~target_valid, 0.0) ** 2).sum(dim=-1)
                                    / target_valid.float().sum(dim=-1).clamp(min=1.0))
                 fire_target_std = ((fire_target_var * sv).sum() / sv_sum).sqrt()
-                ship_target_scores = ship_logits_target.amax(dim=-1)  # (B, MO, max_planets)
-                ship_target_mean = (ship_target_scores.masked_fill(~target_valid, 0.0).sum(dim=-1)
-                                    / target_valid.float().sum(dim=-1).clamp(min=1.0))
-                ship_target_var = (((ship_target_scores - ship_target_mean.unsqueeze(-1)).masked_fill(~target_valid, 0.0) ** 2).sum(dim=-1)
-                                   / target_valid.float().sum(dim=-1).clamp(min=1.0))
-                ship_target_std = ((ship_target_var * sv).sum() / sv_sum).sqrt()
+                ship_bin0_rate = mean_ship_bin = ship_target_std = torch.zeros(
+                    (), device=fire_logits_target.device)
+                if not binary_mode:
+                    ship_argmax = ship_logits.argmax(dim=-1)
+                    weighted = (ship_argmax == 0).float() * fired_mask
+                    ship_bin0_rate = weighted.sum() / fired_mask.sum().clamp(min=1)
+                    mean_ship_bin = (
+                        ship_argmax.float() * fired_mask).sum() / fired_mask.sum().clamp(min=1)
+                    ship_target_scores = ship_logits_target.amax(dim=-1)  # (B, MO, max_planets)
+                    ship_target_mean = (
+                        ship_target_scores.masked_fill(~target_valid, 0.0).sum(dim=-1)
+                        / target_valid.float().sum(dim=-1).clamp(min=1.0))
+                    ship_target_var = (
+                        ((ship_target_scores - ship_target_mean.unsqueeze(-1))
+                         .masked_fill(~target_valid, 0.0) ** 2).sum(dim=-1)
+                        / target_valid.float().sum(dim=-1).clamp(min=1.0))
+                    ship_target_std = ((ship_target_var * sv).sum() / sv_sum).sqrt()
                 # Entropy ceiling for the target head: its uniform max is ln(#legal
                 # targets), which moves with game state — batch mean over valid slots.
                 # Fire (ln 2) and ship (ln num_bins) ceilings are constants; all three
@@ -377,8 +386,8 @@ class PPOLearner:
                     target_entropy_max = (tgt_legal.log() * sv).sum() / sv_sum
                 fire_prior = outputs.get("_phase4_fire_prior")
                 fire_residual = outputs.get("_phase4_fire_residual")
-                ship_prior = outputs.get("_phase4_ship_prior")
-                ship_residual = outputs.get("_phase4_ship_residual")
+                ship_prior = outputs.get("_phase4_ship_prior") if not binary_mode else None
+                ship_residual = outputs.get("_phase4_ship_residual") if not binary_mode else None
                 fire_prior_rms = fire_resid_rms = fire_resid_ratio = 0.0
                 ship_prior_rms = ship_resid_rms = ship_resid_ratio = 0.0
                 fire_flip_prob = fire_noop_to_commit = fire_commit_to_noop = fire_straddle_rate = 0.0
@@ -424,7 +433,8 @@ class PPOLearner:
                 # as the raw entropies above) — cross-head comparable, 1.0 = uniform.
                 "fire_entropy_frac": fire_entropy.item() / math.log(2.0),
                 "target_entropy_frac": target_entropy.item() / max(target_entropy_max.item(), 1e-6),
-                "ship_entropy_frac": ship_entropy.item() / math.log(ship_logits.shape[-1]),
+                "ship_entropy_frac": (0.0 if binary_mode else
+                                      ship_entropy.item() / math.log(ship_logits.shape[-1])),
                 "target_entropy_max": target_entropy_max.item(),
                 "noop_kl": float(noop_kl.item() if torch.is_tensor(noop_kl) else noop_kl),
                 "mean_launch_rate": mean_launch_rate,

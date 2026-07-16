@@ -43,7 +43,7 @@ class ModelConfig:
     # MUST match the BC label scheme that produced the checkpoint.
     # Default "absolute" preserves legacy checkpoint behaviour.
     ship_bin_mode: str = "absolute"
-    pairwise_feature_dim: int = 26   # see features.PAIRWISE_FEATURE_DIM (22 base + 4 intent-sizing)
+    pairwise_feature_dim: int = 36   # 22 base + 4 intent + 6 target-CF + 4 source-CF
     max_planets: int = 48            # for target_head output size; matches EnvConfig
     # Target-conditioned fire/ship residual output init scale. The phase4 name is
     # retained in the checkpoint and CLI contract. 0.0 starts the residual at zero.

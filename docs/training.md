@@ -358,3 +358,204 @@ reinforcement share, planets at step 50, and capture retention.
 
 Launch order is A100-80GB spot, A100-80GB on-demand, then RTX PRO 6000. Hardware is a throughput
 choice rather than an algorithm delta; the training configuration remains matched.
+
+### Replay diagnosis after fixing under-commit — production race and source drain (2026-07-15)
+
+This is the diagnosis that motivated the counterfactual feature experiments below. It does not
+contradict the earlier ship-KL finding: that finding isolated under-commit in the old policy. These
+replays use the exact-marginal binary policy after all-in resolution had already lifted local
+capture/attack conversion. The remaining question was why good local conversion still did not turn
+into wins.
+
+**Yijie, 30.081M checkpoint:** compare seed 647 (win, our seat 0) with seed 1843 (loss,
+our seat 0). The discriminating state variable was opponent-relative production, not raw captures
+or planet count:
+
+| replay / step | planet delta | production delta | material delta |
+|---|---:|---:|---:|
+| win @32 | +2 | **+6** | +21 |
+| win @50 | +2 | **+6** | +64 |
+| win @75 | +4 | **+10** | +100 |
+| win @100 | +6 | **+16** | +314 |
+| loss @32 | -1 | -1 | +9 |
+| loss @50 | 0 | 0 | -21 |
+| loss @75 | -1 | **-9** | -48 |
+| loss @100 | -6 | **-22** | -416 |
+
+The win established a production lead by step 15 and sustained it. The loss never sustained one:
+it was approximately even at step 50, then Yijie's production compounded away. This is why
+`production_delta` is the north-star passive metric; planet count alone hides planet quality.
+
+The loss also exposed a concrete capital-allocation failure. At steps 46-47 the policy sent
+124 + 40 = **164 ships** from two sources toward production-1 neutral planet 14 (garrison 14).
+At steps 55-56 it sent 41 + 50 + 18 = **109 ships** from three sources toward production-1
+neutral planet 23 (garrison 14). The first wave made later waves already covered in the observed
+state. The audit does **not** show that the model lacked a production input: production had a
+non-zero learned projection, and the selected planets were cheap/close relative to the more
+productive alternatives. It shows that static target value plus per-source decisions did not price
+the fleet already committed, the opportunity cost of emptying each source, or the resulting global
+production trade. Thus the safe conclusion is coordination/capital misallocation, not simply
+"production feature ignored" or "routing/ETA is wrong."
+
+**Ajay, 40.108M checkpoint:** two losses (seed 32, both seats) showed the same economic reversal;
+a seed-2078 win retained its production lead. In the seat-0 loss we moved from +4 production and
++23 material at step 50 to -4/-19 at step 75, -6/-31 at step 125, and -20/-316 at step 150. The
+win remained +4/+57 at step 50, +8/+97 at step 75, and +5/+340 at step 100. The second seed-32
+loss similarly moved from +1 production at step 32 to -5 at step 50 and -10 at step 75.
+
+A target audit of the first loss made the source-side mechanism visible. Five late all-in launches
+sent 135, 168, 131, 67, and 160 ships from planets worth 4, 4, 4, 2, and 2 production. All five
+destination planets were captured, so these were local tactical successes. Four of the emptied
+sources were then lost within 0-12 steps; the fifth was lost later. This does not prove that an
+arbitrary smaller fleet would have won, but it rules out "failed capture" as the full explanation:
+the policy could win the destination while losing more valuable production capacity behind it.
+
+**Actionable conclusion:** target-side counterfactuals should expose whether the candidate capture
+survives and earns production; source-side counterfactuals should expose whether launching loses the
+origin and its production. Keep paired production/material deltas at fixed steps as the outcome
+read. Do not infer causality from feature-weight norms alone, and do not add a middle commitment
+until a matched feature-only arm establishes whether merely exposing this tradeoff is sufficient.
+
+Replay provenance is under
+`gpu_run_artifacts/binarymarg100m_l4_from25m/replay_analysis/`: the Yijie seed-647/1843 replay and
+analysis JSONs, `yijie_30m_seed1843_bad_target_audit.json`, both Ajay seed-32 losses, the seed-2078
+win, and `ajay_40m_seed32_target_audit.json`.
+
+### Candidate-conditioned counterfactual timeline — experiment contract (2026-07-15)
+
+Run `binarycf100m_rtxpro6000_spot` starts from random model and optimizer initialization. The sole
+training delta from exact-marginal binary PPO is six appended source-target features computed by
+replaying the existing 24-step arrival timeline with that candidate's deterministic commit added:
+mine-at-arrival, signed arrival margin, owned fraction after arrival, held-through-horizon,
+production delta versus no action, and terminal signed-margin delta versus no action. Existing
+in-flight fleets retain the exact timeline combat recurrence; no eval-time action override is used.
+
+**Hypothesis:** the current target head sees static value/pressure and a no-new-launch planet
+timeline, but not the consequence of its own candidate action. Direct candidate outcomes should
+prefer captures that survive and earn production, improving production advantage and retention
+against Yijie without sacrificing the exact-marginal binary launch discipline.
+
+Everything else remains matched: binary NOOP/COMMIT, exact executed-action likelihood, all-in
+non-owned commit sizing, maintain sizing for own targets, no-op KL 0.3, sparse reward, self-play
+pool 0.5, reinforcement gate 2, reverse-edge cooldown 3, seed/default initialization, 64-step
+rollouts, 32 minibatches, two PPO epochs, and 5M checkpoint cadence. Primary decision evidence is
+the 256-game Yijie trajectory; Ajay is the regression guard. Mechanism reads are production delta
+at 50/100, capture retention, planets at 50, capture/attack, reinforce share, launch/NOOP rate,
+candidate-feature weight norms, action entropy, clip fraction, and explained variance.
+
+Pre-launch gates: 27 focused feature/eval/action tests passed; a 64-step fresh CPU rollout completed
+PPO and checkpointing; the generated export ran four games without agent errors. The full suite was
+123 passed with one pre-existing random-policy symmetry smoke outside its broad threshold after the
+input-width change altered random initialization; targeted train/eval feature parity passed.
+
+The initial GCP L4 run (`10bccw3y`) failed during the compiled PPO update: the 384-env job had only
+175 MiB free and could not allocate another 180 MiB. The instance was deleted.
+
+**Active launch:** Jarvis RTX PRO 6000 96 GB spot, machine `447053`, managed run `r_a3356010`,
+W&B `orrk0m50`. It retains the matched 1,280-env configuration and completed compiled PPO without
+OOM. After compilation, iterations 5 and 10 took 16.5s and 17.7s for 81,920 environment steps,
+or about 4.6-5.0k steady SPS. Managed checkpoint sync and Ajay eval are attached at 5M-step cadence.
+
+### Source-conditioned counterfactual timeline — matched experiment contract (2026-07-15)
+
+Run `binarycfsrc100m_rtxpro6000_spot` is a fresh, same-seed arm alongside the target-only
+counterfactual run above. Its sole training delta is four additional source-side outcomes for
+each deterministic binary candidate: source owned fraction over the 24-step horizon,
+held-through-horizon, source production delta versus no action, and source terminal signed-margin
+delta versus no action. They are computed by deducting the candidate fleet from the source and
+replaying the same existing arrivals. The original six target-side outcomes remain unchanged.
+
+**Hypothesis:** Ajay loss replays showed locally successful all-in captures draining production
+sources before a later economic reversal. Target-only outcomes price the destination but omit that
+source cost. If merely exposing the net tradeoff is sufficient, this arm should improve Ajay
+retention/production trajectories and eventually Yijie without changing the binary `NOOP/COMMIT`
+action space. Everything else, including seed, optimizer, 100M schedule, rollout/PPO configuration,
+pool, decoder, reward, and checkpoint cadence, remains matched.
+
+Primary comparison is target-only versus target+source at matched 5M checkpoints: full Ajay and
+Yijie panels, production delta at 50/100, capture retention, attack conversion, planets at 50,
+launch/NOOP rate, and functional ablation of the four source channels. Do not add intermediate
+sizing in this arm. If the source channels are learned but do not improve outcomes, the next
+experiment may add a deterministic middle commitment; combining both changes now would make the
+result uninterpretable.
+
+**Active launch:** Jarvis RTX PRO 6000 96 GB spot, machine `447117`, managed run `r_02d2b8ec`,
+W&B `yh3lh8dr`. The matched 1,280-env configuration completed compilation and PPO without OOM.
+At iteration 10 it processed 81,920 environment steps in 17.3s, or about 4.73k steady SPS, versus
+about 4.96k SPS for the target-only arm at iteration 5 (roughly 5% source-projection overhead).
+GPU memory was 78.7/97.9 GiB. Managed checkpoint sync plus full Ajay and Yijie panels are attached
+at 5M-step cadence.
+
+### Target+source L4 continuation — matched-budget contract (2026-07-16)
+
+Resume the source-conditioned arm from global step 25,395,200 for 30M additional steps on GCP L4
+(`binarycfsrc_l4_from25m`), reaching 55,395,200 cumulative. This is a budget-matching experiment,
+not a feature change: warm optimizer and self-play pool resume, binary NOOP/COMMIT and all model,
+reward, decoder, and PPO settings remain unchanged. Continue the original 100M cosine schedule with
+`--lr-offset-steps 25395200`.
+
+**Decision evidence:** at the closest completed checkpoints, target-only 30.474M versus
+target+source 25.395M scored 64.1% versus 62.5% against Ajay and both scored 5.1% against Yijie.
+The differences are below one panel's sampling resolution. Source conditioning improved loss-depth
+at step 100: production deficit −18→−12 and material −340→−260 against Ajay; production −54→−46
+and material −1215→−1059 against Yijie. Its source channels are functionally active at 25M, while
+capital efficiency remains worse (more ships per capture and lower Ajay conversion). Continuing
+source to the target arm's 45M budget tests whether the economic improvement survives matched
+learning time and whether binary all-in is the remaining actuator bottleneck.
+
+L4 uses 512 envs with CPU rollout storage: deliberately omit `--gpu-storage`, which caused the
+earlier 384-env compiled update OOM. The local stage is 30M steps (about one overnight at the
+historical ~700 SPS), with checkpoints every 5M local / cumulative 30.395M through 55.395M.
+
+### Projected-hold decoder calibration — reject as execution contract (2026-07-16)
+
+**Hypothesis:** all-in attacks waste source capital. Execute the smallest fleet explicitly
+verified to capture the target and keep it for the existing 24-step counterfactual timeline,
+including production, combat, and already in-flight fleets. Reject a middle fleet if its source
+falls while the no-launch baseline source stays ours; fall back to all-in when no verified middle
+exists. Keep the checkpoint's NOOP probability, target choice, and all-in feasibility unchanged.
+
+The resolver was tested against the same source-conditioned checkpoint
+`torch_step_25067520_binarycfsrc_l4_from25m_20260715_185338.pt` on the same 16 canonical Ajay panel
+games (panel shard 0/16). The paired result was decisive:
+
+| metric | all-in | projected hold |
+|---|---:|---:|
+| wins | **13/16** | 1/16 |
+| capture / attack launch | **0.742** | 0.181 |
+| capture peel rate | **0.488** | 0.898 |
+| median production delta at step 50 | **+3.0** | -0.5 |
+| median material delta at step 50 | **0** | -32 |
+
+The resolver found a verified result for 1,443/1,483 executed attacks (97.3%), used a strictly
+smaller fleet on 1,394/1,483 (94.0%), and sent only 17,344/100,735 ships (17.2% of all-in). That is
+the failure mechanism, not noise: a no-new-launch projection verifies that today's known arrivals
+cannot peel the capture, but does not price the opponent's response after seeing an under-sized
+garrison. The policy then repeats cheap attacks, conversion collapses, and captures peel.
+
+**Verdict: reject.** Keep projected-hold as an eval diagnostic, not a training/eval decoder and
+not a deterministic third action. If intermediate capital remains worth testing, the policy must
+choose it (NOOP / HOLD / ALL-IN) or its resolver must model a conservative opponent response; the
+24-step no-new-launch minimum is not a strategically sufficient hold amount. No PPO run was
+launched from this result.
+
+### Submitted-checkpoint cross-eval integrity audit (2026-07-16)
+
+The earlier claim that binary 30.081M beat both final submitted 2p agents 256/256 is invalid. Both
+opponent wrappers derived their bundle path from `__file__`; `kaggle_environments` executes path
+agents without defining that name. The opponents therefore errored before acting, while the older
+eval loop accepted the terminal reward instead of requiring both statuses to be `DONE`. The two
+panels consequently produced identical aggregate statistics despite different embedded model
+hashes.
+
+The archived tarballs and extracted standalone 2p payloads are byte-identical:
+
+- `presres1` `neural_agent.py`: `981723dc125183c12e99b396900f790b0bfb37e1052ef09883a399691f17631e`
+- `stgpr1` `neural_agent.py`: `18146322db85c09032b4f103a2059fe35ca83dcd8001869cafc039ce8d78b41e`
+
+Direct smoke games completed `DONE/DONE` and emitted 41 and 60 non-empty action steps,
+respectively. The corrected comparison uses exact-marginal binary 40.108M
+(`torch_step_40108032_binarymarg100m_l4_from25m_20260714_163936.pt`, the current Ajay peak at
+80.5%) against those exact standalone payloads. Initial independent 16-game canonical samples were
+12/16 versus `presres1` and 14/16 versus `stgpr1`, already disproving the perfect-sweep claim.
+Full 256-game panels are running; record the final rates here when complete.

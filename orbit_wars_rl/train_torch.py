@@ -76,7 +76,6 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
     Returns: (fire_a, direction_a, ship_a, target_a, lp_fire, lp_ship, lp_target)
     """
     fire_logits_target = outputs["fire_logits"]
-    ship_logits_target = outputs["ship_logits"]
     target_logits = outputs["target_logits"]
     if target_mask is not None:
         target_logits = target_logits.masked_fill(~target_mask, -1e9)
@@ -97,6 +96,7 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
         # ship/target fields remain zero so the rollout storage contract stays stable.
         return fire_a.long(), direction_a, ship_a, target_a, lp_action, zeros, zeros
 
+    ship_logits_target = outputs["ship_logits"]
     target_dist = torch.distributions.Categorical(logits=target_logits)
 
     target_a = target_dist.sample()  # (N, MAX_OWNED)

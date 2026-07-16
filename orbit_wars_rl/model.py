@@ -101,6 +101,7 @@ class EntityTransformer(nn.Module):
         # Ship head: bin count is configurable so the fraction-head experiment
         # can swap to 10 fraction bins. Default 32 = legacy absolute counts.
         self.num_ship_bins = getattr(cfg, "num_ship_bins", NUM_SHIP_BINS)
+        self.binary_actions = getattr(cfg, "ship_bin_mode", "absolute") == "binary"
         # Intent sizing (experiments.md #4): ship head emits target-relative intent semantics.
         self.intent_sizing = getattr(cfg, "ship_bin_mode", "absolute") == "intent"
         self.ship_head = nn.Linear(D, self.num_ship_bins)
@@ -262,7 +263,9 @@ class EntityTransformer(nn.Module):
             owned_indices: (B, max_owned) int, indices into planet array
             owned_count: (B,) int
 
-        Returns dict with per-target fire/ship logits, target_logits, value.
+        Returns dict with per-target fire logits, target logits, and value. ``ship_logits``
+        and its diagnostic tensors are ``None`` in binary mode because ship count is
+        resolved deterministically from the selected target.
         """
         encoded = self.encode_state(
             planet_features, fleet_features, global_features,
@@ -313,17 +316,20 @@ class EntityTransformer(nn.Module):
                 device=owned_enriched.device, dtype=owned_enriched.dtype,
             )
 
-        # Fire/ship decisions condition on the chosen target through the same
-        # pairwise path as target selection. Slot-only heads remain as residual
-        # priors for checkpoint compatibility.
+        # Fire decisions condition on the chosen target through the same pairwise path as
+        # target selection. Slot-only heads remain as residual priors for checkpoint
+        # compatibility. Binary NOOP/COMMIT never consumes a learned ship distribution, so
+        # skip that full dense branch while retaining its parameters in the state dict.
         fire_logits_slot = self.fire_head(owned_enriched).squeeze(-1)  # (B, max_owned)
-        ship_logits_slot = self.ship_head(owned_enriched)  # (B, max_owned, num_ship_bins)
         fire_prior = fire_logits_slot.unsqueeze(-1).expand(-1, -1, self.max_planets)
-        ship_prior = ship_logits_slot.unsqueeze(2).expand(-1, -1, self.max_planets, -1)
         fire_residual = torch.zeros_like(fire_prior)
-        ship_residual = torch.zeros_like(ship_prior)
         fire_logits = fire_prior
-        ship_logits = ship_prior
+        ship_prior = ship_residual = ship_logits = None
+        if not self.binary_actions:
+            ship_logits_slot = self.ship_head(owned_enriched)  # (B, max_owned, num_ship_bins)
+            ship_prior = ship_logits_slot.unsqueeze(2).expand(-1, -1, self.max_planets, -1)
+            ship_residual = torch.zeros_like(ship_prior)
+            ship_logits = ship_prior
         if pairwise_features is not None:
             N_p = planet_features.shape[1]
             q_fire = self.fire_q(owned_enriched).unsqueeze(2).expand(-1, -1, N_p, -1)
@@ -331,27 +337,28 @@ class EntityTransformer(nn.Module):
             fire_in = torch.cat([q_fire, k_fire, pairwise_features], dim=-1)
             fire_resid_live = self.fire_scorer(fire_in).squeeze(-1)
 
-            q_ship = self.ship_q(owned_enriched).unsqueeze(2).expand(-1, -1, N_p, -1)
-            k_ship = self.ship_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
-            ship_in = torch.cat([q_ship, k_ship, pairwise_features], dim=-1)
-            ship_resid_live = self.ship_scorer(ship_in)
-
             fire_logits = fire_logits.clone()
-            ship_logits = ship_logits.clone()
             fire_residual[..., :N_p] = fire_resid_live
-            ship_residual[..., :N_p, :] = ship_resid_live
-            fire_logits[..., :N_p] = fire_logits[..., :N_p] + fire_resid_live
-            ship_logits[..., :N_p, :] = ship_logits[..., :N_p, :] + ship_resid_live
-            # Intent legality by target ownership (pairwise ch5 = is_mine): capture(0)/
-            # capture-defend(1) are enemy/neutral-only; maintain(2) is own-only; all-in(3) any.
-            if self.intent_sizing:
-                is_own = pairwise_features[..., 5] > 0.5                     # (B, MO, N_p)
-                illegal = torch.zeros(B, max_owned, N_p, self.num_ship_bins,
-                                      dtype=torch.bool, device=ship_logits.device)
-                illegal[..., 0] = is_own
-                illegal[..., 1] = is_own
-                illegal[..., 2] = ~is_own
-                ship_logits[..., :N_p, :] = ship_logits[..., :N_p, :].masked_fill(illegal, -100.0)
+            fire_logits = fire_logits + fire_residual
+            if not self.binary_actions:
+                q_ship = self.ship_q(owned_enriched).unsqueeze(2).expand(-1, -1, N_p, -1)
+                k_ship = self.ship_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
+                ship_in = torch.cat([q_ship, k_ship, pairwise_features], dim=-1)
+                ship_resid_live = self.ship_scorer(ship_in)
+                ship_logits = ship_logits.clone()
+                ship_residual[..., :N_p, :] = ship_resid_live
+                ship_logits = ship_logits + ship_residual
+                # Intent legality by target ownership (pairwise ch5 = is_mine): capture(0)/
+                # capture-defend(1) are enemy/neutral-only; maintain(2) is own-only; all-in(3) any.
+                if self.intent_sizing:
+                    is_own = pairwise_features[..., 5] > 0.5               # (B, MO, N_p)
+                    illegal = torch.zeros(B, max_owned, N_p, self.num_ship_bins,
+                                          dtype=torch.bool, device=ship_logits.device)
+                    illegal[..., 0] = is_own
+                    illegal[..., 1] = is_own
+                    illegal[..., 2] = ~is_own
+                    ship_logits[..., :N_p, :] = ship_logits[..., :N_p, :].masked_fill(
+                        illegal, -100.0)
         # Mask out invalid planet slots (padded) so target softmax only sees real planets
         if planet_mask is not None:
             tgt_mask = planet_mask.unsqueeze(1).expand(-1, max_owned, -1)  # (B, MO, N_p)
@@ -370,7 +377,9 @@ class EntityTransformer(nn.Module):
             fire_logits = fire_logits.masked_fill(~fire_mask.unsqueeze(-1), -100.0)
         if slot_valid is not None:
             fire_logits = fire_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
-            ship_logits = ship_logits.masked_fill(~slot_valid.unsqueeze(-1).unsqueeze(-1), -100.0)
+            if ship_logits is not None:
+                ship_logits = ship_logits.masked_fill(
+                    ~slot_valid.unsqueeze(-1).unsqueeze(-1), -100.0)
             target_logits = target_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
         # Value head: new=concat(global_token, owned_pool) [2D], old=mean-pool all [D].

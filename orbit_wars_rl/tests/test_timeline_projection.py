@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -96,6 +97,100 @@ def test_timeline_feature_encoding():
     # mine channel at k must match owner_ts == 0 for player 0
     assert torch.equal(grouped[:, :, 0], (own_ts == 0.0).float())
     assert torch.equal(grouped[:, :, 3], torch.log1p(garr_ts.clamp(min=0.0)) / 8.0)
+
+
+def test_candidate_timeline_captures_and_values_future_production():
+    planets = torch.tensor([[[0.0, -1.0, 20.0, 20.0, 1.0, 10.0, 2.0]]])
+    alive = torch.ones(1, 1, dtype=torch.bool)
+    fleets = torch.zeros(1, 1, 7)
+    fleet_alive = torch.zeros(1, 1, dtype=torch.bool)
+    owner_ts, garr_ts, arrivals = tl.project_timeline(
+        planets, alive, fleets, fleet_alive, torch.zeros(1),
+        num_players=2, return_arrivals=True,
+    )
+    feats = tl.candidate_timeline_features(
+        planets, alive, arrivals, owner_ts, garr_ts, player=0,
+        candidate_ships=torch.tensor([[[15.0]]]),
+        candidate_eta=torch.tensor([[[1.0]]]),
+        source_indices=torch.tensor([[0]]),
+        slot_valid=torch.ones(1, 1, dtype=torch.bool),
+    )
+    assert feats.shape == (1, 1, 1, tl.CANDIDATE_TIMELINE_DIM)
+    actual = feats[0, 0, 0]
+    assert actual[0].item() == 1.0
+    assert actual[1].item() == pytest.approx(5.0 / 200.0)
+    assert actual[2].item() == 1.0
+    assert actual[3].item() == 1.0
+    assert actual[4].item() == pytest.approx(2.0 * (K - 1) / 100.0)
+    terminal_margin_delta = (5.0 + 2.0 * (K - 1) + 10.0) / 200.0
+    assert actual[5].item() == pytest.approx(terminal_margin_delta)
+
+
+def test_candidate_timeline_prices_source_loss_after_launch():
+    planets = torch.tensor([[[0.0, 0.0, 20.0, 20.0, 1.0, 20.0, 3.0],
+                             [1.0, 1.0, 30.0, 20.0, 1.0, 10.0, 1.0]]])
+    alive = torch.ones(1, 2, dtype=torch.bool)
+    fleets = torch.tensor([[[0.0, 1.0, 10.0, 20.0, 0.0, 1.0, 20.0]]])
+    fleet_alive = torch.ones(1, 1, dtype=torch.bool)
+    owner_ts, garr_ts, arrivals = tl.project_timeline(
+        planets, alive, fleets, fleet_alive, torch.zeros(1),
+        num_players=2, return_arrivals=True,
+    )
+    feats = tl.candidate_timeline_features(
+        planets, alive, arrivals, owner_ts, garr_ts, player=0,
+        candidate_ships=torch.tensor([[[20.0, 20.0]]]),
+        candidate_eta=torch.tensor([[[1.0, 1.0]]]),
+        source_indices=torch.tensor([[0]]),
+        slot_valid=torch.ones(1, 1, dtype=torch.bool),
+    )
+    source = feats[0, 0, 1, 6:]
+    assert source[0].item() < 1.0
+    assert source[1].item() == 0.0
+    assert source[2].item() < 0.0
+    assert source[3].item() < 0.0
+
+
+def _hold_fixture(*, target_enemy_step=None, source_enemy_step=None):
+    planets = torch.tensor([[[0.0, 0.0, 20.0, 20.0, 1.0, 20.0, 0.0],
+                             [1.0, -1.0, 21.0, 20.0, 1.0, 10.0, 0.0]]])
+    alive = torch.ones(1, 2, dtype=torch.bool)
+    arrivals = torch.zeros(1, K, 2, 2)
+    if target_enemy_step is not None:
+        arrivals[0, target_enemy_step, 1, 1] = 5.0
+    if source_enemy_step is not None:
+        arrivals[0, source_enemy_step, 0, 1] = 10.0
+    owner_ts = torch.tensor([[[0.0] * K, [-1.0] * K]])
+    garr_ts = torch.tensor([[[20.0] * K, [10.0] * K]])
+    return planets, alive, arrivals, owner_ts, garr_ts
+
+
+def _resolve_hold(**fixture_kwargs):
+    planets, alive, arrivals, owner_ts, garr_ts = _hold_fixture(**fixture_kwargs)
+    return tl.projected_hold_sizes(
+        planets, alive, arrivals, owner_ts, garr_ts, player=0,
+        max_ships=torch.tensor([[20.0]]),
+        candidate_distance=torch.tensor([[[0.0, 1.0]]]),
+        source_indices=torch.tensor([[0]]),
+        slot_valid=torch.ones(1, 1, dtype=torch.bool),
+    )
+
+
+def test_projected_hold_finds_minimum_verified_capture():
+    sizes, feasible = _resolve_hold()
+    assert feasible[0, 0, 1]
+    assert sizes[0, 0, 1].item() == 11.0
+
+
+def test_projected_hold_includes_known_future_counterattack():
+    sizes, feasible = _resolve_hold(target_enemy_step=2)
+    assert feasible[0, 0, 1]
+    assert sizes[0, 0, 1].item() == 15.0
+
+
+def test_projected_hold_falls_back_to_all_in_when_source_would_newly_fall():
+    sizes, feasible = _resolve_hold(source_enemy_step=1)
+    assert not feasible[0, 0, 1]
+    assert sizes[0, 0, 1].item() == 20.0
 
 
 if __name__ == "__main__":

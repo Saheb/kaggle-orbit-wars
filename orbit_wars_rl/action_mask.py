@@ -700,6 +700,10 @@ def _apply_defensive_reinforce_overlay(
 def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_target, masks, obs, player,
                                fire_threshold=0.5, sample: bool = False,
                                ship_bin_mode: str = "absolute",
+                               binary_attack_sizing: str = "all-in",
+                               projected_hold_sizes=None,
+                               projected_hold_feasible=None,
+                               projected_hold_stats: dict = None,
                                pairwise_features=None,   # (MO, P, >=26) — intent mode reads resolved sizes ch22-25
                                reserve_frac: float = 0.0,
                                allow_reinforce: bool = False,
@@ -759,7 +763,9 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
     if ship_bin_mode == "binary":
         if pairwise_features is None:
             raise ValueError("binary ship mode requires pairwise_features")
-        binary_sizes, binary_feasible = resolve_binary_commit_np(pairwise_features, max_ships)
+        binary_sizes, binary_feasible = resolve_binary_commit_np(
+            pairwise_features, max_ships, attack_sizing=binary_attack_sizing,
+            projected_hold_sizes=projected_hold_sizes)
 
     def _own_reinforce_illegal(src_planet, tgt_planet):
         """True if an own (reinforce) target is barred by gate / forward-staging / reverse-edge cooldown."""
@@ -813,12 +819,7 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
         fire_decisions = fire_t.cpu().numpy().squeeze(0)
         fire_prob_values = log_commit.exp().sum(dim=-1).cpu().numpy().squeeze(0)
         ship_bins = np.zeros_like(target_indices)
-        chosen_ship_logits = torch.gather(
-            ship_logits_target,
-            2,
-            target_idx_t.unsqueeze(-1).unsqueeze(-1).expand(
-                -1, -1, 1, ship_logits_target.shape[-1]),
-        ).squeeze(2)
+        chosen_ship_logits = None
     elif sample:
         target_dist = torch.distributions.Categorical(logits=target_logits)
         target_indices = target_dist.sample().cpu().numpy().squeeze(0)
@@ -885,7 +886,8 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
             "max_ships": int(max_ships[slot]),
             "target_scores": [float(x) for x in target_logits[0, slot, :len(planets)].detach().cpu().tolist()],
             "fire_scores_by_target": [float(x) for x in fire_logits_target[0, slot, :len(planets)].detach().cpu().tolist()],
-            "ship_scores": [float(x) for x in chosen_ship_logits[0, slot].detach().cpu().tolist()],
+            "ship_scores": ([] if chosen_ship_logits is None else
+                            [float(x) for x in chosen_ship_logits[0, slot].detach().cpu().tolist()]),
         }
         if not fire_decisions[slot]:
             continue
@@ -902,6 +904,18 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
             continue
 
         ships = decoded_ships
+        if (binary_attack_sizing == "projected-hold" and not is_own_target
+                and projected_hold_stats is not None):
+            projected_hold_stats["attacks"] = projected_hold_stats.get("attacks", 0) + 1
+            projected_hold_stats["all_in_ships"] = (
+                projected_hold_stats.get("all_in_ships", 0) + int(max_ships[slot]))
+            projected_hold_stats["executed_ships"] = (
+                projected_hold_stats.get("executed_ships", 0) + ships)
+            if ships < int(max_ships[slot]):
+                projected_hold_stats["resized"] = projected_hold_stats.get("resized", 0) + 1
+            if (projected_hold_feasible is not None
+                    and bool(projected_hold_feasible[slot, tidx])):
+                projected_hold_stats["verified"] = projected_hold_stats.get("verified", 0) + 1
         if _SHIP_AUDIT["on"]:
             _nom = SHIP_COUNTS[int(ship_bins[slot])] if ship_bin_mode == "absolute" else ships
             _ship_audit_record(_nom, int(planets[pidx][5]), is_own_target)
@@ -1111,13 +1125,20 @@ def resolve_intent_sizes_np(cap_cost, reach_em, mass_soon, src_ships, is_own):
     return np.stack([capture, cap_def, maintain, all_in], axis=-1).astype(np.float32)
 
 
-def resolve_binary_commit_np(pairwise_features, src_ships):
+def resolve_binary_commit_np(pairwise_features, src_ships, attack_sizing="all-in",
+                             projected_hold_sizes=None):
     """Deterministic NOOP/COMMIT plan from normalized pairwise features.
 
     Non-owned targets commit the full source garrison, but only when that single source can
     afford the projected capture cost. Owned targets use the existing maintain/defend amount.
     Any commit below five ships is infeasible, so the learned fire bit becomes NOOP.
+
+    Non-default attack sizing is eval-only: feasibility and the policy's NOOP/target
+    distribution stay all-in-identical, while only the executed non-owned amount changes.
+    Training/export use the default all-in behavior.
     """
+    if attack_sizing not in ("all-in", "capture-defend", "projected-hold"):
+        raise ValueError(f"unknown binary attack sizing: {attack_sizing}")
     pw = np.asarray(pairwise_features, dtype=np.float32)
     S = np.asarray(src_ships, dtype=np.float32)[..., np.newaxis]
     is_own = pw[..., 5] > 0.5
@@ -1127,5 +1148,18 @@ def resolve_binary_commit_np(pairwise_features, src_ships):
     attack_ok = (S >= MIN_BINARY_COMMIT_SHIPS) & (S + 1e-3 >= capture_required)
     defend_ok = (defend >= MIN_BINARY_COMMIT_SHIPS) & (S + 1e-3 >= defend)
     feasible = np.where(is_own, defend_ok, attack_ok)
-    ships = np.where(is_own, defend, S)
+    if attack_sizing == "projected-hold":
+        if projected_hold_sizes is None:
+            raise ValueError("projected-hold sizing requires projected_hold_sizes")
+        projected = np.asarray(projected_hold_sizes, dtype=np.float32)
+        if projected.shape != feasible.shape:
+            raise ValueError(
+                f"projected hold table shape {projected.shape} != {feasible.shape}")
+        attack_ships = np.minimum(S, np.maximum(projected, MIN_BINARY_COMMIT_SHIPS))
+    elif attack_sizing == "capture-defend":
+        capture_defend = np.rint(pw[..., 23] * 200.0).astype(np.float32)
+        attack_ships = np.minimum(S, np.maximum(capture_defend, MIN_BINARY_COMMIT_SHIPS))
+    else:
+        attack_ships = S
+    ships = np.where(is_own, defend, attack_ships)
     return np.where(feasible, ships, 0.0).astype(np.float32), feasible

@@ -40,7 +40,66 @@ RTX improved both major buckets (`env.step` 15.0→8.3-8.9s and PPO update 12.5�
 
 **Operational choice:** for this 0.53M-parameter production model, RTX PRO 6000 at 1,280 envs
 is the best measured single-GPU throughput. Do not generalise the 1.57× ratio to arbitrary
-models or action spaces until an identical-checkpoint, identical-action-mode A/B is run.
+models or action spaces; the identical-checkpoint A/B below attributes only 5-7% to skipping
+binary mode's unused ship branch.
+
+### Binary ship-head bypass A/B (2026-07-15)
+
+An identical-checkpoint A/B on a Jarvis A100 80 GB spot instance isolated the cost of computing
+the unused ship branch in binary mode. Both arms resumed the 25.3952M binary checkpoint and used
+1,280 envs × 64 steps, 32 minibatches, PPO epochs 2, bf16, compiled model/features, GPU storage,
+and the same seed. The control retained the old behavior (compute ship prior/residual/logits, then
+discard them); the treatment bypassed `ship_head`, `ship_q`, `ship_k`, and `ship_scorer`.
+
+| binary implementation | timed steady iteration | steady SPS | seven-iteration post-first aggregate |
+|---|---:|---:|---:|
+| old: compute unused ship branch | 27.2s | **3,012** | **2,941 SPS** |
+| new: bypass unused ship branch | 25.4s | **3,225** | **3,076 SPS** |
+
+That is **+7.1%** on the directly timed steady iteration and **+4.6%** over the broader
+post-first window. The range reflects residual shape compilation and normal iteration variance;
+use **roughly +5-7%** as the supported effect size. This is worthwhile and policy-equivalent,
+but it cannot explain the RTX run's 1.57× advantage over the earlier A100 intent run. Raw logs:
+`gpu_run_artifacts/envperf/binary_ship_bypass_20260715/` (instance 446533 was destroyed).
+
+### Rejected: nearest-16 sparse target scoring (2026-07-15)
+
+The next identical-checkpoint A/B tested scoring only the 16 shortest-ETA legal targets per
+source, while leaving source enrichment dense. This was deliberately opt-in because it restricts
+the action set. The same A100 80 GB configuration above was used for eight iterations per arm.
+
+| target scorer | timed steady iteration | steady SPS | seven-iteration post-first aggregate |
+|---|---:|---:|---:|
+| dense | 24.2s | **3,385** | 3,127 SPS |
+| nearest 16 | 24.6s | **3,330** | 3,166 SPS |
+
+The two views bracket the result from **-1.6% to +1.3%**: no supported throughput gain. The
+smaller MLP input is offset by `topk`, gather, and scatter work, while the dense pairwise source
+enrichment and environment remain unchanged. The experiment was removed rather than carrying a
+behavior-changing path with no measured benefit. Do not retry this exact boundary; meaningful
+sparsity would have to start before source enrichment or avoid materialising dense pairwise
+features. Raw logs: `gpu_run_artifacts/envperf/sparse_target_k16_20260715/` (Jarvis run IDs
+`r_44dbd649` and `r_82e7768a`; spot instance 446549 was destroyed).
+
+### Rejected: cached-target-only fleet collisions (2026-07-15)
+
+Fleet trajectories are fixed at launch, but the engine's first physical collision is not a
+perfectly fixed target: orbiting planets and comets can make a cached resolver disagree with the
+dense swept-collision result. Under the 25.3952M binary policy with the normal four-tick refresh,
+the cached target agreed on **1,530/1,561 true hits (98.0%)**. We therefore tested the approximation
+as opt-in only: gather one cached planet per fleet and collision-test `(env,fleet)` instead of the
+dense `(env,fleet,planet)` cube.
+
+| collision path | iteration 5 wall / `env.step` | iteration 10 wall / `env.step` | 11-iteration post-first SPS |
+|---|---:|---:|---:|
+| dense swept collision | 24.5s / 10.3s | **27.0s / 12.8s** | **3,057** |
+| cached target only | 24.5s / 10.4s | 27.6s / 13.5s | 3,048 |
+
+There was **no speedup**: the full post-first window regressed 0.3%, and the late/high-fleet
+iteration regressed 2.2% overall (5.5% in `env.step`). Gather overhead and the rest of the env
+dominate this already-vectorized cube. The path was removed because it was both slower and
+physics-approximate. Raw logs: `gpu_run_artifacts/envperf/cached_target_collision_20260715/`
+(Jarvis run IDs `r_242e6da1` and `r_5df9cfa9`; spot instance 446561 was destroyed).
 
 **TL;DR — the loop is model/PPO-compute-bound, and more so as the model grows. A JAX
 rewrite will not reach 10k SPS.** The top teams hit 10k because their bottleneck was a

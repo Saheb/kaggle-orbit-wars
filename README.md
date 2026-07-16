@@ -86,7 +86,7 @@ Snapshot in [`docs/current-state.md`](docs/current-state.md); standing diagnosis
   next move is **structural** (an opponent/curriculum that punishes spray and forces holding), steered by
   `launch_rate → ~0.04` / `peel↓` / `hold↑` rather than by spray-inflated Ajay WR.
 
-## Post-competition: what the winners knew (2026-07)
+## Post-submission progress (2026-07)
 
 The competition ended; the project continued as a study of the top-100 writeups
 ([`docs/writeup_lessons.md`](docs/writeup_lessons.md)), applying one lesson at a time. The first
@@ -99,6 +99,19 @@ budget answered the open finding above:
   launch discipline (`launch_rate` 0.09) was *learned*, not masked in. The spray Nash that every
   competition-era retrain fell back into simply doesn't form when bad launches are visible to the
   critic the step they happen. Run record: [`docs/training.md`](docs/training.md).
+
+The previously reported **256/256 against each submitted endpoint was invalid**. The local wrapper
+used `__file__`, which `kaggle_environments` does not define when it executes a path agent; the old
+evaluator then counted the errored opponent as a win. The identical aggregate statistics against two
+different neural payloads were the tell. The evaluator now fails closed on non-`DONE` agent status,
+and submitted-opponent checks use the archived standalone `neural_agent.py` payloads whose hashes
+match the final tarballs.
+
+A corrected full-panel audit of the best current checkpoint (exact-marginal binary 40.108M, 80.5%
+vs Ajay) is in progress. The first independent canonical samples already disprove the perfect-sweep
+claim: 12/16 against `presres1` and 14/16 against `stgpr1`. Final 256-game rates will replace this
+interim note when both panels complete. Experiment history and the audit trail live in
+[`docs/training.md`](docs/training.md).
 
 ## Repo navigation
 

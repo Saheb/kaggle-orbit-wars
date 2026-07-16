@@ -26,6 +26,7 @@ def _pairwise(src_ships, target_ships, *, enemy=False, own=False, production=0):
     pw[0, 1, 7] = float(not own and not enemy)
     pw[0, 1, 8] = production / 5.0
     pw[0, 1, 10] = target_ships / 200.0
+    pw[0, 1, 23] = (target_ships + 1) / 200.0
     pw[0, 1, 24] = 1.0 / 200.0
     pw[0, :, 25] = src_ships / 200.0
     return pw
@@ -48,7 +49,7 @@ def test_binary_resolver_semantics_and_torch_parity():
         assert np_sizes[0, 1] == expected_target
 
 
-def _decode(source_ships):
+def _decode(source_ships, attack_sizing="all-in", projected_hold_sizes=None):
     obs = {
         "player": 0,
         "step": 0,
@@ -63,12 +64,13 @@ def _decode(source_ships):
     fire = torch.full((1, 16, 2), 20.0)
     target = torch.full((1, 16, 2), -20.0)
     target[:, :, 1] = 20.0
-    ships = torch.zeros(1, 16, 2, 4)
     pairwise = np.zeros((16, 2, 26), dtype=np.float32)
     pairwise[0] = _pairwise(source_ships, 6)[0]
     return actions_from_target_policy(
-        fire, target, ships, masks, obs, 0,
-        ship_bin_mode="binary", pairwise_features=pairwise,
+        fire, target, None, masks, obs, 0,
+        ship_bin_mode="binary", binary_attack_sizing=attack_sizing,
+        projected_hold_sizes=projected_hold_sizes,
+        pairwise_features=pairwise,
     )
 
 
@@ -79,11 +81,52 @@ def test_binary_eval_decode_all_in_or_noop():
     assert moves[0][2] == 10
 
 
+def test_binary_capture_defend_diagnostic_changes_only_executed_attack_amount():
+    pw = _pairwise(20, 6)
+    all_in, all_in_ok = resolve_binary_commit_np(
+        pw, np.array([20], dtype=np.float32), attack_sizing="all-in")
+    sufficient, sufficient_ok = resolve_binary_commit_np(
+        pw, np.array([20], dtype=np.float32), attack_sizing="capture-defend")
+
+    assert np.array_equal(all_in_ok, sufficient_ok)
+    assert all_in[0, 1] == 20
+    assert sufficient[0, 1] == 7
+
+    all_in_move = _decode(20, attack_sizing="all-in")[0]
+    sufficient_move = _decode(20, attack_sizing="capture-defend")[0]
+    assert all_in_move[:2] == sufficient_move[:2]
+    assert all_in_move[2] == 20
+    assert sufficient_move[2] == 7
+
+
+def test_binary_projected_hold_diagnostic_changes_only_executed_attack_amount():
+    pw = _pairwise(20, 6)
+    projected = np.full((1, 2), 20.0, dtype=np.float32)
+    projected[0, 1] = 11.0
+    all_in, all_in_ok = resolve_binary_commit_np(
+        pw, np.array([20], dtype=np.float32), attack_sizing="all-in")
+    held, held_ok = resolve_binary_commit_np(
+        pw, np.array([20], dtype=np.float32), attack_sizing="projected-hold",
+        projected_hold_sizes=projected)
+
+    assert np.array_equal(all_in_ok, held_ok)
+    assert all_in[0, 1] == 20
+    assert held[0, 1] == 11
+
+    all_in_move = _decode(20, attack_sizing="all-in")[0]
+    held_move = _decode(
+        20, attack_sizing="projected-hold",
+        projected_hold_sizes=np.tile(projected, (16, 1)),
+    )[0]
+    assert all_in_move[:2] == held_move[:2]
+    assert all_in_move[2] == 20
+    assert held_move[2] == 11
+
+
 def test_binary_sampler_has_no_ship_action_and_no_idle_target_credit():
     outputs = {
         "target_logits": torch.zeros(1, 2, 2),
         "fire_logits": torch.tensor([[[100.0, 100.0], [-100.0, -100.0]]]),
-        "ship_logits": torch.randn(1, 2, 2, 4),
     }
     fire, _, ship, _, lp_action, lp_ship, lp_target = sample_action_batched(
         outputs, torch.ones(1, 2, dtype=torch.bool),
@@ -95,6 +138,55 @@ def test_binary_sampler_has_no_ship_action_and_no_idle_target_credit():
     assert lp_target[0, 1] == 0
     assert torch.isclose(lp_action[0, 0].exp(), torch.tensor(0.5), atol=1e-5)
     assert torch.isclose(lp_action[0, 1], torch.tensor(0.0), atol=1e-5)
+
+
+def test_binary_model_skips_ship_branch_without_changing_executed_logits():
+    torch.manual_seed(3)
+    full_cfg = Config().model
+    binary_cfg = Config().model
+    binary_cfg.ship_bin_mode = "binary"
+    full = EntityTransformer(full_cfg).eval()
+    binary = EntityTransformer(binary_cfg).eval()
+    binary.load_state_dict(full.state_dict(), strict=True)
+
+    env = VecTorchEnv(num_envs=3, num_players=2, device="cpu", action_decode="target",
+                      ship_bin_mode="binary")
+    env.reset(seeds=[31, 32, 33])
+    feats = env.get_features(0)
+
+    calls = []
+    hooks = [module.register_forward_pre_hook(
+        lambda _module, _inputs, name=name: calls.append(name))
+        for name, module in (
+            ("ship_head", binary.ship_head),
+            ("ship_q", binary.ship_q),
+            ("ship_k", binary.ship_k),
+            ("ship_scorer", binary.ship_scorer),
+        )]
+
+    def _forward(model):
+        return model(
+            feats["planet_features"], feats["fleet_features"], feats["global_features"],
+            feats["planet_mask"], feats["fleet_mask"], fire_mask=feats["fire_mask"],
+            slot_valid=feats["slot_valid"], owned_indices=feats["owned_indices"],
+            owned_count=feats["owned_count"], pairwise_features=feats["pairwise_features"],
+        )
+
+    try:
+        with torch.no_grad():
+            full_out = _forward(full)
+            binary_out = _forward(binary)
+    finally:
+        for hook in hooks:
+            hook.remove()
+
+    assert calls == []
+    assert binary_out["ship_logits"] is None
+    assert binary_out["_phase4_ship_prior"] is None
+    assert binary_out["_phase4_ship_residual"] is None
+    for key in ("fire_logits", "target_logits", "value", "_phase4_fire_prior",
+                "_phase4_fire_residual"):
+        assert torch.equal(binary_out[key], full_out[key]), key
 
 
 def test_binary_executed_action_distribution_is_exactly_marginalized():
@@ -155,6 +247,14 @@ def test_binary_rollout_and_ppo_log_prob_parity():
     }
     _, metrics = learner.compute_loss(batch, return_metrics=True)
     assert abs(metrics["approx_kl"]) < 1e-6
+    assert metrics["ship_entropy"] == 0.0
+    assert metrics["ship_target_std"] == 0.0
+
+    loss = learner.compute_loss(batch)
+    loss.backward()
+    for name, param in model.named_parameters():
+        if name.startswith(("ship_head.", "ship_q.", "ship_k.", "ship_scorer.")):
+            assert param.grad is None, name
 
 
 def test_binary_metrics_report_actionable_noop_and_commit_mass():
