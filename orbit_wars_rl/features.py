@@ -45,8 +45,8 @@ import math
 import numpy as np
 import torch
 
-from timeline import (candidate_timeline_features, project_timeline,
-                      projected_hold_sizes, timeline_features)
+from timeline import (candidate_timeline_features, global_economy_features,
+                      project_timeline, projected_hold_sizes, timeline_features)
 from action_mask import resolve_intent_sizes_np
 
 # Canonical feature semantics:
@@ -142,7 +142,7 @@ MAX_OWNED_PLANETS = 16  # hard cap for owned-planet slots; matches config.ModelC
 
 def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
                      max_owned=MAX_OWNED_PLANETS, timeline=True,
-                     projected_hold=False):
+                     projected_hold=False, global_econ=False):
     """Extract entity features from observation dict.
 
     Returns dict of torch tensors (no batch dim).
@@ -150,6 +150,9 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
     timeline=True appends the 96 projected-timeline channels to planet_features
     (dim 20 → 116). Pass False only for pre-timeline checkpoints (planet_proj
     20-wide) — eval.py infers this from the checkpoint's weight shapes.
+
+    global_econ=True appends the 48 projected economy-delta channels to
+    global_features (dim 15 → 63). Same deal: eval.py infers it from global_proj.
     """
     planets = obs["planets"]
     fleets = obs["fleets"]
@@ -541,6 +544,14 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         tl_feats = timeline_features(own_ts, garr_ts, player)[0].numpy()  # (max_planets, 96)
         tl_feats *= planet_mask[:, np.newaxis]
         planet_feats = np.concatenate([planet_feats, tl_feats], axis=1)  # (max_planets, 116)
+
+    # --- Projected economy series (48 = 2 ch × 24 steps; global dim 15 → 63) ---
+    if global_econ:
+        econ = global_economy_features(
+            pl_t, alive_t, fl_t, fl_alive_t, own_ts, garr_ts, arrivals,
+            player, num_players,
+        )[0].numpy()
+        global_feats = np.concatenate([global_feats, econ], axis=0)  # (63,)
 
     result = {
         "planet_features": torch.from_numpy(planet_feats),

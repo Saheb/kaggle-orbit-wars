@@ -24,6 +24,7 @@ MAX_SHIP_SPEED = 6.0
 
 TIMELINE_K = 24                     # projection horizon (steps)
 TIMELINE_DIM = 4 * TIMELINE_K       # mine/enemy/neutral one-hot + log-garrison, per step
+GLOBAL_ECON_DIM = 2 * TIMELINE_K    # projected production + material delta, per step
 CANDIDATE_TARGET_TIMELINE_DIM = 6
 CANDIDATE_SOURCE_TIMELINE_DIM = 4
 CANDIDATE_TIMELINE_DIM = CANDIDATE_TARGET_TIMELINE_DIM + CANDIDATE_SOURCE_TIMELINE_DIM
@@ -358,3 +359,48 @@ def timeline_features(owner_ts, garr_ts, player: int):
     neutral = (owner_ts < 0).float()
     garr = torch.log1p(garr_ts.clamp(min=0.0)) / 8.0
     return torch.cat([mine, enemy, neutral, garr], dim=2)
+
+
+def _signed_log(x: torch.Tensor, scale: float) -> torch.Tensor:
+    """Signed log compression: keeps resolution near 0, never saturates on blowouts."""
+    return torch.sign(x) * torch.log1p(x.abs()) / scale
+
+
+def global_economy_features(planets, planet_alive, fleets, fleet_alive,
+                            owner_ts, garr_ts, arrivals, player: int, num_players: int):
+    """Encode the passive rollout's ECONOMY series into global channels: (N, GLOBAL_ECON_DIM).
+
+    Layout [production_delta(K) | material_delta(K)] — at each projected step, ours minus the
+    enemy total (summed over enemies, matching the existing global enemy channels; identical
+    to "vs the opponent" in 2p). The per-planet timeline says who owns what; this says whether
+    the projected production race is being won, which the win/loss replays identified as the
+    discriminating state variable (docs/training.md "production race and source drain").
+
+    Material counts ships still in flight: at step k a player's undelivered fleets are its
+    launched ships minus everything that has landed by k. Fleets that never resolve to a
+    target stay counted as in-flight for the whole horizon.
+    """
+    dev = planets.device
+    N, P, K = owner_ts.shape
+    prod = planets[:, :, 6].unsqueeze(2)                        # (N,P,1)
+    alive = planet_alive.unsqueeze(2).float()                   # (N,P,1)
+
+    mine = (owner_ts == float(player)).float() * alive          # (N,P,K)
+    enemy = ((owner_ts != float(player)) & (owner_ts >= 0)).float() * alive
+    side = mine - enemy                                         # +1 ours, -1 theirs, 0 neutral
+
+    prod_delta = (side * prod).sum(dim=1)                       # (N,K)
+    mat_delta = (side * garr_ts.clamp(min=0.0)).sum(dim=1)      # (N,K) on-planet material
+
+    # In-flight material: launched per player minus cumulative arrivals through step k.
+    f_owner = torch.clamp(fleets[:, :, 1].long(), 0, num_players - 1)   # (N,F)
+    f_ships = fleets[:, :, 6] * fleet_alive.float()
+    launched = torch.zeros(N, num_players, device=dev).scatter_add(1, f_owner, f_ships)
+    landed = arrivals.sum(dim=2).cumsum(dim=1)                  # (N,K,NP)
+    inflight = launched.unsqueeze(1) - landed                   # (N,K,NP)
+    mine_air = inflight[:, :, player]
+    enemy_air = inflight.sum(dim=2) - mine_air
+    mat_delta = mat_delta + (mine_air - enemy_air)
+
+    return torch.cat([_signed_log(prod_delta, 4.0),
+                      _signed_log(mat_delta, 8.0)], dim=1)      # (N, 2K)

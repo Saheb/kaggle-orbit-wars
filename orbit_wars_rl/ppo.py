@@ -126,6 +126,21 @@ class PPOLearner:
         self.optimizer = torch.optim.Adam(param_groups, eps=1e-5)
         self.total_steps = 0
         self.update_count = 0
+        # Frozen previous-best reference for the anchor terms. Set via set_anchor(); None = off
+        # (and the anchor loss terms are skipped entirely, so no extra forward is paid).
+        self.anchor_model = None
+
+    def set_anchor(self, state_dict):
+        """Install/replace the frozen anchor (the previous-best policy). Called once at setup
+        and again on every promotion."""
+        policy_model = getattr(self.model, "_orig_mod", self.model)
+        if self.anchor_model is None:
+            self.anchor_model = type(policy_model)(policy_model.cfg).to(self.device)
+            for p in self.anchor_model.parameters():
+                p.requires_grad_(False)
+        self.anchor_model.load_state_dict(
+            {k: v.detach().to(self.device) for k, v in state_dict.items()})
+        self.anchor_model.eval()
 
     def compute_loss(self, batch, return_metrics=False, value_only=False):
         """Compute PPO clipped loss on a batch (target-decode only).
@@ -297,6 +312,52 @@ class PPOLearner:
             kl_per_slot = (log_q.exp() * (log_q - log_prior)).sum(dim=-1)         # (B, MO)
             ship_kl = (kl_per_slot * fired_slots).sum() / fired_slots.sum().clamp(min=1)
 
+        # Best-checkpoint anchor: KL(live ‖ frozen best) over the EXACT executed action
+        # distribution, plus a value term pulling the critic toward the best's estimate. This is
+        # what keeps long unanchored self-play from drifting out of the region that beats real
+        # opponents while its internal metrics stay healthy (docs/training.md, noopkl2).
+        anchor_kl = 0.0
+        anchor_value = 0.0
+        anchor_on = (self.anchor_model is not None and not value_only
+                     and (cfg.anchor_kl_coef > 0.0 or cfg.anchor_value_coef > 0.0))
+        if anchor_on:
+            if not binary_mode:
+                raise NotImplementedError(
+                    "anchor_kl_coef/anchor_value_coef are implemented for ship_bin_mode='binary' "
+                    "only (the exact NOOP/COMMIT action distribution). Factorized fire/ship/target "
+                    "anchoring is not wired — train the anchor arm in binary mode.")
+            with torch.no_grad():
+                with torch.autocast(device_type="cuda", dtype=self.amp_dtype,
+                                    enabled=self.amp_enabled):
+                    a_out = self.anchor_model(
+                        planet_features, fleet_features, global_features,
+                        planet_mask, fleet_mask,
+                        fire_mask=fire_mask,
+                        slot_valid=slot_valid_2d, owned_indices=owned_indices,
+                        owned_count=batch.get("owned_count"),
+                        pairwise_features=pairwise,
+                    )
+                a_target_logits = a_out["target_logits"].float()
+                if target_mask is not None:
+                    a_target_logits = a_target_logits.masked_fill(~target_mask, -1e9)
+                a_log_noop, a_log_commit = binary_action_log_probs(
+                    a_target_logits, a_out["fire_logits"].float(), target_mask, fire_mask)
+                a_value = a_out["value"].float()
+
+            if cfg.anchor_kl_coef > 0.0:
+                # KL = Σ_a p(a)·(log p(a) − log p_anchor(a)) over {NOOP, COMMIT(t) ∀t}, per source
+                # slot, averaged over slots that actually decide.
+                kl_noop = binary_log_noop.exp() * (binary_log_noop - a_log_noop)
+                kl_commit = (binary_log_commit.exp()
+                             * (binary_log_commit - a_log_commit)).sum(dim=-1)
+                kl_slot = kl_noop + kl_commit                                 # (B, MO)
+                anchor_kl = ((kl_slot * decision_valid).sum()
+                             / decision_valid.sum().clamp(min=1))
+            if cfg.anchor_value_coef > 0.0:
+                # Isaiah describes a value cross-entropy; our critic is a scalar regressor, so
+                # the analogue is an MSE distillation toward the frozen best's estimate.
+                anchor_value = ((values - a_value) ** 2).mean()
+
         if value_only:
             loss = cfg.value_coef * value_loss
         else:
@@ -309,6 +370,10 @@ class PPOLearner:
                 loss = loss + cfg.noop_kl_coef * noop_kl
             if cfg.ship_kl_coef > 0.0:
                 loss = loss + cfg.ship_kl_coef * ship_kl
+            if anchor_on and cfg.anchor_kl_coef > 0.0:
+                loss = loss + cfg.anchor_kl_coef * anchor_kl
+            if anchor_on and cfg.anchor_value_coef > 0.0:
+                loss = loss + cfg.anchor_value_coef * anchor_value
 
         if return_metrics:
             clip_frac = ((ratio - 1.0).abs() > cfg.clip_eps).float().mean()
@@ -439,6 +504,9 @@ class PPOLearner:
                 "noop_kl": float(noop_kl.item() if torch.is_tensor(noop_kl) else noop_kl),
                 "mean_launch_rate": mean_launch_rate,
                 "ship_kl": float(ship_kl.item() if torch.is_tensor(ship_kl) else ship_kl),
+                "anchor_kl": float(anchor_kl.item() if torch.is_tensor(anchor_kl) else anchor_kl),
+                "anchor_value": float(anchor_value.item() if torch.is_tensor(anchor_value)
+                                      else anchor_value),
                 "clip_frac": clip_frac.item(),
                 "clip_frac_fire": clip_frac_fire.item(),
                 "approx_kl": (old_log_prob - new_log_prob).mean().item(),

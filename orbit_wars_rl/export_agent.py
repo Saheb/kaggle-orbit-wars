@@ -63,6 +63,7 @@ _MAX_PLANETS = 48
 _MAX_FLEETS = 128
 _PAIRWISE_DIM = {pairwise_feature_dim}
 _TIMELINE = {timeline_features}  # projected-timeline planet channels (dim 116 vs 20)
+_GLOBAL_ECON = {global_econ}  # projected economy-series global channels (dim 63 vs 15)
 _FIRE_THRESHOLD = {fire_threshold}
 _SHIP_BIN_MODE = {ship_bin_mode}
 _TARGET_DECODE = {target_decode}
@@ -331,7 +332,8 @@ def agent(obs, cfg=None):
         if _step_now <= _CD["prev_step"]:
             _CD["last"].clear()
         _CD["prev_step"] = _step_now
-    features = extract_features(obs, player, num_players=2, timeline=_TIMELINE)
+    features = extract_features(obs, player, num_players=2, timeline=_TIMELINE,
+                                global_econ=_GLOBAL_ECON)
     masks = compute_action_masks(obs, player)
 
     with torch.no_grad():
@@ -476,12 +478,16 @@ def _apply_checkpoint_model_config(checkpoint, cfg: Config) -> dict:
     # checkpoint like stageb4/bc_snowball_15global must not silently export resolver features).
     # Blessed-era saves that lack the flag due to the old cfg_blob persistence bug need it
     # backfilled (see final_submissions/presres1_0.5M_backfilled_resolver.pt).
+    # 15 = game-phase globals; 63 = + the 48-channel projected economy series (the inlined
+    # extractor emits either, keyed off the exported _GLOBAL_ECON flag). Anything else is a
+    # pre-cleanup (11-global) checkpoint.
     if isinstance(state_dict, dict) and "global_proj.weight" in state_dict:
         _gdim = int(state_dict["global_proj.weight"].shape[1])
-        if _gdim != 15:
+        if _gdim not in (15, 63):
             raise RuntimeError(
-                f"Checkpoint has {_gdim}-global weights; the blessed config is 15-global. "
+                f"Checkpoint has {_gdim}-global weights; the blessed config is 15- or 63-global. "
                 f"Export it from the pre-cleanup git tag (pre-cleanup-2026-07) instead.")
+        cfg.model.global_feature_dim = _gdim
     _stale = {k: bool(ckpt_cfg.get(k, False))
               for k in ("roi_enemy_deflate", "zero_roi_channels", "threat_eta_surface")
               if bool(ckpt_cfg.get(k, False))}
@@ -613,6 +619,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         reinforce_cooldown_code=reinforce_cooldown_code,
         timeline_code=timeline_code,
         timeline_features=(m.planet_feature_dim > 20),
+        global_econ=(m.global_feature_dim > 15),
     )
 
     with open(output_path, "w") as f:

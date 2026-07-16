@@ -85,7 +85,8 @@ COMET_LIFE_NORM = 40.0      # normalize steps-to-departure (comet paths are <= ~
 # Discrete action bins (match action_mask.py / model.py)
 from action_mask import (SHIP_COUNTS, FRACTION_BIN_VALUES, NUM_INTENTS,
                          MIN_BINARY_COMMIT_SHIPS)  # single source of truth (re-exported)
-from timeline import candidate_timeline_features, project_timeline, timeline_features
+from timeline import (candidate_timeline_features, global_economy_features,
+                      project_timeline, timeline_features)
 
 NUM_ANGLE_BINS = 144
 ANGLE_BIN_WIDTH = 2 * math.pi / NUM_ANGLE_BINS
@@ -1182,6 +1183,13 @@ class VecTorchEnv:
             comet_cycle = torch.where(sc < S, (S - sc) / 100.0, comet_cycle)
         gf_list += [early, mid, late, comet_cycle]
         gf = torch.stack(gf_list, dim=1)  # (N, 15)
+
+        # 15-62: the passive rollout's economy series (Yijie's global token carries the same
+        # per-turn ship/production differences). Reuses the projection already computed above
+        # for the planet channels — no second rollout.
+        gf = torch.cat([gf, global_economy_features(
+            planets, planet_alive, self.fleets, self.fleet_alive,
+            own_ts, garr_ts, timeline_arrivals, player, self.num_players)], dim=1)  # (N, 63)
 
         # Action masks
         owned_idx, slot_valid = self.owned_indices_for(player)

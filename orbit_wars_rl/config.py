@@ -28,8 +28,11 @@ class ModelConfig:
     planet_feature_dim: int = 116
     fleet_feature_dim: int = 13
     # Global features: 11 base + 4 game-phase channels (phase one-hot
-    # early/mid/late + normalized steps-to-next-comet-spawn).
-    global_feature_dim: int = 15
+    # early/mid/late + normalized steps-to-next-comet-spawn) + 48 projected
+    # economy-delta channels (timeline.GLOBAL_ECON_DIM: production/material
+    # delta × 24 steps). Eval infers the width from global_proj.weight when
+    # loading a checkpoint from before the economy series (15-wide).
+    global_feature_dim: int = 63
     entity_dim: int = 96
     num_heads: int = 4
     num_layers: int = 3
@@ -102,6 +105,14 @@ class PPOConfig:
     # entropy_coef_ships=0 because this replaces rather than stacks with entropy.
     ship_kl_coef: float = 0.0
     ship_kl_prior_exp: float = 1.0   # prior w_i ∝ SHIP_COUNTS[i]**exp; 1.0=linear-in-count, higher=more full-send-biased
+    # Best-checkpoint ANCHOR (Isaiah #1 / Yijie #13; docs/training.md "The recipe"): KL from the
+    # live policy to the frozen previous-best, plus a value-CE term. Unanchored self-play has
+    # nothing pulling it back toward known-good play, so it drifts (the noopkl2 0% collapse);
+    # anchoring converts that drift into bounded oscillation near the best, and the promotion
+    # gate (train_torch --anchor-promote-*) ratchets the best upward. 0 = off (both terms).
+    # Costs one extra no-grad forward per minibatch.
+    anchor_kl_coef: float = 0.0
+    anchor_value_coef: float = 0.0
     kl_target: float = 0.05   # KL early-stop threshold per epoch; inf = disabled
     value_coef: float = 0.5
     # Critic-only warmup (for BC warmstarts: trained policy + UNtrained critic).

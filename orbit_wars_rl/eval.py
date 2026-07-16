@@ -318,6 +318,8 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
     # Projected-timeline channels: feed them iff the checkpoint was trained with them
     # (planet_proj input width 116 vs the pre-timeline 20).
     _timeline = int(model.planet_proj.in_features) > 20
+    # Same for the projected economy series (global_proj width 63 vs the earlier 15).
+    _global_econ = int(model.global_proj.in_features) > 15
 
     def agent_fn(obs):
         # obs may be a dict or an Observation namedtuple depending on caller
@@ -345,6 +347,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
         features = extract_features(
             obs, player, num_players=num_players, timeline=_timeline,
             projected_hold=(binary_attack_sizing == "projected-hold"),
+            global_econ=_global_econ,
         )
         masks = compute_action_masks(obs, player)
 

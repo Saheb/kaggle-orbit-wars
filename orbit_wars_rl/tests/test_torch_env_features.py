@@ -48,7 +48,8 @@ def run_parity(num_envs: int = 4, after_steps: int = 30):
         for i in range(num_envs):
             obs = to_legacy_obs(env, env_idx=i, player=player)
             ref = extract_features(obs, player, num_players=2,
-                                   max_planets=48, max_fleets=128)
+                                   max_planets=48, max_fleets=128,
+                                   global_econ=True)
             ref_masks = compute_action_masks(obs, player)
 
             # Compare planet features

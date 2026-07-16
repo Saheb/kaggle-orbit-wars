@@ -66,7 +66,7 @@ def test_feature_shapes():
     cfg = ModelConfig()
     feats = extract_features(obs, player=0, num_players=2,
                              max_planets=cfg.max_entities,
-                             max_fleets=128)
+                             max_fleets=128, global_econ=True)
 
     assert feats["planet_features"].shape == (cfg.max_entities, cfg.planet_feature_dim), \
         feats["planet_features"].shape
@@ -84,7 +84,7 @@ def test_feature_shapes():
 def test_feature_normalization():
     """Extracted features should be roughly in [-3, 3]."""
     obs = _make_obs()
-    feats = extract_features(obs, player=0, num_players=2)
+    feats = extract_features(obs, player=0, num_players=2, global_econ=True)
 
     p_max = float(feats["planet_features"].abs().max())
     f_max = float(feats["fleet_features"].abs().max())
@@ -263,7 +263,7 @@ def test_end_to_end_obs_to_actions():
     model = EntityTransformer(cfg)
     model.eval()
 
-    feats = extract_features(obs, player=0, num_players=2)
+    feats = extract_features(obs, player=0, num_players=2, global_econ=True)
     masks = compute_action_masks(obs, player=0)
 
     with torch.no_grad():

@@ -566,6 +566,8 @@ def train(args):
     cfg.ppo.noop_target_launch_rate = args.noop_target_launch_rate
     cfg.ppo.ship_kl_coef = args.ship_kl_coef
     cfg.ppo.ship_kl_prior_exp = args.ship_kl_prior_exp
+    cfg.ppo.anchor_kl_coef = args.anchor_kl_coef
+    cfg.ppo.anchor_value_coef = args.anchor_value_coef
     print(f"PPO config: lr={cfg.ppo.learning_rate}, ppo_epochs={cfg.ppo.ppo_epochs}, "
           f"num_minibatches={cfg.ppo.num_minibatches}, clip_eps={cfg.ppo.clip_eps}, "
           f"entropy_coef_fire={cfg.ppo.entropy_coef_fire}, gae_lambda={cfg.ppo.gae_lambda}, "
@@ -581,6 +583,10 @@ def train(args):
     if cfg.ppo.ship_kl_coef > 0.0:
         print(f"Ship-size KL-to-prior: coef={cfg.ppo.ship_kl_coef} exp={cfg.ppo.ship_kl_prior_exp} "
               f"(full-send-biased; REPLACES ship entropy — entropy_coef_ships={cfg.ppo.entropy_coef_ships})")
+    if cfg.ppo.anchor_kl_coef > 0.0 or cfg.ppo.anchor_value_coef > 0.0:
+        print(f"Best-checkpoint ANCHOR: kl_coef={cfg.ppo.anchor_kl_coef} "
+              f"value_coef={cfg.ppo.anchor_value_coef} | promote at EMA wr>="
+              f"{args.anchor_promote_winrate} over >={args.anchor_promote_min_games} games")
     print(f"Action decode: {args.action_decode}")
     print(f"Reinforcement (own planets as targets): {'ON' if args.allow_reinforce else 'off'}")
     if args.allow_reinforce and args.reinforce_anneal_frac > 0.0:
@@ -1979,6 +1985,29 @@ if __name__ == "__main__":
                         help="Exponent of the ship-size prior w_i ∝ SHIP_COUNTS[i]**exp "
                              "(default 1.0 = linear-in-count; higher = more full-send-biased). "
                              "Only active with --ship-kl-coef > 0.")
+    parser.add_argument("--anchor-kl-coef", type=float, default=0.0,
+                        help="Best-checkpoint anchor (Isaiah #1 / Yijie #13): coefficient on "
+                             "KL(live ‖ frozen previous-best) over the executed action "
+                             "distribution. This is what makes long pure self-play stable — "
+                             "unanchored, it drifts out of the region that beats real opponents "
+                             "while internal metrics look healthy (docs/training.md noopkl2). "
+                             "Requires --ship-bin-mode binary. 0 = off. Try ~0.1.")
+    parser.add_argument("--anchor-value-coef", type=float, default=0.0,
+                        help="Coefficient on the anchor's value term (MSE toward the frozen "
+                             "best's value estimate; Isaiah's value-CE analogue for our scalar "
+                             "critic). 0 = off. Try ~0.5. Pairs with --anchor-kl-coef.")
+    parser.add_argument("--anchor-promote-winrate", type=float, default=0.7,
+                        help="Promotion gate: adopt the live policy as the new anchor once its "
+                             "EMA win-rate vs the current anchor reaches this (Isaiah/Yijie both "
+                             "used 0.70). Turns self-play cycling into a monotonic ratchet — a "
+                             "regression is never adopted. Only active with an anchor enabled.")
+    parser.add_argument("--anchor-promote-min-games", type=int, default=1024,
+                        help="Minimum games vs the anchor before the promotion gate may fire "
+                             "(Yijie: 1024). Guards against promoting on a lucky streak.")
+    parser.add_argument("--anchor-from", type=str, default=None,
+                        help="Checkpoint to seed the anchor from. Default: the run's starting "
+                             "weights (from-scratch: the random init, which the first promotion "
+                             "replaces almost immediately).")
     parser.add_argument("--ship-bin-mode", type=str, default=None,
                         choices=["absolute", "fraction", "intent", "binary"],
                         help="Ship-head action space. 'absolute' (32 count bins, default), "

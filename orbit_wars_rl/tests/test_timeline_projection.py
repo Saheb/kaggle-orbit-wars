@@ -193,7 +193,57 @@ def test_projected_hold_falls_back_to_all_in_when_source_would_newly_fall():
     assert sizes[0, 0, 1].item() == 20.0
 
 
+def test_global_economy_parity():
+    """The projected economy series must match stepping the engine K times with no actions:
+    production delta exactly (integer, ownership-driven), material delta to within the
+    projection's own garrison slack. Material counts in-flight ships, so it is conserved
+    across a launch — the property that makes an emptied source visible as a source cost."""
+    st = _make_state()
+
+    own_ts, garr_ts, arrivals = tl.project_timeline(
+        st.planets, st.planet_alive, st.fleets, st.fleet_alive,
+        st.angular_velocity, num_players=2, K=K, return_arrivals=True)
+    econ = tl.global_economy_features(
+        st.planets, st.planet_alive, st.fleets, st.fleet_alive,
+        own_ts, garr_ts, arrivals, player=0, num_players=2)
+    assert econ.shape == (N, tl.GLOBAL_ECON_DIM)
+
+    def _deltas(planets, planet_alive, fleets, fleet_alive):
+        owner, garr, prod = planets[:, :, 1], planets[:, :, 5], planets[:, :, 6]
+        mine = (owner == 0) & planet_alive
+        enemy = (owner > 0) & planet_alive
+        p = (mine.float() * prod).sum(1) - (enemy.float() * prod).sum(1)
+        m = (mine.float() * garr).sum(1) - (enemy.float() * garr).sum(1)
+        fs = fleets[:, :, 6] * fleet_alive.float()
+        f_mine = (fleets[:, :, 1] == 0).float() * fs
+        m = m + f_mine.sum(1) - (fs - f_mine).sum(1)
+        return p, m
+
+    # Tolerances mirror test_timeline_parity: the projection's 4-iteration intercept solve can
+    # be a step off on a marginal fleet, which misattributes that planet's whole production for
+    # a step. Measured: production exact on 99.7% of (env, step) cells, MAE 0.01; material MAE
+    # 0.41. So assert on the distribution, not a worst case that one slow fleet can set.
+    s = st
+    prod_err, mat_err = [], []
+    for k in range(K):
+        s, _, _ = fn.physics_step(s, 2, 500)
+        gt_p, gt_m = _deltas(s.planets, s.planet_alive, s.fleets, s.fleet_alive)
+        # Invert the signed-log encoding to compare in raw units.
+        got_p = torch.expm1(econ[:, k].abs() * 4.0) * torch.sign(econ[:, k])
+        got_m = torch.expm1(econ[:, K + k].abs() * 8.0) * torch.sign(econ[:, K + k])
+        prod_err.append((got_p - gt_p).abs())
+        mat_err.append((got_m - gt_m).abs())
+    prod_err, mat_err = torch.stack(prod_err), torch.stack(mat_err)
+    prod_exact = (prod_err < 0.5).float().mean().item()
+    print(f"economy series — production MAE {prod_err.mean():.3f} (exact on "
+          f"{prod_exact * 100:.1f}% of cells)  material MAE {mat_err.mean():.3f}")
+    assert prod_exact >= 0.99, f"production delta exact on only {prod_exact:.4f} of cells"
+    assert prod_err.mean().item() <= 0.1, f"production delta MAE {prod_err.mean():.3f}"
+    assert mat_err.mean().item() <= 2.0, f"material delta MAE {mat_err.mean():.3f}"
+
+
 if __name__ == "__main__":
     test_timeline_parity()
     test_timeline_feature_encoding()
+    test_global_economy_parity()
     print("OK")
