@@ -558,6 +558,65 @@ choose it (NOOP / HOLD / ALL-IN) or its resolver must model a conservative oppon
 24-step no-new-launch minimum is not a strategically sufficient hold amount. No PPO run was
 launched from this result.
 
+### Ender launch-sizing probe — all-in is NOT the gap (2026-07-16, `orbit_wars_rl/ender_sizing.py`)
+
+**Question:** the binary resolver forces all-in at non-owned targets. The projected-hold rejection
+showed a *deterministic* middle is wrong, but not that all-in is right. Before building a learned
+`NOOP/HOLD/ALL-IN` action space (experiments.md #3), measure what a top-10 agent actually sends:
+per launch, `ships_sent / source_garrison_at_launch`, from real Ender play.
+
+| population | attacks | reinforces | all-in (≥95%) | middle (5–95%) |
+|---|---:|---:|---:|---:|
+| Ender vs Ajay (12 games, 694 launches) | 393 | 301 | **97.3%** | 2.7% |
+| **Ender vs Ender** (10 games, 5,706 launches) | 1,666 | 4,040 | **97.7%** | **2.3%** |
+
+**Verdict: REJECT learned commitment as a priority.** Ender all-ins ~97% of launches, and the
+strong-vs-strong control is *more* all-in than vs Ajay (opening attacks **100.0%**), which closes
+the "all-in only works because the opponent is weak" confound. Our binary resolver already
+reproduces top-10 sizing behaviour ~97% of the time; a learned middle addresses ≤3% of launches.
+This also reconciles Ender's writeup: his fraction prior (1:1:1:1:10) *offered* four middle
+options and the trained policy converged to essentially never using them. Sizing is settled —
+stop paying for it.
+
+**Reinforce share is NOT ours-vs-Jake-0.56 either — that comparison was confounded.** The 0.21
+figure in the binary table below is `binary 50.79M vs **Yijie**`; it was being cited as a general
+deficit. Like-for-like on the same opponent, our champion (40.108M) vs Ajay reinforces **0.49**
+vs Ender's **0.434** vs Ajay — we reinforce slightly MORE. Do not cite a reinforce-share gap
+without matching the opponent.
+
+**What the probe DOES suggest (weaker, confounded — do not act on it alone):** Ender *raises*
+reinforcement under pressure (0.434 vs Ajay → **0.708** vs Ender) while we *lower* it (0.49 vs
+Ajay → 0.42 vs Ender) — opposite adaptation. Confound: Ender-vs-Ender games are long stalemates
+with big empires (571 launches/game) while our games vs Ender are short losses (142 steps median,
+empire collapsing), so share-of-launches partly reflects the state we are in, not the policy.
+Per-owned-planet launch rate is comparable (~0.08–0.09 both). Treat as a hypothesis.
+
+### Champion vs Ender — 0/256 full panel (2026-07-16)
+
+`torch_step_40108032_binarymarg100m_l4_from25m` (the 80.5%-Ajay peak) vs `candidate_ender.py`,
+256 games: **0/256 (0.0%)**, both seats, **wiped to 0 material in 100%** of games.
+
+| read | value | Ender reference (metrics.md) |
+|---|---:|---:|
+| win-rate | **0.0%** | — |
+| peel-rate | **0.99** (5,277/5,309 caps lost), median-hold 14st | 0.41 |
+| planets@16/32/50/100 · end | 2/5/8/**4** · **0.0** | 9 @50 · 18.5 end |
+| cap/atk-launch (open<50) | 0.645 (**0.517**) | 1.03 (**0.75**) |
+| reinf_share | 0.42 | 0.708 (Ender-vs-Ender) |
+| launch_rate | 0.092 | ~0.08 (per owned-planet-step) |
+
+**The shape, and it is the same one the Yijie/Ajay loss replays showed:** production delta is
+**+0 at step 32** (18% of games ahead), −4 at 50, **−34 at 100** (0% ahead); material −5 → −51 →
+**−888**. We are level on the economy at step 32 and it compounds away. Expansion peaks at 8
+planets by step 50 and **collapses to 4** by step 100. We capture 20.7 planets/game and lose
+essentially all of them.
+
+**Diagnosis this locks:** not sizing (settled above), not per-launch conversion vs weak play
+(0.743 vs Ajay is fine). The gap is **retention + the compounding economy after step 32** — we
+take planets and cannot keep them, against an opponent that keeps 59% of what it takes. The
+north-star `open<50 cap/atk` is **0.517 vs Ender's 0.75** and has NOT moved across the whole
+timeline+binary program (presres1 was 0.58) — Ajay 57.4%→80.5% bought nothing here.
+
 ### Global economy series — feature contract (2026-07-16)
 
 **The lever:** the global token carried **15 static scalars** — current totals, no projection.

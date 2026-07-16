@@ -10,8 +10,10 @@ One line per experiment, in rough priority order. One change per run; record hyp
 | Target+source counterfactual + L4 25.068M | Complete | 75.8% Ajay · 3.9% Yijie | Added source channels active; no promotion |
 | Forced projected hold | **Rejected** | 1/16 vs 13/16 all-in on paired Ajay slice | Underprices the opponent response |
 | Submitted-agent cross-eval | **Complete** | 69.9% vs `presres1` · 64.1% vs `stgpr1` | Current champion is stronger, not a sweep; retain both as regression gates |
-| Best-checkpoint anchor + gate | **Built, unrun** | Unit + end-to-end verified (`tests/test_anchor.py`) | Prerequisite for any long run; A/B it as part of the long-run launch |
+| Best-checkpoint anchor + gate | **Built, unrun** | Unit + end-to-end verified (`tests/test_anchor.py`) | Back-pocket for 200M+ drift — NOT a prerequisite (tl100m ran 100M unanchored, no collapse; the noopkl2 collapse was cold-Adam, since fixed). Costs ~15–20% throughput |
 | Global economy series | **Built, unrun** | Ground-truthed vs engine; parity 0 error | Feature arm — see contract in docs/training.md |
+| Ender launch sizing | **Measurement** | Ender all-in 97.3% vs Ajay · **97.7% vs itself** | Kills learned commitment (#3) |
+| Champion vs Ender panel | **Measurement** | **0/256**, peel 0.99, wiped 100%, prod +0@32 → −34@100 | Retention is the gap |
 
 ## The budget caveat that qualifies every verdict above
 
@@ -53,16 +55,14 @@ is the precondition for running one arm long enough for its verdict to mean anyt
    ⚠ The anchor accrues gate games only when sampled — pass `--pool-pinned-fraction` (it is
    pinned) or as 1-of-20 members it sees ~5% of the pool slice and the gate crawls.
 2. **Global economy series** — BUILT 2026-07-16 (global dim 15→63). Contract in docs/training.md.
-3. **Learned commitment (NOOP / HOLD / ALL-IN)** — the policy must *choose* it. The forced
-   projected-hold decoder failed 1/16 vs 13/16 all-in on a paired Ajay slice because a
-   no-new-launch projection underprices the opponent's response — so it cannot be the execution
-   contract, but that rejection does NOT clear all-in. Note where the field landed: Yijie
-   (continuous fraction, conditioned on the chosen target), Isaiah (logistic mixture, ditto) and
-   Ender (joint origin×fraction) all sized their launches; only SimJeg/kiyotah were pure all-in,
-   at 3–10B steps. Sub-item: the **single-source affordability mask** makes any planet no lone
-   source can afford unattackable *by construction* — combined-arms pincers are inexpressible.
-   Rarely binds vs Ajay; plausibly caps expansion vs Yijie-class defense (captures/game 11.7 vs
-   ship-KL's 18.8; planets@50 6 vs 8). Softening it is a candidate single delta.
+3. ~~**Learned commitment (NOOP / HOLD / ALL-IN)**~~ **REJECTED 2026-07-16 by measurement.**
+   Ender all-ins **97.3%** of launches vs Ajay and **97.7%** vs itself (opening attacks 100.0%) —
+   `ender_sizing.py`. The strong-vs-strong control kills the "all-in only works vs weak play"
+   confound. Our resolver already matches top-10 sizing ~97% of the time; a learned middle
+   addresses ≤3% of launches. Sizing is settled — do not spend a run on it.
+   Still open (small, unmeasured): the **single-source affordability mask** makes any planet no
+   lone source can afford unattackable *by construction*, so combined-arms pincers are
+   inexpressible. Cheap to probe before it is ever a run.
 4. **Combat-preview scalars** — endpoint owner/ships/flip-margin per planet (Jake); cheap add-on to the timeline, covers the one thing it doesn't hand over (margin).
 5. **Conv1d timeline encoder** — SimJeg's 1D-CNN into the planet token; only if timeline signal looks bottlenecked by the linear projection. Yijie ran a 1D-CNN + attention pool over his series and notes most of his FLOPs landed there — and that Billy/Simon got away with flattening it into the MLP instead.
 6. **Surrender / early-truncation** — cut compute on decided games (Jake: 60–70% of turns); sample-density multiplier, not raw SPS. ⚠ Yijie *tried and dropped* a resign rule (75% ships for 20 turns): models sometimes collapsed in games they had all but won.
@@ -74,13 +74,22 @@ is the precondition for running one arm long enough for its verdict to mean anyt
 10. **Yijie-style model selection** — round-robin pool, score = mean WR over all pairs, instead of
    one saturating panel (writeup lesson 6; kiyotah's gate picked a 668M ckpt when 412M was better).
 
-## Retention / reinforcement — the gap nothing has moved
+## ⭐ RETENTION — what the Ender panel actually locks (2026-07-16)
 
-Reinforce share **0.21 vs Jake's 0.56**: more than half a winner's launches are reinforcements,
-and metrics.md notes Ender holds (peel 0.41 vs our 0.94–0.98) via exactly that friendly
-follow-up. Partly downstream of all-in (an emptied source cannot reinforce), so watch whether
-#2/#3 move it before making it its own experiment — but if reinforce share is still ~0.2 after
-learned commitment, it becomes the next diagnosis target.
+Champion (80.5% Ajay) vs Ender: **0/256**, wiped to 0 material in **100%** of games, **peel-rate
+0.99** (5,277 of 5,309 captures lost), planets 8 @50 → **4** @100 vs Ender's 18.5 end. Production
+delta **+0 at step 32 → −34 at 100**: level on the economy, then it compounds away — the same
+shape as the Yijie/Ajay loss replays. `open<50 cap/atk` **0.517 vs Ender 0.75**, unmoved since
+presres1's 0.58 despite Ajay 57.4%→80.5%.
+
+**We take planets and cannot keep them.** That is the gap — not sizing (rejected above), not
+per-launch conversion vs weak play (0.743 vs Ajay).
+
+⚠ **Retracted:** the "reinforce share 0.21 vs Jake 0.56" deficit was **opponent-confounded**.
+Like-for-like vs Ajay: **us 0.49, Ender 0.434** — we reinforce slightly more. Never cite a
+reinforce-share gap across different opponents. The surviving (weaker, state-confounded)
+observation: Ender raises reinforcement under pressure (0.434 vs Ajay → 0.708 vs Ender) while we
+lower it (0.49 → 0.42). Hypothesis, not a lever.
 
 ## Parked / conditional
 
