@@ -108,9 +108,16 @@ and submitted-opponent checks use the archived standalone `neural_agent.py` payl
 match the final tarballs.
 
 A corrected full-panel audit of the best current checkpoint (exact-marginal binary 40.108M, 80.5%
-vs Ajay) is in progress. The first independent canonical samples already disprove the perfect-sweep
-claim: 12/16 against `presres1` and 14/16 against `stgpr1`. Final 256-game rates will replace this
-interim note when both panels complete. Experiment history and the audit trail live in
+vs Ajay) completed against the hash-validated final payloads:
+
+| Submitted opponent | Overall | Current agent as seat 0 | Current agent as seat 1 |
+|---|---:|---:|---:|
+| `presres1` (decisive) | **179/256 (69.9%)** | 66.4% | 73.4% |
+| `stgpr1` (spray) | **164/256 (64.1%)** | 55.5% | 72.7% |
+
+The current policy is genuinely stronger than both submitted agents, but it does not sweep them.
+The 17.2pp seat gap against `stgpr1` is also a real limitation hidden by the invalid 256/256 result.
+Experiment history, passive metrics, and the audit trail live in
 [`docs/training.md`](docs/training.md).
 
 ## Repo navigation

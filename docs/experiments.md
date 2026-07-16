@@ -9,14 +9,15 @@ One line per experiment, in rough priority order. One change per run; record hyp
 | Target counterfactual 45.711M | Complete | 74.2% Ajay · **5.9% Yijie** | No overall promotion; best Yijie read |
 | Target+source counterfactual + L4 25.068M | Complete | 75.8% Ajay · 3.9% Yijie | Added source channels active; no promotion |
 | Forced projected hold | **Rejected** | 1/16 vs 13/16 all-in on paired Ajay slice | Underprices the opponent response |
-| Submitted-agent cross-eval | Audit | Old 256/256 claims invalid; corrected gates 12/16 and 14/16 | Full panels must be rerun |
+| Submitted-agent cross-eval | **Complete** | 69.9% vs `presres1` · 64.1% vs `stgpr1` | Current champion is stronger, not a sweep; retain both as regression gates |
 | Best-checkpoint anchor | **Next** | Preserve a proven policy while testing one structural delta | Add anchor + promotion gate |
 
-## Active validation
+## Completed validation
 
-- **Submitted-agent cross-eval integrity audit** — rerun the 256-game panels against the exact
-  tarball payloads. The old wrappers errored before acting, so their 100% results are void. The
-  evaluator now requires `DONE/DONE` and hashes the tracked archives before play.
+- **Submitted-agent cross-eval integrity audit** — the old wrappers errored before acting, so their
+  256/256 results are void. Corrected 256-game panels against the hash-validated final payloads gave
+  179/256 (69.9%; seats 66.4/73.4%) versus `presres1` and 164/256 (64.1%; seats 55.5/72.7%) versus
+  `stgpr1`. The evaluator now requires `DONE/DONE` and hashes the tracked archives before play.
 
 ## Next in line
 
