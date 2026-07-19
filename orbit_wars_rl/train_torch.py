@@ -1039,8 +1039,10 @@ def train(args):
     wb = None
     if args.wandb:
         if _wandb is None:
-            print("WARNING: --wandb passed but wandb package not installed. "
-                  "Run: pip install wandb")
+            raise RuntimeError(
+                "wandb is required (training-side logging is default-ON) but the package is not "
+                "installed. Run `pip install wandb` (setup/install_orbit_wars.sh does this), or "
+                "pass --no-wandb to train without it.")
         else:
             wb = _wandb.init(
                 project=args.wandb_project,
@@ -2410,6 +2412,16 @@ if __name__ == "__main__":
     parser.add_argument("--wandb-run-name", type=str, default="",
                         help="W&B run name. Defaults to run timestamp if not set.")
     args = parser.parse_args()
+
+    # W&B is REQUIRED by default (training-side logging). Fail instantly on a misconfigured box —
+    # BEFORE loading checkpoints / building the model / compiling — so a run never silently trains
+    # without logging. Opt out only by explicitly passing --no-wandb. (wandb.init itself also
+    # fail-fasts later on an auth/network error — intentional, not caught.)
+    if args.wandb and _wandb is None:
+        raise SystemExit(
+            "wandb is required (training-side logging is default-ON) but the package is not "
+            "installed. Run `pip install wandb` (setup/install_orbit_wars.sh does this), or pass "
+            "--no-wandb to train without it.")
 
     if not args.device:
         if torch.backends.mps.is_available():

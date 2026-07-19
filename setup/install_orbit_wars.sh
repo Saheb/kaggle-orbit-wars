@@ -24,6 +24,13 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 # ----------------------------------------------------------------------------
 
+# --- wandb: training logging is default-ON (train_torch.py --wandb defaults True), so ensure the
+# package is present on every fresh/migrated box. Auth persists in ~/.netrc across pause/resume;
+# only the pip install is lost on a spot host migration — this line restores it so a resumed run
+# logs training internals without a manual reinstall. Non-fatal: if it fails, the run still trains
+# (wandb.init just warns and continues, or pass --no-wandb). ---
+pip install -q wandb 2>/dev/null && echo "wandb ready" || echo "WARNING: wandb install failed — run will train without training-side W&B"
+
 # Find where kaggle_environments is installed
 KE_PATH=$(python3 -c "
 import sys, io

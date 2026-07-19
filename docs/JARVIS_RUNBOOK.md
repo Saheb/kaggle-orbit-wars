@@ -264,21 +264,22 @@ ssh -i $KEY -o StrictHostKeyChecking=no root@$IP \
 ```
 
 ### W&B on a fresh instance (training-side metrics)
-`train_torch.py` defaults `--wandb` ON, but a fresh Jarvis box has **no wandb package and no
-creds**, so it prints `--wandb passed but wandb package not installed` and trains without logging.
-(The *eval* curves still reach W&B — the LOCAL watcher's `wandb_eval_push.py` reads your Mac's
-`~/.netrc`. This step only adds the training-internal charts: KL/EV/loss/timing.) Two steps:
+`train_torch.py` defaults `--wandb` ON. **The package is now auto-installed by
+`setup/install_orbit_wars.sh`** (above), so a fresh/migrated box has wandb without extra steps.
+Only the **auth** is manual, and it only has to be done **once per box** — the creds land in
+`~/.netrc`, which lives under `/home` and **persists across pause/resume AND spot host-migration**
+(a migration wipes the pip install but not `/home`, and setup restores the package):
 ```bash
-# 1. install the package on the remote (no secret)
-ssh -i $KEY -o StrictHostKeyChecking=no root@$IP "pip install -q wandb"
-# 2. auth WITHOUT exposing the key — pull it straight from your local ~/.netrc into the remote login
+# auth WITHOUT exposing the key — pull it straight from your local ~/.netrc into the remote login
 ssh -i $KEY -o StrictHostKeyChecking=no root@$IP \
   "wandb login $(awk '/api.wandb.ai/{f=1} f&&/password/{print $2; exit}' ~/.netrc)"
 ```
 Verify: `ssh … root@$IP "python3 -c 'import wandb;print(bool(wandb.api.api_key))'"` → `True`.
 Do this **before** launching training (wandb.init runs once at startup; enabling it later needs a
-restart). ⚠ Do NOT rsync your whole `~/.netrc` to the box — it carries other creds; the one-liner
-above transfers only the wandb key. `--no-wandb` opts out entirely.
+restart — and never restart a *progressing* run just for charts: the eval curves already reach W&B
+via the LOCAL watcher's `wandb_eval_push.py`, so `--no-wandb` loses only KL/EV/loss/timing).
+⚠ Do NOT rsync your whole `~/.netrc` to the box — it carries other creds; the one-liner transfers
+only the wandb key.
 
 ---
 
