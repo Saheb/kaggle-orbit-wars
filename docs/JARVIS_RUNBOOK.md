@@ -263,6 +263,23 @@ ssh -i $KEY -o StrictHostKeyChecking=no root@$IP \
   "cd /home && pip install -q kaggle-environments && bash setup/install_orbit_wars.sh"
 ```
 
+### W&B on a fresh instance (training-side metrics)
+`train_torch.py` defaults `--wandb` ON, but a fresh Jarvis box has **no wandb package and no
+creds**, so it prints `--wandb passed but wandb package not installed` and trains without logging.
+(The *eval* curves still reach W&B — the LOCAL watcher's `wandb_eval_push.py` reads your Mac's
+`~/.netrc`. This step only adds the training-internal charts: KL/EV/loss/timing.) Two steps:
+```bash
+# 1. install the package on the remote (no secret)
+ssh -i $KEY -o StrictHostKeyChecking=no root@$IP "pip install -q wandb"
+# 2. auth WITHOUT exposing the key — pull it straight from your local ~/.netrc into the remote login
+ssh -i $KEY -o StrictHostKeyChecking=no root@$IP \
+  "wandb login $(awk '/api.wandb.ai/{f=1} f&&/password/{print $2; exit}' ~/.netrc)"
+```
+Verify: `ssh … root@$IP "python3 -c 'import wandb;print(bool(wandb.api.api_key))'"` → `True`.
+Do this **before** launching training (wandb.init runs once at startup; enabling it later needs a
+restart). ⚠ Do NOT rsync your whole `~/.netrc` to the box — it carries other creds; the one-liner
+above transfers only the wandb key. `--no-wandb` opts out entirely.
+
 ---
 
 ## Start training in tmux

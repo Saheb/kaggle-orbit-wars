@@ -217,21 +217,27 @@ learning: apply what the winner writeups teach, one lesson at a time
 
 **⚠ AJAY IS NOT THE OBJECTIVE — it saturates ~77–80% and is blind to what beats us.**
 Use **Yijie** (rank 13, 1640 Elo) as the verdict metric and Ender as the top-10 reference.
-Our 80.5%-Ajay champion scores **0/256 vs Ender** and 3.9% vs Yijie. Optimizing Ajay bought
-+23pp there and **nothing** against strong play — see docs/training.md.
+Our champion (binarygates, **98.0% Ajay**) now scores **14.1% vs Yijie** but is still **0/32 vs
+Ender** (quick), wiped 100%. Ajay and Yijie both rose sharply once the commit gates were released —
+but the top-10 wall is unchanged, so a high Ajay still says little about strong play. See
+docs/training.md.
 
 | Checkpoint | Ajay | Yijie | Notes |
 |---|---|---|---|
 | stgpr1 0.5M (final submission) | 57.4% | — | Pre-timeline best (spray-inflated) |
 | tl100m 100M (2026-07-12) | 74.6% | — | ⭐ Timeline features, from-scratch sparse self-play |
 | **tl100m_s2 (+35M → ~135M)** | **~77% ±4 (PLATEAU)** | — | **Stage 2 gained ~+1pp/10M — the "still +5pp/10M at the tail" claim was the noise band of a saturating metric. Budget is NOT the free explanation.** |
-| shipkl_probe (absolute + soft ship-KL, ~136M cum.) | ~80% | **5.9–7.0%** | ⭐ **BEST YIJIE EVER — the bar.** Plateaued ("dead flat 1M→8M") |
-| **binarymarg 40.108M** (binary all-in + gates) | **80.5%** | 3.9% | Best Ajay · **0/256 vs Ender**, wiped 100%, peel 0.99 |
-| binarygates100m_l4 | running | running | ⭐ Arm B: `--binary-commit-gates minimal` (from scratch, 100M) |
+| shipkl_probe (absolute + soft ship-KL, ~136M cum.) | ~80% | 5.9–7.0% | Prev Yijie bar — **superseded by binarygates100m_l4**. Plateaued ("dead flat 1M→8M") |
+| **binarymarg 40.108M** (binary all-in + gates) | **80.5%** | 3.9% | Best Ajay (old) · **0/256 vs Ender**, wiped 100%, peel 0.99 |
+| **⭐⭐ binarygates100m_l4 100.008M (2026-07-18)** | **98.0%** | **14.1%** | **NEW CHAMPION — best Ajay AND best Yijie ever.** Arm B: `--binary-commit-gates minimal`, from scratch, 100M. Yijie 2.7→14.1% (2× the shipkl bar, ~4× binarymarg's gated 3.9%); plateaus ~15% over the last 30M. Still **0/32 vs Ender** (quick), wiped 100%. |
 
-**The open question:** the binary all-in program bought Ajay (57→80%) and appears to have
-**cost Yijie (~7%→~3%)**. Confounded by cumulative budget (136M vs 70M), but it is the opposite
-of what "under-trained" predicts. Arm B tests the prime suspect: the hardcoded commit gates.
+**RESOLVED (2026-07-18, Arm B):** the Yijie regression was the **hardcoded commit gates, not the
+binary action space**. `--binary-commit-gates minimal` (binarygates100m_l4, 100M from scratch) took
+Yijie to **14.1%** — 2× the shipkl bar and ~4× binarymarg's gated 3.9% — while also hitting **98.0%
+Ajay** (best ever). Confirms Key Lesson 12: the gates computed a verdict from features the model
+already saw, then deleted what it might disagree with. Yijie plateaus ~15% over the last 30M — the
+stage-2 200M-horizon resume tests whether more budget breaks the plateau. Ender wall unchanged:
+0/32 (quick 32g). Curve: `gpu_run_artifacts/binarygates100m_l4/eval_{ajay_1200,yijie}.csv`.
 
 Competition-era numbers (Rev31 "918.8 LB", Rev32b 88.7% Zach, corrpack3e "18% Ajay") are an
 **older eval era and not comparable** to current panels — see README and archive docs for

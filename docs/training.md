@@ -758,6 +758,19 @@ First iterations confirm the mechanism is live: **NOOP 0.61** (gated binary ran 
 `actionable 0.65`, launch_rate 0.359 at iter ~2 (from-scratch random policy; noop-KL pulls the
 mean toward 0.10 as it learns — watch it, do not panic at iter 2).
 
+**⭐⭐ RESULT (2026-07-18, 100.008M complete) — HYPOTHESIS CONFIRMED.** Releasing the gates recovered
+strong-play performance: **Yijie 2.7% (5M) → 8.2 (30M) → 13.3 (70M) → 14.8 (90/95M) → 14.1% (100M
+final)** — 2× the shipkl bar (~7%) and ~4× binarymarg's gated 3.9%. **Ajay 98.0%** (best ever), a
+monotone climb 45→98%. So the Yijie regression the binary lineage suffered was the *hardcoded commit
+gates*, not the binary action space (Key Lesson 12). Costs came in as predicted-benign: cap/atk held
+~0.65 (the `capture_required` gate was not load-bearing for conversion). **Two caveats:** (1) Yijie
+plateaus ~15% over the last 30M — flat within the ±4pp panel band, NOT still climbing; the stage-2
+200M-horizon resume (`--lr-schedule-steps 200000000 --lr-offset-steps <ckpt-step>`, LR continues the
+cosine at ~1.5e-4) tests whether budget breaks it. (2) Ender wall unchanged: champion 0/32 (quick
+32g), wiped 100%, peel 1.00 — it dies ~2× slower (180st vs presres1's 99st) but the endgame is
+identical. Head-to-head vs our own submissions the champion dominates: presres1 96.9%, stgpr1 90.6%
+(32g). Curve CSVs: `gpu_run_artifacts/binarygates100m_l4/eval_{ajay_1200,yijie}.csv`.
+
 ⚠ **Ops gotcha:** `launch_gpu_gcp.sh` hardcodes `PROJECT="orbit-wars-rl"`, but the real project is
 **`orbit-wars-rl-499921`** — the default fails with a confusing "Required
 'compute.instances.create' permission" (it is a wrong-project error, not an IAM one). Pass
