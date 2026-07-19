@@ -58,6 +58,16 @@ from action_mask import resolve_intent_sizes_np
 # Older toggle-based variants are intentionally unsupported in this code path.
 _COMET_SPAWN_STEPS = (50, 150, 250, 350, 450)  # MUST match torch_env.COMET_SPAWN_STEPS
 
+# Diagnostic hook (default OFF): zero the friendly_contest signal (our own ships already inbound to
+# a target) so roi_20/roi_50 are NOT deflated for already-inbound targets. Set from a probe to A/B
+# whether the roi-deflation actually reduces redundant re-launch (docs/feature_audit.md). Not a
+# training flag — leave False everywhere except an explicit ablation run.
+_ABLATE_FRIENDLY_CONTEST = False
+# Diagnostic hook (default OFF): zero the candidate MARGINAL-VALUE deltas (pairwise 30/31 target,
+# 34/35 source — "outcome of this launch relative to no action"). A/B whether the model's target
+# choice actually uses the marginal signal, or overkills regardless (feature-usage vs -absence).
+_ABLATE_CANDIDATE_DELTA = False
+
 
 def _resolve_fleet_targets(fx, fy, fcos, fsin, fspeed, px, py, pr, angvel):
     """Per-fleet lead-aware swept-collision target index, (E,) int (-1 if it hits nothing).
@@ -468,6 +478,8 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
             headed_f = _resolved_headed(ffx, ffy, ffcos, ffsin, ffspeed,
                                         tgt_x_pf, tgt_y_pf, tgt_r_pf, angular_velocity)
             friendly_contest = (ffships[:, np.newaxis] * headed_f).sum(axis=0).astype(np.float32)
+    if _ABLATE_FRIENDLY_CONTEST:
+        friendly_contest[:] = 0.0                       # diagnostic ablation (see module flag)
 
     # Resolve the existing in-flight fleets once. Besides the no-action planet timeline,
     # the arrivals tensor supports source-target counterfactual outcome features below.
@@ -522,6 +534,8 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         torch.from_numpy(slot_valid).unsqueeze(0),
     )[0].numpy()
     pairwise[..., 26:36] = candidate
+    if _ABLATE_CANDIDATE_DELTA:
+        pairwise[..., [30, 31, 34, 35]] = 0.0           # diagnostic: zero marginal-value deltas
 
     hold_sizes = hold_feasible = None
     if projected_hold:
