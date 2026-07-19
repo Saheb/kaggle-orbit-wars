@@ -20,7 +20,7 @@ below exists to show that it moved 57→80% while nothing that matters moved at 
 |---|---|---:|---:|---|
 | **`binarygates100m_l4`** (Arm B) | ⭐⭐ **CHAMPION** (100M done) | **98.0%** | **14.1%** | `--binary-commit-gates minimal`, from scratch 100M. Best on BOTH; 2× the shipkl bar. Still **0/32 vs Ender**. Ladder: presres1 96.9 · stgpr1 90.6 · yusa 78.1 (32g) |
 | `binarygates_s2` (stage-2 → 200M) | **Plateaued** | ~96% | ~12.5% | Continued champion from 95M with LR-offset cosine (as one run); flat/slightly-down over cum 100→115M ⇒ budget-continuation plateau **#2**. Killed at ~115M |
-| `econblock100m_l4` (economy block, #2+#9) | ⭐ **RUNNING** (2026-07-19) | … | … | `--global-econ` + `gamma 0.999`, from scratch 100M, GCP L4. **Bar: >14% Yijie** |
+| `econblock100m_l4` (economy block, #2+#9) | **STOPPED @40M** (below baseline) | ~43–78% | ~1–5% | `--global-econ` + `gamma 0.999`. Tracked **BELOW** baseline (Yijie 5 vs 8 @30M, 1.2 vs 8.2 @35M; Ajay 43 vs 88 @35M). γ0.999 likely destabilized (huge horizon vs ~200-step games). Killed, L4 deleted |
 | `cap128x6_100m` (capacity, #7) | **STOPPED @40M** (mild-negative) | ~80–85% | ~5% | **1.44M UNDERperformed the 0.53M baseline** (Yijie ~5 vs ~8, Ajay ~82 vs ~88 at matched steps). Killed 2026-07-19; RL capacity ceiling looks real (cf. Yijie's 4M worse). Spot destroyed |
 | `shipkl_probe` (absolute + soft ship-KL, ~136M cum.) | Plateaued (SUPERSEDED) | ~80% | 5.9–7.0% | Prev Yijie bar — beaten by binarygates. "dead flat 1M→8M" |
 | Exact-marginal binary 40.108M | Best Ajay | **80.5%** | 3.9% | **0/256 vs Ender**, wiped 100%. Ajay peak bought nothing vs strong play |
@@ -31,7 +31,7 @@ below exists to show that it moved 57→80% while nothing that matters moved at 
 | Learned middle commitment | **Rejected (measurement)** | — | — | Ender all-ins 97.3% vs Ajay / **97.7% vs itself** ⇒ worth ≤3% of launches |
 | Submitted-agent cross-eval | Complete | 69.9% `presres1` · 64.1% `stgpr1` | — | Not a sweep; retain both as regression gates |
 | Best-checkpoint anchor + gate | **Built, unrun** | — | — | Back-pocket for 200M+ (tl100m ran 100M unanchored, no collapse; noopkl2 was cold-Adam, fixed). ~15–20% throughput |
-| Global economy series | **RUNNING** → see `econblock100m_l4` | — | — | Opt-in `--global-econ`; ground-truthed vs engine, parity 0 error. Launched 2026-07-19 bundled with gamma 0.999 |
+| Global economy series | **STOPPED (below baseline)** → `econblock100m_l4` | — | — | Opt-in `--global-econ`; ground-truthed vs engine. Ran bundled with γ0.999; below baseline, killed @40M. Econ-alone (no γ) untested |
 
 ## ⛔ "Just train longer" — CHECKED AGAINST OUR OWN CURVES, AND IT DOES NOT HOLD (2026-07-16)
 
@@ -100,12 +100,14 @@ Arm B (#0) is the test.
 
 ## Next in line
 
-### ▶ Running now (2026-07-19)
-- **#2 · Economy block** — `econblock100m_l4`, from scratch 100M, GCP L4. `--global-econ` (global dim
-  15→63) + `--gamma 0.999`, bundled on purpose. The Ender/Yijie losses are economic reversals that
-  compound over 100+ steps; #2 adds the *observability* (projected production/material series), #9 the
-  *credit assignment* (0.995 discounts step-100 reward ~40%). **Bar: >14% Yijie.** 15M read: econ
-  channels weighted ~0.91× the originals and growing (used, not ignored). Contract in docs/training.md.
+### ⏹ Nothing running (both 2026-07-19 arms STOPPED below baseline; all GPUs deleted)
+- **#2 · Economy block — ❌ STOPPED @40M (below baseline).** `econblock100m_l4`, `--global-econ`
+  (global dim 15→63) + `--gamma 0.999`, bundled on purpose. **Tracked BELOW the 0.53M baseline**
+  (Yijie 5.1 @30M / 1.2 @35M vs 8.2; Ajay 43 @35M vs 88). γ0.999's ~1000-step effective horizon vs
+  ~200-step games likely destabilized value learning (high-variance targets). Confounded econ+γ, so
+  **econ-alone (no γ) is untested** — but the block as shipped didn't help. L4 deleted. (15M read:
+  econ channels *were* used — weighted ~0.91× the originals — so the features aren't inert; the
+  bundle just didn't win.)
 - **#7 · Capacity jump — ❌ STOPPED @40M (2026-07-19, mild-negative).** `cap128x6` `--entity-dim 128
   --num-layers 6` = **1.44M** (was 0.53M), from scratch on Jarvis RTX PRO 6000 spot (preempted at 35M,
   resumed as `cap128x6_r2`, killed ~40M; spot destroyed). Through 40M it tracked **BELOW** the 0.53M
