@@ -1,6 +1,17 @@
-"""Coordination / overkill probe (ground-truth). Do OUR launches waste ships attacking a target
-another of our fleets already captures? Measures the force-concentration wall (experiments.md #4b)
-directly so we know the behavior exists BEFORE building proposal-context to fix it.
+"""Coordination / overkill probe (ground-truth).
+
+⚠⚠ CALIBRATED 2026-07-19 — "redundant-on-arrival" is NOT a defect; DO NOT read it as waste. ⚠⚠
+Reference check vs Ajay: our champion 42.6% redundant, **Yijie 63.8%, Ender 70.3%** — the top-10
+agents do it MORE than we do. So landing an attack on an already-ours target is normal *multi-wave
+capture-and-hold / reinforcement* (Ender reinforces ~71% of launches), not overkill. The metric
+over-counts because it labels every follow-up wave "redundant". Do not resurrect the "cross-turn
+redundancy ⇒ target-first defect" story; it was built on this misread and retracted.
+The ONE cut that survived calibration: **same-turn multi-source** — Ender 0.0% vs us 7.4% — the
+only real coordination signal (its AR decode never fires two sources at one target the same turn),
+and it's small (the proposal-context #4b slice).
+
+Original intent (kept for the run mechanics): do OUR launches attack a target another of our fleets
+already captures?
 
 REDUNDANCY IS GROUND-TRUTH, not a garrison guess: an ATTACK launch (target not ours at launch) is
 "redundant" iff the target is ACTUALLY owned by us at the fleet's arrival turn (from the replay).
@@ -97,7 +108,10 @@ def run_side(steps, seat, acc):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=6)
-    ap.add_argument("--agent-checkpoint", required=True)
+    ap.add_argument("--agent-checkpoint", default=None)
+    ap.add_argument("--agent-path", default=None,
+                    help="measure a PATH-agent's redundancy (e.g. opponents/candidate_ender.py) "
+                         "for calibration — is ~50%% our defect or normal for this game?")
     ap.add_argument("--opponent", default=AJAY)
     ap.add_argument("--self-play", action="store_true", help="opponent = the same checkpoint")
     ap.add_argument("--ablate-friendly-contest", action="store_true",
@@ -111,7 +125,13 @@ def main():
     features._ABLATE_CANDIDATE_DELTA = bool(args.ablate_candidate_delta)
     print(f"  friendly_contest: {'ABLATED' if args.ablate_friendly_contest else 'ON'} | "
           f"candidate_delta: {'ABLATED' if args.ablate_candidate_delta else 'ON'}")
-    agent = _checkpoint_agent(args.agent_checkpoint)
+    if args.agent_checkpoint:
+        agent = _checkpoint_agent(args.agent_checkpoint)
+        who = os.path.basename(args.agent_checkpoint)
+    else:
+        assert args.agent_path, "pass --agent-checkpoint or --agent-path"
+        agent = args.agent_path
+        who = os.path.basename(args.agent_path)
     opp = agent if args.self_play else args.opponent
     opp_name = "SELF" if args.self_play else args.opponent
 
@@ -127,7 +147,7 @@ def main():
 
     atk = acc["atk"] or 1
     print(f"\n=== coordination / overkill (ground-truth) — "
-          f"{os.path.basename(args.agent_checkpoint)} vs {opp_name} ({2*args.seeds} games) ===")
+          f"{who} vs {opp_name} ({2*args.seeds} games) ===")
     print(f"  total ATTACK launches                 {acc['atk']}")
     print(f"  ⭐ redundant-on-arrival (target already ours when we land)")
     print(f"       {acc['redundant']}  ({100*acc['redundant']/atk:.1f}% of attacks)  "

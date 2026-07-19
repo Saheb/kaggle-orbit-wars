@@ -302,6 +302,13 @@ training** at inference or the policy reinforces where it was masked and self-sa
 - **In-training pool `wr` / `ema_wr`** — NOT a performance metric. Measured inside `torch_env` with
   sampled actions where aiming heuristics play far weaker than in the real env. PFSP sampling signal
   only; use cross-eval for the comparable number. Full analysis: `docs/train-eval.md`.
+- **`coord_overkill_probe` "redundant-on-arrival"** — CALIBRATED-AWAY 2026-07-19: an attack landing on
+  an already-ours target is **NOT waste**. Reference vs Ajay: us 42.6%, **Yijie 63.8%, Ender 70.3%** —
+  the top-10 agents do it MORE (it's multi-wave capture-and-hold / reinforcement; Ender reinforces
+  ~71% of launches). Do not read the cross-turn number as a coordination defect (this misread drove a
+  since-retracted "target-first is the fix" story). The one honest signal in that probe is **same-turn
+  multi-source** (Ender 0.0% vs us 7.4%) — a small, real coordination gap, nothing more. Same shape as
+  the peel-rate tautology: a plausible-looking number that a reference agent debunks.
 
 ## The honest hierarchy of "is it working"
 

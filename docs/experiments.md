@@ -114,9 +114,16 @@ Arm B (#0) is the test.
   envs kept to match baseline batch; steady ~2,900 SPS. Not resuming.
 
 ### ◻ Queued  (recommended next: **#4b**)
-- **#4b · ⭐ Same-turn proposal context** — the multi-source COORDINATION signal we have **zero** of,
-  and the standout gap in the 2026-07-19 features audit (writeup_lessons.md §2). **Ender AND #99 both
-  explicitly credit it.** For the ship/fraction head, per-target aggregates over the current-turn
+- **#4b · Same-turn proposal context** *(DOWNGRADED — small residual, not the wall)*.
+  ⚠ **CALIBRATED 2026-07-19:** the overkill probe's cross-turn "redundant-on-arrival" is **NOT a
+  defect** — reference check vs Ajay put Yijie at **63.8%** and Ender at **70.3%** redundant vs our
+  **42.6%**, i.e. the top-10 agents do it MORE (it's multi-wave capture-and-hold, not waste). So the
+  "cross-turn coordination wall" motivation is retracted. The ONLY signal that survived: **same-turn
+  multi-source — Ender 0.0% vs us 7.4%** (its AR decode never fires two sources at one target the
+  same turn). That is exactly what proposal-context addresses — but it's a **~7% slice**, so this is
+  a minor cleanup, not the lever it looked like. Original rationale below (kept for the mechanics).
+  The multi-source COORDINATION signal we have **zero** of (features audit, writeup_lessons.md §2).
+  **Ender AND #99 both credit it.** For the ship/fraction head, per-target aggregates over the current-turn
   candidate set: **proposal count, total proposed ships, this source's share, min/mean/max ETA, ETA
   rank** — so a source sizing its launch KNOWS others are hitting the same target. Ender: *"helped the
   fraction head reason about multi-source attacks instead of treating every launch independently."*
@@ -128,9 +135,11 @@ Arm B (#0) is the test.
   ⚠ Chicken-egg: proposals depend on what sources WOULD launch. #99 fed the same-turn PROPOSAL set
   (what each source is currently proposing this turn), not resolved launches. Scope: extend the
   pairwise block with these per-target cross-source aggregates, computed at feature time.
-  **Hypothesis (2026-07-19, user):** target-first decode may itself be the core defect (target
-  log-prob credited in the PPO joint even when fire=0 — see #2a). Proposal context tests the wall as a
-  *feature* gap first; if it doesn't move, the decode structure (#2a) is the next suspect.
+  **Target-first (#2a) status:** the redundancy-based justification for target-first is **RETRACTED**
+  by the calibration above — the cross-turn "redundancy" it rested on isn't a defect. Target-first
+  may still be worth revisiting on its *own* merits (the fire=0 target-logprob PPO-joint drag is
+  real and independently documented), but NOT as "the fix for the overkill wall" — there is no
+  overkill wall. Don't spend a run on it off this thread.
 - **#3b · Delete the magic horizons** (cheap, high-information). `_THREAT_ETA_WINDOW=6`,
   `_REACH_HORIZON=18`, `_VALUE_HORIZON=40` are three arbitrary answers to "how far ahead should the
   model look", introduced together in one BC commit (`7bd0ffe`), never ablated. `TIMELINE_K=24` already
