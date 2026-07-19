@@ -13,7 +13,7 @@ completes or hits a milestone. Numbers are **our agent's win-rate** (as the agen
 | shipkl — ship-KL plateau | ~136M | ~80% | ~7% | — | — | — | — |
 | **binarygates100m_l4 — ⭐ champion** | 100M | **98.0%** | **14.1%** | 96.9% | 90.6% | 78.1% | 0/32 |
 | econblock — econ feats + γ0.999 | *running* | … | … | — | — | — | — |
-| cap128x6 — 1.44M capacity | *running* | … | … | — | — | — | — |
+| cap128x6 — 1.44M capacity | ❌ stopped @40M | ~82 | ~5 | — | — | — | — |
 
 ⭐ **Yijie** (rank 13, 1640 Elo) is the verdict metric — Ajay saturates ~77–80% and is blind to what
 beats us. `0/N` = wiped, zero wins.
@@ -46,7 +46,7 @@ Each row is one deliberate change from the row above it (the project moves one l
   the model its projected production/material trajectory, and raise the discount (`gamma`
   0.995→0.999) so it actually values economic swings that play out over 100+ steps (how we lose to
   strong agents).
-- **cap128x6** *(running)* — from the champion recipe, *make the model bigger*: 128-wide × 6 layers
+- **cap128x6** *(❌ stopped @40M — tracked below the 0.53M baseline; RL capacity ceiling looks real)* — from the champion recipe, *make the model bigger*: 128-wide × 6 layers
   = **1.44M** params (up from 96×3 = 0.53M), matching the ~1.2M scale the winners used. Everyone
   competitive was 2–3× our size.
 

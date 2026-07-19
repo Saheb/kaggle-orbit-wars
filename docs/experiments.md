@@ -21,7 +21,7 @@ below exists to show that it moved 57→80% while nothing that matters moved at 
 | **`binarygates100m_l4`** (Arm B) | ⭐⭐ **CHAMPION** (100M done) | **98.0%** | **14.1%** | `--binary-commit-gates minimal`, from scratch 100M. Best on BOTH; 2× the shipkl bar. Still **0/32 vs Ender**. Ladder: presres1 96.9 · stgpr1 90.6 · yusa 78.1 (32g) |
 | `binarygates_s2` (stage-2 → 200M) | **Plateaued** | ~96% | ~12.5% | Continued champion from 95M with LR-offset cosine (as one run); flat/slightly-down over cum 100→115M ⇒ budget-continuation plateau **#2**. Killed at ~115M |
 | `econblock100m_l4` (economy block, #2+#9) | ⭐ **RUNNING** (2026-07-19) | … | … | `--global-econ` + `gamma 0.999`, from scratch 100M, GCP L4. **Bar: >14% Yijie** |
-| `cap128x6_100m` (capacity, #7) | ⭐ **RUNNING** (2026-07-19) | … | … | `--entity-dim 128 --num-layers 6` = **1.44M** (was 0.53M), from scratch 100M, Jarvis RTX PRO 6000. **Bar: >14% Yijie** |
+| `cap128x6_100m` (capacity, #7) | **STOPPED @40M** (mild-negative) | ~80–85% | ~5% | **1.44M UNDERperformed the 0.53M baseline** (Yijie ~5 vs ~8, Ajay ~82 vs ~88 at matched steps). Killed 2026-07-19; RL capacity ceiling looks real (cf. Yijie's 4M worse). Spot destroyed |
 | `shipkl_probe` (absolute + soft ship-KL, ~136M cum.) | Plateaued (SUPERSEDED) | ~80% | 5.9–7.0% | Prev Yijie bar — beaten by binarygates. "dead flat 1M→8M" |
 | Exact-marginal binary 40.108M | Best Ajay | **80.5%** | 3.9% | **0/256 vs Ender**, wiped 100%. Ajay peak bought nothing vs strong play |
 | Target counterfactual 45.711M | Complete | 74.2% | 5.9% | No promotion; best Yijie of the binary lineage |
@@ -100,58 +100,73 @@ Arm B (#0) is the test.
 
 ## Next in line
 
-0. ⭐ **`--binary-commit-gates minimal`** — **RUNNING** (`binarygates100m_l4`, from scratch, 100M,
-   GCP L4 asia-south1-b, launched 2026-07-16). Verdict metric: **Yijie** panel; Ajay = guard. Deletes the two
-   hand-tuned walls (`capture_required`, `maintain`/`defend_ok`); COMMIT = all-in at any target,
-   gated only on `S >= MIN_BINARY_COMMIT_SHIPS`. Measured: action space **19.8% → 83.7%** legal on
-   the same states. Nothing new is added — it is pure deletion; ch10/ch20/ch22-25 remain as
-   FEATURES so the model still sees cap-cost/threat/resolved-sizes, it just isn't overruled by
-   them. This is SimJeg's shipped design and matches Ender's measured 97.7% all-in.
-   **Bar: Yijie ~6–7%** (the ship-KL/absolute plateau — the repo's best). Beating binary's 3–4% is
-   not success. Expect cap/atk and possibly Ajay to fall; that is the trade. Full contract,
-   tripwires and the "what it bets against" in docs/training.md.
+### ▶ Running now (2026-07-19)
+- **#2 · Economy block** — `econblock100m_l4`, from scratch 100M, GCP L4. `--global-econ` (global dim
+  15→63) + `--gamma 0.999`, bundled on purpose. The Ender/Yijie losses are economic reversals that
+  compound over 100+ steps; #2 adds the *observability* (projected production/material series), #9 the
+  *credit assignment* (0.995 discounts step-100 reward ~40%). **Bar: >14% Yijie.** 15M read: econ
+  channels weighted ~0.91× the originals and growing (used, not ignored). Contract in docs/training.md.
+- **#7 · Capacity jump — ❌ STOPPED @40M (2026-07-19, mild-negative).** `cap128x6` `--entity-dim 128
+  --num-layers 6` = **1.44M** (was 0.53M), from scratch on Jarvis RTX PRO 6000 spot (preempted at 35M,
+  resumed as `cap128x6_r2`, killed ~40M; spot destroyed). Through 40M it tracked **BELOW** the 0.53M
+  baseline on both metrics (Yijie ~5 vs ~8, Ajay ~82 vs ~88). Consistent with the field (Yijie won at
+  1.2M, his 4M was *worse*) — the RL capacity ceiling looks real; bigger isn't the lever here. 512
+  envs kept to match baseline batch; steady ~2,900 SPS. Not resuming.
 
-1. ~~**Best-ckpt anchor + promotion gate**~~ **BUILT 2026-07-16** (`--anchor-kl-coef`,
-   `--anchor-value-coef`, `--anchor-promote-winrate/-min-games`, `--anchor-from`). KL(live ‖
-   frozen best) over the exact NOOP/COMMIT distribution + value MSE; promotion adopts the live
-   policy at ≥70% EMA h2h over ≥1024 games and demotes the old anchor into the league. Verified:
-   6 unit tests (identity ⇒ KL 0; loss += coef·KL; gradient reduces KL) + an end-to-end CPU run
-   where the gate fires and resets. **Unrun at scale.** Costs one no-grad forward per minibatch.
-   ⚠ The anchor accrues gate games only when sampled — pass `--pool-pinned-fraction` (it is
-   pinned) or as 1-of-20 members it sees ~5% of the pool slice and the gate crawls.
-2. **Global economy series** — BUILT 2026-07-16 (global dim 15→63). ⭐ **RUNNING 2026-07-19 as
-   `econblock100m_l4`**, bundled with #9 (gamma 0.999) as the "economy block" (from scratch 100M, L4).
-   The Ender/Yijie losses are economic reversals that compound over 100+ steps; #2 adds the
-   *observability* (projected production/material series) and #9 the *credit assignment* (0.995
-   discounts step-100 reward ~40%). Bar: >14% Yijie. Contract in docs/training.md.
-3. ~~**Learned commitment (NOOP / HOLD / ALL-IN)**~~ **REJECTED 2026-07-16 by measurement.**
-   Ender all-ins **97.3%** of launches vs Ajay and **97.7%** vs itself (opening attacks 100.0%) —
-   `ender_sizing.py`. The strong-vs-strong control kills the "all-in only works vs weak play"
-   confound. Our resolver already matches top-10 sizing ~97% of the time; a learned middle
-   addresses ≤3% of launches. Sizing is settled — do not spend a run on it.
-   ~~Still open: the single-source affordability mask~~ → **measured and folded into Arm B (#0)**:
-   `capture_required` blocks **62.2%** of attack options, so pincers were inexpressible. It is one
-   of the two walls `--binary-commit-gates minimal` deletes.
-3b. **Delete the magic horizons** (follow-up to Arm B, cheap and high-information).
-   `_THREAT_ETA_WINDOW=6`, `_REACH_HORIZON=18`, `_VALUE_HORIZON=40` are three arbitrary answers to
-   "how far ahead should the model look", introduced together in one BC commit (`7bd0ffe`) with no
-   justification and never ablated — why 6 and not 4 or 8? Meanwhile `TIMELINE_K=24` already hands
-   the model the whole resolved future, so these scalars add **no information**, only an
-   unjustified prior about which horizon matters. **Prediction: removing ch20/ch15's hand-picked
-   summaries is a NO-OP.** If it hurts, the timeline isn't doing its job — also worth knowing.
-   Pairs naturally with #5 (learned pooling picks the horizon instead). Do NOT bundle with Arm B.
-4. **Combat-preview scalars** — endpoint owner/ships/flip-margin per planet (Jake); cheap add-on to the timeline, covers the one thing it doesn't hand over (margin).
-5. **Conv1d timeline encoder** — SimJeg's 1D-CNN into the planet token; only if timeline signal looks bottlenecked by the linear projection. Yijie ran a 1D-CNN + attention pool over his series and notes most of his FLOPs landed there — and that Billy/Simon got away with flattening it into the MLP instead.
-6. **Surrender / early-truncation** — cut compute on decided games (Jake: 60–70% of turns); sample-density multiplier, not raw SPS. ⚠ Yijie *tried and dropped* a resign rule (75% ships for 20 turns): models sometimes collapsed in games they had all but won.
-7. **Capacity jump** — `--entity-dim`/`--num-layers` up (0.5M → 5–20M); needs H100/H200 (update-bound: bigger model = proportionally slower). Calibration: Yijie's final was **1.2M** (6-layer, 128-d) and his 4M attempt was *much worse*; we are at 0.5M. ⭐ **RUNNING 2026-07-19 as `cap128x6_100m`** — `--entity-dim 128 --num-layers 6` = **1.44M**, from scratch 100M on Jarvis RTX PRO 6000 spot (~2,900 SPS, ~9.5h). Both axes moved together *on purpose* (width vs depth is unmeasurable at ±4pp Yijie — yusa's "noise > effect" lesson); 512 envs kept to match the baseline batch. Also field-confirmed: Gerardo (rank 72) ~0.75M, yusa (rank ~151) 7.2M *BC* — everyone competitive is bigger, but 7M is a BC regime; RL sweet spot is ~1.2M.
-8. **Exploiters** — train a fresh model purely to beat the main one, fold into the league (Ender/rank-55: +15–17pp first-place).
-9. **Recipe deltas to fold into the long run** (not separate arms — confounded on purpose, adopt
-   as a block with the winners' settings): **gamma 0.995 → 0.999** (Yijie; economic reversals play
-   out over 100+ steps — his gamma=1 stalling note bounds it from above), **rollout 64 → 128**.
-   `--gamma` now a CLI flag. ⭐ gamma 0.999 **IN FLIGHT** as half of `econblock100m_l4` (#2); rollout
-   128 not yet run.
-10. **Yijie-style model selection** — round-robin pool, score = mean WR over all pairs, instead of
-   one saturating panel (writeup lesson 6; kiyotah's gate picked a 668M ckpt when 412M was better).
+### ◻ Queued  (recommended next: **#4b**)
+- **#4b · ⭐ Same-turn proposal context** — the multi-source COORDINATION signal we have **zero** of,
+  and the standout gap in the 2026-07-19 features audit (writeup_lessons.md §2). **Ender AND #99 both
+  explicitly credit it.** For the ship/fraction head, per-target aggregates over the current-turn
+  candidate set: **proposal count, total proposed ships, this source's share, min/mean/max ETA, ETA
+  rank** — so a source sizing its launch KNOWS others are hitting the same target. Ender: *"helped the
+  fraction head reason about multi-source attacks instead of treating every launch independently."*
+  Our pairwise feats are ALL per-(source,target); nothing aggregates across sources (grep: no
+  proposal/share/eta_rank). This is the **force-concentration / pincer wall verbatim** — N planets
+  deciding peel/commit independently. **Lower-risk than the target-first refactor (#2a):** a pure
+  feature add, not a decode restructure, and two top-10 agents credit it — so **try this before
+  target-first**; target-first stays the follow-up if proposal context doesn't move the wall.
+  ⚠ Chicken-egg: proposals depend on what sources WOULD launch. #99 fed the same-turn PROPOSAL set
+  (what each source is currently proposing this turn), not resolved launches. Scope: extend the
+  pairwise block with these per-target cross-source aggregates, computed at feature time.
+  **Hypothesis (2026-07-19, user):** target-first decode may itself be the core defect (target
+  log-prob credited in the PPO joint even when fire=0 — see #2a). Proposal context tests the wall as a
+  *feature* gap first; if it doesn't move, the decode structure (#2a) is the next suspect.
+- **#3b · Delete the magic horizons** (cheap, high-information). `_THREAT_ETA_WINDOW=6`,
+  `_REACH_HORIZON=18`, `_VALUE_HORIZON=40` are three arbitrary answers to "how far ahead should the
+  model look", introduced together in one BC commit (`7bd0ffe`), never ablated. `TIMELINE_K=24` already
+  hands the model the whole resolved future, so these add **no information**, only an unjustified
+  prior. **Prediction: removing ch20/ch15's hand-picked summaries is a NO-OP.** If it hurts, the
+  timeline isn't doing its job. Pairs with #5 (learned pooling picks the horizon instead).
+- **#4 · Combat-preview scalars** — endpoint owner/ships/flip-margin per planet (Jake); cheap add-on to
+  the timeline, covers the one thing it doesn't hand over (margin).
+- **#5 · Conv1d timeline encoder** — SimJeg's 1D-CNN into the planet token; only if timeline signal
+  looks bottlenecked by the linear projection. Yijie ran a 1D-CNN + attention pool over his series and
+  notes most of his FLOPs landed there — Billy/Simon got away with flattening into the MLP instead.
+  (Audit caveat: Ender, top-10, uses **linear** into the tokens — so this is optional, not required.)
+- **#6 · Surrender / early-truncation** — cut compute on decided games (Jake: 60–70% of turns);
+  sample-density multiplier, not raw SPS. ⚠ Yijie *tried and dropped* a resign rule (75% ships for 20
+  turns): models sometimes collapsed in games they had all but won.
+- **#8 · Exploiters** — train a fresh model purely to beat the main one, fold into the league
+  (Ender/rank-55: +15–17pp first-place).
+- **#9 · Recipe deltas** (adopt as a block with the winners' settings): **gamma 0.995 → 0.999** (Yijie;
+  economic reversals over 100+ steps) — ✅ **DONE, in flight as half of #2's econ block**; **rollout
+  64 → 128 not yet run.** `--gamma` is now a CLI flag.
+- **#10 · Yijie-style model selection** — round-robin pool, score = mean WR over all pairs, instead of
+  one saturating panel (writeup lesson 6; kiyotah's gate picked a 668M ckpt when 412M was better).
+
+### ✓ Done / rejected
+- **#0 · `--binary-commit-gates minimal`** — ✅ **DONE → CHAMPION** (`binarygates100m_l4`, 100M):
+  **98.0% Ajay / 14.1% Yijie**, best on both, 2× the prior Yijie bar. Confirmed the hand-tuned gates
+  (`capture_required`, `maintain`/`defend_ok`) — **not** the binary action space — suppressed strong
+  play; deleting them restored the action space **19.8% → 83.7%** legal. Full record in docs/training.md.
+- **#1 · Best-ckpt anchor + promotion gate** — BUILT 2026-07-16 (`--anchor-kl-coef`,
+  `--anchor-value-coef`, `--anchor-promote-winrate/-min-games`, `--anchor-from`); KL(live‖frozen best)
+  over NOOP/COMMIT + value MSE, promote at ≥70% EMA h2h over ≥1024 games. 6 unit tests + CPU e2e pass.
+  **Unrun at scale.** ⚠ Accrues gate games only when sampled — use `--pool-pinned-fraction`.
+- **#3 · Learned commitment (NOOP/HOLD/ALL-IN)** — ❌ **REJECTED 2026-07-16 by measurement.** Ender
+  all-ins **97.3%** vs Ajay / **97.7%** vs itself (`ender_sizing.py`); a learned middle is worth ≤3% of
+  launches. Sizing is settled. The single-source affordability mask (`capture_required`, 62.2% of
+  attacks) folded into #0.
 
 ## ⭐ RETENTION — what the Ender panel actually locks (2026-07-16)
 
