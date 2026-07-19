@@ -121,6 +121,15 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
         cfg.model.fleet_feature_dim = int(sd["fleet_proj.weight"].shape[1])
     if "global_proj.weight" in sd:
         cfg.model.global_feature_dim = int(sd["global_proj.weight"].shape[1])
+    # --- transformer capacity (width + depth): infer from weights, like the dims above, so
+    # capacity-experiment checkpoints (e.g. 128d/6L) load without CLI flags. planet_proj maps
+    # feature_dim -> entity_dim, so shape[0] is the model width; blocks.<i>.* gives the depth. ---
+    if "planet_proj.weight" in sd:
+        cfg.model.entity_dim = int(sd["planet_proj.weight"].shape[0])
+    _block_idx = [int(k.split(".")[1]) for k in sd
+                  if k.startswith("blocks.") and k.split(".")[1].isdigit()]
+    if _block_idx:
+        cfg.model.num_layers = max(_block_idx) + 1
     # features.py always emits PAIRWISE_FEATURE_DIM channels, so the model's pairwise input
     # must be that wide regardless of the checkpoint. Older/narrower checkpoints are zero-padded
     # by EntityTransformer.load_state_dict (new channels contribute nothing → identical

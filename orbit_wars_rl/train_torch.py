@@ -568,6 +568,8 @@ def train(args):
         cfg.ppo.max_grad_norm = args.max_grad_norm
     if args.gae_lambda is not None:
         cfg.ppo.gae_lambda = args.gae_lambda
+    if args.gamma is not None:
+        cfg.ppo.gamma = args.gamma
     if args.critic_warmup_ev is not None:
         cfg.ppo.critic_warmup_ev = args.critic_warmup_ev
     if args.critic_warmup_max_updates is not None:
@@ -2139,6 +2141,9 @@ if __name__ == "__main__":
                              "(default: cfg.ppo.max_grad_norm=0.5)")
     parser.add_argument("--gae-lambda", type=float, default=None,
                         help="Override GAE lambda (default: cfg.ppo.gae_lambda=0.95)")
+    parser.add_argument("--gamma", type=float, default=None,
+                        help="Override PPO discount gamma (default: cfg.ppo.gamma=0.995; "
+                             "0.999 for long-horizon economic reversals — writeup lesson)")
     parser.add_argument("--critic-warmup-ev", type=float, default=None,
                         help="Critic-only warmup: before PPO, freeze the trunk + policy "
                              "heads and train ONLY the value head until explained-variance "
