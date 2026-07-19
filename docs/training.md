@@ -790,6 +790,35 @@ and scored 74.2% Ajay / 5.9% Yijie at 45M with no promotion. So the honest readi
 already SEE it and have not trained long enough to ACT on it. That points at budget, and at
 decoding structure (#2) if budget alone stalls.
 
+### Stage-2, economy block, and capacity (2026-07-18/19)
+
+**`binarygates_s2` — champion continuation toward 200M (PLATEAU, killed ~115M).** Resumed the
+champion's 95M **interval** checkpoint (carries Adam + `pool_step`; the 100M `_final` has NO pool
+file — lesson 11) and continued "as one run": kept peak LR 3e-4 but set `--lr-schedule-steps
+200000000 --lr-offset-steps 95256576` so the cosine **continues mid-decay** (~1.6e-4 effective at the
+seam, verified in the log) instead of restarting at peak. `total_env_steps` resets to 0 on resume
+(train_torch.py), so it uses a NEW run-name — stitch the curve by adding 95.256M. **Result:** Yijie
+12.5 → 12.5 → 13.3 → 11.7 across cumulative ~100→115M — flat-to-slightly-**down** vs the ~14% stage-1
+tail. The seam LR bump kicked the policy off 14% and it re-settled in the same 12–14% band: an
+*attractor*, not undertraining. Budget-continuation plateau **#2** (tl100m_s2 was #1). Killed; pivoted
+to structural levers.
+
+**`econblock100m_l4` — the economy block (RUNNING, GCP L4, 2026-07-19).** Two deltas vs the champion,
+confounded on purpose (experiments.md #2 + #9): `--global-econ` (global dim 15→63, the projected
+production/material series) + `--gamma 0.999` (was 0.995). The Ender/Yijie losses are economic
+reversals over 100+ steps; #2 adds the *observability*, #9 the *credit assignment* (at 0.995,
+step-100 reward is discounted ~40%). From scratch 100M. `--gamma` added as a CLI flag (was pinned to
+the cfg default). Bar: >14% Yijie.
+
+**`cap128x6_100m` — capacity jump (RUNNING, Jarvis RTX PRO 6000 spot, 2026-07-19).** One delta:
+`--entity-dim 128 --num-layers 6` = **1.44M** params (was 96×3 = 0.53M), matching the winners' ~1.2M
+RL scale (Yijie won at 1.2M; his 4M was *worse* — not bigger-is-better). Width+depth moved together
+because attribution is unmeasurable at ±4pp Yijie (yusa's noise>effect lesson). 512 envs kept to
+match the baseline batch; steady **~2,900 SPS** (98% GPU, PPO-update-bound), ~9.5h for 100M. Bar:
+>14% Yijie. **Eval fix required:** `eval.load_checkpoint` did not infer `entity_dim`/`num_layers`, so
+capacity checkpoints would not load — now inferred from weight shapes (`planet_proj` output width;
+`blocks.<i>` count), verified round-trip (128/6 loads at 1.44M; 96/3 regression intact).
+
 ### Global economy series — feature contract (2026-07-16)
 
 **The lever:** the global token carried **15 static scalars** — current totals, no projection.

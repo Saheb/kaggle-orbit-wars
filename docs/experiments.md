@@ -18,8 +18,11 @@ below exists to show that it moved 57→80% while nothing that matters moved at 
 
 | Frontier | Status | Ajay (guard) | **Yijie (verdict)** | Decision |
 |---|---|---:|---:|---|
-| **`binarygates100m_l4`** (Arm B) | ⭐ **RUNNING** | — | — | `--binary-commit-gates minimal`, from scratch 100M. **Bar: >6–7% Yijie** |
-| `shipkl_probe` (absolute + soft ship-KL, ~136M cum.) | Plateaued | ~80% | **5.9–7.0%** | ⭐ **BEST YIJIE — the bar.** "dead flat 1M→8M" |
+| **`binarygates100m_l4`** (Arm B) | ⭐⭐ **CHAMPION** (100M done) | **98.0%** | **14.1%** | `--binary-commit-gates minimal`, from scratch 100M. Best on BOTH; 2× the shipkl bar. Still **0/32 vs Ender**. Ladder: presres1 96.9 · stgpr1 90.6 · yusa 78.1 (32g) |
+| `binarygates_s2` (stage-2 → 200M) | **Plateaued** | ~96% | ~12.5% | Continued champion from 95M with LR-offset cosine (as one run); flat/slightly-down over cum 100→115M ⇒ budget-continuation plateau **#2**. Killed at ~115M |
+| `econblock100m_l4` (economy block, #2+#9) | ⭐ **RUNNING** (2026-07-19) | … | … | `--global-econ` + `gamma 0.999`, from scratch 100M, GCP L4. **Bar: >14% Yijie** |
+| `cap128x6_100m` (capacity, #7) | ⭐ **RUNNING** (2026-07-19) | … | … | `--entity-dim 128 --num-layers 6` = **1.44M** (was 0.53M), from scratch 100M, Jarvis RTX PRO 6000. **Bar: >14% Yijie** |
+| `shipkl_probe` (absolute + soft ship-KL, ~136M cum.) | Plateaued (SUPERSEDED) | ~80% | 5.9–7.0% | Prev Yijie bar — beaten by binarygates. "dead flat 1M→8M" |
 | Exact-marginal binary 40.108M | Best Ajay | **80.5%** | 3.9% | **0/256 vs Ender**, wiped 100%. Ajay peak bought nothing vs strong play |
 | Target counterfactual 45.711M | Complete | 74.2% | 5.9% | No promotion; best Yijie of the binary lineage |
 | Target+source counterfactual + L4 25.068M | Complete | 75.8% | 3.9% | Source channels active; no promotion |
@@ -28,7 +31,7 @@ below exists to show that it moved 57→80% while nothing that matters moved at 
 | Learned middle commitment | **Rejected (measurement)** | — | — | Ender all-ins 97.3% vs Ajay / **97.7% vs itself** ⇒ worth ≤3% of launches |
 | Submitted-agent cross-eval | Complete | 69.9% `presres1` · 64.1% `stgpr1` | — | Not a sweep; retain both as regression gates |
 | Best-checkpoint anchor + gate | **Built, unrun** | — | — | Back-pocket for 200M+ (tl100m ran 100M unanchored, no collapse; noopkl2 was cold-Adam, fixed). ~15–20% throughput |
-| Global economy series | **Built, unrun** | — | — | Opt-in `--global-econ`; ground-truthed vs engine, parity 0 error |
+| Global economy series | **RUNNING** → see `econblock100m_l4` | — | — | Opt-in `--global-econ`; ground-truthed vs engine, parity 0 error. Launched 2026-07-19 bundled with gamma 0.999 |
 
 ## ⛔ "Just train longer" — CHECKED AGAINST OUR OWN CURVES, AND IT DOES NOT HOLD (2026-07-16)
 
@@ -43,6 +46,12 @@ That is a **plateau at ~77% ±4**, i.e. ~+1pp/10M — not the "+5pp/10M at the t
 projected (that read the noise band of a saturating metric as a trend). And the Yijie curves are
 flat over long stretches within a lineage: `binarymarg` 1.2 → 4.3 over 45M; `binary100m_scratch`
 Ajay **plateaued at 48–49% from 30M through 50M** while Yijie sat at 1–2%.
+
+**Confirmed AGAIN (2026-07-19):** `binarygates_s2` continued the **champion** (95M →, as one
+continuous run with an LR-offset cosine that resumed the decay mid-curve) and Yijie went
+12.5 → 12.5 → 13.3 → 11.7 across cumulative 100→115M — flat-to-slightly-**down** vs the ~14% stage-1
+tail. The LR bump kicked the policy off 14% and it re-settled in the same 12–14% band: that is an
+*attractor*, not undertraining. Second clean champion-scale plateau; killed at ~115M.
 
 **So plateaus are real and we do detect them.** Budget is not the free explanation. What the
 curves also show, and this is the uncomfortable one:
@@ -110,7 +119,11 @@ Arm B (#0) is the test.
    where the gate fires and resets. **Unrun at scale.** Costs one no-grad forward per minibatch.
    ⚠ The anchor accrues gate games only when sampled — pass `--pool-pinned-fraction` (it is
    pinned) or as 1-of-20 members it sees ~5% of the pool slice and the gate crawls.
-2. **Global economy series** — BUILT 2026-07-16 (global dim 15→63). Contract in docs/training.md.
+2. **Global economy series** — BUILT 2026-07-16 (global dim 15→63). ⭐ **RUNNING 2026-07-19 as
+   `econblock100m_l4`**, bundled with #9 (gamma 0.999) as the "economy block" (from scratch 100M, L4).
+   The Ender/Yijie losses are economic reversals that compound over 100+ steps; #2 adds the
+   *observability* (projected production/material series) and #9 the *credit assignment* (0.995
+   discounts step-100 reward ~40%). Bar: >14% Yijie. Contract in docs/training.md.
 3. ~~**Learned commitment (NOOP / HOLD / ALL-IN)**~~ **REJECTED 2026-07-16 by measurement.**
    Ender all-ins **97.3%** of launches vs Ajay and **97.7%** vs itself (opening attacks 100.0%) —
    `ender_sizing.py`. The strong-vs-strong control kills the "all-in only works vs weak play"
@@ -130,11 +143,13 @@ Arm B (#0) is the test.
 4. **Combat-preview scalars** — endpoint owner/ships/flip-margin per planet (Jake); cheap add-on to the timeline, covers the one thing it doesn't hand over (margin).
 5. **Conv1d timeline encoder** — SimJeg's 1D-CNN into the planet token; only if timeline signal looks bottlenecked by the linear projection. Yijie ran a 1D-CNN + attention pool over his series and notes most of his FLOPs landed there — and that Billy/Simon got away with flattening it into the MLP instead.
 6. **Surrender / early-truncation** — cut compute on decided games (Jake: 60–70% of turns); sample-density multiplier, not raw SPS. ⚠ Yijie *tried and dropped* a resign rule (75% ships for 20 turns): models sometimes collapsed in games they had all but won.
-7. **Capacity jump** — `--entity-dim`/`--num-layers` up (0.5M → 5–20M); needs H100/H200 (update-bound: bigger model = proportionally slower). Calibration: Yijie's final was **1.2M** (6-layer, 128-d) and his 4M attempt was *much worse*; we are at 0.5M.
+7. **Capacity jump** — `--entity-dim`/`--num-layers` up (0.5M → 5–20M); needs H100/H200 (update-bound: bigger model = proportionally slower). Calibration: Yijie's final was **1.2M** (6-layer, 128-d) and his 4M attempt was *much worse*; we are at 0.5M. ⭐ **RUNNING 2026-07-19 as `cap128x6_100m`** — `--entity-dim 128 --num-layers 6` = **1.44M**, from scratch 100M on Jarvis RTX PRO 6000 spot (~2,900 SPS, ~9.5h). Both axes moved together *on purpose* (width vs depth is unmeasurable at ±4pp Yijie — yusa's "noise > effect" lesson); 512 envs kept to match the baseline batch. Also field-confirmed: Gerardo (rank 72) ~0.75M, yusa (rank ~151) 7.2M *BC* — everyone competitive is bigger, but 7M is a BC regime; RL sweet spot is ~1.2M.
 8. **Exploiters** — train a fresh model purely to beat the main one, fold into the league (Ender/rank-55: +15–17pp first-place).
 9. **Recipe deltas to fold into the long run** (not separate arms — confounded on purpose, adopt
    as a block with the winners' settings): **gamma 0.995 → 0.999** (Yijie; economic reversals play
    out over 100+ steps — his gamma=1 stalling note bounds it from above), **rollout 64 → 128**.
+   `--gamma` now a CLI flag. ⭐ gamma 0.999 **IN FLIGHT** as half of `econblock100m_l4` (#2); rollout
+   128 not yet run.
 10. **Yijie-style model selection** — round-robin pool, score = mean WR over all pairs, instead of
    one saturating panel (writeup lesson 6; kiyotah's gate picked a 668M ckpt when 412M was better).
 

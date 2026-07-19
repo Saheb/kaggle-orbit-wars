@@ -113,6 +113,7 @@ seed_checkpoints/          ← resume points uploaded to training instances
 
 setup/                     ← install orbit_wars kaggle env (run once per instance)
 docs/                      ← runbooks and logs
+  scoreboard.md            ← ⭐ living table: our agent vs Ajay/Yijie/presres1/stgpr1/yusa/Ender
   commands.md              ← ⭐ copy-paste command reference (start here)
   submissions.md           ← full submission log with Kaggle IDs and checkpoint paths
   GCP_RUNBOOK.md           ← GCP L4 launch, monitoring, terminate

@@ -100,6 +100,18 @@ budget answered the open finding above:
   competition-era retrain fell back into simply doesn't form when bad launches are visible to the
   critic the step they happen. Run record: [`docs/training.md`](docs/training.md).
 
+- **`binarygates100m_l4`** (2026-07-18): 100M from scratch on a binary NOOP/COMMIT action space
+  with the hand-tuned commit gates *released* (`--binary-commit-gates minimal`) — **98.0% vs Ajay
+  and 14.1% vs Yijie** (rank 13, 1640 Elo). Best result on *both* metrics, and ~2× the prior Yijie
+  best (~7%). The finding: the binary lineage's earlier Yijie regression was the hardcoded commit
+  gates, *not* the binary action space itself. The gates computed a verdict from features the model
+  already saw, then deleted ~80% of the commit options it might have disagreed with — no
+  multi-source pincers, no pre-emptive reinforcement. Releasing them recovered strong play while
+  *also* lifting Ajay to the best ever. **Yijie is now the verdict metric** — Ajay saturates
+  ~77–80% and is blind to what beats us. The top-10 wall is unchanged: still **0/32 vs Ender**,
+  wiped 100%. Follow-on arms (long-horizon economy features + `gamma` 0.999; a 1.44M capacity jump
+  to the winners' ~1.2M shape) test whether the ~15% Yijie plateau is the ceiling of this config.
+
 The previously reported **256/256 against each submitted endpoint was invalid**. The local wrapper
 used `__file__`, which `kaggle_environments` does not define when it executes a path agent; the old
 evaluator then counted the errored opponent as a win. The identical aggregate statistics against two
