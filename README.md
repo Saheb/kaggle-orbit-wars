@@ -9,26 +9,118 @@ from behaviour cloning of top-leaderboard replays. The hard part has never been 
 **holding** them against forward-projecting planner opponents. Most of the work below is the search for a
 training signal that produces retention instead of spray-and-churn.
 
-## Phases
+## Replay
 
-Each phase is one structural attack on that holding problem. Reward/mask deltas live in `archive/docs/training-till-submission.md`;
-these docs cover the architecture- and dynamics-level changes.
+[![Action-heavy closing sequence from an Orbit Wars match](docs/assets/orbit-wars-replay.gif)](https://saheb.github.io/blog/orbit-wars/replay-83428941.html)
 
-| Phase | Idea | Design doc |
-|-------|------|------------|
-| **Phase 2** | Teach **reinforcement** (sending ships to your *own* planets) as a native, empire-size-gated behaviour — the #1 skill gap vs the top tier. Fresh run, redesigned reward + one new action mask. | [`docs/phase2.md`](docs/phase2.md) |
-| **Phase 3** | Fix the **self-play drift / cycling** that no reward knob touched, via a ratcheted teacher-KL anchor + opponent league (Toad Brigade / Isaiah Pressman recipe). Changes the *training dynamics*, not the reward. | [`docs/phase3.md`](docs/phase3.md) |
-| **Phase 4** | **Per-target conditioning** for the fire/ship heads (architecture change). Makes all three action heads read the same `[q_slot, k_target, pairwise]` inputs so ship can size to `garrison+1` and fire can see `enemy_contest`. | [`docs/phase4.md`](docs/phase4.md) |
+*Turns 104–144 of episode 83428941, Saheb vs Johnny Hyland. Click the GIF for the full interactive replay
+with pause, scrubbing, speed, and turn-by-turn controls.*
 
-The standing diagnosis that ties them together — **what the wall actually is** — lives in
-[`docs/current_problem.md`](docs/current_problem.md): the long-assumed "out-massing wall" turned out to be a
-measurement ghost; the real axis is **peel-rate / retention** (holding a higher fraction of *your* captures
-than the opponent holds of theirs), and the open lever is **capital efficiency**.
+## System at a glance
+
+The project has four separable layers:
+
+1. `features.py` turns a variable-size observation into padded planet, fleet, global, and
+   source-target tensors. Geometry that should be exact—arrival direction, travel time, sun safety,
+   projected garrison—is computed explicitly; strategic preferences are left to the network.
+2. `model.py` embeds those entities with a shared transformer, then scores actions independently for
+   every owned source planet and candidate target planet.
+3. `torch_env.py` simulates hundreds of games in parallel on one device. `train_torch.py` collects
+   self-play rollouts and `ppo.py` applies clipped PPO with GAE.
+4. `eval.py` runs deterministic, both-seat panels against fixed opponents. `export_agent.py` packages a
+   checkpoint as a standalone Kaggle agent.
+
+```mermaid
+flowchart LR
+    O[Kaggle observation] --> F[Feature extraction]
+    F --> P[Planet tokens]
+    F --> L[Fleet tokens]
+    F --> G[Global token]
+    P & L & G --> T[3-layer entity transformer]
+    T --> E[Owned-source embeddings]
+    F --> X[36-D source-target features]
+    E & X --> H[Target / fire / ship heads]
+    T --> V[Value head]
+    H --> M[Legality masks]
+    M --> D[Orbital-intercept decoder]
+    D --> A[Launch actions]
+    A --> R[Vectorised GPU environment]
+    R --> O
+```
+
+### Policy architecture
+
+The default model uses 96-dimensional entity embeddings, three transformer blocks, and four attention
+heads. Its inputs are checkpoint-versioned because the feature set evolved during the project:
+
+| Input | Default shape | Contents |
+|---|---:|---|
+| Planet | `48 × 116` | 20 current-state features + 24-step projected owner/garrison timeline |
+| Fleet | `256 × 13` | Kinematics, ownership, destination/ETA, and threat context |
+| Global | `15` | Step, mode, angular velocity, and aggregate economy; optional 48-D economy timeline |
+| Source-target | `16 × 48 × 36` | Arrival geometry, ownership, capture cost, contest/support, ROI, and counterfactual features |
+
+Each owned planet is an action slot. For each slot, the network produces:
+
+- a target distribution over real planets;
+- a target-conditioned fire/NOOP decision;
+- a target-conditioned ship-size distribution, unless the checkpoint uses binary `NOOP/COMMIT` mode;
+- a shared state value for PPO.
+
+The network selects *what* planet to act from and target. The decoder computes *how* to aim using orbital
+intercept geometry rather than learning an angle bin. Action masks enforce only environment legality and
+the explicit discipline stored with the checkpoint. See [`orbit_wars_rl/model.py`](orbit_wars_rl/model.py),
+[`orbit_wars_rl/features.py`](orbit_wars_rl/features.py), and the
+[`feature audit`](docs/feature_audit.md) for the exact contract.
+
+### Training system
+
+- **Algorithm:** clipped PPO + GAE over synchronous rollouts from the vectorised Torch environment.
+- **Opponents:** live self-play, historical checkpoints, and optional fixed heuristics; PFSP can bias the
+  pool toward opponents near the policy's current frontier.
+- **Initialization/stability:** runs may start from behaviour cloning, resume a PPO checkpoint, or anchor
+  to a frozen best policy with KL regularisation and a promotion gate.
+- **Action spaces:** legacy absolute/fractional ship bins, semantic intent sizing, and binary
+  `NOOP/COMMIT` are checkpoint-compatible experiment variants—not interchangeable eval flags.
+- **Observability:** checkpoints persist model/action configuration; training exposes passive mechanism
+  metrics and optional Weights & Biases logging.
+
+The strongest post-competition run uses pure self-play, sparse terminal reward, projected-future features,
+and the binary action space with minimal hardcoded commit gates. That is a result of the experiments below,
+not a claim that every checkpoint in the repository shares that setup. The full experiment ledger is
+[`docs/training.md`](docs/training.md).
+
+### Evaluation contract
+
+Local win rate is an opponent-specific diagnostic, not a leaderboard-score estimate. Small 16-game runs
+are used only to catch obvious regressions; decisions use a fixed 128-seed panel with the learned agent in
+both seats. The opponent ladder also has to move as the policy improves: Zach is a smoke test, Ajay became
+saturated, Yijie is the current mid-tier verdict, and Ender remains the top-tier wall.
+
+Two-player and four-player results are kept separate. The learned policy was developed primarily in 2p;
+the competition submissions route 4p games to the `ajay` heuristic because 2p strength did not transfer
+reliably to free-for-all play. Final checks run through the official Kaggle environment, fail on any agent
+error, and report seat asymmetry alongside aggregate win rate.
+
+## Research progression
+
+The work moved through three failure modes rather than one linear recipe:
+
+| Problem | Intervention | What survived testing |
+|---|---|---|
+| Opening paralysis and weak conversion | reward shaping, BC, target-conditioned heads | Per-target conditioning and correct geometry were necessary; shaping alone was not stable. |
+| Spray/churn self-play equilibrium | masks, opponent pools, teacher anchors | Pools slowed drift, but projected-future state made bad launches learnably visible. |
+| Binary policy plateau | richer sizing, counterfactual features, gate audits | Hardcoded commit gates—not binary actions themselves—were deleting valuable reinforcement and pincer moves. |
+
+Detailed chronology and failed arms are retained in [`docs/training.md`](docs/training.md),
+[`docs/writeup_lessons.md`](docs/writeup_lessons.md), and
+[`archive/docs/training-till-submission.md`](archive/docs/training-till-submission.md).
 
 ## Results
 
 Final pre-submission eval of the best exported agents (2026-06-24, 256-game panels on the GCP eval box,
-0 draws across all panels). Full tables + raw logs in [`results/eval_results.md`](results/eval_results.md).
+0 draws across all panels). Full tables + raw logs are archived in
+[`archive/cleanup_2026-07/results/eval_results.md`](archive/cleanup_2026-07/results/eval_results.md).
 
 **2p head-to-head win rate** (256 games = 128 seeds × 2 seats):
 
@@ -68,12 +160,14 @@ our own past-best checkpoints (full 256-game both-seats panels, same as the cert
 Both sweep the held-out set — every public heuristic (85–99%) and every prior self (91–97%) — clear
 absolute progress with no forgetting, seats near-symmetric (|asym| ≤ 5.5pp). `stgpr1` edges ahead on
 most opponents, but that's the same spray/churn WR-inflation, not cleaner play. Full per-seat table +
-the historical `corrpack3e` panel + the N=6 diversity matrix: [`results/eval_results.md`](results/eval_results.md).
+the historical `corrpack3e` panel + the N=6 diversity matrix:
+[`archive/cleanup_2026-07/results/eval_results.md`](archive/cleanup_2026-07/results/eval_results.md).
 
 ## Current state
 
-Snapshot in [`docs/current-state.md`](docs/current-state.md); standing diagnosis in
-[`docs/current_problem.md`](docs/current_problem.md).
+The current experiment state and the evidence behind it are tracked in
+[`docs/training.md`](docs/training.md); competition-era decisions are preserved in
+[`archive/docs/training-till-submission.md`](archive/docs/training-till-submission.md).
 
 - **Two agents submitted** (2026-06-24, both daily slots): `presres1` 0.5M "decisive" and `stgpr1` 0.5M
   "spray", each routing 2p → neural agent, 4p → `ajay`. See [`docs/submissions.md`](docs/submissions.md).
@@ -132,19 +226,72 @@ The 17.2pp seat gap against `stgpr1` is also a real limitation hidden by the inv
 Experiment history, passive metrics, and the audit trail live in
 [`docs/training.md`](docs/training.md).
 
+## Reproduce the core workflow
+
+Python 3.11 is the safest local choice for the current Torch and Kaggle environment stack.
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r orbit_wars_rl/requirements.txt
+bash setup/install_orbit_wars.sh
+```
+
+Run a small CPU smoke train before launching a GPU experiment:
+
+```bash
+python orbit_wars_rl/train_torch.py \
+  --device cpu \
+  --num-envs 8 \
+  --rollout-steps 8 \
+  --total-steps 64 \
+  --no-wandb
+```
+
+Evaluate a checkpoint against the fixed 128-seed panel from both seats (256 games total):
+
+```bash
+CUDA_VISIBLE_DEVICES="" python orbit_wars_rl/eval.py \
+  --checkpoint <checkpoint.pt> \
+  --opponent opponents/candidate_ajay_1200.py \
+  --panel \
+  --target-decode
+```
+
+Export the same policy contract for Kaggle:
+
+```bash
+python orbit_wars_rl/export_agent.py \
+  --checkpoint <checkpoint.pt> \
+  --output main.py \
+  --target-decode
+```
+
+Evaluation and export infer feature widths and action-mode settings from the checkpoint. Do not override
+reinforcement gates or decoding semantics unless you are deliberately running an ablation. The evaluator
+fails closed when an agent errors; this matters because an earlier wrapper bug produced invalid 256/256
+results by treating errored opponents as losses.
+
+For full training launches, checkpoint sync, monitoring, and teardown, use
+[`docs/commands.md`](docs/commands.md) and the provider runbooks. Cloud commands are intentionally kept out
+of this README because they encode machine-specific paths and cost-control rules.
+
 ## Repo navigation
 
 | Where | What |
 |-------|------|
 | `orbit_wars_rl/` | All active RL code (training, env, model, eval, export) |
 | `opponents/` | Eval + training opponents (Ajay, Zach, Debatreya, producers; `orbit_lite/` dep) |
-| `results/` | Final eval panels + raw cert/FFA logs |
+| `archive/cleanup_2026-07/results/` | Final competition eval panels + raw cert/FFA logs |
+| `final_submissions/` | Hash-audited competition checkpoints and submission archives |
 | `seed_checkpoints/` | Resume points uploaded to training instances |
 | `docs/commands.md` | Copy-paste command reference (start here for ops) |
+| `docs/training.md` | Post-competition experiment ledger and current conclusions |
+| `docs/feature_audit.md` | Exact learned-vs-computed feature boundary |
 | `archive/docs/training-till-submission.md` | Full run history + key config (through first submission) |
 | `docs/submissions.md` | Submission log with Kaggle IDs and checkpoint paths |
 | `docs/GCP_RUNBOOK.md` · `docs/JARVIS_RUNBOOK.md` | GPU instance launch / monitor / teardown |
-| `CLAUDE.md` | Agent operating rules (hard constraints for Claude Code) |
+| `AGENTS.md` | Repository map, current baselines, and operating constraints |
 | `gpu_run_artifacts/` | Training scripts, watchers, synced checkpoints (gitignored) |
 
 ---
