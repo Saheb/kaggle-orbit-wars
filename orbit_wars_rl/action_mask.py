@@ -113,27 +113,6 @@ def _target_intercept_angle(src_planet, target_planet, ships: int, obs) -> float
     return float(math.atan2(py - sy, px - sx))
 
 
-def _def_fleet_target(planets, fleet):
-    """Loose current-heading target resolver, matching the eval hold/decisive diagnostics."""
-    best = None
-    best_d = None
-    c, s = math.cos(float(fleet[4])), math.sin(float(fleet[4]))
-    fx, fy = float(fleet[2]), float(fleet[3])
-    for p in planets:
-        px, py, pr = float(p[2]), float(p[3]), float(p[4])
-        vx, vy = px - fx, py - fy
-        along = vx * c + vy * s
-        if along <= 0:
-            continue
-        perp = abs(vx * s - vy * c)
-        if perp >= pr + 1.5:
-            continue
-        d = math.hypot(vx, vy)
-        if best_d is None or d < best_d:
-            best_d, best = d, p
-    return best
-
-
 def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_target, masks, obs, player,
                                fire_threshold=0.5, sample: bool = False,
                                ship_bin_mode: str = "absolute",
@@ -141,26 +120,22 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
                                pairwise_features=None,   # (MO, P, >=26) — binary mode sizes/gates COMMIT from it
                                allow_reinforce: bool = False,
                                reinforce_gate_min_planets: int = 0,
-                               reinforce_forward_only: bool = False,
-                               reinforce_garrison_floor: float = 0.0,
                                reverse_edge_cooldown: int = 0,
                                cooldown_last: dict = None,
-                               cooldown_step: int = 0,
-                               sufficient_commit_factor: float = 0.0):
+                               cooldown_step: int = 0):
     """Convert policy outputs to actions using target planet logits for aiming.
 
     allow_reinforce: must MATCH the env's setting the checkpoint was trained with.
     False (default) = own planets are illegal targets. True = own planets are legal
     (reinforcement), only the launch source planet is excluded.
 
-    reinforce_gate_min_planets / reinforce_forward_only / reinforce_garrison_floor:
-    the three reinforce-DISCIPLINE masks from torch_env. They constrain only own
-    (reinforce) targets; enemy/neutral are never affected. MUST match training, else
-    the policy emits reinforce moves it was masked from at train time (e.g. reinforcing
-    a 1-2 planet opening instead of expanding) and self-sabotages at inference.
+    reinforce_gate_min_planets / reverse_edge_cooldown: the reinforce-DISCIPLINE masks
+    from torch_env. They constrain only own (reinforce) targets; enemy/neutral are never
+    affected. MUST match training, else the policy emits reinforce moves it was masked from
+    at train time (e.g. reinforcing a 1-2 planet opening instead of expanding) and
+    self-sabotages at inference.
     """
     planets = obs["planets"]
-    fleets = obs.get("fleets") or []   # needed by the sufficient-commit veto (inbound-aware)
     owned_indices = masks["owned_indices"].cpu().numpy()
     max_ships = masks["max_ships"].cpu().numpy().squeeze(0)
     target_logits = target_logits.clone()
@@ -169,14 +144,6 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
     owned_count = int(masks["owned_count"])
     gate_block_own = (allow_reinforce and reinforce_gate_min_planets > 0
                       and owned_count < reinforce_gate_min_planets)
-    # enemy = owner >= 0 and != player (neutrals owner < 0 excluded), matching torch_env.
-    enemy_xy = ([(float(p[2]), float(p[3])) for p in planets
-                 if int(p[1]) >= 0 and int(p[1]) != player]
-                if (allow_reinforce and reinforce_forward_only) else [])
-
-    def _nearest_enemy_dist(p):
-        px, py = float(p[2]), float(p[3])
-        return min(math.hypot(px - ex, py - ey) for ex, ey in enemy_xy)
 
     cd_on = (reverse_edge_cooldown > 0 and cooldown_last is not None)
     binary_sizes = None
@@ -188,12 +155,9 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
             pairwise_features, max_ships, gates=binary_commit_gates)
 
     def _own_reinforce_illegal(src_planet, tgt_planet):
-        """True if an own (reinforce) target is barred by gate / forward-staging / reverse-edge cooldown."""
+        """True if an own (reinforce) target is barred by the empire gate / reverse-edge cooldown."""
         if gate_block_own:
             return True
-        if reinforce_forward_only and enemy_xy:  # no live enemy -> forward moot
-            if not (_nearest_enemy_dist(tgt_planet) < _nearest_enemy_dist(src_planet)):
-                return True
         # Reverse-edge cooldown: block reinforce src->dst if the reverse dst->src fired within K steps.
         if cd_on and _cd_is_blocked(cooldown_last, cooldown_step,
                                     int(src_planet[0]), int(tgt_planet[0]), reverse_edge_cooldown):
@@ -290,50 +254,13 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
         if is_source or (is_own_target and not allow_reinforce):
             continue
         # Reinforce-discipline parity: a slot whose every target was logit-masked
-        # still argmaxes to one of them; reject gated/backward own reinforces here too.
+        # still argmaxes to one of them; reject gated own reinforces here too.
         if is_own_target and allow_reinforce and _own_reinforce_illegal(planets[pidx], planets[tidx]):
             continue
 
         ships = decoded_ships
         if ships <= 0 or planets[pidx][5] < ships:
             continue
-        # Garrison floor parity (torch_env): a reinforce must not drain the source
-        # below the floor. Attacks (enemy/neutral) are never garrison-limited.
-        if (is_own_target and allow_reinforce and reinforce_garrison_floor > 0.0
-                and (planets[pidx][5] - ships) < reinforce_garrison_floor):
-            continue
-        # Sufficient-commit parity (torch_env): veto a NEUTRAL attack launch where
-        # (ships + friendly inbound arriving before us) can't beat the target's defense
-        # (current garrison + enemy inbound arriving before us). Neutrals DON'T regrow
-        # (engine applies production only to owner != -1) so there is NO production×ETA
-        # term. Enemy targets exempt (under-strength attacks can soften/feint).
-        # Reinforces (own targets) untouched (garrison floor instead).
-        is_neutral_target = int(planets[tidx][1]) < 0
-        if is_neutral_target and sufficient_commit_factor > 0.0:
-            src = planets[pidx]
-            tgt = planets[tidx]
-            dist = math.hypot(tgt[2] - src[2], tgt[3] - src[3])
-            eta = max(1.0, math.ceil(dist / max(_fleet_speed(ships), 1e-6)))
-            projected_defense = tgt[5]
-            tgt_id = int(tgt[0])
-            friendly_inbound = 0.0
-            enemy_inbound = 0.0
-            for f in fleets:
-                ft = _def_fleet_target(planets, f)
-                if ft is None or int(ft[0]) != tgt_id:
-                    continue
-                f_speed = max(_fleet_speed(int(f[6])), 1e-6)
-                f_dist = math.hypot(tgt[2] - f[2], tgt[3] - f[3])
-                f_eta = f_dist / f_speed
-                if f_eta <= eta:
-                    if int(f[1]) == player:
-                        friendly_inbound += f[6]
-                    elif int(f[1]) >= 0:
-                        enemy_inbound += f[6]
-            projected_defense += enemy_inbound
-            if (ships + friendly_inbound) <= projected_defense * sufficient_commit_factor:
-                continue
-
         angle = _target_intercept_angle(planets[pidx], planets[tidx], ships, obs)
         move_records.append({
             "move": [src_id, angle, ships],

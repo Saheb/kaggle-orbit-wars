@@ -46,13 +46,10 @@ class ModelConfig:
     pairwise_feature_dim: int = 36   # 22 base + 4 intent + 6 target-CF + 4 source-CF
     max_planets: int = 48            # for target_head output size; matches EnvConfig
     # Target-decode discipline. These are persisted in checkpoints so train/eval/export
-    # do not silently disagree about own-target legality or attack concentration vetoes.
+    # do not silently disagree about own-target legality.
     allow_reinforce: bool = False
     reinforce_gate_min_planets: int = 0
-    reinforce_forward_only: bool = False
-    reinforce_garrison_floor: float = 0.0
     reverse_edge_cooldown: int = 0
-    sufficient_commit_factor: float = 0.0
     dropout: float = 0.0
 
 

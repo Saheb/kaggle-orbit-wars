@@ -128,7 +128,7 @@ def _intercept_angle(planets, angular_velocity, src_x, src_y, src_r, ship_count,
 def apply_actions_core(planets, planet_alive, fleets, fleet_alive, next_fleet_id,
                        angular_velocity, actions, owner_id: int, ship_counts):
     """Functional launch application for one player (attack-only target-decode, clamp
-    overflow). Deferred vs the oracle: reinforce discipline, sufficient-commit, diagnostics,
+    overflow). Deferred vs the oracle: reinforce discipline, diagnostics,
     fleet_tgt cache — additive/separable, don't affect physics or throughput. Fleet writes use
     a MASKLESS scratch-slot scatter (slot F = throwaway) instead of the oracle's boolean-masked
     advanced index → torch.compile-traceable. Returns (planets, fleets, fleet_alive, next_fleet_id)."""

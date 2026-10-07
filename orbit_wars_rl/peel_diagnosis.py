@@ -201,7 +201,7 @@ def main():
         raise SystemExit(
             "checkpoint has allow_reinforce=False — a reinforcement diagnosis on it is vacuous.")
     print(f"  allow_reinforce={model.allow_reinforce} gate>={model.reinforce_gate_min_planets} "
-          f"floor={model.reinforce_garrison_floor} cooldown={model.reverse_edge_cooldown}")
+          f"cooldown={model.reverse_edge_cooldown} gates={model.binary_commit_gates}")
     agent_fn = ev.build_agent_fn(
         model, device, fire_threshold=0.5, ship_bin_mode=cfg.model.ship_bin_mode,
         target_decode=(action_decode == "target"), num_players=2)

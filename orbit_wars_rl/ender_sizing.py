@@ -101,7 +101,7 @@ def _checkpoint_agent(path):
     device = torch.device("cpu")
     model, action_decode = ev.load_eval_model(path, cfg)
     print(f"  [checkpoint agent] allow_reinforce={model.allow_reinforce} "
-          f"gate>={model.reinforce_gate_min_planets} floor={model.reinforce_garrison_floor} "
+          f"gate>={model.reinforce_gate_min_planets} "
           f"cooldown={model.reverse_edge_cooldown} mode={cfg.model.ship_bin_mode} "
           f"gates={model.binary_commit_gates}")
     return ev.build_agent_fn(model, device, fire_threshold=0.5,

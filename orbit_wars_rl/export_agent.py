@@ -68,13 +68,9 @@ _SHIP_BIN_MODE = {ship_bin_mode}
 _BINARY_COMMIT_GATES = {binary_commit_gates}  # mask contract — MUST match training
 _TARGET_DECODE = {target_decode}
 _ALLOW_REINFORCE = {allow_reinforce}
-# Reinforce-DISCIPLINE masks — MUST match training values (not stored in the checkpoint).
+# Reinforce-DISCIPLINE masks — MUST match training values (auto-loaded from the checkpoint).
 # Inert unless _ALLOW_REINFORCE; constrain only own (reinforce) targets.
 _REINFORCE_GATE_MIN = {reinforce_gate_min_planets}
-_REINFORCE_FORWARD_ONLY = {reinforce_forward_only}
-_REINFORCE_GARRISON_FLOOR = {reinforce_garrison_floor}
-# Sufficient-commit mask (ATTACKS) — also MUST match training. Independent of reinforce.
-_SUFFICIENT_COMMIT_FACTOR = {sufficient_commit_factor}
 # Reverse-edge reinforce cooldown (MUST match training; auto-loaded from ckpt). 0 = off.
 _REVERSE_EDGE_COOLDOWN = {reverse_edge_cooldown}
 
@@ -369,9 +365,6 @@ def agent(obs, cfg=None):
                                if "pairwise_features" in features else None),
             allow_reinforce=_ALLOW_REINFORCE,
             reinforce_gate_min_planets=_REINFORCE_GATE_MIN,
-            reinforce_forward_only=_REINFORCE_FORWARD_ONLY,
-            reinforce_garrison_floor=_REINFORCE_GARRISON_FLOOR,
-            sufficient_commit_factor=_SUFFICIENT_COMMIT_FACTOR,
             reverse_edge_cooldown=_REVERSE_EDGE_COOLDOWN,
             cooldown_last=_CD["last"] if _REVERSE_EDGE_COOLDOWN > 0 else None,
             cooldown_step=int(obs.get("step", 0)),
@@ -522,14 +515,19 @@ def _apply_checkpoint_model_config(checkpoint, cfg: Config) -> dict:
     # is pre-pairwise and unsupported (it fails at load_state_dict with missing pair_kv keys).
     if isinstance(state_dict, dict):
         cfg.model.pairwise_feature_dim = PAIRWISE_FEATURE_DIM
-    # Reinforce / sufficient-commit DISCIPLINE (persisted by ppo.state_dict) so the exported
-    # mask matches training without relying on remembered CLI flags. Absent in old ckpts → 0/False.
+    # Legacy discipline masks were removed in the 2026-10 cleanup — refuse a checkpoint trained
+    # with one active rather than silently export a different policy (mirrors eval.load_checkpoint).
+    _legacy = {k: ckpt_cfg[k] for k in ("sufficient_commit_factor", "reinforce_forward_only",
+                                        "reinforce_garrison_floor") if ckpt_cfg.get(k)}
+    if _legacy:
+        raise RuntimeError(
+            f"Checkpoint was trained with legacy discipline masks {_legacy}, removed in the "
+            f"2026-10 cleanup — export it from git tag pre-cleanup-2026-10.")
+    # Reinforce DISCIPLINE (persisted by ppo.state_dict) so the exported mask matches training
+    # without relying on remembered CLI flags. Absent in old ckpts → 0/False.
     cfg.model._discipline_persisted = ("reinforce_gate_min_planets" in ckpt_cfg)
     cfg.model.allow_reinforce = bool(ckpt_cfg.get("allow_reinforce", False))
     cfg.model.reinforce_gate_min_planets = int(ckpt_cfg.get("reinforce_gate_min_planets", 0))
-    cfg.model.reinforce_forward_only = bool(ckpt_cfg.get("reinforce_forward_only", False))
-    cfg.model.reinforce_garrison_floor = float(ckpt_cfg.get("reinforce_garrison_floor", 0.0))
-    cfg.model.sufficient_commit_factor = float(ckpt_cfg.get("sufficient_commit_factor", 0.0))
 
     return state_dict
 
@@ -552,10 +550,7 @@ def load_model(checkpoint_path: str, cfg: Config) -> EntityTransformer:
 
 def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_threshold: float = 0.5,
                  target_decode: bool = False,
-                 reinforce_gate_min_planets: int = None,
-                 reinforce_forward_only: bool = None,
-                 reinforce_garrison_floor: float = None,
-                 sufficient_commit_factor: float = None):
+                 reinforce_gate_min_planets: int = None):
     model = load_model(checkpoint_path, cfg)
     # Discipline masks: explicit arg overrides; else use what the checkpoint was trained with
     # (load_model populated cfg.model via _apply_checkpoint_model_config). For OLD reinforce ckpts
@@ -567,16 +562,10 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
             and reinforce_gate_min_planets is None):
         raise SystemExit(
             "Checkpoint has allow_reinforce=True but NO persisted reinforce discipline (pre-2026-06-15 "
-            "ckpt). Pass --reinforce-gate-min-planets (and floor/forward) explicitly — it can't be "
+            "ckpt). Pass --reinforce-gate-min-planets explicitly — it can't be "
             "inferred and guessing self-sabotages the exported agent.")
     if reinforce_gate_min_planets is None:
         reinforce_gate_min_planets = int(cfg.model.reinforce_gate_min_planets)
-    if reinforce_forward_only is None:
-        reinforce_forward_only = bool(cfg.model.reinforce_forward_only)
-    if reinforce_garrison_floor is None:
-        reinforce_garrison_floor = float(cfg.model.reinforce_garrison_floor)
-    if sufficient_commit_factor is None:
-        sufficient_commit_factor = float(cfg.model.sufficient_commit_factor)
 
     # Encode state_dict as base64 (load_model already rejected any key the model lacks;
     # retired q_* weights are dropped by EntityTransformer.load_state_dict).
@@ -605,8 +594,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     if allow_reinforce:
         print("  Reinforcement: ON (own planets are legal targets)")
         print(f"  Reinforce DISCIPLINE (must match training): gate_min_planets="
-              f"{reinforce_gate_min_planets} forward_only={reinforce_forward_only} "
-              f"garrison_floor={reinforce_garrison_floor}")
+              f"{reinforce_gate_min_planets}")
     agent_code = AGENT_TEMPLATE.format(
         num_angle_bins=NUM_ANGLE_BINS,
         num_ship_bins=m.num_ship_bins,
@@ -626,9 +614,6 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         target_decode=target_decode,
         allow_reinforce=allow_reinforce,
         reinforce_gate_min_planets=reinforce_gate_min_planets,
-        reinforce_forward_only=reinforce_forward_only,
-        reinforce_garrison_floor=reinforce_garrison_floor,
-        sufficient_commit_factor=sufficient_commit_factor,
         reverse_edge_cooldown=reverse_edge_cooldown,
         params_b64=params_b64,
         features_code=features_code,
@@ -702,27 +687,15 @@ if __name__ == "__main__":
     parser.add_argument("--target-decode", action="store_true",
                         help="Use target-planet aiming (actions_from_target_policy). "
                              "Required for checkpoints trained with --action-decode target.")
-    # Reinforce-discipline masks. Defaults = the current locked Tier-1/Phase-2 training values
-    # (p2rev4/p2rev5: forward-only DROPPED so the policy can pull ships back to defend, floor=0).
-    # Inert for non-reinforce checkpoints; for reinforce checkpoints they MUST match
-    # training or the policy self-sabotages (reinforces <gate planets, backward, drains source).
-    # For OLD forward-only/floor=10 checkpoints (p2rev1-3) pass --reinforce-forward-only
-    # --reinforce-garrison-floor 10 explicitly.
-    # Defaults None → auto-load from the checkpoint config (persisted by ppo.state_dict); pass a
-    # flag to override. Old ckpts without persisted discipline fall back to legacy values.
+    # Reinforce gate. Inert for non-reinforce checkpoints; for reinforce checkpoints it MUST match
+    # training or the policy self-sabotages (reinforces a 1-2 planet opening).
+    # Default None → auto-load from the checkpoint config (persisted by ppo.state_dict); pass a
+    # flag to override.
     parser.add_argument("--reinforce-gate-min-planets", type=int, default=None)
-    parser.add_argument("--reinforce-forward-only", action=argparse.BooleanOptionalAction,
-                        default=None, help="Own reinforce target must be closer to enemy than source.")
-    parser.add_argument("--reinforce-garrison-floor", type=float, default=None)
-    # Sufficient-commit mask (ATTACKS). MUST match training (p2rev6 = 1.0). 0 = off.
-    parser.add_argument("--sufficient-commit-factor", type=float, default=None)
     args = parser.parse_args()
 
     cfg = Config()
     export_agent(args.checkpoint, args.output, cfg,
                  fire_threshold=args.fire_threshold,
                  target_decode=args.target_decode,
-                 reinforce_gate_min_planets=args.reinforce_gate_min_planets,
-                 reinforce_forward_only=args.reinforce_forward_only,
-                 reinforce_garrison_floor=args.reinforce_garrison_floor,
-                 sufficient_commit_factor=args.sufficient_commit_factor)
+                 reinforce_gate_min_planets=args.reinforce_gate_min_planets)

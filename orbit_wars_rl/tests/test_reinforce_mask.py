@@ -76,45 +76,6 @@ def test_empire_gate_blocks_own_targets_below_threshold():
                 assert bool(tm[0, s, p]), "enemy targets must stay legal under the gate"
 
 
-def test_forward_staging_gate_blocks_rear_reinforcement():
-    """Forward-staging gate (#4): with allow_reinforce + reinforce_forward_only, an own
-    planet is a legal reinforce target only if it is CLOSER to the nearest enemy planet
-    than the launch source. A rearward own planet (farther from the enemy) is masked; a
-    forward one (closer) stays legal; enemy targets are never constrained. With the gate
-    OFF the rear target is legal — proving the flag is what blocks it."""
-    def setup(forward_only):
-        te = VecTorchEnv(num_envs=1, num_players=2, device="cpu",
-                         action_decode="target", allow_reinforce=True,
-                         reinforce_forward_only=forward_only)
-        te.reset([7])
-        # Controlled 1-D layout on the x-axis; everything else neutral and far away so
-        # the designated enemy (planet 3) is unambiguously the nearest enemy.
-        te.planet_alive[0, :] = True
-        te.planets[0, :, 1] = -1          # all neutral
-        te.planets[0, :, 2] = 1000.0      # x far
-        te.planets[0, :, 3] = 0.0         # y
-        te.planets[0, :, 5] = 20.0        # ships
-        #             idx  owner   x       role
-        for idx, own, px in [(0, 0, 40.0),   # S  source (mine)
-                             (1, 0, 70.0),   # F  front  (mine, closer to enemy)
-                             (2, 0, 10.0),   # R  rear   (mine, farther from enemy)
-                             (3, 1, 100.0)]: # E  enemy
-            te.planets[0, idx, 1] = own
-            te.planets[0, idx, 2] = px
-        return te
-
-    for forward_only, rear_legal in ((True, False), (False, True)):
-        te = setup(forward_only)
-        f = te.get_features(player=0)
-        tm, sv, oi = f["target_mask"], f["slot_valid"], f["owned_indices"]
-        s = next(i for i in range(tm.shape[1]) if sv[0, i] and int(oi[0, i]) == 0)
-        assert bool(tm[0, s, 1]), "front own target (closer to enemy) must stay legal"
-        assert bool(tm[0, s, 2]) == rear_legal, (
-            f"rear own-target legality should be {rear_legal} (forward_only={forward_only})")
-        assert bool(tm[0, s, 3]), "enemy target must never be constrained by forward-staging"
-        assert not bool(tm[0, s, 0]), "source must never target itself"
-
-
 def test_action_mask_eval_reinforce_toggle():
     # source planet 0 at center. Own reinforce candidate (planet 1) due EAST,
     # enemy (planet 2) due NORTH — orthogonal so the chosen launch angle reveals which
@@ -150,42 +111,6 @@ def test_action_mask_eval_reinforce_toggle():
     a_off = chosen_angle(False)  # reinforce OFF → own planet 1 masked → aims NORTH (~pi/2)
     assert abs(a_on) < 0.4, f"reinforce ON should aim east (~0), got {a_on}"
     assert abs(a_off - np.pi / 2) < 0.4, f"reinforce OFF should aim north (~pi/2), got {a_off}"
-
-
-def test_garrison_floor_vetoes_drain_but_spares_attacks():
-    """#1 Garrison floor: a REINFORCE launch that would drain its source below the
-    floor is vetoed (no fleet); a launch that stays at/above the floor fires; and an
-    ATTACK that drains below the floor is UNAFFECTED (floor only governs reinforcement).
-    SHIP_COUNTS: bin 3 = 4 ships, bin 9 = 10 ships."""
-    from orbit_wars_rl.torch_env import MAX_OWNED
-
-    def run(ship_bin, target_idx_fn):
-        te = VecTorchEnv(num_envs=1, num_players=2, device="cpu",
-                         action_decode="target", allow_reinforce=True,
-                         reinforce_garrison_floor=25.0)
-        te.reset([7])
-        B = _give_player0_a_second_planet(te)
-        te.planets[0, 0, 5] = 30.0          # source (home, planet 0) has 30 ships
-        oi, _ = te.owned_indices_for(0)
-        a_slot = next(s for s in range(MAX_OWNED) if int(oi[0, s]) == 0)
-        act = torch.zeros(1, MAX_OWNED, 4)
-        act[0, a_slot, 0] = 1
-        act[0, a_slot, 2] = ship_bin
-        act[0, a_slot, 3] = target_idx_fn(te, B)
-        n_before = int(te.fleet_alive[0].sum())
-        te.step({0: act})
-        return int(te.fleet_alive[0].sum()) - n_before
-
-    enemy = lambda te, B: next(p for p in range(te.planets.shape[1])
-                               if te.planet_alive[0, p] and int(te.planets[0, p, 1]) == 1)
-    own = lambda te, B: B
-
-    # reinforce sending 10 ships: 30-10=20 < floor 25 → VETOED
-    assert run(9, own) == 0, "reinforce draining below floor must be vetoed"
-    # reinforce sending 4 ships: 30-4=26 >= floor 25 → fires
-    assert run(3, own) == 1, "reinforce staying above floor must fire"
-    # ATTACK sending 10 ships: 30-10=20 < floor, but it's an attack → UNAFFECTED
-    assert run(9, enemy) == 1, "garrison floor must not touch attacks"
 
 
 def test_reinforce_rate_counts_reinforce_vs_attack_launches():

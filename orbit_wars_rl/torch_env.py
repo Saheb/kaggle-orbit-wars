@@ -273,11 +273,8 @@ class VecTorchEnv:
         staging_topk: int = 2,
         staging_gamma: float = 0.995,
         allow_reinforce: bool = False,
-        reinforce_garrison_floor: float = 0.0,
         reinforce_gate_min_planets: int = 0,
-        reinforce_forward_only: bool = False,
         reverse_edge_cooldown: int = 0,
-        sufficient_commit_factor: float = 0.0,
         enable_comets: bool = True,
         fleet_target_refresh_every: int = 4,
     ):
@@ -303,44 +300,21 @@ class VecTorchEnv:
         # targets — ships arriving at a friendly planet add to its garrison (physics
         # already implemented in step()). Default False = attack-only.
         self.allow_reinforce = bool(allow_reinforce)
-        # Reinforcement discipline prevents costless reinforcement floods.
-        #   #1 GARRISON FLOOR: a reinforce launch may not drain its source below this
-        #      many ships. Pure training-time mask (veto), NOT a penalty → no Nash risk.
-        #      Kills the "drain a planet, then lose it" regression. The real Kaggle env
-        #      has no floor, so inference is unconstrained — the policy internalises it.
-        #   (#2, a per-ship reinforce transit COST, was removed in the 2026-10 cleanup.)
-        # Only acts on launches whose target is OUR OWN planet — attacks (enemy/neutral)
-        # are untouched, so it cannot distort the attack Nash.
-        self.reinforce_garrison_floor = float(reinforce_garrison_floor)
-        #   #3 EMPIRE-SIZE GATE: own planets become legal reinforce targets only once the
+        # Reinforcement discipline prevents costless reinforcement floods. Both masks act only on
+        # launches whose target is OUR OWN planet — attacks (enemy/neutral) are untouched, so
+        # neither can distort the attack Nash. (The garrison floor, transit cost, forward-staging
+        # gate and attack-side sufficient-commit mask were removed in the 2026-10 cleanup.)
+        #   EMPIRE-SIZE GATE: own planets become legal reinforce targets only once the
         #      player owns >= this many planets. Below it, attack-only (must expand first).
         #      Reinforcement should ramp with empire size. A pure action mask that makes
-        #      the early flood impossible by construction. 0 = off (no gate). Training-only,
-        #      like the garrison floor — the policy internalises it.
+        #      the early flood impossible by construction. 0 = off (no gate).
         self.reinforce_gate_min_planets = int(reinforce_gate_min_planets)
-        #   #4 FORWARD-STAGING GATE: an own (reinforce) target is legal only if it sits
-        #      closer to the nearest enemy planet than the launch source — reinforcement
-        #      flows rear→front (staging), never into a safe rear hoard. A rear hoard is the costless
-        #      safe-fire outlet that floods symmetric self-play. Pure mask (no Nash risk),
-        #      training-only, internalised at inference. 0/False = off. Enemy/neutral
-        #      targets are never constrained.
-        self.reinforce_forward_only = bool(reinforce_forward_only)
         #   REVERSE-EDGE COOLDOWN: after an own-target reinforce A→B, the reverse B→A reinforce
         #   is illegal for K steps (block the A→B→A ping-pong; rank1 recip<=3st <0.01 vs our
         #   0.06-0.10). Canonical rule in reinforce_cooldown.py; ownership-change & episode resets
         #   clear stale edges. Pure mask, training-internalised. 0 = off. project_reinforce_pingpong.
         self.reverse_edge_cooldown = int(reverse_edge_cooldown)
         self.reinf_cd = None   # (N, num_players, P, P) long: last step each reinforce edge fired
-        #   SUFFICIENT-COMMIT MASK: veto an ATTACK launch (enemy/neutral target) whose
-        #   ship_count <= target's current defense × this factor → fragments fired under a
-        #   target's garrison become impossible by construction, forcing concentration
-        #   (attack only a target you can actually take, else accumulate first). Fixes the
-        #   opening under-commitment that caps conversion. 1.0 = strict (need strictly
-        #   more than current defense); 0.6 = relaxed
-        #   fallback if it over-constrains; 0.0 = off. Exact for neutrals (they don't regrow),
-        #   approximate for enemy planets (reinforce in transit). Pure training-time mask
-        #   (no reward tax → no fire=0 Nash); the policy internalises it, parity at eval/export.
-        self.sufficient_commit_factor = float(sufficient_commit_factor)
         # reinforce_rate metric accumulators (N, num_players), allocated/zeroed per
         # rollout via reset_reinforce_stats(). None = not collecting (no overhead).
         self._reinforce_launch_count = None
@@ -1213,24 +1187,6 @@ class VecTorchEnv:
                 gate_ok = (num_owned >= self.reinforce_gate_min_planets).view(-1, 1, 1)
                 # disallow own targets where the empire is too small
                 target_mask = target_mask & (~is_own | gate_ok)
-            # Forward-staging gate: an own (reinforce) target is legal only if it is
-            # closer to the nearest enemy planet than the launch source. Reinforcement
-            # flows rear→front (staging), never into a safe rear hoard — the outlet that
-            # floods symmetric self-play. Enemy/neutral targets are never constrained.
-            if self.reinforce_forward_only:
-                is_own = (target_owner == player)  # (N, MAX_OWNED, P)
-                enemy_planet = (owner != player) & (owner >= 0) & planet_alive  # (N, P)
-                # dpp (N, P, P) pairwise dists computed above
-                INF = torch.finfo(dpp.dtype).max
-                d2e = torch.where(enemy_planet.unsqueeze(1), dpp,
-                                  torch.full_like(dpp, INF)).min(dim=2).values  # (N, P)
-                # gather source planet's enemy-distance per owned slot (owned_idx is
-                # clamped gather-safe; padded slots are dropped by slot_valid anyway)
-                src_d2e = torch.gather(d2e, 1, owned_idx)              # (N, MAX_OWNED)
-                forward_ok = d2e.unsqueeze(1) < src_d2e.unsqueeze(-1)  # (N, MAX_OWNED, P)
-                # envs with no live enemy planet: forward-staging is moot → don't constrain
-                forward_ok = forward_ok | (~enemy_planet.any(dim=1)).view(-1, 1, 1)
-                target_mask = target_mask & (~is_own | forward_ok)
             # Reverse-edge cooldown: an own (reinforce) target d is illegal from source s if the
             # REVERSE edge d→s reinforced within K steps (block A→B→A ping-pong). reinf_cd[n,p,u,v]
             # = last step reinforce u→v fired; reverse edge active iff (step - reinf_cd) <= K, so
@@ -1698,7 +1654,6 @@ class VecTorchEnv:
             target_gather = target_idx.unsqueeze(-1).expand(-1, -1, 7)
             tgt = self.planets.gather(1, target_gather)
             target_owner = tgt[:, :, 1].long()
-            target_ships = tgt[:, :, 5]                            # current defense at the target
             target_alive = self.planet_alive.gather(1, target_idx)
             if self.allow_reinforce:
                 # Own planets are valid targets (friendly arrival reinforces the
@@ -1744,19 +1699,13 @@ class VecTorchEnv:
             self._attempt_step[:, owner_id, 1] += _at * _w1
             self._attempt_step[:, owner_id, 2] += _at * _w2
 
-        # Reinforcement discipline (#1 garrison floor + #2 transit cost) + reinforce_rate
-        # metric. is_reinforce: a launch whose target is one of OUR OWN planets — only
+        # Reinforcement bookkeeping (reverse-edge cooldown) + reinforce_rate metric.
+        # is_reinforce: a launch whose target is one of OUR OWN planets — only
         # possible with allow_reinforce + target decode. Attacks (enemy/neutral) untouched.
         if (self.allow_reinforce and self.action_decode == "target"
                 and actions.shape[-1] >= 4):
             is_reinforce = use_target_decode & (target_owner == owner_id)  # (N, MAX_OWNED)
-            # #1 Garrison floor: veto any reinforce launch that would drain its source
-            # below the floor (mask, not penalty → no Nash risk).
-            if self.reinforce_garrison_floor > 0.0:
-                would_underflow = is_reinforce & ((src_ships - ship_count) < self.reinforce_garrison_floor)
-                can_fire = can_fire & ~would_underflow
-            # Reverse-edge cooldown bookkeeping (after the floor veto, so only REALIZED reinforces
-            # arm the reverse block): (1) clear edges touching any planet we don't currently own —
+            # Reverse-edge cooldown bookkeeping (only REALIZED reinforces arm the reverse block): (1) clear edges touching any planet we don't currently own —
             # recapture starts clean (the ownership-change reset, better than a static exception);
             # (2) record this step's executed reinforces src→tgt at the current step.
             if self.reverse_edge_cooldown > 0 and self.reinf_cd is not None:
@@ -1797,55 +1746,6 @@ class VecTorchEnv:
                 self._reinf_step[:, owner_id, 2] += reinf_per * w2
                 is_neutral = use_target_decode & (target_owner < 0)  # neutral planet owner = -1
                 self._neutral_launch_count[:, owner_id] += (can_fire & is_neutral).sum(dim=1).float()
-
-        # SUFFICIENT-COMMIT MASK (arrival-aware): veto a NEUTRAL attack launch whose
-        # ship count + friendly inbound can't beat the target's PROJECTED defense at
-        # arrival (current garrison + production×ETA + enemy inbound arriving before
-        # us). Enemy targets are exempt — under-strength attacks on enemies can soften,
-        # feint, or arrive as a second wave. Reinforces (own targets) are untouched.
-        if (self.sufficient_commit_factor > 0.0
-                and self.action_decode == "target" and actions.shape[-1] >= 4):
-            is_neutral_attack = use_target_decode & (target_owner < 0)
-            if is_neutral_attack.any():
-                tgt_x = tgt[:, :, 2]; tgt_y = tgt[:, :, 3]
-                # ETA from source to target (fleet speed depends on launched ship_count)
-                dist = torch.sqrt((src_x - tgt_x) ** 2 + (src_y - tgt_y) ** 2)
-                speed = _ship_speed(ship_count).clamp(min=1e-6)
-                eta = torch.ceil(dist / speed).clamp(min=1.0)           # (N, MAX_OWNED)
-                # Projected defense = current garrison. Neutrals DON'T regrow (engine applies
-                # production only to owner != -1), so there is NO production×ETA term — adding
-                # one was phantom defense that vetoed ~all deterministic-decode launches.
-                projected_defense = target_ships                       # (N, MAX_OWNED)
-                # Enemy inbound: fleets (owner != us, owner >= 0) heading to the same
-                # target, arriving before or at our ETA. Friendly inbound (our fleets
-                # already en route) counts as added offense — subtract from the cost.
-                # Resolved via the vectorized fleet-target resolver to match the real
-                # swept-collision target (not just angle alignment).
-                fi = self.fleets                                       # (N, F, 7)
-                fa = self.fleet_alive                                  # (N, F)
-                f_owner = fi[:, :, 1].long()
-                f_ships = fi[:, :, 6] * fa.float()
-                f_tgt = self._fleet_targets()                          # (N, F)
-                f_fx, f_fy = fi[:, :, 2], fi[:, :, 3]
-                f_speed = _ship_speed(fi[:, :, 6]).clamp(min=1e-6)
-                # Per-(slot, fleet) ETA: distance from fleet to the slot's target / fleet speed
-                # tgt per slot (N, MAX_OWNED); broadcast fleets (N, F) → (N, MAX_OWNED, F)
-                tx = tgt_x.unsqueeze(2); ty = tgt_y.unsqueeze(2)       # (N, MAX_OWNED, 1)
-                fxp = f_fx.unsqueeze(1); fyp = f_fy.unsqueeze(1)       # (N, 1, F)
-                f_eta_to_tgt = (torch.sqrt((fxp - tx) ** 2 + (fyp - ty) ** 2)
-                                / f_speed.unsqueeze(1)).clamp(max=100.0)  # (N, MAX_OWNED, F)
-                hits_tgt = (f_tgt.unsqueeze(1) == target_idx.unsqueeze(2))  # (N, MAX_OWNED, F)
-                arrives_before = f_eta_to_tgt <= eta.unsqueeze(2)      # (N, MAX_OWNED, F)
-                # Enemy inbound (adds to defense); friendly inbound (adds to offense)
-                enemy_mask = (f_owner.unsqueeze(1) != owner_id) & (f_owner.unsqueeze(1) >= 0)  # (N, 1, F)
-                friendly_mask = (f_owner.unsqueeze(1) == owner_id)     # (N, 1, F)
-                valid = hits_tgt & arrives_before & fa.unsqueeze(1)    # (N, MAX_OWNED, F)
-                enemy_inbound = (f_ships.unsqueeze(1) * (valid & enemy_mask).float()).sum(dim=2)
-                friendly_inbound = (f_ships.unsqueeze(1) * (valid & friendly_mask).float()).sum(dim=2)
-                total_offense = ship_count + friendly_inbound
-                # SUFFICIENT-COMMIT: veto if (ship_count + friendly_inbound) can't beat the floor.
-                insufficient = is_neutral_attack & (total_offense <= projected_defense * self.sufficient_commit_factor)
-                can_fire = can_fire & ~insufficient
 
         # Compute launch positions (just outside planet radius along angle)
         start_x = src_x + torch.cos(angle) * (src_r + 0.1)

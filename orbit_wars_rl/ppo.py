@@ -568,14 +568,11 @@ class PPOLearner:
                 "feature_config": "blessed-2026-07",
                 # Projected-future timeline channels (planet dim 20→116).
                 "timeline_features": True,
-                # Reinforce / sufficient-commit DISCIPLINE — eval & export must mask the SAME way
+                # Reinforce DISCIPLINE — eval & export must mask the SAME way
                 # the ckpt was trained or the policy self-sabotages. Persist so they auto-load
                 # instead of relying on CLI flags being remembered.
                 "reinforce_gate_min_planets": int(getattr(model_cfg, "reinforce_gate_min_planets", 0)),
-                "reinforce_forward_only": bool(getattr(model_cfg, "reinforce_forward_only", False)),
                 "reverse_edge_cooldown": int(getattr(model_cfg, "reverse_edge_cooldown", 0)),
-                "reinforce_garrison_floor": float(getattr(model_cfg, "reinforce_garrison_floor", 0.0)),
-                "sufficient_commit_factor": float(getattr(model_cfg, "sufficient_commit_factor", 0.0)),
             }
         # Save the UNCOMPILED model's state_dict. torch.compile wraps the model and prefixes
         # every key with "_orig_mod." — persisting that breaks eval/export/resume (which load

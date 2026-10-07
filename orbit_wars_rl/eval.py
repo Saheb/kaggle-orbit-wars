@@ -144,14 +144,21 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
             f"Checkpoint feature semantics {_mismatch} do not match the blessed config "
             f"{_blessed}. This checkpoint predates the 2026-07 cleanup — eval it from the "
             f"pre-cleanup git tag (pre-cleanup-2026-07) instead.")
-    # Reinforce / sufficient-commit DISCIPLINE: persisted at train time so eval/export mask the
-    # SAME way (else the policy self-sabotages). Absent in old ckpts → defaults (0/False) → those
-    # still require CLI flags, as before. evaluate_checkpoint uses these unless CLI overrides.
+    # Legacy discipline masks (attack sufficient-commit, forward-only staging, garrison floor)
+    # were removed in the 2026-10 cleanup. A checkpoint trained WITH one active would be played
+    # here without it — refuse rather than silently change its policy (presres1/stgpr1 have
+    # sufficient_commit_factor=1.0; as OPPONENTS they run from their own frozen code).
+    _legacy = {k: ckpt_cfg[k] for k in ("sufficient_commit_factor", "reinforce_forward_only",
+                                        "reinforce_garrison_floor") if ckpt_cfg.get(k)}
+    if _legacy:
+        raise RuntimeError(
+            f"Checkpoint was trained with legacy discipline masks {_legacy}, removed in the "
+            f"2026-10 cleanup — eval/export it from git tag pre-cleanup-2026-10.")
+    # Reinforce DISCIPLINE: persisted at train time so eval/export mask the SAME way (else the
+    # policy self-sabotages). Absent in old ckpts → defaults → those still require CLI flags.
+    # evaluate_checkpoint uses these unless the CLI overrides.
     cfg.model.reinforce_gate_min_planets = int(ckpt_cfg.get("reinforce_gate_min_planets", 0))
-    cfg.model.reinforce_forward_only = bool(ckpt_cfg.get("reinforce_forward_only", False))
     cfg.model.reverse_edge_cooldown = int(ckpt_cfg.get("reverse_edge_cooldown", 0))
-    cfg.model.reinforce_garrison_floor = float(ckpt_cfg.get("reinforce_garrison_floor", 0.0))
-    cfg.model.sufficient_commit_factor = float(ckpt_cfg.get("sufficient_commit_factor", 0.0))
     cfg.model._discipline_persisted = ("reinforce_gate_min_planets" in ckpt_cfg)
     return sd, action_decode
 
@@ -172,10 +179,7 @@ def load_eval_model(path: str, cfg: Config) -> tuple[EntityTransformer, str]:
     model.allow_reinforce = bool(m.allow_reinforce)
     model.binary_commit_gates = str(m.binary_commit_gates)
     model.reinforce_gate_min_planets = int(m.reinforce_gate_min_planets)
-    model.reinforce_forward_only = bool(m.reinforce_forward_only)
     model.reverse_edge_cooldown = int(m.reverse_edge_cooldown)
-    model.reinforce_garrison_floor = float(m.reinforce_garrison_floor)
-    model.sufficient_commit_factor = float(m.sufficient_commit_factor)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     bad_missing = [k for k in missing if k not in PHASE4_COMPAT_MISSING_KEYS]
     if bad_missing or unexpected:
@@ -271,9 +275,6 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                                    if "pairwise_features" in features else None),
                 allow_reinforce=getattr(model, "allow_reinforce", allow_reinforce),
                 reinforce_gate_min_planets=getattr(model, "reinforce_gate_min_planets", 0),
-                reinforce_forward_only=getattr(model, "reinforce_forward_only", False),
-                reinforce_garrison_floor=getattr(model, "reinforce_garrison_floor", 0.0),
-                sufficient_commit_factor=getattr(model, "sufficient_commit_factor", 0.0),
                 reverse_edge_cooldown=_cd_K,
                 cooldown_last=_cd["last"] if _cd_K > 0 else None,
                 cooldown_step=int(obs.get("step", 0)),
@@ -1083,48 +1084,24 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         panel: bool = False, sample: bool = False,
                         target_decode: bool = False,
                         reinforce_gate_min_planets: int = None,
-                        reinforce_forward_only: bool = None,
-                        reinforce_garrison_floor: float = None,
-                        sufficient_commit_factor: float = None,
                         collect_records: bool = False):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
 
     model, ckpt_action_decode = load_eval_model(params_path, cfg)
-    # Discipline masks: an explicit CLI value overrides; otherwise auto-load what the checkpoint
-    # was trained with (load_checkpoint set these on cfg.model). Eliminates the "forgot the flag
-    # → wrong panel/submission" footgun for masked runs. For OLD reinforce ckpts that never
-    # persisted the discipline, the gate CAN'T be inferred (guessing self-sabotages) → require it.
+    # Reinforce gate: an explicit CLI value overrides; otherwise auto-load what the checkpoint
+    # was trained with (load_eval_model set it on the model). For OLD reinforce ckpts that never
+    # persisted it, the gate CAN'T be inferred (guessing self-sabotages) → require it.
     if (bool(cfg.model.allow_reinforce) and not bool(getattr(cfg.model, "_discipline_persisted", False))
             and reinforce_gate_min_planets is None):
         raise SystemExit(
             "Checkpoint has allow_reinforce=True but NO persisted reinforce discipline (pre-2026-06-15 "
-            "ckpt). The gate/floor/forward values can't be inferred and guessing self-sabotages — pass "
-            "--reinforce-gate-min-planets (and --reinforce-garrison-floor / --[no-]reinforce-forward-only) "
-            "explicitly to match how it was trained.")
-    # Each auto-loaded entry shows its value AND whether the mask is actually ACTIVE — so
-    # "forward_only=False [off]" reads as "no mask applied", not "a mask got enabled". off =
-    # the mask is a no-op at this value (gate≤0 / forward False / floor≤0 / suff≤0).
-    _on = lambda active: "on" if active else "off"
-    _from_ckpt = []
+            "ckpt). The gate can't be inferred and guessing self-sabotages — pass "
+            "--reinforce-gate-min-planets explicitly to match how it was trained.")
     if reinforce_gate_min_planets is None:
         reinforce_gate_min_planets = int(cfg.model.reinforce_gate_min_planets)
-        _from_ckpt.append(f"gate={reinforce_gate_min_planets} [{_on(reinforce_gate_min_planets > 0)}]")
-    if reinforce_forward_only is None:
-        reinforce_forward_only = bool(cfg.model.reinforce_forward_only)
-        _from_ckpt.append(f"forward_only={reinforce_forward_only} [{_on(reinforce_forward_only)}]")
-    if reinforce_garrison_floor is None:
-        reinforce_garrison_floor = float(cfg.model.reinforce_garrison_floor)
-        _from_ckpt.append(f"floor={reinforce_garrison_floor} [{_on(reinforce_garrison_floor > 0)}]")
-    if sufficient_commit_factor is None:
-        sufficient_commit_factor = float(cfg.model.sufficient_commit_factor)
-        _from_ckpt.append(f"sufficient_commit={sufficient_commit_factor} [{_on(sufficient_commit_factor > 0)}]")
-    if _from_ckpt:
-        print(f"Discipline auto-loaded from checkpoint: {', '.join(_from_ckpt)}")
-        # Full resolved set in effect (incl. any CLI-set values), so train/eval parity is visible.
-        print(f"  → discipline in effect: gate={reinforce_gate_min_planets} "
-              f"forward_only={reinforce_forward_only} floor={reinforce_garrison_floor} "
-              f"suff={sufficient_commit_factor}")
+        print(f"Reinforce gate auto-loaded from checkpoint: gate={reinforce_gate_min_planets} "
+              f"[{'on' if reinforce_gate_min_planets > 0 else 'off'}]")
     if cfg.model.ship_bin_mode != "absolute":
         print(f"Checkpoint ship_bin_mode={cfg.model.ship_bin_mode}")
     # Auto-detect action_decode from checkpoint config; CLI --target-decode overrides.
@@ -1132,21 +1109,13 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         target_decode = True
         print("Checkpoint action_decode=target  →  enabling target_decode automatically")
 
-    # Explicit CLI overrides of the discipline load_eval_model set from the checkpoint (a None
-    # argument resolved to the checkpoint's own value above, so this is a no-op unless overridden).
+    # Explicit CLI override of the gate load_eval_model set from the checkpoint (a None argument
+    # resolved to the checkpoint's own value above, so this is a no-op unless overridden).
     model.reinforce_gate_min_planets = int(reinforce_gate_min_planets)
-    model.reinforce_forward_only = bool(reinforce_forward_only)
-    model.reinforce_garrison_floor = float(reinforce_garrison_floor)
-    model.sufficient_commit_factor = float(sufficient_commit_factor)
     if model.allow_reinforce:
         print(f"Reinforcement: ON (own planets are legal targets) | "
               f"gate>={model.reinforce_gate_min_planets} planets, "
-              f"forward_only={model.reinforce_forward_only}, "
-              f"garrison_floor={model.reinforce_garrison_floor}, "
               f"reverse_edge_cooldown={model.reverse_edge_cooldown}")
-    if model.sufficient_commit_factor > 0.0:
-        print(f"Sufficient-commit mask: ON | veto attacks with ships <= "
-              f"target_defense × {model.sufficient_commit_factor}")
 
     if panel:
         results = evaluate_panel(model, device, opponent=opponent,
@@ -1206,16 +1175,6 @@ if __name__ == "__main__":
                         help="Reinforce-discipline parity: own targets legal only at "
                              ">= this many owned planets. Default=auto-load from checkpoint; "
                              "pass to override. MUST match training.")
-    parser.add_argument("--reinforce-forward-only", action=argparse.BooleanOptionalAction, default=None,
-                        help="Reinforce-discipline parity: own target legal only if closer "
-                             "to the nearest enemy than the source. Default=auto-load from ckpt; "
-                             "pass --reinforce-forward-only / --no-reinforce-forward-only to override.")
-    parser.add_argument("--reinforce-garrison-floor", type=float, default=None,
-                        help="Reinforce-discipline parity: veto a reinforce that drains the "
-                             "source below this. Default=auto-load from checkpoint.")
-    parser.add_argument("--sufficient-commit-factor", type=float, default=None,
-                        help="Sufficient-commit parity: veto an attack whose ships <= target "
-                             "defense × this factor. Default=auto-load from ckpt (1.0 = strict).")
     parser.add_argument("--panel-out", type=str, default=None,
                         help="Pickle the full --panel per-game records here (each game's conv dict "
                              "incl. dm_ratios), AND print the report normally. recompute_panel.py "
@@ -1236,9 +1195,6 @@ if __name__ == "__main__":
         sample=args.sample,
         target_decode=args.target_decode,
         reinforce_gate_min_planets=args.reinforce_gate_min_planets,
-        reinforce_forward_only=args.reinforce_forward_only,
-        reinforce_garrison_floor=args.reinforce_garrison_floor,
-        sufficient_commit_factor=args.sufficient_commit_factor,
         collect_records=bool(args.panel_out),
     )
     if args.panel_out and _eval_result is not None:

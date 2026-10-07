@@ -60,3 +60,17 @@ def test_probes_do_not_hand_build_models():
             src = f.read()
         assert "EntityTransformer(" not in src and "load_checkpoint(" not in src, (
             f"{name} builds its own model — use eval.load_eval_model")
+
+
+def test_legacy_discipline_checkpoint_is_refused(tmp_path):
+    """presres1/stgpr1-style checkpoints (sufficient_commit_factor=1.0) would silently play a
+    different policy now that the legacy masks are gone — loading must refuse instead."""
+    import pytest
+    path = _save_minimal_ckpt(tmp_path)
+    ckpt = torch.load(path, weights_only=False)
+    ckpt["config"]["sufficient_commit_factor"] = 1.0
+    torch.save(ckpt, path)
+    cfg = Config()
+    cfg.device = "cpu"
+    with pytest.raises(RuntimeError, match="legacy discipline masks"):
+        ev.load_eval_model(path, cfg)

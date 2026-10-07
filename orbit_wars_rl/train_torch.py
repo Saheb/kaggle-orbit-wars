@@ -544,18 +544,9 @@ def train(args):
               f"{args.anchor_promote_winrate} over >={args.anchor_promote_min_games} games")
     print(f"Action decode: {args.action_decode}")
     print(f"Reinforcement (own planets as targets): {'ON' if args.allow_reinforce else 'off'}")
-    if args.allow_reinforce and args.reinforce_garrison_floor > 0.0:
-        print(f"Reinforcement DISCIPLINE: garrison_floor={args.reinforce_garrison_floor} "
-              f"(veto reinforce that drains source below this)")
     if args.allow_reinforce and args.reinforce_gate_min_planets > 0:
         print(f"Reinforcement EMPIRE GATE: own targets legal only at >= "
               f"{args.reinforce_gate_min_planets} planets (attack-only below; mask, no Nash risk)")
-    if args.allow_reinforce and args.reinforce_forward_only:
-        print("Reinforcement FORWARD-STAGING GATE: own targets legal only if closer to the "
-              "nearest enemy than the source (rear→front staging; mask, no Nash risk)")
-    if args.sufficient_commit_factor > 0.0:
-        print(f"SUFFICIENT-COMMIT MASK: veto attack launches with ships <= target_defense × "
-              f"{args.sufficient_commit_factor} (force concentration; mask, no Nash risk)")
     print(f"Win margin coeff: {args.win_margin_coeff}")
     print(f"Expansion coeff: {args.expansion_coef}")
     print(f"Early capture coeff: {args.early_capture_coef} (decay over {args.early_capture_steps} steps)")
@@ -612,14 +603,8 @@ def train(args):
             args.allow_reinforce = True
         if args.reinforce_gate_min_planets == 0 and "reinforce_gate_min_planets" in ckpt_cfg:
             args.reinforce_gate_min_planets = int(ckpt_cfg["reinforce_gate_min_planets"])
-        if not args.reinforce_forward_only and bool(ckpt_cfg.get("reinforce_forward_only", False)):
-            args.reinforce_forward_only = True
         if args.reverse_edge_cooldown == 0 and "reverse_edge_cooldown" in ckpt_cfg:
             args.reverse_edge_cooldown = int(ckpt_cfg["reverse_edge_cooldown"])
-        if args.reinforce_garrison_floor == 0.0 and "reinforce_garrison_floor" in ckpt_cfg:
-            args.reinforce_garrison_floor = float(ckpt_cfg["reinforce_garrison_floor"])
-        if args.sufficient_commit_factor == 0.0 and "sufficient_commit_factor" in ckpt_cfg:
-            args.sufficient_commit_factor = float(ckpt_cfg["sufficient_commit_factor"])
         del _ckpt_peek
 
     # Ship-bin-mode CLI override. Takes precedence over any checkpoint value.
@@ -629,14 +614,11 @@ def train(args):
             print("Ship-bin-mode=binary → fire head is NOOP/COMMIT; ship head is not sampled")
     cfg.model.action_decode = args.action_decode
     cfg.model.allow_reinforce = args.allow_reinforce
-    # Persist the reinforce/sufficient-commit DISCIPLINE on cfg.model so the checkpoint records
+    # Persist the reinforce DISCIPLINE on cfg.model so the checkpoint records
     # them (ppo.state_dict) and eval/export auto-load them — they must match training or the
     # policy self-sabotages. Previously eval relied on CLI flags being remembered.
     cfg.model.reinforce_gate_min_planets = args.reinforce_gate_min_planets
-    cfg.model.reinforce_forward_only = args.reinforce_forward_only
     cfg.model.reverse_edge_cooldown = args.reverse_edge_cooldown
-    cfg.model.reinforce_garrison_floor = args.reinforce_garrison_floor
-    cfg.model.sufficient_commit_factor = args.sufficient_commit_factor
     if args.global_econ:
         from timeline import GLOBAL_ECON_DIM
         cfg.model.global_feature_dim = 15 + GLOBAL_ECON_DIM
@@ -657,11 +639,8 @@ def train(args):
                       global_econ=args.global_econ,
                       action_decode=args.action_decode,
                       allow_reinforce=args.allow_reinforce,
-                      reinforce_garrison_floor=args.reinforce_garrison_floor,
                       reinforce_gate_min_planets=args.reinforce_gate_min_planets,
-                      reinforce_forward_only=args.reinforce_forward_only,
                       reverse_edge_cooldown=args.reverse_edge_cooldown,
-                      sufficient_commit_factor=args.sufficient_commit_factor,
                       win_margin_coeff=args.win_margin_coeff,
                       expansion_coef=args.expansion_coef,
                       early_capture_coef=args.early_capture_coef,
@@ -1954,12 +1933,6 @@ if __name__ == "__main__":
                              "players reinforce ~57%% of launches; default agents 0%%. "
                              "Saved in the checkpoint so eval/export mask the same way. "
                              "Off by default (attack-only, backward-compatible).")
-    parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0,
-                        help="Reinforcement discipline #1: a reinforce launch may not drain its "
-                             "source planet below this many ships (training-time mask/veto, NOT a "
-                             "penalty → no Nash risk). Kills the 'drain a planet, then lose it' "
-                             "regression. Inference is unconstrained (real env has no floor). "
-                             "0 = off. Only active with --allow-reinforce.")
     parser.add_argument("--reinforce-gate-min-planets", type=int, default=0,
                         help="Reinforcement discipline #3 (empire-size gate): own planets become "
                              "legal reinforce targets only once the player owns >= this many planets; "
@@ -1967,14 +1940,6 @@ if __name__ == "__main__":
                              "replays (reinforce_rate ≈0 at 1 planet, ramps with empire size). A pure "
                              "action mask → no Nash risk; makes the early flood impossible by "
                              "construction. 0 = off. Only active with --allow-reinforce.")
-    parser.add_argument("--reinforce-forward-only", action="store_true",
-                        help="Reinforcement discipline #4 (forward-staging gate): an own reinforce "
-                             "target is legal only if it is closer to the nearest enemy planet than "
-                             "the launch source, so reinforcement flows rear→front (staging) and a "
-                             "safe rear hoard is impossible by construction. Matches the 66-70%% "
-                             "forward-staging in top-player replays; removes the costless safe-fire "
-                             "outlet that floods symmetric self-play. Enemy/neutral targets "
-                             "unconstrained. Only active with --allow-reinforce.")
     parser.add_argument("--reverse-edge-cooldown", type=int, default=0,
                         help="Reinforce discipline (reverse-edge cooldown): after an own-target "
                              "reinforce A->B, the reverse B->A reinforce is illegal for this many "
@@ -1982,14 +1947,6 @@ if __name__ == "__main__":
                              "0.06-0.10). Ownership-change & episode resets clear stale edges so a "
                              "recaptured planet is never mis-blocked. Pure mask, internalised at "
                              "inference. 0 = off. Try 3. Enemy/neutral untouched; needs --allow-reinforce.")
-    parser.add_argument("--sufficient-commit-factor", type=float, default=0.0,
-                        help="SUFFICIENT-COMMIT MASK: veto an ATTACK launch (enemy/neutral target) "
-                             "whose ship count <= target's current defense × this factor → fragments "
-                             "fired under a target's garrison are impossible by construction, forcing "
-                             "concentration (the opening under-commitment fix). 1.0 = strict (need "
-                             "strictly more than current defense); 0.6 = relaxed fallback; 0 = off. "
-                             "Pure mask (no reward tax → no fire=0 Nash); internalised at inference. "
-                             "Independent of --allow-reinforce (acts on attacks, not reinforces).")
     parser.add_argument("--num-players", type=int, choices=[2, 4], default=2,
                         help="Players per game. 4 = FFA self-play (every seat is the learning "
                              "policy; --pool-fraction must be 0 — external 4p pool not yet wired).")
