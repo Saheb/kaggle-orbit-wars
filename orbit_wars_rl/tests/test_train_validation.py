@@ -1,8 +1,9 @@
 """Pre-training sanity checks for the VecTorchEnv + PPO self-play loop (target-decode).
 
 Two validations before committing GPU time:
-  A. Env symmetry — random-init-model vs random-init-model should be near 50/50
-     under seat swap (catches gross seat asymmetry in the env/reward path).
+  A. Env symmetry — pooled over a seat swap, random-init models should win ~50% from
+     seat 0 (catches gross seat asymmetry in the env/reward path). Slow (~3 min):
+     marked `slow`, run with `pytest --runslow`.
   B. Gradient direction — positive advantage on an action must increase
      that action's probability after a PPO update.
 
@@ -15,6 +16,7 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -71,9 +73,10 @@ def _play_set(m_p0, m_p1, n_games=64, seed_base=1000, episode_steps=200):
     return w0, w1, d, done_count
 
 
+@pytest.mark.slow
 def test_env_symmetry():
     print("=" * 60)
-    print("Test A: Env symmetry under seat swap (random-init models, n=64)")
+    print("Test A: Env symmetry under seat swap (random-init models, n=64 per pairing)")
     print("=" * 60)
     cfg = Config()
     torch.manual_seed(1); m1 = EntityTransformer(cfg.model); m1.eval()
@@ -83,10 +86,15 @@ def test_env_symmetry():
     b0, b1, _, nb = _play_set(m2, m1, seed_base=2000)
     print(f"  m1@seat0 vs m2@seat1: P0 wins {a0}/{na} = {a0/na:.1%}")
     print(f"  m2@seat0 vs m1@seat1: P0 wins {b0}/{nb} = {b0/nb:.1%}")
-    # Symmetric env → both rates near 50%. n=64 → std err ~6%; allow ±15% (this is a
-    # gross-asymmetry smoke test, not a statistical one).
-    ok = abs(a0/na - 0.5) < 0.15 and abs(b0/nb - 0.5) < 0.15
-    print("PASS" if ok else "FAIL", "— P0 win rates near 50% (allowance 15%)")
+    # Each model plays each seat once, so POOLING the two pairings cancels model strength and
+    # leaves only the seat effect. (The old check — each pairing's P0 rate near 50% — failed
+    # whenever one random model was simply stronger: m1 won 34.4% from seat 0 AND 45.3% from
+    # seat 1, i.e. a weaker model, not a seat bias.) Decisive games only; n≈128 → std err
+    # ~4.4pp, so ±15pp is a gross-asymmetry smoke test.
+    p0 = (a0 + b0) / max(a0 + a1 + b0 + b1, 1)
+    ok = abs(p0 - 0.5) < 0.15
+    print(f"  pooled seat-0 share of decisive games: {p0:.1%}")
+    print("PASS" if ok else "FAIL", "— pooled seat-0 share near 50% (allowance 15%)")
     assert ok
     return ok
 

@@ -128,7 +128,10 @@ def test_kl_gradient_pulls_toward_anchor():
     learner.set_anchor(_perturbed(model, scale=0.2))
 
     _, m_before = learner.compute_loss(batch, return_metrics=True)
-    opt = torch.optim.SGD(model.parameters(), lr=1.0)
+    # A small step: this tests the gradient's DIRECTION. At lr=1.0 SGD overshoots and the KL
+    # oscillates upward (0.08 → 0.36 → 0.35 → 1.06 → 0.37), which said nothing about the anchor;
+    # at lr=0.01 it falls every step (0.080 → 0.0625 → … → 0.0607).
+    opt = torch.optim.SGD(model.parameters(), lr=0.01)
     for _ in range(5):
         loss, _ = learner.compute_loss(batch, return_metrics=True)
         opt.zero_grad(); loss.backward(); opt.step()
