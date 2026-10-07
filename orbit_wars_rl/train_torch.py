@@ -583,6 +583,11 @@ def train(args):
         if "ship_bin_mode" in ckpt_cfg:
             cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
             print(f"Checkpoint declares ship_bin_mode={cfg.model.ship_bin_mode}")
+        # Commit gates are a mask contract: a binary checkpoint resumes under its OWN gates unless
+        # the CLI overrides them (absent key = legacy "full", as in eval/export). Without this the
+        # resume silently took the config default.
+        if args.binary_commit_gates is None and ckpt_cfg.get("ship_bin_mode") == "binary":
+            args.binary_commit_gates = str(ckpt_cfg.get("binary_commit_gates", "full"))
         # Blessed feature config guard (2026-07 cleanup): feature semantics are hard-coded
         # (game-phase 15-global ON, precise pressure resolver ON, friendly roi-deflation ON,
         # enemy-deflate/zero-roi/surface-threat REMOVED). A checkpoint trained under different
@@ -1916,7 +1921,8 @@ if __name__ == "__main__":
                              "an unrelated arm. Eval/export infer the width from global_proj.")
     parser.add_argument("--binary-commit-gates", type=str, default=None,
                         choices=["full", "minimal"],
-                        help="Binary-mode commit legality. 'full' (default) = the legacy "
+                        help="Binary-mode commit legality. Default: the resumed binary checkpoint's "
+                             "own gates, else 'minimal'. 'full' = the legacy "
                              "capture_required affordability gate + maintain/defend_ok, which "
                              "MEASURED removes 80.2%% of the action space (62.2%% of attacks — "
                              "pincers inexpressible; 73.3%% of reinforces — no pre-emptive "

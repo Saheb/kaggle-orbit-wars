@@ -40,7 +40,9 @@ class ModelConfig:
     # MIN_BINARY_COMMIT_SHIPS. Measured, "full" removes 80.2% of the action space and makes
     # pre-emptive reinforcement inexpressible — see docs/training.md "THE REINFORCEMENT LEGALITY
     # WALL". Persisted in the checkpoint: eval/export MUST mask the same way training did.
-    binary_commit_gates: str = "full"
+    # Default "minimal" (2026-10) for NEW runs; a checkpoint WITHOUT the key is legacy "full"
+    # (eval/export/resume all apply that rule when they read a checkpoint).
+    binary_commit_gates: str = "minimal"
     pairwise_feature_dim: int = 36   # 22 base + 4 intent + 6 target-CF + 4 source-CF
     max_planets: int = 48            # for target_head output size; matches EnvConfig
     # Target-decode discipline. These are persisted in checkpoints so train/eval/export
