@@ -15,10 +15,9 @@ import io
 import os
 
 import torch
-import numpy as np
 
-from config import Config, ModelConfig
-from model import EntityTransformer, NUM_ANGLE_BINS, NUM_SHIP_BINS, ANGLE_BIN_WIDTH, PHASE4_COMPAT_MISSING_KEYS
+from config import Config
+from model import EntityTransformer, NUM_ANGLE_BINS, ANGLE_BIN_WIDTH, PHASE4_COMPAT_MISSING_KEYS
 from features import PAIRWISE_FEATURE_DIM
 
 
@@ -272,8 +271,7 @@ def _get_model():
         sd = torch.load(buf, map_location="cpu", weights_only=True)
     except Exception:
         sd = torch.load(buf, map_location="cpu", weights_only=False)
-    # strict=False: the embedded state_dict may carry inference-unused params
-    # (COMA q_* head, VDN value_pp_*) the slim _Model doesn't define.
+    # The embedded state_dict matches _Model key-for-key; strict=False is legacy tolerance.
     m.load_state_dict(sd, strict=False)
     m.eval()
     _model_cache[0] = m
@@ -580,13 +578,10 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     if sufficient_commit_factor is None:
         sufficient_commit_factor = float(cfg.model.sufficient_commit_factor)
 
-    # Encode state_dict as base64. Drop inference-unused params the slim exported
-    # _Model doesn't define (COMA q_* counterfactual head, VDN value_pp_*) — else
-    # the exported loader sees them as unexpected keys.
-    sd_export = {k: v for k, v in model.state_dict().items()
-                 if not (k.startswith("q_") or k.startswith("value_pp_"))}
+    # Encode state_dict as base64 (load_model already rejected any key the model lacks;
+    # retired q_* weights are dropped by EntityTransformer.load_state_dict).
     buf = io.BytesIO()
-    torch.save(sd_export, buf)
+    torch.save(model.state_dict(), buf)
     params_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
     # Read feature / action-mask code (strip duplicate imports; agent template provides them)
@@ -703,7 +698,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", default="main_submitted.py")
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fire-threshold", type=float, default=0.5)
     parser.add_argument("--target-decode", action="store_true",
                         help="Use target-planet aiming (actions_from_target_policy). "
@@ -725,7 +719,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     cfg = Config()
-    cfg.seed = args.seed
     export_agent(args.checkpoint, args.output, cfg,
                  fire_threshold=args.fire_threshold,
                  target_decode=args.target_decode,

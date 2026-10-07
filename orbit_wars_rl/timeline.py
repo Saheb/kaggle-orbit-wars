@@ -81,7 +81,6 @@ def project_timeline(planets, planet_alive, fleets, fleet_alive, angular_velocit
     """Returns (owner_ts (N,P,K) float in {-1,0..NP-1}, garr_ts (N,P,K) float): the projected
     owner and garrison of each planet at each of the next K steps, assuming no new launches."""
     N, P, _ = planets.shape
-    F = fleets.shape[1]
     NP = num_players
     dev = planets.device
 

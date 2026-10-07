@@ -7,10 +7,9 @@ import hashlib
 import math
 import os
 from pathlib import Path
-from statistics import mean, median
+from statistics import median
 
 import torch
-import numpy as np
 
 from config import Config
 from model import EntityTransformer, PHASE4_COMPAT_MISSING_KEYS
@@ -99,11 +98,6 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     elif "ship_head.weight" in sd:
         cfg.model.num_ship_bins = int(sd["ship_head.weight"].shape[0])
 
-    if "angle_head.weight" in sd:
-        n = int(sd["angle_head.weight"].shape[0])
-        if n != cfg.model.num_angle_bins:
-            cfg.model.num_angle_bins = n
-
     if "ship_bin_mode" in ckpt_cfg:
         cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
     # Binary commit gates are a MASK contract: evaluating a "minimal"-trained checkpoint under
@@ -133,11 +127,7 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     # pair_kv is pre-pairwise and unsupported (it fails at load_state_dict with missing keys).
     cfg.model.pairwise_feature_dim = PAIRWISE_FEATURE_DIM
 
-    # Detect value head version from fc1 input width (old=D, new=2D).
-    if "value_fc1.weight" in sd:
-        cfg.model.value_head_in = int(sd["value_fc1.weight"].shape[1])
-
-    action_decode = str(ckpt_cfg.get("action_decode", "angle"))
+    action_decode = str(ckpt_cfg.get("action_decode", "target"))
     # Reinforcement: eval must mask targets the SAME way the checkpoint was trained.
     cfg.model.allow_reinforce = bool(ckpt_cfg.get("allow_reinforce", False))
     # Feature semantics are hard-coded in
@@ -188,11 +178,8 @@ def load_eval_model(path: str, cfg: Config) -> tuple[EntityTransformer, str]:
     model.sufficient_commit_factor = float(m.sufficient_commit_factor)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     bad_missing = [k for k in missing if k not in PHASE4_COMPAT_MISSING_KEYS]
-    # VDN per-planet value head (Stage 2) is never used at eval — ignore it if the
-    # checkpoint carries it but this (eval-time) model doesn't.
-    bad_unexpected = [k for k in unexpected if not k.startswith("value_pp_")]
-    if bad_missing or bad_unexpected:
-        raise RuntimeError(f"Checkpoint/model mismatch: missing={bad_missing}, unexpected={bad_unexpected}")
+    if bad_missing or unexpected:
+        raise RuntimeError(f"Checkpoint/model mismatch: missing={bad_missing}, unexpected={list(unexpected)}")
     model.eval()
     return model, action_decode
 

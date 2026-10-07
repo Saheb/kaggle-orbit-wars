@@ -28,7 +28,7 @@ import json
 import os
 import statistics
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)

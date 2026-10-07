@@ -127,7 +127,7 @@ def game_phase_channels(step):
     comet_cycle = (nxt - step) / 100.0 if nxt is not None else 1.0
     return [early, mid, late, comet_cycle]
 
-from kaggle_environments.envs.orbit_wars.orbit_wars import Planet, Fleet, CENTER, ROTATION_RADIUS_LIMIT
+from kaggle_environments.envs.orbit_wars.orbit_wars import CENTER, ROTATION_RADIUS_LIMIT
 
 BOARD_SIZE = 100.0
 SUN_RADIUS = 10.0

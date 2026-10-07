@@ -8,15 +8,11 @@ from __future__ import annotations
 
 import math
 import time
-from collections import deque
 
 import torch
-import torch.nn as nn
-import numpy as np
 
 from binary_policy import (binary_action_entropy, binary_action_log_probs,
                            binary_taken_log_prob)
-from config import Config
 
 
 def _gather_target_logits(per_target_logits: torch.Tensor, target_idx: torch.Tensor) -> torch.Tensor:
@@ -564,7 +560,7 @@ class PPOLearner:
                 "pairwise_feature_dim": int(getattr(model_cfg, "pairwise_feature_dim", 0)),
                 "ship_bin_mode": str(getattr(model_cfg, "ship_bin_mode", "absolute")),
                 "binary_commit_gates": str(getattr(model_cfg, "binary_commit_gates", "full")),
-                "action_decode": str(getattr(model_cfg, "action_decode", "angle")),
+                "action_decode": str(getattr(model_cfg, "action_decode", "target")),
                 "allow_reinforce": bool(getattr(model_cfg, "allow_reinforce", False)),
                 # Persist feature semantics so loaders can reject incompatible checkpoints.
                 "game_phase_features": True,

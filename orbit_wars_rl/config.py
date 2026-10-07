@@ -1,21 +1,10 @@
 from dataclasses import dataclass, field
-from typing import Tuple
 
 
 @dataclass
 class EnvConfig:
-    board_size: float = 100.0
-    sun_radius: float = 10.0
-    center: Tuple[float, float] = (50.0, 50.0)
-    max_speed: float = 6.0
-    episode_steps: int = 500
     max_planets: int = 48
-    max_fleets: int = 256
-    comet_speed: float = 4.0
-    rotation_radius_limit: float = 50.0
     num_players: int = 2
-    max_moves_per_turn: int = 8
-    win_margin_coeff: float = 0.0   # terminal bonus: winner gets +1 + α*(my_score/total_score)
 
 
 @dataclass
@@ -63,18 +52,13 @@ class ModelConfig:
     reverse_edge_cooldown: int = 0
     sufficient_commit_factor: float = 0.0
     dropout: float = 0.0
-    # Value head input width. 0 = auto (2*entity_dim concat head). Eval sets this
-    # to entity_dim when loading an older mean-pool checkpoint.
-    value_head_in: int = 0
 
 
 @dataclass
 class PPOConfig:
     learning_rate: float = 3e-4
     lr_warmup_steps: int = 5000
-    lr_decay: str = "cosine"
     total_env_steps: int = 500_000_000
-    batch_size: int = 2048
     num_minibatches: int = 4
     # Two epochs is the throughput-oriented default; see docs/perf.md. Override
     # per run with --ppo-epochs when additional sample reuse is worth the cost.
@@ -108,24 +92,10 @@ class PPOConfig:
 
 
 @dataclass
-class SelfPlayConfig:
-    opponent_pool_size: int = 8
-    opponent_sample_prob_old: float = 0.3
-    eval_interval_steps: int = 10_000_000
-    eval_num_games: int = 32
-    checkpoint_interval_steps: int = 10_000_000
-    num_env_workers: int = 4
-
-
-@dataclass
 class Config:
     env: EnvConfig = field(default_factory=EnvConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
-    self_play: SelfPlayConfig = field(default_factory=SelfPlayConfig)
-    seed: int = 42
-    wandb_project: str = "orbit-wars-rl"
-    wandb_entity: str = ""
     device: str = ""  # auto-detect
 
     def __post_init__(self):

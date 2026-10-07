@@ -121,11 +121,8 @@ class EntityTransformer(nn.Module):
         nn.init.zeros_(self.fire_scorer[-1].bias)
         nn.init.zeros_(self.ship_scorer[-1].bias)
 
-        # Value head: concat global token + owned pool → Linear(2D→D) by default.
-        # value_head_in=0 means auto (2*D); load_checkpoint sets it to D for
-        # pre-Phase-1 checkpoints that used mean-pool-all-entities (D→D).
-        _vh_in = getattr(cfg, "value_head_in", 0) or (2 * D)
-        self.value_fc1 = nn.Linear(_vh_in, D)
+        # Value head: concat(global token, owned pool) → Linear(2D→D).
+        self.value_fc1 = nn.Linear(2 * D, D)
         self.value_fc2 = nn.Linear(D, D // 2)
         self.value_out = nn.Linear(D // 2, 1)
 
@@ -185,7 +182,6 @@ class EntityTransformer(nn.Module):
         # Enrich each source slot with explicit source-target geometry. The target
         # head scores each pair directly from the same inputs.
         if pairwise_features is not None:
-            N_p = planet_features.shape[1]
             planet_per_slot = planet_emb_post.unsqueeze(1).expand(-1, max_owned, -1, -1)
             kv_input = torch.cat([planet_per_slot, pairwise_features], dim=-1)  # (B, MO, N_p, D+F)
             kv = self.pair_kv(kv_input)                                         # (B, MO, N_p, 2D)
@@ -236,13 +232,10 @@ class EntityTransformer(nn.Module):
             pairwise_features=pairwise_features,
         )
         x = encoded["x"]
-        attn_mask = encoded["attn_mask"]
         planet_emb_post = encoded["planet_emb"]
-        owned_entities = encoded["owned_entities"]
         owned_enriched = encoded["owned_enriched"]
         B = planet_features.shape[0]
         max_owned = owned_enriched.shape[1]
-        D = x.shape[-1]
         target_logits = None
 
         # Per-target scoring head: each (slot, target) gets its own logit from
@@ -328,20 +321,15 @@ class EntityTransformer(nn.Module):
                     ~slot_valid.unsqueeze(-1).unsqueeze(-1), -100.0)
             target_logits = target_logits.masked_fill(~slot_valid.unsqueeze(-1), -100.0)
 
-        # Value head: new=concat(global_token, owned_pool) [2D], old=mean-pool all [D].
-        if self.value_fc1.in_features == D:
-            # Pre-Phase-1 checkpoint: mean-pool all valid entities
-            valid_float = (~attn_mask).float()
-            value_input = (x * valid_float.unsqueeze(-1)).sum(1) / valid_float.sum(1, keepdim=True).clamp(min=1)
+        # Value head: concat(global_token, owned_pool) [2D].
+        global_token = x[:, 0, :]                                    # (B, D)
+        if slot_valid is not None:
+            owned_float = slot_valid.float().unsqueeze(-1)
+            n_owned = owned_float.sum(dim=1).clamp(min=1)
+            owned_pool = (owned_enriched * owned_float).sum(dim=1) / n_owned
         else:
-            global_token = x[:, 0, :]                                    # (B, D)
-            if slot_valid is not None:
-                owned_float = slot_valid.float().unsqueeze(-1)
-                n_owned = owned_float.sum(dim=1).clamp(min=1)
-                owned_pool = (owned_enriched * owned_float).sum(dim=1) / n_owned
-            else:
-                owned_pool = owned_enriched.mean(dim=1)
-            value_input = torch.cat([global_token, owned_pool], dim=-1)  # (B, 2D)
+            owned_pool = owned_enriched.mean(dim=1)
+        value_input = torch.cat([global_token, owned_pool], dim=-1)  # (B, 2D)
         value = self.value_out(F.gelu(self.value_fc2(F.gelu(self.value_fc1(value_input))))).squeeze(-1)
 
         return {
@@ -385,11 +373,6 @@ class EntityTransformer(nn.Module):
 
 def count_params(model):
     return sum(p.numel() for p in model.parameters())
-
-
-def ship_bin_to_count(bin_idx, max_ships):
-    counts = torch.tensor(SHIP_COUNTS, dtype=torch.long, device=bin_idx.device)
-    return counts[bin_idx].clamp(max=max_ships.long())
 
 
 if __name__ == "__main__":

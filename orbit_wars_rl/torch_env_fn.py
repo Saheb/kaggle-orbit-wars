@@ -1,4 +1,9 @@
-"""Functional / immutable twin of torch_env.VecTorchEnv (Stage 0 scaffold).
+"""Functional / immutable twin of torch_env.VecTorchEnv.
+
+CURRENT ROLE (2026-10): the pure-function physics that tests/test_timeline_projection.py uses as
+a parity oracle (state_from_torch_env / apply_actions_core / physics_step). The whole-step
+compile / JAX port it was scaffolded for is retired (docs/perf.md); the board-pool reset and
+full-step helpers that served that plan were removed in the 2026-10 cleanup.
 
 WHY: torch_env.step mutates self.* in place and calls numpy/set/.tolist() in the comet
 and reset paths — untraceable for whole-program fusion, so torch.compile gets ~0% (see
@@ -21,12 +26,11 @@ from __future__ import annotations
 import math
 from typing import NamedTuple
 
-import numpy as np
 import torch
 
 from torch_env import (
-    MAX_PLANETS, MAX_FLEETS, CENTER, BOARD_SIZE, SUN_RADIUS, ROTATION_RADIUS_LIMIT,
-    MAX_SHIP_SPEED, MAX_OWNED, ANGLE_BIN_WIDTH, _ship_speed,
+    CENTER, BOARD_SIZE, SUN_RADIUS, ROTATION_RADIUS_LIMIT,
+    MAX_OWNED, ANGLE_BIN_WIDTH, _ship_speed,
 )
 
 
@@ -81,62 +85,6 @@ def state_from_torch_env(env) -> EnvState:
         planet_orbital_r=orb_r.clone(),
         planet_is_orbiting=is_orb.clone(),
     )
-
-
-def make_board_pool(k: int, num_players: int, device, seed: int = 0):
-    """Pre-generate k fresh boards with the REAL kaggle generate_planets (once, at startup).
-    Vectorized reset then gathers from this pool instead of calling numpy per-env — exact
-    parity with the generator, zero numpy in the hot loop. Returns (planets, alive) tensors
-    of shape (k, 48, 7) / (k, 48). angular_velocity is drawn per-reset, not pooled."""
-    from kaggle_environments.envs.orbit_wars.orbit_wars import generate_planets
-    import random as _random
-    rng = _random.Random(seed)
-    planets = np.zeros((k, MAX_PLANETS, 7), dtype=np.float32)
-    alive = np.zeros((k, MAX_PLANETS), dtype=bool)
-    for b in range(k):
-        raw = generate_planets(rng)
-        n = len(raw)
-        for i, p in enumerate(raw):
-            planets[b, i] = p
-        alive[b, :n] = True
-        planets[b, n:, 1] = -1
-        num_groups = n // 4
-        if num_groups > 0:
-            home = rng.randint(0, num_groups - 1)
-            base = home * 4
-            if num_players == 2:
-                planets[b, base, 1] = 0;     planets[b, base, 5] = 10
-                planets[b, base + 3, 1] = 1; planets[b, base + 3, 5] = 10
-            elif num_players == 4:
-                for j in range(4):
-                    planets[b, base + j, 1] = j; planets[b, base + j, 5] = 10
-    return (torch.from_numpy(planets).to(device), torch.from_numpy(alive).to(device))
-
-
-def reset_masked(state: EnvState, done_mask: torch.Tensor, pool_planets: torch.Tensor,
-                 pool_alive: torch.Tensor, pool_idx: torch.Tensor,
-                 ang_vel_new: torch.Tensor) -> EnvState:
-    """Vectorized reset (replaces the numpy/.tolist per-env loop). For each done env, gather
-    a fresh board from the pre-generated pool and clear fleets/step/done; non-done envs are
-    untouched. All tensor ops — no numpy, no Python loop, no host sync → torch.compile-safe.
-    `pool_idx` (N,) and `ang_vel_new` (N,) are caller-supplied randomness (keeps this pure)."""
-    N = state.planets.shape[0]
-    fresh_planets = pool_planets[pool_idx]              # (N, 48, 7)
-    fresh_alive = pool_alive[pool_idx]                  # (N, 48)
-    dm3 = done_mask.view(N, 1, 1)
-    dm2 = done_mask.view(N, 1)
-    new_planets = torch.where(dm3, fresh_planets, state.planets)
-    new_init = torch.where(dm3, fresh_planets, state.init_planets)
-    new_alive = torch.where(dm2, fresh_alive, state.planet_alive)
-    new_fleets = torch.where(dm3, torch.zeros_like(state.fleets), state.fleets)
-    new_fleet_alive = state.fleet_alive & ~dm2
-    new_step = torch.where(done_mask, torch.zeros_like(state.step_count), state.step_count)
-    new_angvel = torch.where(done_mask, ang_vel_new, state.angular_velocity)
-    new_nfid = torch.where(done_mask, torch.zeros_like(state.next_fleet_id), state.next_fleet_id)
-    new_done = state.done & ~done_mask
-    ia, orb_r, is_orb = compute_orbital(new_init, new_alive)
-    return EnvState(new_planets, new_alive, new_fleets, new_fleet_alive, new_step,
-                    new_angvel, new_nfid, new_done, new_init, ia, orb_r, is_orb)
 
 
 def _owned_indices(planets, planet_alive, player: int):
@@ -239,22 +187,6 @@ def apply_actions_core(planets, planet_alive, fleets, fleet_alive, next_fleet_id
     apad = apad.scatter(1, safe_slot, torch.ones_like(safe_slot, dtype=torch.bool))
     new_next = next_fleet_id + target_valid.long().sum(dim=1)
     return new_planets, new_fpad[:, :F], apad[:, :F], new_next
-
-
-def step_full_core(planets, planet_alive, fleets, fleet_alive, step_count, angular_velocity,
-                   next_fleet_id, done, planet_initial_angle, planet_orbital_r, planet_is_orbiting,
-                   actions0, actions1, ship_counts, num_players: int, episode_steps: int):
-    """One full tick: apply both players' launches, then physics. Tensor-in/out (compilable).
-    Returns the tensors needed to continue: (planets, fleets, fleet_alive, step_count,
-    next_fleet_id, done, rewards)."""
-    planets, fleets, fleet_alive, next_fleet_id = apply_actions_core(
-        planets, planet_alive, fleets, fleet_alive, next_fleet_id, angular_velocity, actions0, 0, ship_counts)
-    planets, fleets, fleet_alive, next_fleet_id = apply_actions_core(
-        planets, planet_alive, fleets, fleet_alive, next_fleet_id, angular_velocity, actions1, 1, ship_counts)
-    (new_planets, _, new_fleets, survives, new_step, new_done, rewards, _) = physics_core(
-        planets, planet_alive, fleets, fleet_alive, step_count, angular_velocity,
-        planet_initial_angle, planet_orbital_r, planet_is_orbiting, done, num_players, episode_steps)
-    return new_planets, new_fleets, survives, new_step, next_fleet_id, new_done, rewards
 
 
 def physics_core(planets, planet_alive, fleets, fleet_alive, step_count,

@@ -1413,12 +1413,8 @@ def train(args):
         # Pool-opponent slots have train_mask=False — drop them so PPO only
         # learns from samples where current model picked the action.
         TN = rollout_T * N * P
-        # Keys with shape (T, N) instead of (T, N, P, ...) — skip standard flatten
-        _PER_ENV_KEYS = set()
         flat = {}
         for k, v in storage.items():
-            if k in _PER_ENV_KEYS:
-                continue  # handled separately (not per-player)
             flat[k] = v.reshape(TN, *v.shape[3:])
         flat_adv  = advantages.reshape(TN)
         flat_ret  = returns.reshape(TN)
@@ -1430,8 +1426,6 @@ def train(args):
             flat_ret = flat_ret[train_idx]
         TN = flat_adv.numel()
 
-        fired_train_slots = flat["fire_a"].float() * flat["slot_valid"].float()
-        fired_count = fired_train_slots.sum().clamp(min=1.0)
         # Hoard milestones (player 0, controlled episode-step → no end-skew): at 16/32/50/100,
         #   ships/planet = parked / owned planets         — pile-up per planet
         #   planets     = owned planets                   — expansion trajectory
@@ -1443,7 +1437,7 @@ def train(args):
             ms_metrics[f"ships_per_planet@{_m}"] = g / pl if pl > 0 else 0.0
             ms_metrics[f"planets@{_m}"] = pl / nn if nn > 0 else 0.0
 
-        # Build PPOLearner-compatible batch (matches make_batch in self_play.py)
+        # Build the PPOLearner batch
         batch = {
             "planet_features": flat["planet_features"],
             "fleet_features":  flat["fleet_features"],
