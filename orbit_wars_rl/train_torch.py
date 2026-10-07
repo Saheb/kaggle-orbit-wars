@@ -351,123 +351,6 @@ def compute_diagnostics(metrics, *, train_mask, env, model, args, flat, flat_adv
 
 
 # ----------------------------------------------------------------------------
-# External Python opponents are CPU-bound, so persistent worker processes load
-# each agent once and evaluate independent environments concurrently.
-# ----------------------------------------------------------------------------
-
-import multiprocessing as _mp
-
-_WORKER_AGENT_FN = None  # populated per-worker in _heur_worker_init
-
-
-def _heur_worker_init(agent_path: str):
-    """Each worker fork loads the agent module once and stashes its agent fn."""
-    import importlib.util, sys
-    # Prevent worker processes from oversubscribing Torch's intra-op CPU threads.
-    import torch
-    torch.set_num_threads(1)
-    spec = importlib.util.spec_from_file_location("worker_agent", agent_path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod  # required for @dataclass __module__ resolution
-    spec.loader.exec_module(mod)
-    global _WORKER_AGENT_FN
-    _WORKER_AGENT_FN = mod.agent
-
-
-def _heur_worker_call(obs):
-    """Run the worker's agent on one obs. Logs exceptions and returns no-op."""
-    try:
-        return _WORKER_AGENT_FN(obs) or []
-    except Exception as exc:
-        import sys, traceback
-        print(f"WARNING heur_worker_call: {exc}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        return []
-
-
-class HeuristicWorkerPool:
-    """Persistent process pool around one external heuristic agent."""
-    def __init__(self, agent_path: str, num_workers: int):
-        # Use 'spawn' to avoid inheriting parent's CUDA context (fork+CUDA = deadlock).
-        ctx = _mp.get_context("spawn")
-        self.pool = ctx.Pool(
-            processes=num_workers,
-            initializer=_heur_worker_init,
-            initargs=(agent_path,),
-        )
-        self.num_workers = num_workers
-        self.agent_path = agent_path
-
-    def map(self, obs_list, timeout: float = 30.0):
-        result = self.pool.map_async(_heur_worker_call, obs_list)
-        try:
-            return result.get(timeout=timeout)
-        except Exception as exc:
-            import sys
-            print(f"WARNING HeuristicWorkerPool.map fallback ({type(exc).__name__}: {exc})"
-                  f" — {len(obs_list)} envs will use no-op actions this rollout", file=sys.stderr)
-            return [[] for _ in obs_list]
-
-    def close(self):
-        self.pool.close()
-        self.pool.join()
-
-
-def _heuristic_moves_to_action_tensor(moves_per_env, env, player, device, *,
-                                      owned_idx=None, slot_valid=None, src_pids=None):
-    """Convert list-of-lists [[from_pid, angle_rad, ships], ...] per env into
-    a (num_envs, MAX_OWNED, 3) action tensor plus a (num_envs, MAX_OWNED) float
-    tensor of continuous direction overrides (NaN where no launch).
-
-    Callers may pass the indices already produced by get_features() to avoid
-    recomputing ownership and copying the full planet tensor to the CPU.
-    """
-    from torch_env import MAX_OWNED, NUM_ANGLE_BINS, ANGLE_BIN_WIDTH, SHIP_COUNTS
-    import math as _math
-
-    if owned_idx is None:
-        owned_idx, slot_valid = env.owned_indices_for(player)   # (N, MAX_OWNED)
-        gather_idx = owned_idx.unsqueeze(-1).expand(-1, -1, 7).cpu()
-        # planet id per owned slot (column 0) — same value the precomputed fast path supplies.
-        src_pids = env.planets.cpu().gather(1, gather_idx)[:, :, 0]
-    N = owned_idx.shape[0]
-    sv_cpu = slot_valid.cpu() if torch.is_tensor(slot_valid) else slot_valid
-    src_pids_cpu = src_pids.cpu() if torch.is_tensor(src_pids) else src_pids
-    fire = torch.zeros(N, MAX_OWNED, dtype=torch.long)
-    angle_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
-    ship_bin = torch.zeros(N, MAX_OWNED, dtype=torch.long)
-    direction_override = torch.full((N, MAX_OWNED), float("nan"), dtype=torch.float32)
-
-    for e in range(N):
-        moves = moves_per_env[e]
-        if not moves:
-            continue
-        pid_to_slot = {}
-        for k in range(MAX_OWNED):
-            if bool(sv_cpu[e, k]):
-                pid_to_slot[int(src_pids_cpu[e, k])] = k
-        for mv in moves:
-            if not isinstance(mv, (list, tuple)) or len(mv) < 3:
-                continue
-            slot = pid_to_slot.get(int(mv[0]))
-            if slot is None:
-                continue
-            ang = float(mv[1]) % (2 * _math.pi)
-            ab = int(ang / ANGLE_BIN_WIDTH) % NUM_ANGLE_BINS
-            ships = int(mv[2])
-            best, best_diff = 0, 10**9
-            for b, c in enumerate(SHIP_COUNTS):
-                if abs(c - ships) < best_diff:
-                    best_diff, best = abs(c - ships), b
-            fire[e, slot] = 1
-            angle_bin[e, slot] = ab
-            ship_bin[e, slot] = best
-            direction_override[e, slot] = ang
-    return (torch.stack([fire, angle_bin, ship_bin], dim=-1).to(device),
-            direction_override.to(device))
-
-
-# ----------------------------------------------------------------------------
 # Training loop
 # ----------------------------------------------------------------------------
 
@@ -712,7 +595,7 @@ def train(args):
                   f"({e}) — continuing with a cold optimizer.")
 
     # ----------------------------------------------------------------------
-    # Opponent pool setup (PFSP self-play with optional external heuristics)
+    # Opponent pool setup (PFSP self-play over past-self snapshots + pinned RL champions)
     # ----------------------------------------------------------------------
     pool: OpponentPool | None = None
     pool_opp_model: EntityTransformer | None = None  # reusable frozen model for 'self' opponents
@@ -736,37 +619,18 @@ def train(args):
         if resumed_pool_path:
             pool = OpponentPool.load(resumed_pool_path)
             print(f"Pool resumed from {resumed_pool_path}: {len(pool)} members")
-            # OpponentPool.load() restores the SAVED external_fraction — a CONFIG knob, not
-            # state (unlike the member list / PFSP stats, which we DO keep). Without this the
-            # current run's --pool-external-fraction is silently ignored on resume: a pool
-            # saved at 0.6 kept training at 0.6 despite --pool-external-fraction 0.5. The
-            # current run's flag must govern; override it (members/stats untouched).
-            if pool.external_fraction != args.pool_external_fraction:
-                print(f"  override external_fraction {pool.external_fraction:.2f} -> "
-                      f"{args.pool_external_fraction:.2f} (CLI --pool-external-fraction wins on resume)")
-                pool.external_fraction = args.pool_external_fraction
-            # Same resume footgun for pfsp_externals (a CONFIG knob): CLI flag must govern.
-            if pool.pfsp_externals != args.pfsp_externals:
-                print(f"  override pfsp_externals {pool.pfsp_externals} -> "
-                      f"{args.pfsp_externals} (CLI --pfsp-externals wins on resume)")
-                pool.pfsp_externals = args.pfsp_externals
         else:
             pool = OpponentPool(
                 max_self_members=args.pool_max_size,
                 pfsp_alpha=args.pool_pfsp_alpha,
-                mastered_winrate=args.pool_mastered_threshold,
-                mastered_min_games=args.pool_mastered_min_games,
                 pfsp_min_games=args.pool_pfsp_min_games,
-                external_fraction=args.pool_external_fraction,
-                pfsp_externals=args.pfsp_externals,
             )
             # Seed pool with the starting weights so it isn't empty on iteration 1
             pool.add_self_checkpoint(0, model.state_dict())
 
         # Preseed pool from a directory of .pt checkpoints (appended as 'self'
-        # members). Lets us dilute the heuristic share from iter 1 by populating
-        # the pool with prior-run snapshots instead of waiting for organic
-        # snapshots to accumulate.
+        # members), populating the pool with prior-run snapshots instead of waiting
+        # for organic snapshots to accumulate.
         if args.preseed_pool:
             import re
             preseed_dir = Path(args.preseed_pool)
@@ -845,56 +709,26 @@ def train(args):
                 print(f"  anchor seeded from {src} → pinned pool member {ANCHOR_NAME}")
             learner.set_anchor(anchor_sd)
 
-        # External opponents come from CLI flag — appended even on resume so
-        # the user can add new externals without modifying the pool file.
-        if args.pool_mode == "mixed" and args.external_opponents:
-            existing_ext_names = {m.name for m in pool.members if m.kind == "external_heuristic"}
-            for path in args.external_opponents.split(","):
-                path = path.strip()
-                if not path: continue
-                name = Path(path).stem
-                if name in existing_ext_names:
-                    print(f"  pool external already present from resume: {name}")
-                    continue
-                pool.add_external_heuristic(name, path)
-                print(f"  pool external loaded: {name} ({path})")
-        # Create one dispatcher per external heuristic, keyed by member name so
-        # compute_pool_actions can dispatch by opp.name. All externals run via CPU
-        # worker pools (the in-process GPU planner adapter deadlocked rollout 1).
-        heur_worker_pools: dict[str, HeuristicWorkerPool] = {}
-        nw = args.heuristic_workers if args.heuristic_workers > 0 else max(1, (os.cpu_count() or 2) - 1)
-        for m in pool.members:
-            if m.kind == "external_heuristic":
-                src = getattr(m, "_source_path", None) or args.external_opponents.split(",")[0].strip()
-                heur_worker_pools[m.name] = HeuristicWorkerPool(src, nw)
-                print(f"  heuristic worker pool: {m.name} × {nw} workers")
         # Pre-allocate a frozen model for 'self' opponents (loaded with state_dict per rollout)
         pool_opp_model = copy.deepcopy(model).to(device)
         pool_opp_model.eval()
         print(f"Pool initialised: mode={args.pool_mode}, members={len(pool)} (at init), "
               f"pool-fraction={args.pool_fraction}, snapshot_every={args.pool_checkpoint_interval:,} steps")
-        _pool_ext = max(0.0, min(1.0, args.pool_external_fraction))
         _pool_pin = max(0.0, min(1.0, args.pool_pinned_fraction))
         if args.pool_pinned_fraction > 0.0:
-            _pool_self = max(0.0, 1.0 - _pool_ext - _pool_pin)
+            _pool_self = max(0.0, 1.0 - _pool_pin)
             _pin_total = args.pool_fraction * _pool_pin
         else:
-            _pool_self = max(0.0, 1.0 - _pool_ext)
+            _pool_self = 1.0
             _pin_total = 0.0
-        _ext_total = args.pool_fraction * _pool_ext
         _pool_self_total = args.pool_fraction * _pool_self
         _current_self_total = max(0.0, 1.0 - args.pool_fraction)
-        print(f"  pool exposure target: external≈{_ext_total:.2f} total, "
+        print(f"  pool exposure target: "
               f"pool-self≈{_pool_self_total:.2f} total, current-self≈{_current_self_total:.2f} total"
               + (f", pinned≈{_pin_total:.2f} total" if args.pool_pinned_fraction > 0.0 else ""))
-        if (args.pool_mode == "mixed" and args.external_opponents and args.pool_external_fraction >= 1.0
-                and any(m.kind == "self" for m in pool.members)):
-            print("  WARN: --pool-external-fraction >= 1.0 means self-checkpoints in the pool "
-                  "will not be sampled (their pool wr stays n=0). If you intended 80% external "
-                  "+ 20% pool-self, use --pool-fraction 1.0 --pool-external-fraction 0.8.")
         if args.pool_pinned_fraction > 0.0:
-            print(f"  Opponent-difficulty RAMP active: pinned-RL + external ease in 0 -> "
-                  f"{args.pool_pinned_fraction:.3f}/{args.pool_external_fraction:.3f} of the pool slice "
+            print(f"  Opponent-difficulty RAMP active: pinned-RL eases in 0 -> "
+                  f"{args.pool_pinned_fraction:.3f} of the pool slice "
                   f"over {args.pool_hard_ramp_steps:,} steps (true-zero start = self-play early).")
         print()
     last_pool_snapshot_step = 0
@@ -931,7 +765,6 @@ def train(args):
                     "num_minibatches": cfg.ppo.num_minibatches,
                     "pool_mode": args.pool_mode,
                     "pool_fraction": args.pool_fraction,
-                    "pool_external_fraction": args.pool_external_fraction,
                     "action_decode": args.action_decode,
                     "resume": args.resume or "",
                     "ship_bin_mode": cfg.model.ship_bin_mode,
@@ -960,11 +793,7 @@ def train(args):
     P = args.num_players  # num players — every seat's transitions are collected for PPO
     # 4p pool = HOMOGENEOUS self-snapshots: a pool env puts the learner in one seat and fills the
     # other P-1 seats with ONE sampled member (the per-seat override + train-mask machinery below
-    # is generalized to all non-learner seats). External heuristics in 4p are NOT validated.
-    if P > 2 and args.pool_external_fraction > 0:
-        raise NotImplementedError(
-            "4p with EXTERNAL pool members is not validated — use --pool-mode self "
-            "(self-snapshots fill the 3 non-learner seats; that path IS wired/tested).")
+    # is generalized to all non-learner seats).
 
     # Rollout buffers: CPU by default (keeps GPU memory free). --gpu-storage keeps them
     # ON the GPU, eliminating the per-step D2H feature copy (samp_store) and the per-minibatch
@@ -1020,9 +849,8 @@ def train(args):
 
     def compute_pool_actions(opp: PoolMember, player: int, env_ids: torch.Tensor,
                              cached_feats: dict | None = None) -> torch.Tensor:
-        """Return an action tensor and optional direction override for an opponent
-        in the envs listed in `env_ids` (1-D LongTensor). Supports 'self' (frozen RL
-        model on GPU) and 'external_heuristic' (.py agent via CPU worker pool).
+        """Return the action tensor of a pool member (frozen RL model on GPU) in the envs
+        listed in `env_ids` (1-D LongTensor).
 
         Keyed by an arbitrary index set, NOT a contiguous slice: per-episode pool
         assignment lets different envs hold different members at the same step, so the
@@ -1031,67 +859,25 @@ def train(args):
         `cached_feats` (if given) is the env-batched `get_features(player)` already computed
         for the learning model this step — reused for 'self' members instead of recomputing,
         and indexed to `env_ids` so the frozen model forwards only its assigned envs."""
-        if opp.kind == "self":
-            opp_model = _get_pool_self_model(opp)   # cached weights (no per-group load_state_dict)
-            feats = cached_feats if cached_feats is not None else \
-                env.get_features(player, max_planets=cfg.env.max_planets, max_fleets=128)
-            sub = index_features(feats, env_ids)    # select our envs BEFORE the forward
-            with torch.no_grad():
-                outs = opp_model(
-                    sub["planet_features"], sub["fleet_features"],
-                    sub["global_features"], sub["planet_mask"],
-                    sub["fleet_mask"],
-                    fire_mask=sub["fire_mask"],
-                    slot_valid=sub["slot_valid"], owned_indices=sub["owned_indices"],
-                    owned_count=sub["owned_count"],
-                    pairwise_features=sub.get("pairwise_features"),
-                )
-            fire_a, direction_a, ship_a, target_a, *_ = sample_action_batched(
-                outs, sub["fire_mask"], sub.get("target_mask"), cfg.model.ship_bin_mode
+        opp_model = _get_pool_self_model(opp)   # cached weights (no per-group load_state_dict)
+        feats = cached_feats if cached_feats is not None else \
+            env.get_features(player, max_planets=cfg.env.max_planets, max_fleets=128)
+        sub = index_features(feats, env_ids)    # select our envs BEFORE the forward
+        with torch.no_grad():
+            outs = opp_model(
+                sub["planet_features"], sub["fleet_features"],
+                sub["global_features"], sub["planet_mask"],
+                sub["fleet_mask"],
+                fire_mask=sub["fire_mask"],
+                slot_valid=sub["slot_valid"], owned_indices=sub["owned_indices"],
+                owned_count=sub["owned_count"],
+                pairwise_features=sub.get("pairwise_features"),
             )
-            # Rows already correspond 1:1 to env_ids (we indexed before the forward).
-            return torch.stack([fire_a, direction_a, ship_a, target_a], dim=-1), None
-
-        if opp.kind == "external_heuristic":
-            from torch_env import to_legacy_obs_batch
-            # Convert the whole group to CPU observations in one transfer.
-            _t0 = time.perf_counter()
-            obs_list = to_legacy_obs_batch(env, env_ids, player)
-            _t_acc["ext_obs"] += time.perf_counter() - _t0
-            wp = heur_worker_pools.get(opp.name)
-            if wp is not None:
-                _t0 = time.perf_counter()
-                moves_per_env = wp.map(obs_list)
-                _t_acc["ext_wait"] += time.perf_counter() - _t0
-            else:
-                # Fallback: serial path (no worker pool registered)
-                moves_per_env = []
-                for obs in obs_list:
-                    try:
-                        moves_per_env.append(opp.agent_fn(obs) or [])
-                    except Exception:
-                        moves_per_env.append([])
-            # Reuse ownership tensors already computed for this seat.
-            _t0 = time.perf_counter()
-            if cached_feats is not None:
-                oi_full, sv_full = cached_feats["owned_indices"], cached_feats["slot_valid"]
-            else:
-                oi_full, sv_full = env.owned_indices_for(player)
-            oi_sub, sv_sub = oi_full[env_ids], sv_full[env_ids]
-            src_pids = env.planets[env_ids, :, 0].gather(1, oi_sub)   # (n, MAX_OWNED) planet ids
-            act, direction_override = _heuristic_moves_to_action_tensor(
-                moves_per_env, env, player, device,
-                owned_idx=oi_sub, slot_valid=sv_sub, src_pids=src_pids)
-            _t_acc["ext_conv"] += time.perf_counter() - _t0
-            # A -1 target tells the target-decoding environment to use the external
-            # agent's continuous direction override.
-            pad_target = torch.full(
-                act.shape[:-1] + (1,), -1, dtype=act.dtype, device=act.device
-            )
-            act = torch.cat([act, pad_target], dim=-1)
-            return act, direction_override
-
-        raise ValueError(f"unknown opponent kind: {opp.kind}")
+        fire_a, direction_a, ship_a, target_a, *_ = sample_action_batched(
+            outs, sub["fire_mask"], sub.get("target_mask"), cfg.model.ship_bin_mode
+        )
+        # Rows already correspond 1:1 to env_ids (we indexed before the forward).
+        return torch.stack([fire_a, direction_a, ship_a, target_a], dim=-1)
 
     # Synchronize phase boundaries only when profiling so asynchronous GPU work is
     # attributed to the phase that launched it.
@@ -1145,9 +931,7 @@ def train(args):
         if args.pool_pinned_fraction > 0.0:
             ramp = (min(steps_now / args.pool_hard_ramp_steps, 1.0)
                     if args.pool_hard_ramp_steps > 0 else 1.0)
-            member = pool.sample(rng,
-                                 external_fraction=args.pool_external_fraction * ramp,
-                                 pinned_fraction=args.pool_pinned_fraction * ramp)
+            member = pool.sample(rng, pinned_fraction=args.pool_pinned_fraction * ramp)
         else:
             member = pool.sample(rng)
         if member is None:
@@ -1186,13 +970,13 @@ def train(args):
 
         # --- Rollout collection (no grad) -----------------------------------
         # Per-rollout wall-time breakdown attributes main-thread time to
-        # get_features / model-forward / sample+D2H-store / pool (ext_* ⊂ pool) / env_step /
+        # get_features / model-forward / sample+D2H-store / pool / env_step /
         # post (milestones, done handling, reward store) / bootstrap / gae / batch-build
         # (flatten + minibatch H2D) / ppo_update (upd_fwd/bwd/opt ⊂ upd). Default: CPU
         # perf_counter only → GPU-async work lands at the next sync point. With
         # --profile-sync each bucket owns its own GPU work (true phase attribution).
         _t_acc = {k: 0.0 for k in (
-            "gf", "fwd", "samp_store", "pool", "ext_obs", "ext_wait", "ext_conv",
+            "gf", "fwd", "samp_store", "pool",
             "estep", "post", "boot", "gae", "build", "upd", "upd_fwd", "upd_bwd",
             "upd_opt")}
         _t_iter0 = time.perf_counter()
@@ -1242,7 +1026,6 @@ def train(args):
             # action, and mark the slot not-trainable so PPO ignores it. Per-episode
             # assignment means different envs may hold different members/seats this step,
             # so we group by (member, opp_seat) and call compute_pool_actions per group.
-            direction_overrides = None
             if N_pool > 0:
                 _t_pool = time.perf_counter()
                 groups: dict = {}  # (id(member), opp_seat) -> [member, opp_seat, [env ids]]
@@ -1258,7 +1041,7 @@ def train(args):
                                           [env_member[e], os_, []])[2].append(e)
                 for member, os_, ids in groups.values():
                     ids_t = torch.tensor(ids, device=env.device, dtype=torch.long)
-                    opp_action, opp_cont = compute_pool_actions(
+                    opp_action = compute_pool_actions(
                         member, os_, ids_t, cached_feats=feats_by_player.get(os_))
                     # Advanced-index assignment (index_put_) requires matching dtypes — it
                     # does NOT auto-cast the way the old contiguous-slice copy_ did; cast to
@@ -1266,20 +1049,10 @@ def train(args):
                     dst = actions_per_player[os_]
                     dst[ids_t] = opp_action.to(dst.dtype)
                     storage["train_mask"][t, ids_t, os_] = False
-                    if opp_cont is not None:
-                        if direction_overrides is None:
-                            direction_overrides = {}
-                        ovr = direction_overrides.get(os_)
-                        if ovr is None:
-                            ovr = torch.full(actions_per_player[os_].shape[:2],
-                                             float("nan"), device=env.device)
-                            direction_overrides[os_] = ovr
-                        ovr[ids_t] = opp_cont.to(ovr.dtype)
                 _sync(); _t_acc["pool"] += time.perf_counter() - _t_pool
 
             _t_es = time.perf_counter()
-            _, rewards, done = env.step(
-                actions_per_player, angle_overrides=direction_overrides)
+            _, rewards, done = env.step(actions_per_player)
             _sync(); _t_acc["estep"] += time.perf_counter() - _t_es
             _t_post = time.perf_counter()
             # Hoard milestones: when an env is at episode-step 16/32/50/100, accumulate
@@ -1571,7 +1344,7 @@ def train(args):
                         f"{metrics.get('phase4_ship_decision_flip', 0):.3f}"
                     )
                 if args.log_timing:
-                    # ext_* ⊂ pool and upd_fwd/bwd/opt ⊂ upd, so the denominator is this
+                    # upd_fwd/bwd/opt ⊂ upd, so the denominator is this
                     # iteration's wall-clock, not the bucket sum; "covered" < 100% exposes
                     # unattributed time (diagnostics, logging, Python glue).
                     _wall = (now - _t_iter0) or 1.0
@@ -1717,8 +1490,7 @@ def train(args):
                 print(f"  saved {pool_path} ({len(pool)} members)")
 
         # Pool snapshot (much more frequent than full checkpoint): adds the
-        # current weights to the opponent pool for PFSP sampling. Also evict
-        # any external opponent we've mastered, and print a pool summary.
+        # current weights to the opponent pool for PFSP sampling, and print a pool summary.
         if pool is not None and total_env_steps - last_pool_snapshot_step >= args.pool_checkpoint_interval:
             last_pool_snapshot_step = total_env_steps
             pool.add_self_checkpoint(total_env_steps, model.state_dict())
@@ -1752,17 +1524,13 @@ def train(args):
                           f"(gate {args.anchor_promote_winrate}/"
                           f"{args.anchor_promote_min_games})")
 
-            evicted = pool.maybe_evict_mastered()
-            if evicted:
-                print(f"  pool: mastered & evicted external opponents: {evicted}")
             print(f"  pool snapshot @ step {total_env_steps:,}")
             if args.pool_pinned_fraction > 0.0:
                 ramp = (min(total_env_steps / args.pool_hard_ramp_steps, 1.0)
                         if args.pool_hard_ramp_steps > 0 else 1.0)
                 print(f"  pool hard-ramp {ramp:.2f} ({total_env_steps:,}/{args.pool_hard_ramp_steps:,}): "
-                      f"LIVE pinned_frac={args.pool_pinned_fraction * ramp:.3f} "
-                      f"external_frac={args.pool_external_fraction * ramp:.3f} of pool slice "
-                      f"(target {args.pool_pinned_fraction:.3f}/{args.pool_external_fraction:.3f})")
+                      f"LIVE pinned_frac={args.pool_pinned_fraction * ramp:.3f} of pool slice "
+                      f"(target {args.pool_pinned_fraction:.3f})")
             print(pool.summary())
 
     elapsed = time.perf_counter() - start
@@ -1772,14 +1540,6 @@ def train(args):
 
     # Final checkpoint
     atomic_torch_save(learner.state_dict(), f"checkpoints/torch_step_{total_env_steps}_{run_ts}_final.pt")
-
-    # Shut down external heuristic worker pools
-    if 'heur_worker_pools' in dir():
-        for wp in heur_worker_pools.values():
-            try:
-                wp.close()
-            except Exception:
-                pass
 
     if wb is not None:
         wb.finish()
@@ -1915,18 +1675,18 @@ if __name__ == "__main__":
                              "recaptured planet is never mis-blocked. Pure mask, internalised at "
                              "inference. 0 = off. Try 3. Enemy/neutral untouched; needs --allow-reinforce.")
     parser.add_argument("--num-players", type=int, choices=[2, 4], default=2,
-                        help="Players per game. 4 = FFA self-play (every seat is the learning "
-                             "policy; --pool-fraction must be 0 — external 4p pool not yet wired).")
+                        help="Players per game. 4 = FFA self-play (the learner plus, in pool envs, "
+                             "one sampled pool snapshot filling the other three seats).")
     parser.add_argument("--fleet-target-refresh", type=int, default=4,
                         help="Re-resolve ALL cached fleet targets every K ticks (staleness bound "
                              "for the launch-time target cache — SPS lever, 2026-07-05). Accuracy "
                              "vs true collision: 1 (~fresh) 95.6%%, 2 95.0%%, 4 93.7%%, 8 91.9%%, "
                              "0 (launch-only; comet staleness never fixed) 79.2%%.")
-    # Opponent pool (PFSP self-play with optional external heuristics) ----
-    parser.add_argument("--pool-mode", choices=["none", "self", "mixed"], default="none",
+    # Opponent pool (PFSP self-play over past-self snapshots + pinned RL champions) ----
+    parser.add_argument("--pool-mode", choices=["none", "self"], default="none",
                         help="none: pure current-vs-current self-play (default). "
-                             "self: pool of past-self checkpoints only. "
-                             "mixed: self-checkpoints + external heuristics from --external-opponents.")
+                             "self: pool of past-self checkpoints (+ pinned RL champions). "
+                             "('mixed' — external .py heuristics — was removed in the 2026-10 cleanup.)")
     parser.add_argument("--pool-fraction", type=float, default=0.5,
                         help="Fraction of envs that play current-vs-pool-opponent. "
                              "The rest do P=2 symmetric self-play.")
@@ -1935,44 +1695,23 @@ if __name__ == "__main__":
                              "Should be much smaller than --checkpoint-interval.")
     parser.add_argument("--pool-max-size", type=int, default=20,
                         help="Max past-self checkpoints in the pool (FIFO eviction).")
-    parser.add_argument("--heuristic-workers", type=int, default=0,
-                        help="Number of worker processes per external heuristic. "
-                             "0 = auto (cpu_count - 1). Used by pool-mode=mixed.")
     parser.add_argument("--pool-pfsp-alpha", type=float, default=2.0,
                         help="PFSP sampling exponent: weight = (1 - win_rate)^alpha.")
-    parser.add_argument("--pool-mastered-threshold", type=float, default=0.9,
-                        help="Win-rate above this triggers eviction of an external opponent.")
-    parser.add_argument("--pool-mastered-min-games", type=int, default=50,
-                        help="Minimum games against an external before mastery-eviction is considered.")
     parser.add_argument("--pool-pfsp-min-games", type=int, default=30,
                         help="Minimum games before trusting win-rate for PFSP weight. "
                              "Below this threshold wr=0.5 is assumed, preventing early "
                              "lucky streaks from suppressing an opponent's weight.")
-    parser.add_argument("--pool-external-fraction", type=float, default=0.0,
-                        help="Fixed fraction of pool samples reserved for external heuristic "
-                             "opponents, bypassing PFSP. e.g. 0.4 = 40%% of pool games always "
-                             "go to external opponents (split uniformly among them by default — "
-                             "see --pfsp-externals); the remaining 60%% is governed by PFSP over "
-                             "self-checkpoints. Use for targeted runs where you need sustained "
-                             "pressure from a specific opponent regardless of rollout win-rate.")
-    parser.add_argument("--pfsp-externals", action=argparse.BooleanOptionalAction, default=False,
-                        help="Sample the EXTERNAL slice PFSP-weighted (by (1-ema_wr)^alpha) instead "
-                             "of UNIFORM, so a multi-rung league (e.g. h10/h12/h14) concentrates "
-                             "games on the rungs we lose to most / the matched-difficulty band "
-                             "instead of 1/N each. Default OFF = uniform (the pool's pfsp_w "
-                             "column is display-only for externals when off). Flag-overridden on "
-                             "resume like --pool-external-fraction.")
     parser.add_argument("--pool-pinned-fraction", type=float, default=0.0,
                         help="Target fraction of pool samples reserved for pinned RL champions, "
                              "pulling them out of PFSP into a fixed "
-                             "slice. >0 engages 3-way ramp mode: external / pinned-RL / PFSP-over-"
+                             "slice. >0 engages ramp mode: pinned-RL / PFSP-over-"
                              "organic-selves. Necessary because PFSP up-samples opponents you lose "
                              "to, so a weak from-scratch policy would otherwise over-sample a "
                              "strong pin early. 0 keeps pins inside PFSP.")
     parser.add_argument("--pool-hard-ramp-steps", type=int, default=0,
-                        help="Steps over which the hard opponents (pinned RL + external peeler) "
-                             "ramp in 0→target, linearly. Both --pool-pinned-fraction and "
-                             "--pool-external-fraction are scaled by min(step/ramp,1). Eases the "
+                        help="Steps over which the hard opponents (pinned RL champions) "
+                             "ramp in 0→target, linearly: --pool-pinned-fraction is scaled by "
+                             "min(step/ramp,1). Eases the "
                              "unbeatable opponents in so a weak from-scratch BC isn't win-starved "
                              "(true-zero start = pure self-play early). 0 = no ramp (jump to "
                              "target). Only active when --pool-pinned-fraction > 0.")
@@ -1980,17 +1719,12 @@ if __name__ == "__main__":
                         help="Directory of .pt checkpoints to preseed the pool "
                              "with as 'self' members. Step is parsed from filename "
                              "(e.g. torch_step_5013504.pt -> step=5013504). Useful "
-                             "for diluting the heuristic-share early in training "
-                             "and for resuming pool diversity across runs.")
+                             "for resuming pool diversity across runs.")
     parser.add_argument("--pool-seed-rl", type=str, default="",
                         help="Comma-separated .pt checkpoints to pin into the pool as fixed RL "
                              "champion opponents. Run via the GPU 'self' "
                              "path (fast, sim-gap-immune) and NEVER FIFO-evicted, unlike --preseed-pool. "
                              "Must match the current model architecture (pairwise dim etc.).")
-    parser.add_argument("--external-opponents", type=str, default="",
-                        help="Comma-separated paths to .py heuristic agents (e.g. "
-                             "'opponents/candidate_suneet_lb1200.py,opponents/candidate_zach_public.py'). "
-                             "Only used when --pool-mode=mixed.")
     parser.add_argument("--lr-schedule-steps", type=int, default=0,
                         help="Decouple the LR cosine decay horizon from --total-steps. "
                              "Set larger than --total-steps for slow/partial decay "

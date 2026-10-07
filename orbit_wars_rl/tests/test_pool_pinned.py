@@ -44,7 +44,7 @@ def test_pinned_flag_survives_save_load():
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "pool.pt")
         pool.save(p)
-        loaded = OpponentPool.load(p, reload_externals=False)
+        loaded = OpponentPool.load(p)
 
     pinned = [m for m in loaded.members if m.pinned]
     assert len(pinned) == 1 and pinned[0].name == "seed_rev53b"
@@ -54,7 +54,7 @@ def test_pinned_flag_survives_save_load():
 
 
 def test_pinned_uses_ema_regular_self_uses_lifetime():
-    """uses_ema: pinned RL champions + externals use the recent EMA win-rate (so PFSP
+    """uses_ema: pinned RL champions use the recent EMA win-rate (so PFSP
     doesn't go stale as the policy improves); transient self-snapshots use lifetime."""
     pool = OpponentPool(max_self_members=5)
     pool.add_pinned_rl("rev38", _sd(1))
@@ -105,7 +105,7 @@ def test_pinned_ema_survives_save_load():
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "pool.pt")
         pool.save(p)
-        loaded = OpponentPool.load(p, reload_externals=False)
+        loaded = OpponentPool.load(p)
 
     lp = next(m for m in loaded.members if m.pinned)
     assert abs(lp.ema_win_rate - ema_before) < 1e-9 and lp.ema_games == games_before
