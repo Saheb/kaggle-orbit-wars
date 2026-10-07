@@ -139,7 +139,7 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
                                fire_threshold=0.5, sample: bool = False,
                                ship_bin_mode: str = "absolute",
                                binary_commit_gates: str = "full",
-                               pairwise_features=None,   # (MO, P, >=26) — intent mode reads resolved sizes ch22-25
+                               pairwise_features=None,   # (MO, P, >=26) — binary mode sizes/gates COMMIT from it
                                allow_reinforce: bool = False,
                                reinforce_gate_min_planets: int = 0,
                                reinforce_forward_only: bool = False,
@@ -279,18 +279,8 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
         tidx = int(target_indices[slot])
         if ship_bin_mode == "binary":
             decoded_ships = int(round(float(binary_sizes[slot, tidx])))
-        elif ship_bin_mode == "intent" and pairwise_features is not None:
-            # ship_bins[slot] is the chosen INTENT; read its resolved ship count from the chosen
-            # target's row of the pairwise table (ch22-25 = capture/capture-defend/maintain/all-in,
-            # normalized /200). Same numbers the env used at train time (parity via the resolver).
-            intent = int(ship_bins[slot])
-            if 0 <= tidx < pairwise_features.shape[1] and 0 <= intent < NUM_INTENTS:
-                decoded_ships = int(round(float(pairwise_features[slot, tidx, 22 + intent]) * 200.0))
-            else:
-                decoded_ships = 0
-            decoded_ships = min(decoded_ships, int(max_ships[slot]))
         else:
-            decoded_ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]), mode=ship_bin_mode)
+            decoded_ships = _ship_bin_to_count(int(ship_bins[slot]), int(max_ships[slot]))
         if not fire_decisions[slot]:
             continue
 
@@ -374,35 +364,19 @@ def actions_from_target_policy(fire_logits_target, target_logits, ship_logits_ta
 # (NUM_SHIP_BINS = len(SHIP_COUNTS)); export_agent.py inlines this module body, so they must stay
 # defined here (not imported) for the standalone kaggle agent. Do NOT re-copy these elsewhere.
 SHIP_COUNTS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 19, 22, 26, 30, 35, 42, 50, 60, 72, 86, 102, 122, 145, 173, 206, 245, 290, 350, 420]
-# Fraction-bin values for ship_bin_mode="fraction" (10 bins on (0,1]):
-# bin i → (i+1)/10 fraction of source's max_ships.
-FRACTION_BIN_VALUES = [(i + 1) / 10 for i in range(10)]
 
 
-def _ship_bin_to_count(bin_idx, max_ships, mode: str = "absolute"):
-    """Convert a ship-bin index to an absolute ship count.
-
-    mode:
-      "absolute" — bin_idx indexes the 32-entry SHIP_COUNTS lookup
-      "fraction" — bin_idx indexes the 10-entry FRACTION_BIN_VALUES; the
-                   returned count is round(frac * max_ships), floored to 1
-                   so the fleet is always non-empty.
-    """
+def _ship_bin_to_count(bin_idx, max_ships):
+    """Absolute ship-bin index → ship count: SHIP_COUNTS[bin_idx], capped at max_ships."""
     max_ships = max(1, int(max_ships))
-    if mode == "fraction":
-        n = len(FRACTION_BIN_VALUES)
-        b = max(0, min(int(bin_idx), n - 1))
-        frac = FRACTION_BIN_VALUES[b]
-        ships = int(round(frac * max_ships))
-        return max(1, min(ships, max_ships))
-    # absolute (legacy)
     return min(SHIP_COUNTS[bin_idx], max_ships)
 
 
 # --- Intent ship-sizing resolver (target-relative sizing; experiments.md #4) ---------------
-# The policy chooses a SEMANTIC (capture / capture-defend / maintain / all-in); this resolver
-# fills in the exact integer ship count from the target's requirement, so the head cannot
-# under-commit on a capture (the measured 83%-of-attacks failure). Inputs are the already
+# Resolves four SEMANTIC sizes (capture / capture-defend / maintain / all-in) to exact integer
+# ship counts from the target's requirement. The intent ship MODE that let the policy pick one
+# was removed in the 2026-10 cleanup (superseded by binary); the sizes live on as pairwise
+# feature channels ch22-25 (and "full" binary gates read ch24). Inputs are the already
 # parity-exact pairwise quantities (cap_cost_at_arrival, reachable_enemy_mass ch15,
 # enemy_mass_soon ch20, source garrison); the SAME formula runs in torch_env._resolve_intent_sizes
 # (training) and here (eval/export — inlined). Keep the two in lockstep; tests/ has a fuzz parity.

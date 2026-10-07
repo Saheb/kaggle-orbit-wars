@@ -91,12 +91,9 @@ class EntityTransformer(nn.Module):
         self.fire_head = nn.Linear(D, 1)
         # Launch direction is decoded from the selected target via orbital-intercept
         # geometry; there is no learned angle head.
-        # Ship head: bin count is configurable so the fraction-head experiment
-        # can swap to 10 fraction bins. Default 32 = legacy absolute counts.
+        # Ship head: absolute SHIP_COUNTS bins (binary mode never samples it).
         self.num_ship_bins = getattr(cfg, "num_ship_bins", NUM_SHIP_BINS)
         self.binary_actions = getattr(cfg, "ship_bin_mode", "absolute") == "binary"
-        # Intent sizing (experiments.md #4): ship head emits target-relative intent semantics.
-        self.intent_sizing = getattr(cfg, "ship_bin_mode", "absolute") == "intent"
         self.ship_head = nn.Linear(D, self.num_ship_bins)
         # Target-index head: score each (slot, target) pair from per-target inputs —
         # see docs/bugs.md (target-head collapse).
@@ -323,17 +320,6 @@ class EntityTransformer(nn.Module):
                 ship_logits = ship_logits.clone()
                 ship_residual[..., :N_p, :] = ship_resid_live
                 ship_logits = ship_logits + ship_residual
-                # Intent legality by target ownership (pairwise ch5 = is_mine): capture(0)/
-                # capture-defend(1) are enemy/neutral-only; maintain(2) is own-only; all-in(3) any.
-                if self.intent_sizing:
-                    is_own = pairwise_features[..., 5] > 0.5               # (B, MO, N_p)
-                    illegal = torch.zeros(B, max_owned, N_p, self.num_ship_bins,
-                                          dtype=torch.bool, device=ship_logits.device)
-                    illegal[..., 0] = is_own
-                    illegal[..., 1] = is_own
-                    illegal[..., 2] = ~is_own
-                    ship_logits[..., :N_p, :] = ship_logits[..., :N_p, :].masked_fill(
-                        illegal, -100.0)
         # Mask out invalid planet slots (padded) so target softmax only sees real planets
         if planet_mask is not None:
             tgt_mask = planet_mask.unsqueeze(1).expand(-1, max_owned, -1)  # (B, MO, N_p)

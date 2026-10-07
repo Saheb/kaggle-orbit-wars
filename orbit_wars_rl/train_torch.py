@@ -38,7 +38,6 @@ from torch_env import (
     MAX_OWNED,
     MIN_BINARY_COMMIT_SHIPS,
     SHIP_COUNTS,
-    FRACTION_BIN_VALUES,
 )
 
 
@@ -153,7 +152,6 @@ def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
 
 def decode_ship_bins(ship_bins: torch.Tensor, max_ships: torch.Tensor, ship_bin_mode: str,
                      *, target_bins: torch.Tensor | None = None,
-                     intent_sizes: torch.Tensor | None = None,
                      binary_sizes: torch.Tensor | None = None) -> torch.Tensor:
     """Decode sampled ship bins to ship counts using the same semantics as VecTorchEnv."""
     if ship_bin_mode == "binary":
@@ -161,66 +159,9 @@ def decode_ship_bins(ship_bins: torch.Tensor, max_ships: torch.Tensor, ship_bin_
             raise ValueError("binary decode requires target_bins and binary_sizes")
         target_idx = target_bins.long().clamp(0, binary_sizes.shape[2] - 1)
         return torch.gather(binary_sizes, 2, target_idx.unsqueeze(-1)).squeeze(-1)
-    if ship_bin_mode == "intent":
-        if target_bins is None or intent_sizes is None:
-            raise ValueError("intent decode requires target_bins and intent_sizes")
-        target_idx = target_bins.long().clamp(0, intent_sizes.shape[2] - 1)
-        intent_idx = ship_bins.long().clamp(0, intent_sizes.shape[3] - 1)
-        target_row = torch.gather(
-            intent_sizes, 2,
-            target_idx.unsqueeze(-1).unsqueeze(-1).expand(
-                -1, -1, 1, intent_sizes.shape[3]),
-        ).squeeze(2)
-        return torch.gather(target_row, 2, intent_idx.unsqueeze(-1)).squeeze(-1).clamp(min=1.0)
-    if ship_bin_mode == "fraction":
-        frac_t = torch.tensor(FRACTION_BIN_VALUES, dtype=torch.float32, device=ship_bins.device)
-        idx = ship_bins.long().clamp(0, len(FRACTION_BIN_VALUES) - 1)
-        max_sendable = (max_ships.to(ship_bins.device).float() - 1.0).clamp(min=1.0)
-        return torch.round(frac_t[idx] * max_sendable).clamp(min=1.0)
-
     counts_t = torch.tensor(SHIP_COUNTS, dtype=torch.float32, device=ship_bins.device)
     idx = ship_bins.long().clamp(0, len(SHIP_COUNTS) - 1)
     return counts_t[idx]
-
-
-def intent_rollout_metrics(flat: dict) -> dict[str, float]:
-    """Intent action mix and resolved commitment from actions actually sampled this rollout."""
-    fired = (flat["fire_a"] > 0) & flat["slot_valid"].bool()
-    fired_count = fired.sum().clamp(min=1)
-    intent = flat["ship_a"].long()
-    names = ("capture", "capture_defend", "maintain", "all_in")
-    metrics = {
-        f"intent_{name}_share": float((((intent == i) & fired).sum() / fired_count).item())
-        for i, name in enumerate(names)
-    }
-
-    resolved = flat["ship_count_a"].float()
-    metrics["intent_resolved_ships_mean"] = float(
-        ((resolved * fired).sum() / fired_count).item())
-
-    pairwise = flat.get("pairwise_features")
-    if pairwise is None:
-        return metrics
-    target = flat["target_a"].long().clamp(0, pairwise.shape[2] - 1)
-    chosen = torch.gather(
-        pairwise, 2,
-        target.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, pairwise.shape[-1]),
-    ).squeeze(2)
-    is_enemy = chosen[..., 6] > 0.5
-    is_neutral = chosen[..., 7] > 0.5
-    attack = fired & (is_enemy | is_neutral)
-    attack_count = attack.sum().clamp(min=1)
-    ships_at_arrival = chosen[..., 10] * 200.0
-    production = chosen[..., 8] * 5.0
-    required = ships_at_arrival + is_enemy.float() * production * 3.0 + 1.0
-    commit_ratio = (resolved / required.clamp(min=1.0)).clamp(max=2.0)
-    metrics["intent_attack_resolved_ships_mean"] = float(
-        ((resolved * attack).sum() / attack_count).item())
-    metrics["intent_attack_commit_ratio_capped2"] = float(
-        ((commit_ratio * attack).sum() / attack_count).item())
-    metrics["intent_attack_undercommit_rate"] = float(
-        ((((resolved + 1e-3) < required) & attack).sum() / attack_count).item())
-    return metrics
 
 
 def binary_rollout_metrics(flat: dict) -> dict[str, float]:
@@ -408,9 +349,7 @@ def compute_diagnostics(metrics, *, train_mask, env, model, args, flat, flat_adv
             use_norms = torch.cat(consumers, dim=0).norm(dim=0).detach().cpu().tolist()
             for name, norm in zip(PAIRWISE_FEATURE_NAMES[:feature_dim], use_norms):
                 metrics[f"pairwise_use_norm_{name}"] = float(norm)
-        if getattr(metric_model, "intent_sizing", False):
-            metrics.update(intent_rollout_metrics(flat))
-        elif metric_ship_mode == "binary":
+        if metric_ship_mode == "binary":
             metrics.update(binary_rollout_metrics(flat))
 
 
@@ -700,15 +639,10 @@ def train(args):
 
     if args.phase4_residual_init_std is not None:
         cfg.model.phase4_residual_init_std = args.phase4_residual_init_std
-    # Ship-bin-mode CLI override (from-scratch intent runs; __post_init__ already ran at cfg
-    # construction, so set num_ship_bins here too). Takes precedence over any checkpoint value.
+    # Ship-bin-mode CLI override. Takes precedence over any checkpoint value.
     if args.ship_bin_mode is not None:
         cfg.model.ship_bin_mode = args.ship_bin_mode
-        if args.ship_bin_mode == "intent":
-            from action_mask import NUM_INTENTS
-            cfg.model.num_ship_bins = NUM_INTENTS
-            print(f"Ship-bin-mode=intent → num_ship_bins={NUM_INTENTS} (target-relative intent sizing)")
-        elif args.ship_bin_mode == "binary":
+        if args.ship_bin_mode == "binary":
             print("Ship-bin-mode=binary → fire head is NOOP/COMMIT; ship head is not sampled")
     cfg.model.action_decode = args.action_decode
     cfg.model.allow_reinforce = args.allow_reinforce
@@ -1385,8 +1319,6 @@ def train(args):
                 ship_count_p = decode_ship_bins(
                     ship_p, feats_p["max_ships"], cfg.model.ship_bin_mode,
                     target_bins=target_p,
-                    intent_sizes=(env._intent_sizes.get(p)
-                                  if cfg.model.ship_bin_mode == "intent" else None),
                     binary_sizes=(env._binary_commit_sizes.get(p)
                                   if cfg.model.ship_bin_mode == "binary" else None),
                 )
@@ -1703,23 +1635,7 @@ def train(args):
                     f"tgt n/e {metrics.get('target_share_neutral', 0):.2f}/"
                     f"{metrics.get('target_share_enemy', 0):.2f} | "
                 ) if args.allow_reinforce else ""
-                if cfg.model.ship_bin_mode == "intent":
-                    shipstr = (
-                        f"intent c/cd/m/ai {metrics.get('intent_capture_share', 0):.2f}/"
-                        f"{metrics.get('intent_capture_defend_share', 0):.2f}/"
-                        f"{metrics.get('intent_maintain_share', 0):.2f}/"
-                        f"{metrics.get('intent_all_in_share', 0):.2f} "
-                        f"resolvedμ {metrics.get('intent_resolved_ships_mean', 0):.1f} "
-                        f"under {metrics.get('intent_attack_undercommit_rate', 0):.2f} | "
-                    )
-                    featurestr = (
-                        "intent-use c/cd/m/ai "
-                        f"{metrics.get('pairwise_use_norm_intent_capture_ships', 0):.3f}/"
-                        f"{metrics.get('pairwise_use_norm_intent_capture_defend_ships', 0):.3f}/"
-                        f"{metrics.get('pairwise_use_norm_intent_maintain_ships', 0):.3f}/"
-                        f"{metrics.get('pairwise_use_norm_intent_all_in_ships', 0):.3f}"
-                    )
-                elif cfg.model.ship_bin_mode == "binary":
+                if cfg.model.ship_bin_mode == "binary":
                     shipstr = (
                         f"binary actionable {metrics.get('binary_actionable_source_rate', 0):.2f} "
                         f"noop {metrics.get('binary_noop_rate', 0):.2f} "
@@ -1870,18 +1786,7 @@ def train(args):
                     "target_conditioning/fire_target_straddle_rate": metrics.get("fire_target_straddle_rate", 0),
                     "target_conditioning/ship_decision_flip": metrics.get("phase4_ship_decision_flip", 0),
                 }
-                if cfg.model.ship_bin_mode == "intent":
-                    wandb_metrics.update({
-                        "intent/capture_share": metrics.get("intent_capture_share", 0),
-                        "intent/capture_defend_share": metrics.get("intent_capture_defend_share", 0),
-                        "intent/maintain_share": metrics.get("intent_maintain_share", 0),
-                        "intent/all_in_share": metrics.get("intent_all_in_share", 0),
-                        "intent/resolved_ships_mean": metrics.get("intent_resolved_ships_mean", 0),
-                        "intent/attack_resolved_ships_mean": metrics.get("intent_attack_resolved_ships_mean", 0),
-                        "intent/attack_commit_ratio_capped2": metrics.get("intent_attack_commit_ratio_capped2", 0),
-                        "intent/attack_undercommit_rate": metrics.get("intent_attack_undercommit_rate", 0),
-                    })
-                elif cfg.model.ship_bin_mode == "binary":
+                if cfg.model.ship_bin_mode == "binary":
                     wandb_metrics.update({
                         "binary/actionable_source_rate": metrics.get("binary_actionable_source_rate", 0),
                         "binary/noop_rate": metrics.get("binary_noop_rate", 0),
@@ -1918,7 +1823,7 @@ def train(args):
                 if slot0 > 0.8 and slot_rest_max < 0.1:
                     print("  ⚠ slot-0-only firing: slot 0 fire_prob>0.8 while all "
                           "other slots <0.1 — fire-head is collapsing to one source")
-                if cfg.model.ship_bin_mode not in ("intent", "binary") and metrics.get("ship_bin0_rate", 0) > 0.5:
+                if cfg.model.ship_bin_mode != "binary" and metrics.get("ship_bin0_rate", 0) > 0.5:
                     print(f"  ⚠ ship-bin-0 collapse: {metrics['ship_bin0_rate']:.0%} of fires "
                           f"argmax to bin 0 (1 ship). 1-ship fleets can't capture neutrals.")
 
@@ -2131,13 +2036,11 @@ if __name__ == "__main__":
                              "Persisted in the checkpoint — eval/export auto-match. See "
                              "docs/training.md 'THE REINFORCEMENT LEGALITY WALL'.")
     parser.add_argument("--ship-bin-mode", type=str, default=None,
-                        choices=["absolute", "fraction", "intent", "binary"],
-                        help="Ship-head action space. 'absolute' (32 count bins, default), "
-                             "'fraction' (10 source-fraction bins), or 'intent' (#4: 4 target-relative "
-                             "semantics capture/capture-defend/maintain/all-in resolved to exact ships), "
-                             "or 'binary' (fire=NOOP/COMMIT; affordable attacks all-in, own targets "
-                             "deterministically defend). Intent forces num_ship_bins=4; binary reuses "
-                             "the checkpoint head shape but does not sample or optimize it.")
+                        choices=["absolute", "binary"],
+                        help="Ship-head action space. 'absolute' (32 count bins, default) or "
+                             "'binary' (fire=NOOP/COMMIT, sized by --binary-commit-gates). Binary "
+                             "reuses the checkpoint head shape but does not sample or optimize it. "
+                             "('fraction' and 'intent' were removed in the 2026-10 cleanup.)")
     parser.add_argument("--phase4-residual-init-std", type=float, default=None,
                         help="Stddev for target-conditioned residual output-layer init. "
                              "0.0 = exact parity; small nonzero values let the "

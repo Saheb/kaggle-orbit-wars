@@ -42,7 +42,6 @@ class ModelConfig:
     num_ship_bins: int = 32
     # How to decode a ship-bin index into an absolute ship count:
     #   "absolute" — bin → SHIP_COUNTS[bin]  (32-entry hybrid linear-log table)
-    #   "fraction" — bin → round(FRACTION_BIN_VALUES[bin] * max_ships)
     #   "binary"   — fire head chooses NOOP/COMMIT; ships are resolved deterministically
     # MUST match the BC label scheme that produced the checkpoint.
     # Default "absolute" preserves legacy checkpoint behaviour.
@@ -70,13 +69,6 @@ class ModelConfig:
     # Value head input width. 0 = auto (2*entity_dim concat head). Eval sets this
     # to entity_dim when loading an older mean-pool checkpoint.
     value_head_in: int = 0
-
-    def __post_init__(self):
-        # Intent sizing emits target-relative semantics rather than absolute counts.
-        # Force the head width so model, PPO, and Q-head construction agree.
-        if self.ship_bin_mode == "intent":
-            from action_mask import NUM_INTENTS
-            self.num_ship_bins = NUM_INTENTS
 
 
 @dataclass
