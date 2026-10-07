@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import math
 import os
 import random
 import time
@@ -278,10 +277,8 @@ def compute_diagnostics(metrics, *, train_mask, env, model, args, flat, flat_adv
             metrics["reinf_step_e"] = float((rs[0] / fs[0]).item())
             metrics["reinf_step_m"] = float((rs[1] / fs[1]).item())
             metrics["reinf_step_l"] = float((rs[2] / fs[2]).item())
-    if args.staging_shaping_coef != 0.0 and getattr(env, "_staging_phi_n", 0) > 0:
-        metrics["staging_phi"] = env._staging_phi_acc / env._staging_phi_n
     # overask_rate: fraction of the current policy's INTENDED launches whose ship_count >
-    # source garrison (→ DROPPED in "drop" mode, clamped-to-full in "clamp"/eval). Always
+    # source garrison (→ clamped to the full garrison, as in eval). Always
     # logged (not gated on allow_reinforce); split by episode window [<50/50-100/>100].
     if getattr(env, "_attempt_step", None) is not None:
         tmu = train_frac.unsqueeze(-1)                                        # (N, players, 1)
@@ -547,14 +544,7 @@ def train(args):
     if args.allow_reinforce and args.reinforce_gate_min_planets > 0:
         print(f"Reinforcement EMPIRE GATE: own targets legal only at >= "
               f"{args.reinforce_gate_min_planets} planets (attack-only below; mask, no Nash risk)")
-    print(f"Win margin coeff: {args.win_margin_coeff}")
-    print(f"Expansion coeff: {args.expansion_coef}")
-    print(f"Early capture coeff: {args.early_capture_coef} (decay over {args.early_capture_steps} steps)")
-    if args.early_capture_anneal_frac > 0.0:
-        print(f"Early capture ANNEAL: cosine {args.early_capture_coef}→0 over "
-              f"{args.early_capture_anneal_frac * args.total_steps:,.0f} steps "
-              f"(frac {args.early_capture_anneal_frac}), then 0")
-    print(f"First Strike: {args.first_strike_mult}x for t<{args.first_strike_steps} steps" if args.first_strike_steps > 0 else "First Strike: off")
+    print("Reward: sparse terminal ±1 (shaping levers removed 2026-10; Lesson 11)")
 
     # Honor model-config fields saved in the checkpoint (num_ship_bins,
     # ship_bin_mode) BEFORE creating env or model.
@@ -641,15 +631,6 @@ def train(args):
                       allow_reinforce=args.allow_reinforce,
                       reinforce_gate_min_planets=args.reinforce_gate_min_planets,
                       reverse_edge_cooldown=args.reverse_edge_cooldown,
-                      win_margin_coeff=args.win_margin_coeff,
-                      expansion_coef=args.expansion_coef,
-                      early_capture_coef=args.early_capture_coef,
-                      early_capture_steps=args.early_capture_steps,
-                      first_strike_steps=args.first_strike_steps,
-                      first_strike_mult=args.first_strike_mult,
-                      staging_shaping_coef=args.staging_shaping_coef,
-                      staging_topk=args.staging_topk,
-                      staging_gamma=cfg.ppo.gamma,
                       fleet_target_refresh_every=args.fleet_target_refresh)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
 
@@ -951,13 +932,10 @@ def train(args):
                     "pool_mode": args.pool_mode,
                     "pool_fraction": args.pool_fraction,
                     "pool_external_fraction": args.pool_external_fraction,
-                    "win_margin_coeff": args.win_margin_coeff,
                     "action_decode": args.action_decode,
                     "resume": args.resume or "",
                     "ship_bin_mode": cfg.model.ship_bin_mode,
                     "feature_config": "blessed-2026-07",  # game-phase+resolver ON, deflate variants removed
-                    "staging_shaping_coef": args.staging_shaping_coef,
-                    "staging_topk": args.staging_topk,
                     "entropy_coef_fire": args.entropy_coef_fire,
                     "noop_kl_coef": args.noop_kl_coef,
                     "noop_target_launch_rate": args.noop_target_launch_rate,
@@ -1189,14 +1167,6 @@ def train(args):
         # env_is_pool / env_member / env_seat are sticky per episode (drawn on reset,
         # see the step loop). N_pool is just a diagnostic count, not a slice.
         N_pool = sum(env_is_pool)
-        # Training-wide anneal of early_capture_coef → 0 (dense→sparse shaping).
-        # Cosine from the base coef at step 0 to 0 at frac*total_steps, then stays 0.
-        # env.step() reads self.early_capture_coef fresh each step, so mutating the
-        # attribute here per-rollout is sufficient (no env-code change needed).
-        if args.early_capture_anneal_frac > 0.0 and args.early_capture_coef > 0.0:
-            ec_decay_steps = args.early_capture_anneal_frac * args.total_steps
-            ec_frac = min(total_env_steps / max(ec_decay_steps, 1), 1.0)
-            env.early_capture_coef = args.early_capture_coef * 0.5 * (1.0 + math.cos(math.pi * ec_frac))
         # Reset train_mask: all True by default, mark opp's slots False below
         storage["train_mask"].fill_(True)
         # Zero the reinforce_rate + overask accumulators for this rollout (env counts realized
@@ -1337,9 +1307,8 @@ def train(args):
                 reward_history_p1.append(r)
 
             # PFSP attribution + per-episode reassignment. Credit each finished POOL
-            # env to ITS OWN assigned member using the RAW (pre-shaping) winner — NOT
-            # the shaped `rewards` tensor, which by now carries material/expansion/
-            # early-capture shaping — then draw a fresh assignment for the new episode
+            # env to ITS OWN assigned member using the env's winner mask (env._last_wins)
+            # — then draw a fresh assignment for the new episode
             # that env.step() already auto-reset. Crediting BEFORE reassign so the slot
             # still holds the just-finished episode's controller.
             done_list = torch.nonzero(done, as_tuple=False).flatten().tolist()
@@ -1705,8 +1674,6 @@ def train(args):
                         "policy/ship_bin0_rate": metrics.get("ship_bin0_rate", 0),
                         "policy/mean_ship_bin": metrics.get("mean_ship_bin", 0),
                     })
-                if args.staging_shaping_coef != 0.0 and "staging_phi" in metrics:
-                    wandb_metrics["staging/phi"] = metrics["staging_phi"]
                 wb.log(wandb_metrics, step=total_env_steps)
 
             # Collapse warnings — flag early instead of finding via replay at 10M
@@ -1950,46 +1917,6 @@ if __name__ == "__main__":
     parser.add_argument("--num-players", type=int, choices=[2, 4], default=2,
                         help="Players per game. 4 = FFA self-play (every seat is the learning "
                              "policy; --pool-fraction must be 0 — external 4p pool not yet wired).")
-    parser.add_argument("--win-margin-coeff", type=float, default=0.0,
-                        help="Terminal bonus coefficient α: winner gets +1 + α*(my_score/total_score). "
-                             "0 = pure ±1 reward (default). Suggested start: 0.5.")
-    parser.add_argument("--expansion-coef", type=float, default=0.0,
-                        help="Potential-based shaping on owned-production lead "
-                             "(planet/economy race). Passive play nets ~0 (production "
-                             "only changes on capture). 0 = off. rev14 expansion fix; "
-                             "suggested start: 0.01.")
-    parser.add_argument("--early-capture-coef", type=float, default=0.0,
-                        help="Spike reward for CAPTURING a planet (delta in owned count), decayed "
-                             "linearly to 0 over --early-capture-steps (default 400). Active through "
-                             "mid-game so GAE 18-step horizon can see captures throughout, not just "
-                             "the opening. Coeff math: one capture event ≈ coeff × decay_at_t; "
-                             "keep ≤10%% of terminal win → range 0.05-0.10. 0 = off.")
-    parser.add_argument("--early-capture-steps", type=int, default=400,
-                        help="Step at which the delta-capture decay reaches zero. Default 400.")
-    parser.add_argument("--early-capture-anneal-frac", type=float, default=0.0,
-                        help="Training-wide (not within-episode) anneal of --early-capture-coef to 0. "
-                             "Cosine decay from full coef at step 0 to 0 at frac*total_steps, then "
-                             "stays 0. Cosine holds near full "
-                             "early (bootstrap) and fades fastest mid-run. Removes the capture-shaping "
-                             "crutch once the pool can sustain aggression. 0 = off (constant coef).")
-    parser.add_argument("--first-strike-steps", type=int, default=0,
-                        help="Apply first_strike_mult to capture reward for t < N steps. "
-                             "Breaks opening paralysis by making early captures more lucrative. "
-                             "Suggested: 50. 0 = off.")
-    parser.add_argument("--first-strike-mult", type=float, default=2.0,
-                        help="Multiplier applied to capture reward for t < --first-strike-steps. "
-                             "Default 2.0 (doubles the capture reward in the opening).")
-    parser.add_argument("--staging-shaping-coef", type=float, default=0.0,
-                        help="PBRS staging shaping (project_undermass_by_choice): potential-based "
-                             "reward r += coef*(gamma*Phi(s') - Phi(s)), Phi = top-k Σ min(1, our_"
-                             "inflight/capture_floor) over NEUTRAL targets. Injects the DIRECTED "
-                             "gradient the idle fire head lacks (A≈0 on spare-fire), telescoping so "
-                             "spray-safe. Neutral-ONLY (enemy = decmass, which failed). 0 = off. "
-                             "Start ~0.2 (pre-test calibrated). Tripwire: fire_frac/launch_rate up "
-                             "without caps up = spray.")
-    parser.add_argument("--staging-topk", type=int, default=2,
-                        help="k for the staging potential (top-k neutral targets summed). k=2 keeps "
-                             "serial expansion-breadth while bounding simultaneous spread.")
     parser.add_argument("--fleet-target-refresh", type=int, default=4,
                         help="Re-resolve ALL cached fleet targets every K ticks (staleness bound "
                              "for the launch-time target cache — SPS lever, 2026-07-05). Accuracy "

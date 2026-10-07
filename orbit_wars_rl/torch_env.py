@@ -31,22 +31,15 @@ SUN_RADIUS = 10.0
 ROTATION_RADIUS_LIMIT = 50.0
 MAX_SHIP_SPEED = 6.0
 
-# Lever A (decisive-mass reward) — capture-floor constants, mirroring producer_v2's
-# ProducerLiteConfig + orbit_lite.capture_floor (opponents/candidate_producer_v2.py):
-# floor = projected_defenders_at_arrival + beta*rho(eta)*reachable_enemy_mass + overhead.
-# The beta*rho*enemy_mass margin = the ETA-aware REACTIVE reinforcement v2 anticipates
-# (the not-yet-launched defense that out-masses us); deb uses the bare floor (margin off).
-_DM_BETA = 2.2          # reinforce_size_beta
-_DM_ETA_FREE = 3.0      # reinforce_eta_free  (eta below which the enemy can't react → rho=0)
-_DM_ETA_SCALE = 12.0    # reinforce_eta_scale
-_DM_HORIZON = 18.0      # config.horizon — reach cap for enemy_mass AND eta cap
+# Reach horizon (steps) for the reachable-enemy-mass feature (producer_v2's config.horizon).
+# The other decisive-mass constants went with the shaping rewards in the 2026-10 cleanup.
+_DM_HORIZON = 18.0
 
 # Threat-timing window (ch 20-21): enemy fleet mass landing within this many steps is "soon".
 # Matches the age 0-5 post-capture under-defense window + a nearby reinforce ETA (~3-5 steps).
 # Must match features._THREAT_ETA_WINDOW. ch14 (enemy_contest) is ETA-agnostic, so this pair is
 # the only observation of WHEN pressure lands — the timing signal the policy needs to defend.
 _THREAT_ETA_WINDOW = 6.0
-_DM_OVERHEAD = 1.0      # capture_overhead
 _VALUE_HORIZON = 40.0   # capped production-value lookahead for target value / keepability channels
 
 # Reverse-edge reinforce cooldown — "edge never fired" sentinel; must match
@@ -263,15 +256,6 @@ class VecTorchEnv:
         binary_commit_gates: str = "full",
         global_econ: bool = False,   # append the 48 projected economy-delta globals (15 -> 63)
         action_decode: str = "angle",
-        win_margin_coeff: float = 0.0,
-        expansion_coef: float = 0.0,
-        early_capture_coef: float = 0.0,
-        early_capture_steps: int = 100,
-        first_strike_steps: int = 0,
-        first_strike_mult: float = 2.0,
-        staging_shaping_coef: float = 0.0,
-        staging_topk: int = 2,
-        staging_gamma: float = 0.995,
         allow_reinforce: bool = False,
         reinforce_gate_min_planets: int = 0,
         reverse_edge_cooldown: int = 0,
@@ -360,35 +344,6 @@ class VecTorchEnv:
         if action_decode not in {"angle", "target"}:
             raise ValueError(f"unknown action_decode={action_decode!r}")
         self.action_decode = action_decode
-        # Terminal bonus for winners: +win_margin_coeff * (my_score / total_score).
-        # 0.0 = pure ±1 reward (default, backward-compatible).
-        self.win_margin_coeff = float(win_margin_coeff)
-        # Expansion shaping: potential-based reward on OWNED PRODUCTION (sum of
-        # planet production rates owned). Unlike material (ships), production only
-        # changes when planets change hands, so a passive hoarder gets 0 from it.
-        # Rewards winning the planet/economy
-        # race that decides snowball games. 0.0 = off (default).
-        self.expansion_coef = float(expansion_coef)
-        # Early capture shaping: per-step bonus for each net new planet owned above
-        # starting count (1), decayed linearly from 1.0→0.0 over early_capture_steps.
-        # Gives gradient signal for the opening probe that the terminal reward cannot see.
-        # Coeff math: sum(coeff*(1-t/100), t=4..100) ≈ 97*0.48*coeff per planet captured
-        # at step 3. Keep cumulative bonus ≤ 10-15% of terminal win → coeff 0.002-0.003.
-        self.early_capture_coef = float(early_capture_coef)
-        self.first_strike_steps = int(first_strike_steps)
-        self.first_strike_mult = float(first_strike_mult)
-        self.early_capture_steps = int(early_capture_steps)
-        # PBRS staging shaping (project_undermass_by_choice): potential-based reward that injects a
-        # DIRECTED gradient for the idle fire head to STAGE inflight toward NEUTRAL captures.
-        # Φ = top-k Σ min(1, our_inflight/capture_floor) over neutral targets; r += coef·(γΦ' − Φ).
-        # Telescoping → spray-safe (can't farm by cycling). Neutral-ONLY (enemy = decmass, which failed).
-        self.staging_shaping_coef = float(staging_shaping_coef)
-        self.staging_topk = int(staging_topk)
-        self.staging_gamma = float(staging_gamma)
-        self.prev_staging_phi = None         # (N, num_players) — allocated in reset()
-        self._staging_phi_acc = 0.0          # rollout mean Φ accumulator — reset_reinforce_stats()
-        self._staging_phi_n = 0
-
         # State tensors — allocated in reset()
         self.planets: torch.Tensor = None       # (N, P, 7)
         self.init_planets: torch.Tensor = None  # (N, P, 7) — pristine snapshot
@@ -402,8 +357,6 @@ class VecTorchEnv:
         self._comet_xy = None                       # (N, T+1, 4, 2) precomputed comet positions
         self.done: torch.Tensor = None              # (N,) bool
         self.rewards: torch.Tensor = None           # (N, num_players) float
-        self.prev_production: torch.Tensor = None   # (N, num_players) float — owned production for expansion shaping
-        self.prev_owned: torch.Tensor = None        # (N, num_players) float — owned planet count for delta-capture shaping
         # Seeds (per-env) so we can deterministically auto-reset
         self.seeds: list[int] = []
 
@@ -488,15 +441,7 @@ class VecTorchEnv:
                                     dtype=torch.long, device=self.device)
         self._fleet_tgt_checked = True
         self._tick_counter = 0   # global tick for the periodic fleet-target refresh
-        self.prev_production = self._compute_production()
-        owner_p = self.planets[:, :, 1].long()
-        self.prev_owned = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
-        for pl in range(self.num_players):
-            self.prev_owned[:, pl] = ((owner_p == pl) & self.planet_alive).float().sum(dim=1)
         P = self.planets.shape[1]
-        # PBRS staging: Φ of the previous state. Fresh boards have no inflight → Φ(s_0)=0.
-        self.prev_staging_phi = torch.zeros(
-            self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         # Reverse-edge reinforce cooldown: last step each (player, src, tgt) reinforce edge fired.
         # _DM-style NEVER sentinel so untouched edges never trip the (step - last) <= K test.
         if self.reverse_edge_cooldown > 0:
@@ -517,9 +462,8 @@ class VecTorchEnv:
 
         Scalar mirror: eval._dm_fleet_target / _lead_collision_target, validated at 98.4% vs the true
         swept-collision on replay (the old along/perp-r+2 nearest-distance heuristic was ~85% — it
-        ignored orbital lead and over-loosely matched). Player-independent (geometry only). Feeds the
-        capture-floor machinery via _decisive_mass_fields (staging potential, sufficient-commit
-        veto); dead fleets are masked by the caller (valid_f)."""
+        ignored orbital lead and over-loosely matched). Player-independent (geometry only). Dead
+        fleets are masked by the caller (valid_f)."""
         return self._resolve_targets_at(
             self.fleets[:, :, 2], self.fleets[:, :, 3],
             self.fleets[:, :, 4], self.fleets[:, :, 6])
@@ -590,105 +534,6 @@ class VecTorchEnv:
         Training never needs this."""
         self.fleet_tgt.fill_(_TGT_UNRESOLVED)
         self._fleet_tgt_checked = False
-
-    def _decisive_mass_fields(self):
-        """Per-(N,P,num_players) inflight mass, capture floor, max-ETA and is_enemy mask — the
-        EXACT quantities producer_v2's capture floor uses. Consumed by the PBRS staging
-        potential (_staging_potential).
-
-        floor_t = garrison + prod*eta + enemy_inbound_now      (projected defenders at arrival)
-                + beta*rho(eta)*reachable_enemy_mass           (v2's reactive-reinforcement margin)
-                + overhead
-        mass_t = our alive inflight fleet ships converging on t. eta = MAX ETA of that mass
-        (capped at the horizon — the floor must hold at the LAST arrival, when all counted mass is
-        present, and rho(eta) then gives the enemy the full reaction window). enemy_mass =
-        cheap_enemy_pressure (reachable enemy PLANET mass); enemy_inbound_now = enemy FLEET ships
-        already racing to defend t."""
-        N, P = self.planets.shape[0], self.planets.shape[1]
-        owner = self.planets[:, :, 1].long()                            # (N, P)
-        garr = self.planets[:, :, 5]
-        prod = self.planets[:, :, 6]
-        px, py = self.planets[:, :, 2], self.planets[:, :, 3]
-        alive = self.planet_alive
-        # Reachable-enemy-mass scaffolding (player-independent): pairwise planet distance +
-        # per-source reach decay (cheap_enemy_pressure: closer enemy planets reinforce more).
-        dx = px.unsqueeze(2) - px.unsqueeze(1)                          # (N, P_src, P_tgt)
-        dy = py.unsqueeze(2) - py.unsqueeze(1)
-        pdist = torch.sqrt(dx * dx + dy * dy)
-        src_reach = (_ship_speed(garr) * _DM_HORIZON).clamp(min=1e-6)   # (N, P_src)
-        decay = (1.0 - pdist / src_reach.unsqueeze(2)).clamp(min=0.0)   # (N, P_src, P_tgt)
-        not_self = ~torch.eye(P, dtype=torch.bool, device=self.device).unsqueeze(0)
-        # Our converging fleets: target, ships, and ETA to that target.
-        tgt_idx = self._fleet_targets()                                # (N, F)
-        f_owner = self.fleets[:, :, 1].long()
-        f_ships_raw = self.fleets[:, :, 6]
-        fx, fy = self.fleets[:, :, 2], self.fleets[:, :, 3]
-        tgt_safe = tgt_idx.clamp(min=0)
-        tx = torch.gather(px, 1, tgt_safe)                             # (N, F) target planet x
-        ty = torch.gather(py, 1, tgt_safe)
-        f_eta = (torch.sqrt((fx - tx) ** 2 + (fy - ty) ** 2)
-                 / _ship_speed(f_ships_raw).clamp(min=1e-6)).clamp(max=_DM_HORIZON)
-        f_ships = f_ships_raw * self.fleet_alive.float()
-        valid_f = (tgt_idx >= 0) & self.fleet_alive
-        mass = torch.zeros(N, P, self.num_players, dtype=garr.dtype, device=self.device)
-        floor = torch.zeros_like(mass)
-        eta_out = torch.zeros_like(mass)
-        is_enemy = torch.zeros(N, P, self.num_players, dtype=torch.bool, device=self.device)
-        for pl in range(self.num_players):
-            mine = (valid_f & (f_owner == pl)).float()                 # (N, F)
-            w = f_ships * mine
-            m = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
-            m.scatter_add_(1, tgt_safe, w)                             # our inflight per target
-            # MAX ETA over our contributing fleets (non-mine get -1 so they never win the max;
-            # the 0-init is harmless — targets with no mine fleet have mass=0).
-            eta_src = torch.where(mine.bool(), f_eta, torch.full_like(f_eta, -1.0))
-            eta = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
-            eta.scatter_reduce_(1, tgt_safe, eta_src, reduce='amax', include_self=True)
-            # enemy fleets already inbound to the target (current reinforcements en route)
-            enemy_f = (valid_f & (f_owner != pl) & (f_owner >= 0)).float()
-            inbound = torch.zeros(N, P, dtype=garr.dtype, device=self.device)
-            inbound.scatter_add_(1, tgt_safe, f_ships * enemy_f)
-            # reachable enemy PLANET mass for each target (producer_v2 cheap_enemy_pressure)
-            enemy_src = (alive & (owner != pl) & (owner >= 0)).unsqueeze(2)   # (N, P_src, 1)
-            valid_sp = enemy_src & alive.unsqueeze(1) & not_self
-            enemy_mass = torch.where(valid_sp, garr.unsqueeze(2) * decay,
-                                     torch.zeros_like(decay)).sum(dim=1)      # (N, P_tgt)
-            rho = ((eta - _DM_ETA_FREE) / _DM_ETA_SCALE).clamp(0.0, 1.0)
-            mass[:, :, pl] = m
-            # NEUTRALS DON'T REGROW (engine applies production only to owner != -1) -> no prod
-            # accrual during flight. The staging potential is neutral-only, so the phantom term
-            # under-credited staging toward cheap neutrals. Enemy targets keep prod*eta.
-            prod_floor = torch.where(owner == -1, torch.zeros_like(prod), prod)
-            floor[:, :, pl] = (garr + prod_floor * eta + inbound
-                               + _DM_BETA * rho * enemy_mass + _DM_OVERHEAD)
-            eta_out[:, :, pl] = eta
-            is_enemy[:, :, pl] = alive & (owner != pl) & (owner >= 0)
-        return mass, floor, eta_out, is_enemy
-
-    def _staging_potential(self, fields):
-        """PBRS potential Φ(s) for the staging shaping reward (project_undermass_by_choice):
-        Φ = top-k Σ min(1, our_inflight_mass / capture_floor) over NEUTRAL targets (owner<0, alive),
-        per (N, num_players). Rewards building inflight toward neutrals we can take-and-hold (the
-        floor folds in enemy reactive defense, so contested neutrals count). NEUTRAL-ONLY: enemy
-        targets are excluded (staging into reactive enemy defense = the out-mass contest = decmass,
-        which failed). Reuses _decisive_mass_fields' mass/floor — no new geometry."""
-        mass, floor, _eta, _is_enemy = fields
-        owner = self.planets[:, :, 1].long()                          # (N, P)
-        neutral = ((owner < 0) & self.planet_alive).unsqueeze(-1)     # (N, P, 1)
-        ratio = (mass / floor.clamp(min=1e-6)).clamp(min=0.0, max=1.0)   # (N, P, players), capped
-        ratio = ratio * neutral.float()                              # neutral targets only
-        k = min(self.staging_topk, ratio.shape[1])
-        phi = ratio.topk(k, dim=1).values.sum(dim=1)                 # (N, players): top-k per player
-        return phi
-
-    def _compute_production(self) -> torch.Tensor:
-        """Total production rate of planets owned by each player. (N, num_players)"""
-        owner_p = self.planets[:, :, 1].long()
-        prod_p = self.planets[:, :, 6] * self.planet_alive.float()
-        production = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
-        for pl in range(self.num_players):
-            production[:, pl] = ((owner_p == pl).float() * prod_p).sum(dim=1)
-        return production
 
     def _precompute_orbital_params(self):
         """Cache initial_angle, orbital_r, is_orbiting per planet (shape (N, P))."""
@@ -1864,8 +1709,6 @@ class VecTorchEnv:
         self._obs_total_ships = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
         self._obs_trunc_enemy_ships = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
         self._obs_total_enemy_ships = torch.zeros(self.num_players, dtype=torch.float32, device=self.device)
-        self._staging_phi_acc = 0.0
-        self._staging_phi_n = 0
 
     # ---------------------------------------------------------------------
     # Step — pure tensor ops, runs all N envs in one pass.
@@ -2082,88 +1925,9 @@ class VecTorchEnv:
 
         # 11. Termination + reward (terminal_rewards is non-zero only for newly-done envs)
         terminal_rewards, done = self._check_done()
-        # Expansion shaping: potential-based reward on the change in owned-production
-        # lead. Dense per-step signal for winning the planet/economy race (the thing
-        # that decides snowball games). Telescopes, so passive play nets ~0.
-        if self.expansion_coef != 0.0:
-            production = self._compute_production()
-            prod_delta = production - self.prev_production
-            if self.num_players == 2:
-                d = prod_delta[:, 0] - prod_delta[:, 1]
-                expansion_rewards = torch.stack([d, -d], dim=1)
-            else:
-                others = prod_delta.sum(dim=1, keepdim=True) - prod_delta
-                expansion_rewards = prod_delta - others / max(self.num_players - 1, 1)
-            terminal_rewards = terminal_rewards + self.expansion_coef * expansion_rewards
-        # Delta-capture shaping: time-decayed reward for CAPTURING planets (delta in owned
-        # count), NOT for holding them. Fires as a spike when a planet changes hands.
-        # Symmetric delta + exponential decay with a permanent floor:
-        #   1. SYMMETRIC: planet_delta tracks both gains (+) and losses (-), clamped to [-1, 1].
-        #      Losing a planet now costs as much as gaining one. This eliminates the "planet
-        #      tennis" arbitrage in self-play where both agents trade planets for free reward.
-        #      With losses penalised, trading is net-zero → farming is structurally impossible.
-        #
-        #   2. EXPONENTIAL DECAY + FLOOR: replaces the hard linear cliff at step 400.
-        #      decay = exp(-2.5 × t/500) + 0.10 → stabilises at ~10% of initial coeff.
-        #      At step 450: ~12% of coeff survives. Keeps a navigational beacon alive on
-        #      rotating boards (e.g. seed6462) when orbital alignment opens at step 430.
-        #      Never hits absolute zero, so the late-game gradient desert is eliminated.
-        #
-        #   early_capture_steps parameter is now unused (kept for CLI compat), decay runs
-        #   to episode end.
-        if self.early_capture_coef != 0.0:
-            ec_owner = self.planets[:, :, 1].long()  # (N, P)
-            t = self.step_count.float()  # (N,)
-            # Exponential decay with 10% permanent floor — never hits zero
-            decay = torch.exp(-2.5 * t / self.episode_steps) + 0.10  # (N,)
-            owned = torch.zeros(self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
-            for pl in range(self.num_players):
-                owned[:, pl] = ((ec_owner == pl) & self.planet_alive).float().sum(dim=1)
-            # Symmetric delta: gains positive, losses negative. Capped at ±1/step.
-            planet_delta = (owned - self.prev_owned).clamp(min=-1.0, max=1.0)
-            # Each player's reward = their net delta (no additional zero-sum netting;
-            # symmetric delta is already self-correcting: capturing from opponent gives
-            # +1 to attacker and -1 to defender automatically).
-            ec_rewards = planet_delta
-            # First Strike bonus: multiply capture reward by first_strike_mult for t < first_strike_steps.
-            # Overcomes value critic's "home invasion fear" — makes early captures so lucrative
-            # that the policy fires at step 0 instead of waiting.
-            if self.first_strike_steps > 0:
-                # Linear decay from first_strike_mult at t=0 to 1.0 at t=first_strike_steps.
-                frac = (t.float() / self.first_strike_steps).clamp(max=1.0)
-                fs_mult = 1.0 + (self.first_strike_mult - 1.0) * (1.0 - frac)  # (N,)
-                effective_coef = self.early_capture_coef * decay * fs_mult  # (N,)
-            else:
-                effective_coef = self.early_capture_coef * decay  # (N,)
-            terminal_rewards = terminal_rewards + effective_coef.unsqueeze(1) * ec_rewards
-            self.prev_owned = owned
-        if self.staging_shaping_coef != 0.0:
-            # PBRS: r += coef·(γΦ(s') − Φ(s)). Φ(s') from the post-step pre-reset state.
-            # Terminal Φ(s')=0 (absorbing) on done envs so the potential collapses cleanly.
-            phi_now = self._staging_potential(self._decisive_mass_fields())   # (N, players)
-            gamma_phi = torch.where(done.unsqueeze(1),
-                                    torch.zeros_like(phi_now),
-                                    self.staging_gamma * phi_now)
-            terminal_rewards = terminal_rewards + self.staging_shaping_coef * (
-                gamma_phi - self.prev_staging_phi)
-            self.prev_staging_phi = phi_now                      # done envs fixed post-reset
-            self._staging_phi_acc += float(phi_now.mean().item())
-            self._staging_phi_n += 1
         # 12. Auto-reset done envs in-place — must come AFTER capturing rewards
         if done.any():
             self._auto_reset(done)
-        # Refresh prev_production / prev_owned AFTER auto-reset so done envs telescope
-        # from their fresh post-reset state (avoids spurious spike on episode boundary).
-        if self.expansion_coef != 0.0:
-            self.prev_production = self._compute_production()
-        if self.early_capture_coef != 0.0 and done.any():
-            ec_owner = self.planets[:, :, 1].long()
-            for pl in range(self.num_players):
-                self.prev_owned[done, pl] = ((ec_owner[done] == pl) & self.planet_alive[done]).float().sum(dim=1)
-        # PBRS staging: fresh post-reset boards have no inflight → Φ=0; reset prev so the next step's
-        # γΦ(s')−Φ(s) telescopes from 0 (no spurious spike across the episode boundary).
-        if self.staging_shaping_coef != 0.0 and done.any():
-            self.prev_staging_phi[done] = 0.0
         # Reverse-edge cooldown: clear the per-edge history for fresh games (else a prior game's
         # reinforce edges mis-block the new board — same boundary bug class as decmass re-arm).
         if self.reverse_edge_cooldown > 0 and self.reinf_cd is not None and done.any():
@@ -2222,19 +1986,10 @@ class VecTorchEnv:
             scores[:, pl] = sp.sum(dim=1) + sf.sum(dim=1)
         max_score, _ = scores.max(dim=1, keepdim=True)  # (N, 1)
         wins = (scores == max_score) & (max_score > 0)
-        # Expose the RAW winner mask (pre-shaping/bonus) so callers (PFSP result
-        # attribution) don't have to infer win/loss from the shaped reward tensor —
-        # which already carries expansion/early-capture/etc. shaping by the
-        # time step() returns it. Valid for envs that are newly-done THIS step.
+        # Expose the winner mask so callers (PFSP result attribution) read win/loss directly
+        # rather than from the reward tensor. Valid for envs that are newly-done THIS step.
         self._last_wins = wins
         rewards = torch.where(wins, torch.ones_like(scores), -torch.ones_like(scores))
-        # Optional win-margin bonus: winner gets +α*(my_score/total_score).
-        # Losers stay at -1; coefficient 0 = pure ±1 (default).
-        if self.win_margin_coeff != 0.0:
-            total_score = scores.sum(dim=1, keepdim=True).clamp(min=1.0)
-            margin = scores / total_score          # (N, P) fraction in [0, 1]
-            bonus = self.win_margin_coeff * margin
-            rewards = torch.where(wins, rewards + bonus, rewards)
         # Only return rewards for newly-done envs; zero otherwise
         rewards = rewards * newly_done.unsqueeze(1).float()
         self.rewards = torch.where(newly_done.unsqueeze(1), rewards, self.rewards)

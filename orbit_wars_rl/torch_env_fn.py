@@ -295,7 +295,7 @@ def physics_core(planets, planet_alive, fleets, fleet_alive, step_count,
                               fleets[:, :, 4], fleets[:, :, 5], fleets[:, :, 6]], dim=2)
     new_step = step_count + 1
 
-    # 8. Termination (mirrors _check_done with win_margin_coeff=0).
+    # 8. Termination (mirrors _check_done).
     owner_p = final_owner.long()
     owner_f = new_fleets[:, :, 1].long()
     alive_pl = torch.zeros(N, NP, dtype=torch.bool, device=dev)

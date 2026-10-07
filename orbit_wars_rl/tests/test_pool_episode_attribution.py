@@ -1,14 +1,11 @@
 """Regression test for the RAW winner exposed for per-episode pool attribution.
 
-Context: the per-EPISODE pool assignment fix (train_torch) credits each finished pool
-env to its assigned member using the RAW (pre-shaping) winner, NOT the shaped `rewards`
-tensor returned by step() (which by then carries material/expansion/early-capture/etc.
-shaping). The primitive that makes that possible is `env._last_wins`, stashed in
-_check_done from the score comparison BEFORE any win-margin/speed/shaping bonus.
+Context: the per-EPISODE pool assignment (train_torch) credits each finished pool env to
+its assigned member using `env._last_wins`, stashed in _check_done from the score comparison.
+(It was introduced when step() rewards carried shaping bonuses; the shaping levers were
+removed in the 2026-10 cleanup, but reading the winner mask stays the robust primitive.)
 
-This asserts `_last_wins` matches the score-based winner on terminating envs, and that it
-is independent of the shaping coefficients (win_margin / expansion / early-capture) — i.e.
-turning shaping on does not change who `_last_wins` says won.
+This asserts `_last_wins` matches the score-based winner on terminating envs.
 
 Run:  orbit_wars_rl/.venv/bin/python orbit_wars_rl/tests/test_pool_episode_attribution.py
 """
@@ -59,21 +56,6 @@ def test_last_wins_matches_scores():
     print("ok: _last_wins matches the score-based winner")
 
 
-def test_last_wins_independent_of_shaping():
-    # Heavy shaping on; the raw winner must be unchanged (it's read pre-bonus).
-    env = _build(win_margin_coeff=5.0, expansion_coef=1.0, early_capture_coef=1.0)
-    _, rewards, done = env.step(_noop_actions())
-    assert done.all()
-    lw = env._last_wins
-    assert bool(lw[0, 0]) and not bool(lw[0, 1]), f"env0 winner changed under shaping: {lw[0]}"
-    assert bool(lw[1, 1]) and not bool(lw[1, 0]), f"env1 winner changed under shaping: {lw[1]}"
-    # And the SHAPED reward really did diverge from raw +-1 (proving the bonus is live,
-    # i.e. comparing shaped reward would have been the wrong primitive).
-    assert rewards[0, 0].item() > 1.0, f"expected win_margin bonus on winner, got {rewards[0,0].item()}"
-    print("ok: _last_wins is independent of win_margin/expansion/early-capture shaping")
-
-
 if __name__ == "__main__":
     test_last_wins_matches_scores()
-    test_last_wins_independent_of_shaping()
     print("ALL PASS")

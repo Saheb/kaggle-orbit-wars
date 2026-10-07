@@ -31,9 +31,6 @@ def _make_state():
     torch.manual_seed(0)
     env = VecTorchEnv(num_envs=N, num_players=2, device=torch.device("cpu"),
                       episode_steps=500, enable_comets=False,
-                      expansion_coef=0.0, early_capture_coef=0.0,
-                      staging_shaping_coef=0.0, win_margin_coeff=0.0,
-                      first_strike_steps=0,
                       action_decode="target", ship_bin_mode="absolute",
                       allow_reinforce=False)
     env.reset(seeds=list(range(N)))

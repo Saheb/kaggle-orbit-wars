@@ -83,8 +83,6 @@ class PPOConfig:
     anchor_value_coef: float = 0.0
     kl_target: float = 0.05   # KL early-stop threshold per epoch; inf = disabled
     value_coef: float = 0.5
-    # Note: env reward-shaping coefficients are CLI args wired directly to VecTorchEnv
-    # (see train_torch.py) — PPOConfig is not the right owner for them.
     max_grad_norm: float = 0.5
     clip_value: bool = True
     normalize_advantages: bool = True
