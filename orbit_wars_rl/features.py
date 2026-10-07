@@ -46,7 +46,7 @@ import numpy as np
 import torch
 
 from timeline import (candidate_timeline_features, global_economy_features,
-                      project_timeline, projected_hold_sizes, timeline_features)
+                      project_timeline, timeline_features)
 from action_mask import resolve_intent_sizes_np
 
 # Canonical feature semantics:
@@ -152,7 +152,7 @@ MAX_OWNED_PLANETS = 16  # hard cap for owned-planet slots; matches config.ModelC
 
 def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
                      max_owned=MAX_OWNED_PLANETS, timeline=True,
-                     projected_hold=False, global_econ=False):
+                     global_econ=False):
     """Extract entity features from observation dict.
 
     Returns dict of torch tensors (no batch dim).
@@ -537,18 +537,6 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
     if _ABLATE_CANDIDATE_DELTA:
         pairwise[..., [30, 31, 34, 35]] = 0.0           # diagnostic: zero marginal-value deltas
 
-    hold_sizes = hold_feasible = None
-    if projected_hold:
-        hold_sizes_t, hold_feasible_t = projected_hold_sizes(
-            pl_t, alive_t, arrivals, own_ts, garr_ts, player,
-            torch.from_numpy(src_ships).unsqueeze(0),
-            torch.from_numpy(pairwise[..., 2] * BOARD_SIZE).unsqueeze(0),
-            torch.from_numpy(owned_indices).unsqueeze(0),
-            torch.from_numpy(slot_valid).unsqueeze(0),
-        )
-        hold_sizes = hold_sizes_t[0]
-        hold_feasible = hold_feasible_t[0]
-
     # --- Projected-future timeline (96 = 4 ch × 24 steps; planet dim 20 → 116) ---
     # Runs the SAME timeline.py code the training path uses (batch of 1), so both paths
     # encode identically by construction. Projects over ALL fleets in the obs (no
@@ -577,9 +565,6 @@ def extract_features(obs, player, num_players=2, max_planets=48, max_fleets=128,
         "owned_count": owned_count,
         "pairwise_features": torch.from_numpy(pairwise),
     }
-    if projected_hold:
-        result["projected_hold_sizes"] = hold_sizes
-        result["projected_hold_feasible"] = hold_feasible
     return result
 
 

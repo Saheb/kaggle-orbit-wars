@@ -14,13 +14,9 @@ import numpy as np
 
 from config import Config
 from model import EntityTransformer, PHASE4_COMPAT_MISSING_KEYS
-from features import extract_features, _ETA_PROBE_SPEED, PAIRWISE_FEATURE_DIM
-from action_mask import (compute_action_masks, actions_from_target_policy, _fleet_speed,
-                         _ship_bin_to_count, _target_intercept_angle, MAX_OWNED_PLANETS)
-# Decisive-mass floor constants — IMPORTED from torch_env so the eval dm_* gap diagnostic uses the
-# EXACT same floor as the training reward/diag (they can never drift). project_force_concentration_wall.
-from torch_env import (_DM_BETA, _DM_ETA_FREE, _DM_ETA_SCALE, _DM_HORIZON, _DM_OVERHEAD,
-                       MAX_SHIP_SPEED as _DM_MAX_SPEED)
+from features import extract_features, PAIRWISE_FEATURE_DIM
+from action_mask import compute_action_masks, actions_from_target_policy
+from torch_env import MAX_SHIP_SPEED as _DM_MAX_SPEED
 from kaggle_environments.envs.orbit_wars.orbit_wars import CENTER, ROTATION_RADIUS_LIMIT
 
 
@@ -203,149 +199,12 @@ def load_eval_model(path: str, cfg: Config) -> tuple[EntityTransformer, str]:
     return model, action_decode
 
 
-# Fire-head isolation override (eval diagnostic). On sources the fire head VETOES (fire_prob <
-# threshold) that have a high-holdable-ROI attack available, FORCE fire toward the head's own
-# argmax target (fall back to the top-ROI target if the head's pick is illegal/own), with the
-# head's own ship sizing. Isolates "does the fire veto cost us winnable attacks" from selection.
-# WR rises => fire veto suppresses valuable attacks (audit right); ties/falls => vetoes correct.
-_FORCE_FIRE = {"on": False, "roi": 0.3, "forced": 0, "states": 0, "to_head_tgt": 0}
-
-
-def set_force_fire_high_roi(on: bool, roi_threshold: float = 0.3) -> None:
-    _FORCE_FIRE.update(on=bool(on), roi=float(roi_threshold), forced=0, states=0, to_head_tgt=0)
-
-
-def _apply_force_fire(moves, outputs, masks, obs, player, fire_threshold, ship_bin_mode):
-    tgt_arg = torch.argmax(outputs["target_logits"][0], dim=-1).cpu().numpy()
-    tgt_idx_t = torch.as_tensor(tgt_arg, device=outputs["target_logits"].device).unsqueeze(0)
-    fire_logits = torch.gather(outputs["fire_logits"], -1, tgt_idx_t.unsqueeze(-1)).squeeze(-1)
-    fire_p = torch.sigmoid(fire_logits[0]).cpu().numpy()
-    ship_arg = None
-    if ship_bin_mode != "binary":
-        ship_logits = torch.gather(
-            outputs["ship_logits"],
-            2,
-            tgt_idx_t.unsqueeze(-1).unsqueeze(-1).expand(
-                -1, -1, 1, outputs["ship_logits"].shape[-1]),
-        ).squeeze(2)
-        ship_arg = torch.argmax(ship_logits[0], dim=-1).cpu().numpy()
-    owned_idx = masks["owned_indices"].cpu().numpy()
-    max_ships = masks["max_ships"].cpu().numpy().reshape(-1)
-    planets = obs["planets"]
-    fleets = obs.get("fleets") or []
-    owned_count = int(masks["owned_count"])
-    fired_src = {int(m[0]) for m in moves}
-    _FORCE_FIRE["states"] += 1
-    for slot in range(min(owned_count, fire_p.shape[0])):
-        if len(moves) >= MAX_OWNED_PLANETS:
-            break
-        if fire_p[slot] >= fire_threshold:
-            continue                                          # head already fires → not a veto
-        pidx = int(owned_idx[slot])
-        if pidx >= len(planets):
-            continue
-        src = planets[pidx]
-        if int(src[0]) in fired_src or src[5] <= 0:
-            continue
-        best_roi = best_tgt = None                            # best holdable-ROI attack from this source
-        for tgt in planets:
-            if int(tgt[1]) == player or int(tgt[0]) == int(src[0]):
-                continue
-            hr = _holdable_roi(src, tgt, planets, fleets, player)
-            if hr is not None and (best_roi is None or hr > best_roi):
-                best_roi, best_tgt = hr, tgt
-        if best_roi is None or best_roi < _FORCE_FIRE["roi"]:
-            continue                                          # no worthwhile attack → don't force (avoid spray)
-        ti = int(tgt_arg[slot])                               # keep head's target if it's a legal attack
-        head_tgt = planets[ti] if 0 <= ti < len(planets) else None
-        use_head = head_tgt is not None and int(head_tgt[1]) != player and int(head_tgt[0]) != int(src[0])
-        use_tgt = head_tgt if use_head else best_tgt
-        ships = (int(src[5]) if ship_bin_mode == "binary" else
-                 min(int(_ship_bin_to_count(int(ship_arg[slot]), int(max_ships[slot]),
-                                            mode=ship_bin_mode)), int(src[5])))
-        if ships <= 0:
-            continue
-        angle = _target_intercept_angle(src, use_tgt, ships, obs)
-        moves.append([int(src[0]), float(angle), int(ships)])
-        fired_src.add(int(src[0]))
-        _FORCE_FIRE["forced"] += 1
-        if use_head:
-            _FORCE_FIRE["to_head_tgt"] += 1
-    return moves
-
-
-# Retarget override (eval diagnostic, selection isolation). Leaves fire/ship as-is; for each ATTACK
-# the policy actually launches, redirect its target to the top-holdable-ROI candidate from that
-# source (keep source + ship count). No new launches (no spray), no fire change → clean test of
-# "of the attacks we make, does picking the best target raise WR?" Raises best% to ~100%.
-_RETARGET = {"on": False, "resize": False, "retargeted": 0, "attacks": 0, "uniq_sum": 0.0, "turns": 0}
-
-
-def set_retarget_top_roi(on: bool, resize: bool = False) -> None:
-    _RETARGET.update(on=bool(on), resize=bool(resize), retargeted=0, attacks=0, uniq_sum=0.0, turns=0)
-
-
-def _apply_retarget(moves, obs, player):
-    planets = obs["planets"]
-    fleets = obs.get("fleets") or []
-    byid = {int(p[0]): p for p in planets}
-    for m in moves:
-        src = byid.get(int(m[0]))
-        if src is None:
-            continue
-        cur = _resolve_launch_target(planets, src, m[1])
-        if cur is None or int(cur[1]) == player:
-            continue                                          # leave reinforces / unresolved alone
-        _RETARGET["attacks"] += 1
-        best_roi = best = None
-        for tgt in planets:
-            if int(tgt[1]) == player or int(tgt[0]) == int(src[0]):
-                continue
-            hr = _holdable_roi(src, tgt, planets, fleets, player)
-            if hr is not None and (best_roi is None or hr > best_roi):
-                best_roi, best = hr, tgt
-        if best is not None and int(best[0]) != int(cur[0]):
-            ships = int(m[2])
-            if _RETARGET["resize"]:                            # size to actually capture the NEW target
-                need = int(best[5]) + (1 if int(best[1]) < 0 else int(best[6]) * 3 + 1)
-                ships = min(int(src[5]), max(ships, need))
-            m[2] = int(ships)
-            m[1] = float(_target_intercept_angle(src, best, ships, obs))
-            _RETARGET["retargeted"] += 1
-    # target-funnel diagnostic: distinct attack targets this turn / number of attacks (1.0 = all distinct,
-    # low = many sources piling on the same ROI-greedy target = no expansion spread)
-    atk_tgts = []
-    for m in moves:
-        s = byid.get(int(m[0]))
-        if s is None:
-            continue
-        rt = _resolve_launch_target(planets, s, m[1])
-        if rt is not None and int(rt[1]) != player:
-            atk_tgts.append(int(rt[0]))
-    if atk_tgts:
-        _RETARGET["uniq_sum"] += len(set(atk_tgts)) / len(atk_tgts)
-        _RETARGET["turns"] += 1
-    return moves
-
-
 def build_agent_fn(model: EntityTransformer, device: torch.device,
                    fire_threshold: float = 0.5, sample: bool = False,
                    ship_bin_mode: str = "absolute",
-                   binary_attack_sizing: str = "all-in",
                    target_decode: bool = False,
                    num_players: int = 2,
-                   reserve_frac: float = 0.0,
-                   allow_reinforce: bool = False,
-                   veto_stats: dict = None,
-                   defensive_reinforce_k: int = 0,
-                   defensive_reinforce_beta: float = 2.2,
-                   defensive_reinforce_max_targets: int = 1,
-                   defensive_reinforce_value_margin: float | None = None,
-                   defensive_reinforce_overfill: float = 1.0,
-                   defensive_reinforce_stats: dict = None,
-                   natural_head_audit_stats: dict = None,
-                   natural_head_audit_beta: float = 2.2,
-                   projected_hold_stats: dict = None):
+                   allow_reinforce: bool = False):
     """Return a kaggle_environments-compatible agent function wrapping the model.
 
     sample=True uses Bernoulli/Categorical sampling instead of threshold/argmax —
@@ -392,7 +251,6 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
             _cd["prev_step"] = step_now
         features = extract_features(
             obs, player, num_players=num_players, timeline=_timeline,
-            projected_hold=(binary_attack_sizing == "projected-hold"),
             global_econ=_global_econ,
         )
         masks = compute_action_masks(obs, player)
@@ -413,7 +271,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
             )
 
         if target_decode:
-            moves = actions_from_target_policy(
+            return actions_from_target_policy(
                 outputs["fire_logits"].cpu(),
                 outputs["target_logits"].cpu(),
                 (outputs["ship_logits"].cpu()
@@ -423,18 +281,9 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 fire_threshold=fire_threshold,
                 sample=sample,
                 ship_bin_mode=ship_bin_mode,
-                binary_attack_sizing=binary_attack_sizing,
                 binary_commit_gates=_binary_gates,
-                projected_hold_sizes=(
-                    features["projected_hold_sizes"].cpu().numpy()
-                    if "projected_hold_sizes" in features else None),
-                projected_hold_feasible=(
-                    features["projected_hold_feasible"].cpu().numpy()
-                    if "projected_hold_feasible" in features else None),
-                projected_hold_stats=projected_hold_stats,
                 pairwise_features=(features["pairwise_features"].cpu().numpy()
                                    if "pairwise_features" in features else None),
-                reserve_frac=reserve_frac,
                 allow_reinforce=getattr(model, "allow_reinforce", allow_reinforce),
                 reinforce_gate_min_planets=getattr(model, "reinforce_gate_min_planets", 0),
                 reinforce_forward_only=getattr(model, "reinforce_forward_only", False),
@@ -443,21 +292,7 @@ def build_agent_fn(model: EntityTransformer, device: torch.device,
                 reverse_edge_cooldown=_cd_K,
                 cooldown_last=_cd["last"] if _cd_K > 0 else None,
                 cooldown_step=int(obs.get("step", 0)),
-                defensive_reinforce_k=defensive_reinforce_k,
-                defensive_reinforce_beta=defensive_reinforce_beta,
-                defensive_reinforce_max_targets=defensive_reinforce_max_targets,
-                defensive_reinforce_value_margin=defensive_reinforce_value_margin,
-                defensive_reinforce_overfill=defensive_reinforce_overfill,
-                defensive_reinforce_stats=defensive_reinforce_stats,
-                natural_head_audit_stats=natural_head_audit_stats,
-                natural_head_audit_beta=natural_head_audit_beta,
-                veto_stats=veto_stats,
             )
-            if _RETARGET["on"] and not sample:
-                _apply_retarget(moves, obs, player)
-            if _FORCE_FIRE["on"] and not sample:
-                _apply_force_fire(moves, outputs, masks, obs, player, fire_threshold, ship_bin_mode)
-            return moves
 
         raise NotImplementedError(
             "angle-decode path removed (angle head deleted); target-based checkpoints "
@@ -544,75 +379,16 @@ def _lead_collision_target(planets, x, y, angle, ships, skip_pid=None):
     return best
 
 
-def _resolve_launch_target(planets, src, angle, ships=None):
-    """Planet a launch from `src` at `angle` actually hits. With `ships` given (the launched ship
-    count, needed for fleet speed) this is the lead-aware collision resolver — the fleet flies
+def _resolve_launch_target(planets, src, angle, ships):
+    """Planet a launch from `src` at `angle` actually hits. `ships` (the launched ship count,
+    needed for fleet speed) makes this the lead-aware collision resolver — the fleet flies
     straight and captures whatever it physically collides with, so distance / planet radius / the
-    target's orbital motion all matter (none of which the old angle-only match saw). `ships=None`
-    falls back to the legacy angle-only match for the live retarget intent-probe (`_apply_retarget`),
-    which has no ship count and only wants the aimed direction."""
-    if ships is None:
-        sx, sy = src[2], src[3]
-        best, bd = None, 0.6
-        for p in planets:
-            if p[0] == src[0]:
-                continue
-            pa = math.atan2(p[3] - sy, p[2] - sx)
-            dd = abs((pa - angle + math.pi) % (2 * math.pi) - math.pi)
-            if dd < bd:
-                bd, best = dd, p
-        return best
+    target's orbital motion all matter (none of which the old angle-only match saw)."""
     # Fleet spawns at the source surface + a small launch offset along the heading (engine:
     # start = planet + cos/sin(angle)*(radius + 0.1)), then flies straight.
     sx = src[2] + math.cos(angle) * (src[4] + 0.1)
     sy = src[3] + math.sin(angle) * (src[4] + 0.1)
     return _lead_collision_target(planets, sx, sy, angle, ships, skip_pid=src[0])
-
-
-def _holdable_roi(src, tgt, planets, fleets, seat, beta=_DM_BETA):
-    """Reactive-aware ROI of attacking `tgt` from `src`: value (prod·20) minus producer_v2's capture
-    FLOOR — projected defenders + enemy inbound + beta·rho(eta)·reachable enemy PLANET mass + overhead,
-    the SAME floor as the decisive-mass reward (torch_env._decisive_mass_fields). Unlike the static
-    ch12 roi_20, the cost prices the REACTIVE peel, so a closer/richer-but-unholdable target scores
-    LOW. Returns None for an own target (can't attack it)."""
-    owner = int(tgt[1])
-    if owner == seat:
-        return None
-    dist = math.hypot(tgt[2] - src[2], tgt[3] - src[3])
-    eta = min(max(1.0, math.ceil(dist / _ETA_PROBE_SPEED)), _DM_HORIZON)
-    inbound = _friendly_inbound(fleets, tgt, 1 - seat)        # enemy FLEET ships already inbound
-    enemy_mass = 0.0                                          # reachable enemy PLANET mass (cheap_enemy_pressure)
-    for ep in planets:
-        eo = int(ep[1])
-        if eo < 0 or eo == seat or int(ep[0]) == int(tgt[0]):
-            continue                                          # enemy planets only (excl neutral/self/target)
-        reach = max(_fleet_speed(int(ep[5])) * _DM_HORIZON, 1e-6)
-        d = math.hypot(ep[2] - tgt[2], ep[3] - tgt[3])
-        enemy_mass += ep[5] * max(1.0 - d / reach, 0.0)
-    rho = min(max((eta - _DM_ETA_FREE) / _DM_ETA_SCALE, 0.0), 1.0)
-    floor = tgt[5] + tgt[6] * eta + inbound + beta * rho * enemy_mass + _DM_OVERHEAD
-    return (tgt[6] * 20.0 - floor) / max(floor, 1.0)
-
-
-def _friendly_inbound(fleets, tgt, seat):
-    """Own (seat) ships in flight already HEADED toward planet `tgt` — same geometry the
-    friendly-contest feature reads (along>0, perp < radius+1.5). Used to flag a *redundant*
-    attack-launch: firing at a target a friendly fleet is already capturing. Decision-time
-    obs (fleets@t-1) naturally excludes the launch being made this step."""
-    if not fleets:
-        return 0.0
-    tx, ty, tr = tgt[2], tgt[3], tgt[4]
-    s = 0.0
-    for f in fleets:
-        if int(f[1]) != seat:
-            continue
-        c, sn = math.cos(f[4]), math.sin(f[4])
-        vx, vy = tx - f[2], ty - f[3]
-        along = vx * c + vy * sn
-        perp = abs(vx * sn - vy * c)
-        if along > 0 and perp < tr + 1.5:
-            s += f[6]
-    return s
 
 
 def _relative_economy_snapshot(obs, seat):
@@ -1117,15 +893,7 @@ def evaluate_against_baseline(
     fire_threshold: float = 0.5,
     sample: bool = False,
     ship_bin_mode: str = "absolute",
-    binary_attack_sizing: str = "all-in",
     target_decode: bool = False,
-    defensive_reinforce_k: int = 0,
-    defensive_reinforce_beta: float = 2.2,
-    defensive_reinforce_max_targets: int = 1,
-    defensive_reinforce_value_margin: float | None = None,
-    defensive_reinforce_overfill: float = 1.0,
-    natural_head_audit: bool = False,
-    natural_head_audit_beta: float = 2.2,
 ) -> dict:
     """Evaluate trained policy against a baseline using kaggle_environments.
 
@@ -1136,22 +904,9 @@ def evaluate_against_baseline(
     from kaggle_environments import make
 
     validate_opponent_assets(opponent, num_players)
-    def_reinf_stats = {}
-    natural_head_stats = {} if natural_head_audit else None
-    projected_hold_stats = {} if binary_attack_sizing == "projected-hold" else None
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
                               ship_bin_mode=ship_bin_mode,
-                              binary_attack_sizing=binary_attack_sizing,
                               target_decode=target_decode,
-                              defensive_reinforce_k=defensive_reinforce_k,
-                              defensive_reinforce_beta=defensive_reinforce_beta,
-                              defensive_reinforce_max_targets=defensive_reinforce_max_targets,
-                              defensive_reinforce_value_margin=defensive_reinforce_value_margin,
-                              defensive_reinforce_overfill=defensive_reinforce_overfill,
-                              defensive_reinforce_stats=def_reinf_stats,
-                              natural_head_audit_stats=natural_head_stats,
-                              natural_head_audit_beta=natural_head_audit_beta,
-                              projected_hold_stats=projected_hold_stats,
                               num_players=num_players)
     opponents = [opponent] * (num_players - 1)
     agents = [agent_fn] + opponents
@@ -1194,9 +949,6 @@ def evaluate_against_baseline(
         "win_rate": wins / num_games,
         "avg_material": total_material / num_games,
         "conversion": conv_tot,
-        "defensive_reinforce": def_reinf_stats,
-        "natural_head_audit": natural_head_stats or {},
-        "projected_hold": projected_hold_stats or {},
         "results": results,
     }
 
@@ -1204,10 +956,9 @@ def evaluate_against_baseline(
 def _accumulate_panel_records(records: list) -> dict:
     """Build the panel result dict from a list of per-game records.
 
-    Each record is {archetype, my_seat, is_win, material, conv}. This is the SAME
-    accumulation evaluate_panel does inline, factored out so sharded runs can collect
-    records per-process and replay ALL of them here → numbers identical to a full panel
-    (add_conversion is a pure additive accumulator, so partition-then-merge is exact).
+    Each record is {archetype, my_seat, is_win, material, conv}. Factored out of
+    evaluate_panel so recompute_panel.py can replay saved --panel-out records with the
+    CURRENT metric code (add_conversion is a pure additive accumulator).
     """
     from eval_panel import BY_ARCHETYPE
     per_arch = {arch: {"wins": 0, "total": 0,
@@ -1240,17 +991,7 @@ def evaluate_panel(
     fire_threshold: float = 0.5,
     sample: bool = False,
     ship_bin_mode: str = "absolute",
-    binary_attack_sizing: str = "all-in",
     target_decode: bool = False,
-    defensive_reinforce_k: int = 0,
-    defensive_reinforce_beta: float = 2.2,
-    defensive_reinforce_max_targets: int = 1,
-    defensive_reinforce_value_margin: float | None = None,
-    defensive_reinforce_overfill: float = 1.0,
-    natural_head_audit: bool = False,
-    natural_head_audit_beta: float = 2.2,
-    shard_idx: int = 0,
-    shard_count: int = 1,
     collect_records: bool = False,
 ) -> dict:
     """Stratified eval over the 128-seed community panel, playing both seats.
@@ -1264,44 +1005,22 @@ def evaluate_panel(
     from eval_panel import BY_ARCHETYPE
 
     validate_opponent_assets(opponent, 2)
-    def_reinf_stats = {}
-    natural_head_stats = {} if natural_head_audit else None
-    projected_hold_stats = {} if binary_attack_sizing == "projected-hold" else None
     agent_fn = build_agent_fn(model, device, fire_threshold=fire_threshold, sample=sample,
                               ship_bin_mode=ship_bin_mode,
-                              binary_attack_sizing=binary_attack_sizing,
-                              target_decode=target_decode,
-                              defensive_reinforce_k=defensive_reinforce_k,
-                              defensive_reinforce_beta=defensive_reinforce_beta,
-                              defensive_reinforce_max_targets=defensive_reinforce_max_targets,
-                              defensive_reinforce_value_margin=defensive_reinforce_value_margin,
-                              defensive_reinforce_overfill=defensive_reinforce_overfill,
-                              defensive_reinforce_stats=def_reinf_stats,
-                              natural_head_audit_stats=natural_head_stats,
-                              natural_head_audit_beta=natural_head_audit_beta,
-                              projected_hold_stats=projected_hold_stats)
+                              target_decode=target_decode)
 
     records: list = []
     total_games = sum(len(seeds) for seeds in BY_ARCHETYPE.values()) * 2
-    shard_total = sum(1 for i in range(total_games) if i % shard_count == shard_idx)
 
     print(f"Panel eval START — opponent: {opponent} | {total_games} games "
           f"(128 seeds × 2 seats) | decode={'target' if target_decode else 'argmax'} "
-          f"fire_thr={fire_threshold}"
-          + (f" | SHARD {shard_idx}/{shard_count} ({shard_total} games)" if shard_count > 1 else ""),
+          f"fire_thr={fire_threshold}",
           flush=True)
 
-    # Global game index over the fixed (archetype, seed, seat) order. Shard i runs only
-    # games where idx % shard_count == i — a deterministic partition of the SAME 256 games.
-    gi = 0
     wins_running = 0
     for archetype, seeds in BY_ARCHETYPE.items():
         for seed in seeds:
             for my_seat in (0, 1):
-                do_this = (gi % shard_count == shard_idx)
-                gi += 1
-                if not do_this:
-                    continue
                 agents = [agent_fn, opponent] if my_seat == 0 else [opponent, agent_fn]
                 env = make("orbit_wars", configuration={"seed": seed}, debug=False)
                 env.run(agents)
@@ -1320,168 +1039,16 @@ def evaluate_panel(
                 records.append({"archetype": archetype, "my_seat": my_seat,
                                 "is_win": is_win, "material": material, "conv": conv})
                 wins_running += int(is_win)
-                if len(records) % 16 == 0 or len(records) == shard_total:
-                    print(f"  panel progress: {len(records)}/{shard_total}  "
+                if len(records) % 16 == 0 or len(records) == total_games:
+                    print(f"  panel progress: {len(records)}/{total_games}  "
                           f"overall {wins_running}/{len(records)} "
                           f"({100*wins_running/max(len(records),1):.1f}%)",
                           flush=True)
 
     result = _accumulate_panel_records(records)
-    result["defensive_reinforce"] = def_reinf_stats
-    result["natural_head_audit"] = natural_head_stats or {}
-    result["projected_hold"] = projected_hold_stats or {}
     if collect_records:
         result["_records"] = records
     return result
-
-
-def _fmt_projected_hold(stats: dict) -> str:
-    attacks = stats.get("attacks", 0)
-    verified = stats.get("verified", 0)
-    resized = stats.get("resized", 0)
-    all_in = stats.get("all_in_ships", 0)
-    executed = stats.get("executed_ships", 0)
-    return (
-        "Projected hold sizing: "
-        f"verified {verified}/{attacks} ({verified / max(attacks, 1):.1%}) | "
-        f"strictly smaller {resized}/{attacks} ({resized / max(attacks, 1):.1%}) | "
-        f"ships {executed}/{all_in} ({executed / max(all_in, 1):.1%} of all-in)"
-    )
-
-
-def _fmt_defensive_reinforce(stats: dict) -> str:
-    if not stats:
-        return "Defensive reinforce overlay: no events recorded"
-    forced = stats.get("forced_moves", 0.0)
-    targets = stats.get("forced_targets", 0.0)
-    threatened = stats.get("threatened_targets", 0.0)
-    fillable = stats.get("fillable_targets", 0.0)
-    ships = stats.get("forced_ships", 0.0)
-    orig_total = max(forced, 1.0)
-    same = stats.get("orig_same_target", 0.0) / orig_total
-    nofire = stats.get("orig_no_fire", 0.0) / orig_total
-    enemy = stats.get("orig_enemy", 0.0) / orig_total
-    neutral = stats.get("orig_neutral", 0.0) / orig_total
-    other_own = stats.get("orig_other_own", 0.0) / orig_total
-    undersent = stats.get("orig_undersent", 0.0) / max(
-        forced - stats.get("orig_no_fire", 0.0), 1.0)
-    replaced = stats.get("policy_move_replaced", 0.0)
-    capdrop = stats.get("policy_move_dropped_for_cap", 0.0)
-    db = stats.get("deficit_before", 0.0)
-    da = stats.get("deficit_after", 0.0)
-    hn = max(stats.get("head_fire_n", 0.0), 1.0)
-    tn = max(stats.get("head_target_rank_n", 0.0), 1.0)
-    sn = max(stats.get("head_ship_rank_n", 0.0), 1.0)
-    fire_mean = stats.get("head_fire_prob_sum", 0.0) / hn
-    target_rank = stats.get("head_target_rank_sum", 0.0) / tn
-    ship_rank = stats.get("head_ship_rank_sum", 0.0) / sn
-    value_checked = stats.get("value_gate_checked", 0.0)
-    value_line = ""
-    if value_checked > 0:
-        vg = max(value_checked, 1.0)
-        value_line = (
-            f"\n  value gate: checked {value_checked:.0f} · skipped "
-            f"{stats.get('value_gate_skipped_targets', 0.0):.0f} "
-            f"({stats.get('value_gate_skipped_targets', 0.0) / vg:.0%}) · "
-            f"avg save/opportunity/net "
-            f"{stats.get('value_gate_save_value', 0.0) / vg:.1f}/"
-            f"{stats.get('value_gate_opportunity', 0.0) / vg:.1f}/"
-            f"{stats.get('value_gate_net', 0.0) / vg:.1f}"
-        )
-    requested = stats.get("realized_fill_requested_sum", 0.0)
-    realized_line = ""
-    if requested > 0:
-        fill = stats.get("realized_fill_forced_sum", 0.0)
-        realized_line = (
-            f"\n  realized fill: forced/requested {fill:.0f}/{requested:.0f} "
-            f"({fill / requested:.2f}x) · full targets "
-            f"{stats.get('realized_fill_full_targets', 0.0):.0f}/{max(targets, 1.0):.0f}"
-        )
-    return (
-        "Defensive reinforce overlay:\n"
-        f"  threatened {threatened:.0f} · fillable {fillable:.0f} · forced targets {targets:.0f} "
-        f"moves {forced:.0f} ships {ships:.0f}\n"
-        f"  deficit before/after {db:.0f}/{da:.0f} · hopeless {stats.get('hopeless_targets', 0.0):.0f} "
-        f"· blocked cooldown/mask {stats.get('blocked_by_cooldown_or_mask', 0.0):.0f}"
-        f"{value_line}{realized_line}\n"
-        f"  original policy on forced sources: no-fire {nofire:.0%} · same-target {same:.0%} "
-        f"· other-own {other_own:.0%} · enemy {enemy:.0%} · neutral {neutral:.0%} "
-        f"· undersent(if fired) {undersent:.0%}\n"
-        f"  head audit on forced sources: fire_p mean {fire_mean:.2f} "
-        f"(<0.1/{stats.get('head_fire_lt_01',0.0)/hn:.0%}, <0.3/{stats.get('head_fire_lt_03',0.0)/hn:.0%}, "
-        f"<0.5/{stats.get('head_fire_lt_05',0.0)/hn:.0%})\n"
-        f"     target rank avg {target_rank:.1f} top1/top3/top5 "
-        f"{stats.get('head_target_top1',0.0)/tn:.0%}/{stats.get('head_target_top3',0.0)/tn:.0%}/"
-        f"{stats.get('head_target_top5',0.0)/tn:.0%} · ship sufficient rank avg {ship_rank:.1f} "
-        f"top1/top3/top5 {stats.get('head_ship_top1_ge_send',0.0)/sn:.0%}/"
-        f"{stats.get('head_ship_top3_ge_send',0.0)/sn:.0%}/{stats.get('head_ship_top5_ge_send',0.0)/sn:.0%}\n"
-        f"     joint ready top1/top3 {stats.get('head_all_top1_ready',0.0)/orig_total:.0%}/"
-        f"{stats.get('head_all_top3_ready',0.0)/orig_total:.0%}\n"
-        f"  replaced policy moves {replaced:.0f} · dropped-for-cap {capdrop:.0f}"
-    )
-
-
-def _fmt_natural_head_audit(stats: dict) -> str:
-    if not stats:
-        return "Natural head audit: no events recorded"
-
-    def row(label: str, prefix: str) -> str:
-        slots = max(stats.get(f"{prefix}_slots", 0.0), 1.0)
-        fire_mean = stats.get(f"{prefix}_fire_prob_sum", 0.0) / slots
-        fired = stats.get(f"{prefix}_fired", 0.0) / slots
-        veto = 1.0 - fired
-        chosen_own = stats.get(f"{prefix}_chosen_own", 0.0) / max(stats.get(f"{prefix}_fired", 0.0), 1.0)
-        chosen_enemy = stats.get(f"{prefix}_chosen_enemy", 0.0) / max(stats.get(f"{prefix}_fired", 0.0), 1.0)
-        chosen_neutral = stats.get(f"{prefix}_chosen_neutral", 0.0) / max(stats.get(f"{prefix}_fired", 0.0), 1.0)
-        atk_n = max(stats.get(f"{prefix}_attack_n", 0.0), 1.0)
-        save_n = max(stats.get(f"{prefix}_save_n", 0.0), 1.0)
-        atk_tr_n = max(stats.get(f"{prefix}_attack_target_rank_n", 0.0), 1.0)
-        save_tr_n = max(stats.get(f"{prefix}_save_target_rank_n", 0.0), 1.0)
-        atk_sr_n = max(stats.get(f"{prefix}_attack_ship_rank_n", 0.0), 1.0)
-        save_sr_n = max(stats.get(f"{prefix}_save_ship_rank_n", 0.0), 1.0)
-        atk_rank = stats.get(f"{prefix}_attack_target_rank_sum", 0.0) / atk_tr_n
-        save_rank = stats.get(f"{prefix}_save_target_rank_sum", 0.0) / save_tr_n
-        atk_ship = stats.get(f"{prefix}_attack_ship_rank_sum", 0.0) / atk_sr_n
-        save_ship = stats.get(f"{prefix}_save_ship_rank_sum", 0.0) / save_sr_n
-        return (
-            f"  {label:<5s} slots {slots:.0f} fire_p {fire_mean:.2f} fired {fired:.0%} "
-            f"veto {veto:.0%} (<0.5 {stats.get(f'{prefix}_fire_lt_05',0.0)/slots:.0%}; "
-            f"fired own/enemy/neutral {chosen_own:.0%}/{chosen_enemy:.0%}/{chosen_neutral:.0%})\n"
-            f"        attack-cand {stats.get(f'{prefix}_attack_n',0.0):.0f}: "
-            f"fire>=.5 {stats.get(f'{prefix}_attack_fire_ready',0.0)/atk_n:.0%} · "
-            f"target avg {atk_rank:.1f} top1/3/5 "
-            f"{stats.get(f'{prefix}_attack_target_top1',0.0)/atk_tr_n:.0%}/"
-            f"{stats.get(f'{prefix}_attack_target_top3',0.0)/atk_tr_n:.0%}/"
-            f"{stats.get(f'{prefix}_attack_target_top5',0.0)/atk_tr_n:.0%} · "
-            f"top1-veto {stats.get(f'{prefix}_attack_target_top1_veto',0.0)/atk_tr_n:.0%} · "
-            f"ship>=req avg {atk_ship:.1f} top1/3 "
-            f"{stats.get(f'{prefix}_attack_ship_top1',0.0)/atk_sr_n:.0%}/"
-            f"{stats.get(f'{prefix}_attack_ship_top3',0.0)/atk_sr_n:.0%} · "
-            f"joint top1/3 {stats.get(f'{prefix}_attack_joint_top1',0.0)/atk_n:.0%}/"
-            f"{stats.get(f'{prefix}_attack_joint_top3',0.0)/atk_n:.0%} · "
-            f"chosen-best {stats.get(f'{prefix}_attack_chosen',0.0)/atk_n:.0%}\n"
-            f"        save-cand   {stats.get(f'{prefix}_save_n',0.0):.0f}: "
-            f"fire>=.5 {stats.get(f'{prefix}_save_fire_ready',0.0)/save_n:.0%} · "
-            f"target avg {save_rank:.1f} top1/3/5 "
-            f"{stats.get(f'{prefix}_save_target_top1',0.0)/save_tr_n:.0%}/"
-            f"{stats.get(f'{prefix}_save_target_top3',0.0)/save_tr_n:.0%}/"
-            f"{stats.get(f'{prefix}_save_target_top5',0.0)/save_tr_n:.0%} · "
-            f"top1-veto {stats.get(f'{prefix}_save_target_top1_veto',0.0)/save_tr_n:.0%} · "
-            f"ship>=req avg {save_ship:.1f} top1/3 "
-            f"{stats.get(f'{prefix}_save_ship_top1',0.0)/save_sr_n:.0%}/"
-            f"{stats.get(f'{prefix}_save_ship_top3',0.0)/save_sr_n:.0%} · "
-            f"joint top1/3 {stats.get(f'{prefix}_save_joint_top1',0.0)/save_n:.0%}/"
-            f"{stats.get(f'{prefix}_save_joint_top3',0.0)/save_n:.0%} · "
-            f"chosen-best {stats.get(f'{prefix}_save_chosen',0.0)/save_n:.0%}"
-        )
-
-    return "\n".join([
-        "Natural head audit (passive; lightweight planner-like attack/save candidates):",
-        row("all", "natural_all"),
-        row("<50", "natural_open"),
-        row("50-99", "natural_mid"),
-        row("100+", "natural_late"),
-    ])
 
 
 def print_panel_report(result: dict, opponent: str) -> None:
@@ -1500,12 +1067,6 @@ def print_panel_report(result: dict, opponent: str) -> None:
     print(f"  asymmetry (seat0 − seat1): {asym:+.1f}pp")
     if "conversion" in result:
         print(_fmt_conversion(result["conversion"]))
-    if result.get("defensive_reinforce"):
-        print(_fmt_defensive_reinforce(result["defensive_reinforce"]))
-    if result.get("natural_head_audit"):
-        print(_fmt_natural_head_audit(result["natural_head_audit"]))
-    if result.get("projected_hold"):
-        print(_fmt_projected_hold(result["projected_hold"]))
     print()
     print("Per archetype  (8 games each = 4 seeds × 2 seats):")
     print(f"  {'archetype':<48s}  {'WR':>6s}  {'s0/s1':>10s}  {'mat':>8s}")
@@ -1536,20 +1097,10 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
                         opponent: str = "random", fire_threshold: float = 0.5,
                         panel: bool = False, sample: bool = False,
                         target_decode: bool = False,
-                        binary_attack_sizing: str = "all-in",
                         reinforce_gate_min_planets: int = None,
                         reinforce_forward_only: bool = None,
                         reinforce_garrison_floor: float = None,
                         sufficient_commit_factor: float = None,
-                        defensive_reinforce_k: int = 0,
-                        defensive_reinforce_beta: float = 2.2,
-                        defensive_reinforce_max_targets: int = 1,
-                        defensive_reinforce_value_margin: float | None = None,
-                        defensive_reinforce_overfill: float = 1.0,
-                        natural_head_audit: bool = False,
-                        natural_head_audit_beta: float = 2.2,
-                        shard_idx: int = 0,
-                        shard_count: int = 1,
                         collect_records: bool = False):
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
@@ -1591,11 +1142,6 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
               f"suff={sufficient_commit_factor}")
     if cfg.model.ship_bin_mode != "absolute":
         print(f"Checkpoint ship_bin_mode={cfg.model.ship_bin_mode}")
-    if binary_attack_sizing != "all-in":
-        if cfg.model.ship_bin_mode != "binary":
-            raise ValueError("--binary-attack-sizing requires a binary checkpoint")
-        print("BINARY CAPITAL DIAGNOSTIC: policy/targets unchanged; "
-              f"executed attack sizing={binary_attack_sizing}")
     # Auto-detect action_decode from checkpoint config; CLI --target-decode overrides.
     if not target_decode and ckpt_action_decode == "target":
         target_decode = True
@@ -1616,43 +1162,19 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     if model.sufficient_commit_factor > 0.0:
         print(f"Sufficient-commit mask: ON | veto attacks with ships <= "
               f"target_defense × {model.sufficient_commit_factor}")
-    if defensive_reinforce_k > 0:
-        print(f"Defensive reinforce overlay: ON | nearest_k={defensive_reinforce_k} "
-              f"beta={defensive_reinforce_beta} max_targets={defensive_reinforce_max_targets} "
-              f"overfill={defensive_reinforce_overfill} "
-              f"(eval-time hard override; training unchanged)")
-        if defensive_reinforce_value_margin is not None:
-            print(f"  value gate: save_value - foregone_attack_value >= "
-                  f"{defensive_reinforce_value_margin}")
-        if not model.allow_reinforce:
-            print("  ⚠ overlay is inert unless checkpoint/eval has allow_reinforce=True")
-    if natural_head_audit:
-        print(f"Natural head audit: ON | beta={natural_head_audit_beta} "
-              f"(passive logits/intent diagnostics; actions unchanged)")
 
     if panel:
         results = evaluate_panel(model, device, opponent=opponent,
                                  fire_threshold=fire_threshold, sample=sample,
                                  ship_bin_mode=cfg.model.ship_bin_mode,
-                                 binary_attack_sizing=binary_attack_sizing,
                                  target_decode=target_decode,
-                                 defensive_reinforce_k=defensive_reinforce_k,
-                                 defensive_reinforce_beta=defensive_reinforce_beta,
-                                 defensive_reinforce_max_targets=defensive_reinforce_max_targets,
-                                 defensive_reinforce_value_margin=defensive_reinforce_value_margin,
-                                 defensive_reinforce_overfill=defensive_reinforce_overfill,
-                                 natural_head_audit=natural_head_audit,
-                                 natural_head_audit_beta=natural_head_audit_beta,
-                                 shard_idx=shard_idx, shard_count=shard_count,
                                  collect_records=collect_records)
-        if shard_count <= 1:                 # real shards (>1) stay silent; --panel-out prints normally
-            print_panel_report(results, opponent)
+        print_panel_report(results, opponent)
         return results
 
     results = evaluate_against_baseline(
         model, device,
         ship_bin_mode=cfg.model.ship_bin_mode,
-        binary_attack_sizing=binary_attack_sizing,
         target_decode=target_decode,
         num_games=num_games,
         seed_start=seed_start,
@@ -1660,13 +1182,6 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         num_players=cfg.env.num_players,
         fire_threshold=fire_threshold,
         sample=sample,
-        defensive_reinforce_k=defensive_reinforce_k,
-        defensive_reinforce_beta=defensive_reinforce_beta,
-        defensive_reinforce_max_targets=defensive_reinforce_max_targets,
-        defensive_reinforce_value_margin=defensive_reinforce_value_margin,
-        defensive_reinforce_overfill=defensive_reinforce_overfill,
-        natural_head_audit=natural_head_audit,
-        natural_head_audit_beta=natural_head_audit_beta,
     )
 
     print(f"Win rate vs {opponent}: {results['win_rate']:.2%}  "
@@ -1675,12 +1190,6 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     print(f"Target decode: {target_decode}")
     print(f"Avg material: {results['avg_material']:.1f}")
     print(_fmt_conversion(results["conversion"]))
-    if results.get("defensive_reinforce"):
-        print(_fmt_defensive_reinforce(results["defensive_reinforce"]))
-    if results.get("natural_head_audit"):
-        print(_fmt_natural_head_audit(results["natural_head_audit"]))
-    if results.get("projected_hold"):
-        print(_fmt_projected_hold(results["projected_hold"]))
     for r in results["results"][:5]:
         print(f"  seed={r['seed']} win={r['win']} "
               f"material={r['material']} rewards={r['rewards']}")
@@ -1708,14 +1217,6 @@ if __name__ == "__main__":
                              "is on competent bins (1-ship-fleet trap).")
     parser.add_argument("--target-decode", action="store_true",
                         help="Aim with target_logits plus orbital intercept.")
-    parser.add_argument("--binary-attack-sizing",
-                        choices=("all-in", "capture-defend", "projected-hold"),
-                        default="all-in",
-                        help="Eval-only binary capital diagnostic. Keep the trained NOOP/source/target "
-                             "distribution unchanged, but execute non-owned commits using either the "
-                             "checkpoint's all-in amount, the existing capture-defend heuristic, "
-                             "or a verified 24-step projected hold amount. "
-                             "Own-target maintain sizing is unchanged.")
     parser.add_argument("--reinforce-gate-min-planets", type=int, default=None,
                         help="Reinforce-discipline parity: own targets legal only at "
                              ">= this many owned planets. Default=auto-load from checkpoint; "
@@ -1730,71 +1231,12 @@ if __name__ == "__main__":
     parser.add_argument("--sufficient-commit-factor", type=float, default=None,
                         help="Sufficient-commit parity: veto an attack whose ships <= target "
                              "defense × this factor. Default=auto-load from ckpt (1.0 = strict).")
-    parser.add_argument("--decisive-mass-beta", type=float, default=_DM_BETA,
-                        help="Reactive-margin weight for the decisive-mass GAP diagnostic floor "
-                             "(beta*rho(eta)*reachable_enemy_mass). Default 2.2 (= training default). "
-                             "Pass the run's --decisive-mass-beta to match a non-default-beta decmass "
-                             "run so the eval floor == the reward floor (beta isn't stored in the ckpt).")
-    parser.add_argument("--defensive-reinforce-k", type=int, default=0,
-                        help="Eval-time hard defensive overlay: for threatened own planets, force "
-                             "up to K nearest reachable safe-drain sources to reinforce enough mass "
-                             "to fill the hold-floor deficit. 0=off.")
-    parser.add_argument("--defensive-reinforce-beta", type=float, default=None,
-                        help="Reactive-margin beta for --defensive-reinforce-k. Default reuses "
-                             "--decisive-mass-beta so the overlay and hold-floor diagnostic agree.")
-    parser.add_argument("--defensive-reinforce-max-targets", type=int, default=1,
-                        help="Max threatened own planets the eval-time defensive overlay may fill "
-                             "per agent step.")
-    parser.add_argument("--defensive-reinforce-value-margin", type=float, default=None,
-                        help="Optional value/opportunity gate for --defensive-reinforce-k. "
-                             "When set, force a save only if save_value - foregone_attack_value "
-                             "is at least this margin. Default off preserves the original overlay.")
-    parser.add_argument("--defensive-reinforce-overfill", type=float, default=1.0,
-                        help="Multiplier applied to the selected defensive deficit after value "
-                             "selection. 1.0 preserves current overlay; >1.0 tests aggregate "
-                             "arrival sufficiency without changing target selection.")
-    parser.add_argument("--retarget-top-roi", action="store_true",
-                        help="SELECTION ISOLATION: leave fire/ship as-is; redirect each ATTACK the policy "
-                             "launches to the top-holdable-ROI target from that source (keep source+ships). "
-                             "No spray, no fire change. Tests if better target choice raises WR.")
-    parser.add_argument("--retarget-resize", action="store_true",
-                        help="With --retarget-top-roi: also re-size the redirected attack to capture its "
-                             "NEW target (capped at garrison), removing the size<->target mismatch confound.")
-    parser.add_argument("--force-fire-high-roi", action="store_true",
-                        help="FIRE-HEAD ISOLATION: on sources the fire head vetoes (fire_prob<thr) that "
-                             "have a high-holdable-ROI attack available, force fire toward the head's own "
-                             "target+ship (fallback top-ROI). Tests if the fire veto costs winnable attacks.")
-    parser.add_argument("--force-fire-roi-threshold", type=float, default=0.3,
-                        help="Min holdable-ROI of the best available attack for --force-fire-high-roi to "
-                             "force a vetoed source (avoids forcing spray on worthless targets).")
-    parser.add_argument("--natural-head-audit", action="store_true",
-                        help="Passive target-decode audit: log fire/target/ship agreement with "
-                             "lightweight planner-like attack and save candidates. No action changes.")
-    parser.add_argument("--natural-head-audit-beta", type=float, default=None,
-                        help="Reactive-margin beta for --natural-head-audit save candidates. "
-                             "Default reuses --decisive-mass-beta.")
-    parser.add_argument("--panel-shards", type=int, default=1,
-                        help="Split the --panel run into this many deterministic shards (by game "
-                             "index). Run one process per shard with --panel-shard-idx + --shard-out, "
-                             "then merge_panel_shards.py the pickles → identical numbers, parallel.")
-    parser.add_argument("--panel-shard-idx", type=int, default=0,
-                        help="Which shard this process runs (0..panel-shards-1).")
-    parser.add_argument("--shard-out", type=str, default=None,
-                        help="With --panel-shards>1: pickle this shard's per-game records here "
-                             "(suppresses the report; merge_panel_shards.py prints the merged report).")
     parser.add_argument("--panel-out", type=str, default=None,
                         help="Pickle the full --panel per-game records here (each game's conv dict "
                              "incl. dm_ratios), AND print the report normally. recompute_panel.py "
                              "re-derives any metric offline — so a later metric addition never needs a "
                              "panel re-run. No effect without --panel.")
     args = parser.parse_args()
-    if args.retarget_top_roi:
-        set_retarget_top_roi(True, resize=args.retarget_resize)
-        print(f"SELECTION ISOLATION: retarget each attack to top-holdable-ROI target "
-              f"(resize={'ON' if args.retarget_resize else 'OFF'})")
-    if args.force_fire_high_roi:
-        set_force_fire_high_roi(True, args.force_fire_roi_threshold)
-        print(f"FIRE-HEAD ISOLATION: force-fire vetoed sources w/ best holdable-ROI >= {args.force_fire_roi_threshold}")
 
     cfg = Config()
     cfg.env.num_players = args.num_players
@@ -1808,55 +1250,18 @@ if __name__ == "__main__":
         panel=args.panel,
         sample=args.sample,
         target_decode=args.target_decode,
-        binary_attack_sizing=args.binary_attack_sizing,
         reinforce_gate_min_planets=args.reinforce_gate_min_planets,
         reinforce_forward_only=args.reinforce_forward_only,
         reinforce_garrison_floor=args.reinforce_garrison_floor,
         sufficient_commit_factor=args.sufficient_commit_factor,
-        defensive_reinforce_k=args.defensive_reinforce_k,
-        defensive_reinforce_beta=(args.decisive_mass_beta if args.defensive_reinforce_beta is None
-                                  else args.defensive_reinforce_beta),
-        defensive_reinforce_max_targets=args.defensive_reinforce_max_targets,
-        defensive_reinforce_value_margin=args.defensive_reinforce_value_margin,
-        defensive_reinforce_overfill=args.defensive_reinforce_overfill,
-        natural_head_audit=args.natural_head_audit,
-        natural_head_audit_beta=(args.decisive_mass_beta if args.natural_head_audit_beta is None
-                                 else args.natural_head_audit_beta),
-        shard_idx=args.panel_shard_idx,
-        shard_count=args.panel_shards,
-        collect_records=bool(args.shard_out) or bool(args.panel_out),
+        collect_records=bool(args.panel_out),
     )
-    if args.shard_out and _eval_result is not None:
-        import pickle
-        with open(args.shard_out, "wb") as _f:
-            pickle.dump({"records": _eval_result.get("_records", []),
-                         "defensive_reinforce": _eval_result.get("defensive_reinforce", {}),
-                         "natural_head_audit": _eval_result.get("natural_head_audit", {}),
-                         "projected_hold": _eval_result.get("projected_hold", {})}, _f)
-        _o = _eval_result["overall"]
-        print(f"SHARD {args.panel_shard_idx}/{args.panel_shards} → {args.shard_out}: "
-              f"{len(_eval_result.get('_records', []))} games, {_o['wins']}/{_o['total']} wins",
-              flush=True)
     if args.panel_out and _eval_result is not None:
         import pickle
         with open(args.panel_out, "wb") as _f:
             pickle.dump({"records": _eval_result.get("_records", []),
-                         "opponent": args.opponent,
-                         "projected_hold": _eval_result.get("projected_hold", {})}, _f)
+                         "opponent": args.opponent}, _f)
         print(f"PANEL RECORDS → {args.panel_out}: "
               f"{len(_eval_result.get('_records', []))} games "
               f"(recompute any metric: python orbit_wars_rl/recompute_panel.py {args.panel_out})",
               flush=True)
-    if args.retarget_top_roi:
-        rt = _RETARGET
-        funnel = rt["uniq_sum"] / max(rt["turns"], 1)
-        print(f"SELECTION ISOLATION: retargeted {rt['retargeted']}/{rt['attacks']} attacks "
-              f"({rt['retargeted']/max(rt['attacks'],1):.0%}) to top-holdable-ROI target; "
-              f"resize={'ON' if rt['resize'] else 'OFF'}; target-distinctness {funnel:.2f} "
-              f"(1.0=all distinct, low=funneling to same targets)")
-    if args.force_fire_high_roi:
-        st = _FORCE_FIRE
-        per_state = st["forced"] / max(st["states"], 1)
-        print(f"FIRE-HEAD ISOLATION: forced {st['forced']} fires over {st['states']} states "
-              f"({per_state:.2f}/state; {st['to_head_tgt']} to head's own target, "
-              f"{st['forced'] - st['to_head_tgt']} to fallback top-ROI)")

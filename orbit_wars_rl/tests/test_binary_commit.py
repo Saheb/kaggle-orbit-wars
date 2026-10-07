@@ -91,7 +91,7 @@ def test_minimal_gates_still_respect_the_min_commit_floor():
     assert ok.any() and sizes[0, 1] == MIN_BINARY_COMMIT_SHIPS
 
 
-def _decode(source_ships, attack_sizing="all-in", projected_hold_sizes=None):
+def _decode(source_ships):
     obs = {
         "player": 0,
         "step": 0,
@@ -110,8 +110,7 @@ def _decode(source_ships, attack_sizing="all-in", projected_hold_sizes=None):
     pairwise[0] = _pairwise(source_ships, 6)[0]
     return actions_from_target_policy(
         fire, target, None, masks, obs, 0,
-        ship_bin_mode="binary", binary_attack_sizing=attack_sizing,
-        projected_hold_sizes=projected_hold_sizes,
+        ship_bin_mode="binary",
         pairwise_features=pairwise,
     )
 
@@ -121,48 +120,6 @@ def test_binary_eval_decode_all_in_or_noop():
     moves = _decode(10)
     assert len(moves) == 1
     assert moves[0][2] == 10
-
-
-def test_binary_capture_defend_diagnostic_changes_only_executed_attack_amount():
-    pw = _pairwise(20, 6)
-    all_in, all_in_ok = resolve_binary_commit_np(
-        pw, np.array([20], dtype=np.float32), attack_sizing="all-in")
-    sufficient, sufficient_ok = resolve_binary_commit_np(
-        pw, np.array([20], dtype=np.float32), attack_sizing="capture-defend")
-
-    assert np.array_equal(all_in_ok, sufficient_ok)
-    assert all_in[0, 1] == 20
-    assert sufficient[0, 1] == 7
-
-    all_in_move = _decode(20, attack_sizing="all-in")[0]
-    sufficient_move = _decode(20, attack_sizing="capture-defend")[0]
-    assert all_in_move[:2] == sufficient_move[:2]
-    assert all_in_move[2] == 20
-    assert sufficient_move[2] == 7
-
-
-def test_binary_projected_hold_diagnostic_changes_only_executed_attack_amount():
-    pw = _pairwise(20, 6)
-    projected = np.full((1, 2), 20.0, dtype=np.float32)
-    projected[0, 1] = 11.0
-    all_in, all_in_ok = resolve_binary_commit_np(
-        pw, np.array([20], dtype=np.float32), attack_sizing="all-in")
-    held, held_ok = resolve_binary_commit_np(
-        pw, np.array([20], dtype=np.float32), attack_sizing="projected-hold",
-        projected_hold_sizes=projected)
-
-    assert np.array_equal(all_in_ok, held_ok)
-    assert all_in[0, 1] == 20
-    assert held[0, 1] == 11
-
-    all_in_move = _decode(20, attack_sizing="all-in")[0]
-    held_move = _decode(
-        20, attack_sizing="projected-hold",
-        projected_hold_sizes=np.tile(projected, (16, 1)),
-    )[0]
-    assert all_in_move[:2] == held_move[:2]
-    assert all_in_move[2] == 20
-    assert held_move[2] == 11
 
 
 def test_binary_sampler_has_no_ship_action_and_no_idle_target_credit():

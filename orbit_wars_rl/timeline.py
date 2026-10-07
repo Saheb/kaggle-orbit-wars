@@ -28,7 +28,6 @@ GLOBAL_ECON_DIM = 2 * TIMELINE_K    # projected production + material delta, per
 CANDIDATE_TARGET_TIMELINE_DIM = 6
 CANDIDATE_SOURCE_TIMELINE_DIM = 4
 CANDIDATE_TIMELINE_DIM = CANDIDATE_TARGET_TIMELINE_DIM + CANDIDATE_SOURCE_TIMELINE_DIM
-PROJECTED_HOLD_SEARCH_STEPS = 12
 
 
 def _ship_speed(ships: torch.Tensor) -> torch.Tensor:
@@ -285,65 +284,6 @@ def candidate_timeline_features(planets, planet_alive, arrivals, owner_ts, garr_
     if slot_valid is not None:
         valid = valid * slot_valid.unsqueeze(-1).unsqueeze(-1).float()
     return out * valid
-
-
-def projected_hold_sizes(planets, planet_alive, arrivals, owner_ts, garr_ts,
-                         player: int, max_ships, candidate_distance,
-                         source_indices, slot_valid=None,
-                         min_ships: int = 5,
-                         search_steps: int = PROJECTED_HOLD_SEARCH_STEPS):
-    """Find a verified hold-sized attack for every source-target pair.
-
-    A candidate succeeds only when it captures the target and owns it at every projected
-    step from arrival through the no-new-launch horizon. It is rejected if deducting the
-    fleet makes a source fall that stays ours in the baseline projection.
-
-    The bounded search keeps only explicitly successful upper bounds and re-evaluates its
-    final answer. Fleet speed makes the predicate potentially non-monotonic, so this is the
-    smallest *found* verified fleet, not a mathematical global minimum. Unverified pairs
-    fall back to all-in; callers can therefore use this as a sizing-only intervention
-    without changing the policy's fire or target decision.
-    """
-    upper = max_ships.float().unsqueeze(-1).expand_as(candidate_distance).floor().clamp(min=0.0)
-    eligible = upper >= float(min_ships)
-
-    def evaluate(ships):
-        eta = torch.ceil(
-            candidate_distance / _ship_speed(ships).clamp(min=1e-6)
-        ).clamp(min=1.0)
-        feats = candidate_timeline_features(
-            planets, planet_alive, arrivals, owner_ts, garr_ts, player,
-            ships, eta, source_indices, slot_valid,
-        )
-        target_holds = (feats[..., 0] > 0.5) & (feats[..., 3] > 0.5)
-        return target_holds, feats
-
-    all_in_holds, _ = evaluate(upper)
-    target_feasible = eligible & all_in_holds
-    low = torch.full_like(upper, float(min_ships - 1))
-    high = upper.clone()
-    for _ in range(search_steps):
-        active = target_feasible & ((high - low) > 1.0)
-        if not active.any():
-            break
-        mid = torch.floor((low + high) / 2.0).clamp(min=float(min_ships))
-        mid_holds, _ = evaluate(mid)
-        high = torch.where(active & mid_holds, mid, high)
-        low = torch.where(active & ~mid_holds, mid, low)
-
-    final_holds, final_feats = evaluate(high)
-    K = owner_ts.shape[-1]
-    baseline_source_owner = torch.gather(
-        owner_ts, 1, source_indices.long().unsqueeze(-1).expand(-1, -1, K))
-    baseline_source_held = (baseline_source_owner == float(player)).all(dim=-1).unsqueeze(-1)
-    candidate_source_held = final_feats[..., 7] > 0.5
-    source_preserved = ~baseline_source_held | candidate_source_held
-    feasible = target_feasible & final_holds & source_preserved
-
-    feasible &= planet_alive.unsqueeze(1)
-    if slot_valid is not None:
-        feasible &= slot_valid.unsqueeze(-1)
-    return torch.where(feasible, high, upper), feasible
 
 
 def timeline_features(owner_ts, garr_ts, player: int):

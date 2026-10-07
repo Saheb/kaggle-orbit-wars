@@ -150,49 +150,6 @@ def test_candidate_timeline_prices_source_loss_after_launch():
     assert source[3].item() < 0.0
 
 
-def _hold_fixture(*, target_enemy_step=None, source_enemy_step=None):
-    planets = torch.tensor([[[0.0, 0.0, 20.0, 20.0, 1.0, 20.0, 0.0],
-                             [1.0, -1.0, 21.0, 20.0, 1.0, 10.0, 0.0]]])
-    alive = torch.ones(1, 2, dtype=torch.bool)
-    arrivals = torch.zeros(1, K, 2, 2)
-    if target_enemy_step is not None:
-        arrivals[0, target_enemy_step, 1, 1] = 5.0
-    if source_enemy_step is not None:
-        arrivals[0, source_enemy_step, 0, 1] = 10.0
-    owner_ts = torch.tensor([[[0.0] * K, [-1.0] * K]])
-    garr_ts = torch.tensor([[[20.0] * K, [10.0] * K]])
-    return planets, alive, arrivals, owner_ts, garr_ts
-
-
-def _resolve_hold(**fixture_kwargs):
-    planets, alive, arrivals, owner_ts, garr_ts = _hold_fixture(**fixture_kwargs)
-    return tl.projected_hold_sizes(
-        planets, alive, arrivals, owner_ts, garr_ts, player=0,
-        max_ships=torch.tensor([[20.0]]),
-        candidate_distance=torch.tensor([[[0.0, 1.0]]]),
-        source_indices=torch.tensor([[0]]),
-        slot_valid=torch.ones(1, 1, dtype=torch.bool),
-    )
-
-
-def test_projected_hold_finds_minimum_verified_capture():
-    sizes, feasible = _resolve_hold()
-    assert feasible[0, 0, 1]
-    assert sizes[0, 0, 1].item() == 11.0
-
-
-def test_projected_hold_includes_known_future_counterattack():
-    sizes, feasible = _resolve_hold(target_enemy_step=2)
-    assert feasible[0, 0, 1]
-    assert sizes[0, 0, 1].item() == 15.0
-
-
-def test_projected_hold_falls_back_to_all_in_when_source_would_newly_fall():
-    sizes, feasible = _resolve_hold(source_enemy_step=1)
-    assert not feasible[0, 0, 1]
-    assert sizes[0, 0, 1].item() == 20.0
-
-
 def test_global_economy_parity():
     """The projected economy series must match stepping the engine K times with no actions:
     production delta exactly (integer, ownership-driven), material delta to within the
