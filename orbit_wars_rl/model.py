@@ -56,12 +56,6 @@ class EntityTransformer(nn.Module):
         self.cfg = cfg
         D = cfg.entity_dim
 
-        # Reinforcement curriculum: an annealed additive bias on OWN-target logits
-        # (own planets, pairwise is_mine==1). Set externally per-iter by the training
-        # loop (negative → 0 over training). Plain float, not a Parameter, so it never
-        # enters state_dict — checkpoint-compatible. 0.0 = no effect (default/eval).
-        self.reinforce_logit_bias = 0.0
-
         # Entity projections
         self.planet_proj = nn.Linear(cfg.planet_feature_dim, D)
         self.fleet_proj = nn.Linear(cfg.fleet_feature_dim, D)
@@ -121,13 +115,9 @@ class EntityTransformer(nn.Module):
             nn.GELU(),
             nn.Linear(tgt_hidden, self.num_ship_bins),
         )
-        resid_init_std = float(getattr(cfg, "phase4_residual_init_std", 0.0))
-        if resid_init_std > 0.0:
-            nn.init.normal_(self.fire_scorer[-1].weight, mean=0.0, std=resid_init_std)
-            nn.init.normal_(self.ship_scorer[-1].weight, mean=0.0, std=resid_init_std)
-        else:
-            nn.init.zeros_(self.fire_scorer[-1].weight)
-            nn.init.zeros_(self.ship_scorer[-1].weight)
+        # Zero-init: the target-conditioned residuals start as an exact no-op on the priors.
+        nn.init.zeros_(self.fire_scorer[-1].weight)
+        nn.init.zeros_(self.ship_scorer[-1].weight)
         nn.init.zeros_(self.fire_scorer[-1].bias)
         nn.init.zeros_(self.ship_scorer[-1].bias)
 
@@ -265,11 +255,6 @@ class EntityTransformer(nn.Module):
             k_tgt = self.tgt_k(planet_emb_post).unsqueeze(1).expand(-1, max_owned, -1, -1)
             scorer_in = torch.cat([q_tgt, k_tgt, pairwise_features], dim=-1)
             tgt_scores = self.target_scorer(scorer_in).squeeze(-1)              # (B, MO, N_p)
-            # Reinforcement curriculum: bias own-target logits only (is_mine, idx 5).
-            # Negative bias suppresses reinforcement early; annealed → 0 so RL learns
-            # the reinforce value from reward. Enemy/neutral (is_mine==0) untouched.
-            if self.reinforce_logit_bias != 0.0:
-                tgt_scores = tgt_scores + self.reinforce_logit_bias * pairwise_features[..., 5]
             # Pad to max_planets width if needed
             if N_p < self.max_planets:
                 pad = torch.full(

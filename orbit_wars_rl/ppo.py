@@ -6,7 +6,6 @@ value clipping, and gradient clipping.
 
 from __future__ import annotations
 
-import functools
 import math
 import time
 from collections import deque
@@ -17,21 +16,7 @@ import numpy as np
 
 from binary_policy import (binary_action_entropy, binary_action_log_probs,
                            binary_taken_log_prob)
-from model import SHIP_COUNTS
 from config import Config
-
-
-@functools.lru_cache(maxsize=8)
-def _ship_log_prior_cpu(exp: float, num_bins: int) -> torch.Tensor:
-    """Log of the full-send-biased ship-size prior: w_i ∝ SHIP_COUNTS[i]**exp, normalized.
-    Cached (fixed vector); moved to the loss device/dtype by _ship_log_prior."""
-    counts = torch.tensor(SHIP_COUNTS[:num_bins], dtype=torch.float64)
-    w = counts ** exp
-    return (w / w.sum()).log().float()
-
-
-def _ship_log_prior(exp: float, num_bins: int, device, dtype) -> torch.Tensor:
-    return _ship_log_prior_cpu(float(exp), int(num_bins)).to(device=device, dtype=dtype)
 
 
 def _gather_target_logits(per_target_logits: torch.Tensor, target_idx: torch.Tensor) -> torch.Tensor:
@@ -99,30 +84,9 @@ class PPOLearner:
         self.amp_enabled = False
         self.amp_dtype = torch.bfloat16
 
-        self.phase4_residual_lr_mult = float(getattr(cfg.ppo, "phase4_residual_lr_mult", 1.0))
-        residual_prefixes = (
-            "fire_q.", "fire_k.", "fire_scorer.",
-            "ship_q.", "ship_k.", "ship_scorer.",
-        )
         trainable_params = [p for p in model.parameters() if p.requires_grad]
-        if self.phase4_residual_lr_mult == 1.0:
-            # Preserve the single-group parameter order so existing optimizer states
-            # can restore their Adam moments. A second group has no effect at x1.
-            param_groups = [{"params": trainable_params, "lr": cfg.ppo.learning_rate}]
-        else:
-            residual_param_ids = {
-                id(p) for name, p in model.named_parameters()
-                if any(name.startswith(prefix) for prefix in residual_prefixes)
-            }
-            base_params = [p for p in trainable_params if id(p) not in residual_param_ids]
-            residual_params = [p for p in trainable_params if id(p) in residual_param_ids]
-            param_groups = [{"params": base_params, "lr": cfg.ppo.learning_rate}]
-            if residual_params:
-                param_groups.append({
-                    "params": residual_params,
-                    "lr": cfg.ppo.learning_rate * self.phase4_residual_lr_mult,
-                })
-
+        # One group, in model parameter order — saved optimizer states restore by position.
+        param_groups = [{"params": trainable_params, "lr": cfg.ppo.learning_rate}]
         self.optimizer = torch.optim.Adam(param_groups, eps=1e-5)
         self.total_steps = 0
         self.update_count = 0
@@ -142,7 +106,7 @@ class PPOLearner:
             {k: v.detach().to(self.device) for k, v in state_dict.items()})
         self.anchor_model.eval()
 
-    def compute_loss(self, batch, return_metrics=False, value_only=False):
+    def compute_loss(self, batch, return_metrics=False):
         """Compute PPO clipped loss on a batch (target-decode only).
 
         batch keys:
@@ -300,25 +264,13 @@ class PPOLearner:
                        + (1.0 - p_bar) * ((1.0 - p_bar) / (1.0 - q)).log())
             mean_launch_rate = p_bar.detach().item()
 
-        # Ship-size KL-to-prior: pull the per-draw ship-count distribution toward a
-        # full-send-biased prior (w_i ∝ SHIP_COUNTS[i]**ship_kl_prior_exp), on fired slots only.
-        # KL(π ‖ prior) = Σ π_i (log π_i − log prior_i). Replaces (set entropy_coef_ships=0) the
-        # uniform-seeking ship entropy bonus — see the ship_kl_coef config note.
-        ship_kl = 0.0
-        if cfg.ship_kl_coef > 0.0 and not binary_mode:
-            log_prior = _ship_log_prior(cfg.ship_kl_prior_exp, ship_logits.shape[-1],
-                                        ship_logits.device, ship_logits.dtype)   # (num_bins,)
-            log_q = torch.log_softmax(ship_logits, dim=-1)                        # (B, MO, num_bins)
-            kl_per_slot = (log_q.exp() * (log_q - log_prior)).sum(dim=-1)         # (B, MO)
-            ship_kl = (kl_per_slot * fired_slots).sum() / fired_slots.sum().clamp(min=1)
-
         # Best-checkpoint anchor: KL(live ‖ frozen best) over the EXACT executed action
         # distribution, plus a value term pulling the critic toward the best's estimate. This is
         # what keeps long unanchored self-play from drifting out of the region that beats real
         # opponents while its internal metrics stay healthy (docs/training.md, noopkl2).
         anchor_kl = 0.0
         anchor_value = 0.0
-        anchor_on = (self.anchor_model is not None and not value_only
+        anchor_on = (self.anchor_model is not None
                      and (cfg.anchor_kl_coef > 0.0 or cfg.anchor_value_coef > 0.0))
         if anchor_on:
             if not binary_mode:
@@ -358,22 +310,17 @@ class PPOLearner:
                 # the analogue is an MSE distillation toward the frozen best's estimate.
                 anchor_value = ((values - a_value) ** 2).mean()
 
-        if value_only:
-            loss = cfg.value_coef * value_loss
-        else:
-            loss = (policy_loss
-                    + cfg.value_coef * value_loss
-                    - cfg.entropy_coef_fire  * fire_entropy
-                    - cfg.entropy_coef_target * target_entropy
-                    - cfg.entropy_coef_ships * ship_entropy)
-            if cfg.noop_kl_coef > 0.0:
-                loss = loss + cfg.noop_kl_coef * noop_kl
-            if cfg.ship_kl_coef > 0.0:
-                loss = loss + cfg.ship_kl_coef * ship_kl
-            if anchor_on and cfg.anchor_kl_coef > 0.0:
-                loss = loss + cfg.anchor_kl_coef * anchor_kl
-            if anchor_on and cfg.anchor_value_coef > 0.0:
-                loss = loss + cfg.anchor_value_coef * anchor_value
+        loss = (policy_loss
+                + cfg.value_coef * value_loss
+                - cfg.entropy_coef_fire  * fire_entropy
+                - cfg.entropy_coef_target * target_entropy
+                - cfg.entropy_coef_ships * ship_entropy)
+        if cfg.noop_kl_coef > 0.0:
+            loss = loss + cfg.noop_kl_coef * noop_kl
+        if anchor_on and cfg.anchor_kl_coef > 0.0:
+            loss = loss + cfg.anchor_kl_coef * anchor_kl
+        if anchor_on and cfg.anchor_value_coef > 0.0:
+            loss = loss + cfg.anchor_value_coef * anchor_value
 
         if return_metrics:
             clip_frac = ((ratio - 1.0).abs() > cfg.clip_eps).float().mean()
@@ -503,7 +450,6 @@ class PPOLearner:
                 "target_entropy_max": target_entropy_max.item(),
                 "noop_kl": float(noop_kl.item() if torch.is_tensor(noop_kl) else noop_kl),
                 "mean_launch_rate": mean_launch_rate,
-                "ship_kl": float(ship_kl.item() if torch.is_tensor(ship_kl) else ship_kl),
                 "anchor_kl": float(anchor_kl.item() if torch.is_tensor(anchor_kl) else anchor_kl),
                 "anchor_value": float(anchor_value.item() if torch.is_tensor(anchor_value)
                                       else anchor_value),
@@ -534,8 +480,7 @@ class PPOLearner:
         return loss
 
     def update(self, batches, scheduler=None, ppo_epochs=None,
-               kl_target: float = 0.05, timers=None, sync=None,
-               lean_metrics: bool = False):
+               kl_target: float = 0.05, timers=None, sync=None):
         """Run PPO update on a list of minibatches.
 
         kl_target:  stop epoch loop early if mean approx-KL exceeds this value,
@@ -545,12 +490,6 @@ class PPOLearner:
                     incl. metrics .item() syncs), "upd_bwd" (backward), "upd_opt"
                     (grad-clip + optimizer/scheduler step). `sync` is called at each
                     boundary (pass torch.cuda.synchronize for true attribution).
-        lean_metrics: THROUGHPUT PROBE ONLY. Skip the per-minibatch metrics block
-                    on all but the final update, so only one full metrics dict is
-                    computed per rollout. Gradients/loss
-                    are byte-identical (metrics are no_grad + detached) — this isolates
-                    the logging-sync tax. Disables KL early-stopping (needs per-minibatch
-                    KL). Do NOT use for real training runs (loses the KL guard).
         """
         cfg = self.cfg.ppo
         epochs = ppo_epochs or cfg.ppo_epochs
@@ -564,16 +503,9 @@ class PPOLearner:
 
         for epoch in range(epochs):
             epoch_kl = 0.0
-            last_epoch = epoch == epochs - 1
-            for i, batch in enumerate(batches):
-                # Lean mode: only the very last update of the rollout carries metrics.
-                want_metrics = (not lean_metrics) or (last_epoch and i == len(batches) - 1)
+            for batch in batches:
                 _t0 = time.perf_counter()
-                if want_metrics:
-                    ppo_loss, metrics = self.compute_loss(batch, return_metrics=True)
-                else:
-                    ppo_loss = self.compute_loss(batch, return_metrics=False)
-                    metrics = None
+                ppo_loss, metrics = self.compute_loss(batch, return_metrics=True)
                 total_loss = ppo_loss
                 if timers is not None:
                     sync(); timers["upd_fwd"] += time.perf_counter() - _t0
@@ -592,8 +524,6 @@ class PPOLearner:
                     sync(); timers["upd_opt"] += time.perf_counter() - _t0
 
                 n_updates += 1
-                if metrics is None:
-                    continue
                 for k, v in metrics.items():
                     if isinstance(v, list):
                         # Element-wise sum for list-valued metrics (per-slot etc.)
@@ -609,8 +539,7 @@ class PPOLearner:
 
             # KL early stopping: if this epoch's mean KL exceeded the target,
             # bail out before the next epoch to prevent policy collapse.
-            # (Skipped under lean_metrics — no per-minibatch KL available.)
-            if not lean_metrics and (epoch_kl / max(len(batches), 1)) > kl_target:
+            if (epoch_kl / max(len(batches), 1)) > kl_target:
                 early_stopped = True
                 break
 
@@ -620,55 +549,13 @@ class PPOLearner:
             for k, v in sum_metrics.items()
         }
         avg_metrics["learning_rate"] = self.optimizer.param_groups[0]["lr"]
-        avg_metrics["phase4_residual_learning_rate"] = self.get_phase4_residual_lr()
         avg_metrics["kl_early_stop"] = float(early_stopped)
         self.update_count += n_updates
         return avg_metrics
 
-    # Value-head parameter prefixes — the ONLY params trained during critic warmup.
-    # The shared trunk + policy heads stay frozen so the BC policy is byte-for-byte
-    # untouched while the value head fits the frozen features.
-    _VALUE_HEAD_PREFIXES = ("value_fc1", "value_fc2", "value_out")
-
-    def _set_value_only(self, on: bool) -> None:
-        for name, p in self.model.named_parameters():
-            p.requires_grad = (name.split(".")[0] in self._VALUE_HEAD_PREFIXES) if on else True
-
-    def value_warmup_update(self, batches):
-        """Critic-only warmup (BC warmstart: trained policy + UNtrained critic).
-        Freeze the trunk + policy heads; fit ONLY the value head on the frozen BC
-        features for one pass over the minibatches. No scheduler step (keep LR
-        steady) and no IL/entropy/policy terms. Returns minimal logging metrics."""
-        self._set_value_only(True)
-        sum_vl, n = 0.0, 0
-        for batch in batches:
-            loss, metrics = self.compute_loss(batch, return_metrics=True, value_only=True)
-            self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in self.model.parameters() if p.requires_grad],
-                self.cfg.ppo.max_grad_norm)
-            self.optimizer.step()
-            sum_vl += metrics["value_loss"]
-            n += 1
-        self._set_value_only(False)
-        self.update_count += n
-        return {"value_loss": sum_vl / max(n, 1),
-                "learning_rate": self.optimizer.param_groups[0]["lr"],
-                "phase4_residual_learning_rate": self.get_phase4_residual_lr(),
-                "kl_early_stop": 0.0, "critic_warmup": 1.0}
-
-    def get_lr(self):
-        return self.optimizer.param_groups[0]["lr"]
-
-    def get_phase4_residual_lr(self):
-        if len(self.optimizer.param_groups) < 2:
-            return self.optimizer.param_groups[0]["lr"]
-        return self.optimizer.param_groups[1]["lr"]
-
     def state_dict(self):
         # Save model-arch config alongside weights so loaders can rebuild the
-        # right shape (num_ship_bins for fraction-head).
+        # right shape (num_ship_bins).
         model_cfg = getattr(self.cfg, "model", None)
         cfg_blob = {}
         if model_cfg is not None:
@@ -693,9 +580,6 @@ class PPOLearner:
                 "reverse_edge_cooldown": int(getattr(model_cfg, "reverse_edge_cooldown", 0)),
                 "reinforce_garrison_floor": float(getattr(model_cfg, "reinforce_garrison_floor", 0.0)),
                 "sufficient_commit_factor": float(getattr(model_cfg, "sufficient_commit_factor", 0.0)),
-                # provenance: how the ckpt was trained (eval always clamps, so not an eval-contract field)
-                "ship_overflow_mode": str(getattr(model_cfg, "ship_overflow_mode", "drop")),
-                "phase4_residual_init_std": float(getattr(model_cfg, "phase4_residual_init_std", 0.0)),
             }
         # Save the UNCOMPILED model's state_dict. torch.compile wraps the model and prefixes
         # every key with "_orig_mod." — persisting that breaks eval/export/resume (which load

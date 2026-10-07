@@ -509,7 +509,6 @@ def train(args):
         cfg.ppo.kl_target = args.kl_target
     if args.learning_rate is not None:
         cfg.ppo.learning_rate = args.learning_rate
-    cfg.ppo.phase4_residual_lr_mult = args.phase4_residual_lr_mult
     if args.ppo_epochs is not None:
         cfg.ppo.ppo_epochs = args.ppo_epochs
     if args.clip_eps is not None:
@@ -526,45 +525,28 @@ def train(args):
         cfg.ppo.gae_lambda = args.gae_lambda
     if args.gamma is not None:
         cfg.ppo.gamma = args.gamma
-    if args.critic_warmup_ev is not None:
-        cfg.ppo.critic_warmup_ev = args.critic_warmup_ev
-    if args.critic_warmup_max_updates is not None:
-        cfg.ppo.critic_warmup_max_updates = args.critic_warmup_max_updates
     cfg.ppo.noop_kl_coef = args.noop_kl_coef
     cfg.ppo.noop_target_launch_rate = args.noop_target_launch_rate
-    cfg.ppo.ship_kl_coef = args.ship_kl_coef
-    cfg.ppo.ship_kl_prior_exp = args.ship_kl_prior_exp
     cfg.ppo.anchor_kl_coef = args.anchor_kl_coef
     cfg.ppo.anchor_value_coef = args.anchor_value_coef
     print(f"PPO config: lr={cfg.ppo.learning_rate}, ppo_epochs={cfg.ppo.ppo_epochs}, "
           f"num_minibatches={cfg.ppo.num_minibatches}, clip_eps={cfg.ppo.clip_eps}, "
           f"entropy_coef_fire={cfg.ppo.entropy_coef_fire}, gae_lambda={cfg.ppo.gae_lambda}, "
           f"kl_target={cfg.ppo.kl_target}")
-    if cfg.ppo.phase4_residual_lr_mult != 1.0:
-        print("Target-conditioning residual LR multiplier: "
-              f"x{cfg.ppo.phase4_residual_lr_mult:.3g}")
     print(f"Entropy coefs: fire={cfg.ppo.entropy_coef_fire}, target={cfg.ppo.entropy_coef_target}, "
           f"ships={cfg.ppo.entropy_coef_ships} | max_grad_norm={cfg.ppo.max_grad_norm}")
     if cfg.ppo.noop_kl_coef > 0.0:
         print(f"No-op KL bias: coef={cfg.ppo.noop_kl_coef} → mean launch rate "
               f"{cfg.ppo.noop_target_launch_rate} (anti-spray, adds to fire entropy)")
-    if cfg.ppo.ship_kl_coef > 0.0:
-        print(f"Ship-size KL-to-prior: coef={cfg.ppo.ship_kl_coef} exp={cfg.ppo.ship_kl_prior_exp} "
-              f"(full-send-biased; REPLACES ship entropy — entropy_coef_ships={cfg.ppo.entropy_coef_ships})")
     if cfg.ppo.anchor_kl_coef > 0.0 or cfg.ppo.anchor_value_coef > 0.0:
         print(f"Best-checkpoint ANCHOR: kl_coef={cfg.ppo.anchor_kl_coef} "
               f"value_coef={cfg.ppo.anchor_value_coef} | promote at EMA wr>="
               f"{args.anchor_promote_winrate} over >={args.anchor_promote_min_games} games")
     print(f"Action decode: {args.action_decode}")
     print(f"Reinforcement (own planets as targets): {'ON' if args.allow_reinforce else 'off'}")
-    if args.allow_reinforce and args.reinforce_anneal_frac > 0.0:
-        print(f"Reinforcement CURRICULUM: own-target logit bias {args.reinforce_bias_init}→0 over "
-              f"{args.reinforce_anneal_frac * args.total_steps:,.0f} steps "
-              f"(frac {args.reinforce_anneal_frac}), then 0 — enemy/neutral targeting untouched")
-    if args.allow_reinforce and (args.reinforce_garrison_floor > 0.0 or args.reinforce_cost > 0.0):
+    if args.allow_reinforce and args.reinforce_garrison_floor > 0.0:
         print(f"Reinforcement DISCIPLINE: garrison_floor={args.reinforce_garrison_floor} "
-              f"(veto reinforce that drains source below this), "
-              f"cost={args.reinforce_cost}/ship (reward penalty on ships reinforced)")
+              f"(veto reinforce that drains source below this)")
     if args.allow_reinforce and args.reinforce_gate_min_planets > 0:
         print(f"Reinforcement EMPIRE GATE: own targets legal only at >= "
               f"{args.reinforce_gate_min_planets} planets (attack-only below; mask, no Nash risk)")
@@ -601,8 +583,6 @@ def train(args):
         if "ship_bin_mode" in ckpt_cfg:
             cfg.model.ship_bin_mode = str(ckpt_cfg["ship_bin_mode"])
             print(f"Checkpoint declares ship_bin_mode={cfg.model.ship_bin_mode}")
-        if "phase4_residual_init_std" in ckpt_cfg:
-            cfg.model.phase4_residual_init_std = float(ckpt_cfg["phase4_residual_init_std"])
         # Blessed feature config guard (2026-07 cleanup): feature semantics are hard-coded
         # (game-phase 15-global ON, precise pressure resolver ON, friendly roi-deflation ON,
         # enemy-deflate/zero-roi/surface-threat REMOVED). A checkpoint trained under different
@@ -637,8 +617,6 @@ def train(args):
             args.sufficient_commit_factor = float(ckpt_cfg["sufficient_commit_factor"])
         del _ckpt_peek
 
-    if args.phase4_residual_init_std is not None:
-        cfg.model.phase4_residual_init_std = args.phase4_residual_init_std
     # Ship-bin-mode CLI override. Takes precedence over any checkpoint value.
     if args.ship_bin_mode is not None:
         cfg.model.ship_bin_mode = args.ship_bin_mode
@@ -654,9 +632,6 @@ def train(args):
     cfg.model.reverse_edge_cooldown = args.reverse_edge_cooldown
     cfg.model.reinforce_garrison_floor = args.reinforce_garrison_floor
     cfg.model.sufficient_commit_factor = args.sufficient_commit_factor
-    # PROVENANCE only (eval always clamps via _ship_bin_to_count, so this doesn't change the eval
-    # contract) — but record how the ckpt was trained (drop vs clamp) so it's never ambiguous.
-    cfg.model.ship_overflow_mode = args.ship_overflow_mode
     if args.global_econ:
         from timeline import GLOBAL_ECON_DIM
         cfg.model.global_feature_dim = 15 + GLOBAL_ECON_DIM
@@ -675,11 +650,9 @@ def train(args):
                       ship_bin_mode=cfg.model.ship_bin_mode,
                       binary_commit_gates=cfg.model.binary_commit_gates,
                       global_econ=args.global_econ,
-                      ship_overflow_mode=args.ship_overflow_mode,
                       action_decode=args.action_decode,
                       allow_reinforce=args.allow_reinforce,
                       reinforce_garrison_floor=args.reinforce_garrison_floor,
-                      reinforce_cost=args.reinforce_cost,
                       reinforce_gate_min_planets=args.reinforce_gate_min_planets,
                       reinforce_forward_only=args.reinforce_forward_only,
                       reverse_edge_cooldown=args.reverse_edge_cooldown,
@@ -693,17 +666,8 @@ def train(args):
                       staging_shaping_coef=args.staging_shaping_coef,
                       staging_topk=args.staging_topk,
                       staging_gamma=cfg.ppo.gamma,
-                      enable_comets=not args.disable_comets,
                       fleet_target_refresh_every=args.fleet_target_refresh)
     env.reset(seeds=[args.seed + i for i in range(args.num_envs)])
-    # torch.compile the env physics (probe). env.step is mostly pure vectorized arithmetic
-    # (production / planet paths / fleet movement / swept-collision) with a control-flow tail
-    # (_check_done / _auto_reset). fullgraph=False fuses the arithmetic and falls back to eager
-    # on the breaks. torch.compile is semantics-preserving (not lossy like bf16) — verify by
-    # comparing the seeded reward/EV trajectory to the uncompiled run.
-    if getattr(args, "compile_env", False) and device.type == "cuda":
-        env.step = torch.compile(env.step, fullgraph=False)
-        print("torch.compile ENABLED on env.step (fullgraph=False)")
 
     model = EntityTransformer(cfg.model).to(device)
     print(f"Model params: {count_params(model):,}")
@@ -721,14 +685,6 @@ def train(args):
             _resume_optim_sd = _drop_retired_q_head_from_optimizer(_resume_optim_sd, sd)
         _load_target_conditioning_compatible(model, sd, "--resume")
         print(f"Resumed from {Path(args.resume).resolve()}")
-        if getattr(args, "reinit_critic", False):
-            # CONTROL: re-initialise the value head to a fresh state while keeping
-            # the warm policy. Isolates the cold-critic shock — if a known-stable
-            # warm-critic method (joint) collapses with a fresh critic, resume is
-            # confounded for new-critic methods (VDN) and we should go from-scratch.
-            for _m in (model.value_fc1, model.value_fc2, model.value_out):
-                _m.reset_parameters()
-            print("  CONTROL: scalar critic re-initialised fresh (warm policy kept).")
 
     # The rollout and PPO minibatch shapes compile separately. Pool snapshot models
     # stay eager; see docs/perf.md for the measured trade-off.
@@ -1020,8 +976,6 @@ def train(args):
                     "staging_topk": args.staging_topk,
                     "entropy_coef_fire": args.entropy_coef_fire,
                     "noop_kl_coef": args.noop_kl_coef,
-                    "ship_kl_coef": args.ship_kl_coef,
-                    "ship_kl_prior_exp": args.ship_kl_prior_exp,
                     "noop_target_launch_rate": args.noop_target_launch_rate,
                     "anchor_kl_coef": args.anchor_kl_coef,
                     "anchor_value_coef": args.anchor_value_coef,
@@ -1206,14 +1160,6 @@ def train(args):
         return feats, outs
 
     print(f"\nStarting self-play training (target {args.total_steps:,} env steps)")
-    # Critic-only warmup (BC warmstart): fit the value head with the policy frozen
-    # until EV reaches the threshold, before PPO trusts any advantage. Self-skips on
-    # a warm-critic resume (first rollout's EV already >= threshold).
-    critic_warmup_active = cfg.ppo.critic_warmup_ev > 0.0
-    critic_warmup_count = 0
-    if critic_warmup_active:
-        print(f"Critic warmup ENABLED: value-head-only until EV>={cfg.ppo.critic_warmup_ev} "
-              f"(max {cfg.ppo.critic_warmup_max_updates} rollouts), policy frozen.")
     print("=" * 70)
 
     # --- Per-EPISODE pool assignment (correctness fix) ----------------------------
@@ -1267,14 +1213,6 @@ def train(args):
             ec_decay_steps = args.early_capture_anneal_frac * args.total_steps
             ec_frac = min(total_env_steps / max(ec_decay_steps, 1), 1.0)
             env.early_capture_coef = args.early_capture_coef * 0.5 * (1.0 + math.cos(math.pi * ec_frac))
-        # Reinforcement curriculum: anneal the own-target logit bias init→0 over
-        # reinforce_anneal_frac of training. model.forward reads reinforce_logit_bias
-        # in BOTH the rollout below and this iter's PPO update → consistent PPO ratio.
-        # Only the learning `model` is biased; pool/opponent models keep the 0.0 default.
-        if args.allow_reinforce and args.reinforce_anneal_frac > 0.0:
-            rb_decay_steps = args.reinforce_anneal_frac * args.total_steps
-            rb_frac = min(total_env_steps / max(rb_decay_steps, 1), 1.0)
-            model.reinforce_logit_bias = args.reinforce_bias_init * (1.0 - rb_frac)
         # Reset train_mask: all True by default, mark opp's slots False below
         storage["train_mask"].fill_(True)
         # Zero the reinforce_rate + overask accumulators for this rollout (env counts realized
@@ -1555,19 +1493,12 @@ def train(args):
 
         _sync(); _t_acc["build"] += time.perf_counter() - _t_build
 
-        # PPO update — OR a critic-only warmup step while the BC-warmstart critic is
-        # still cold (policy frozen, value head only). The EV-based exit is checked
-        # below, after this rollout's EV is computed.
+        # PPO update
         model.train()
         _t_upd = time.perf_counter()
-        if critic_warmup_active:
-            metrics = learner.value_warmup_update(minibatches)
-            critic_warmup_count += 1
-        else:
-            metrics = learner.update(minibatches, scheduler=scheduler,
-                                     kl_target=cfg.ppo.kl_target,
-                                     timers=_t_acc if _prof else None, sync=_sync,
-                                     lean_metrics=args.lean_metrics)
+        metrics = learner.update(minibatches, scheduler=scheduler,
+                                 kl_target=cfg.ppo.kl_target,
+                                 timers=_t_acc if _prof else None, sync=_sync)
         _sync(); _t_acc["upd"] += time.perf_counter() - _t_upd
         metrics.update(ms_metrics)
         compute_diagnostics(metrics, train_mask=storage["train_mask"], env=env,
@@ -1577,15 +1508,6 @@ def train(args):
         total_env_steps += rollout_T * N
         iter_count += 1
         clipfrac_history.append(metrics.get("clip_frac", 0.0))
-
-        # Critic-warmup exit: once the (policy-frozen) value head explains enough
-        # return variance — or we hit the cap — stop warming and switch to PPO.
-        if critic_warmup_active:
-            _ev = metrics.get("explained_variance", 0.0)
-            if _ev >= cfg.ppo.critic_warmup_ev or critic_warmup_count >= cfg.ppo.critic_warmup_max_updates:
-                critic_warmup_active = False
-                print(f"  ★ critic warmup DONE: EV={_ev:.3f} after {critic_warmup_count} "
-                      f"rollouts ({total_env_steps:,} steps) — starting PPO.", flush=True)
 
         # --- Logging --------------------------------------------------------
         now = time.perf_counter()
@@ -1618,11 +1540,7 @@ def train(args):
                 f"V_loss {metrics.get('value_loss', 0):.4f} | "
                 f"r_p0 {avg_r:+.3f} r_p1 {avg_r1:+.3f} | "
                 f"LR {metrics['learning_rate']:.6f}"
-                + (f"/{metrics.get('phase4_residual_learning_rate', metrics['learning_rate']):.6f}"
-                   if args.phase4_residual_lr_mult != 1.0 else "")
                 + f" | estop {metrics.get('kl_early_stop', 0):.0f}"
-                + (f" | il_kl {metrics.get('il_kl', 0):.3f} il_coef {metrics.get('il_coef', 0):.3f}"
-                   if metrics.get('il_coef', 0) > 0 else "")
             )
             # Secondary behavioural diagnostics — occasionally useful, not decision
             # drivers (W&B keeps them every iter). Console-print every 5th log.
@@ -1736,7 +1654,6 @@ def train(args):
                     "ppo/value_loss": metrics.get("value_loss", 0),
                     "ppo/early_stop": metrics.get("kl_early_stop", 0),
                     # Anti-spray KL levers (0 when their coef is off)
-                    "ppo/ship_kl": metrics.get("ship_kl", 0),
                     "ppo/noop_kl": metrics.get("noop_kl", 0),
                     "policy/mean_launch_rate": metrics.get("mean_launch_rate", 0),
                     # Policy behaviour — the key kill-signal metrics
@@ -1797,7 +1714,6 @@ def train(args):
                         "binary/action_entropy_max": metrics.get("target_entropy_max", 0),
                     })
                     for key in (
-                        "ppo/ship_kl",
                         "entropy/fire", "entropy/fire_frac",
                         "entropy/ship", "entropy/ship_frac",
                         "entropy/target", "entropy/target_frac", "entropy/target_max",
@@ -1811,9 +1727,6 @@ def train(args):
                         "policy/ship_bin0_rate": metrics.get("ship_bin0_rate", 0),
                         "policy/mean_ship_bin": metrics.get("mean_ship_bin", 0),
                     })
-                if args.phase4_residual_lr_mult != 1.0:
-                    wandb_metrics["target_conditioning/lr"] = metrics.get(
-                        "phase4_residual_learning_rate", metrics["learning_rate"])
                 if args.staging_shaping_coef != 0.0 and "staging_phi" in metrics:
                     wandb_metrics["staging/phi"] = metrics["staging_phi"]
                 wb.log(wandb_metrics, step=total_env_steps)
@@ -1949,17 +1862,10 @@ if __name__ == "__main__":
                         help="On --resume, do NOT load the checkpoint's Adam moments "
                              "(pre-2026-07-10 behaviour). A cold Adam on a mature policy "
                              "takes large undamped first steps — see docs/training.md.")
-    parser.add_argument("--reinit-critic", action="store_true",
-                        help="CONTROL: re-initialise the value head after resume "
-                             "(warm policy + cold critic) to isolate the VDN "
-                             "cold-critic-shock confound.")
     parser.add_argument("--checkpoint-interval", type=int, default=5_000_000,
                         help="Save a periodic checkpoint every N env steps")
     parser.add_argument("--learning-rate", type=float, default=None,
                         help="Override PPO learning rate (default: cfg.ppo.learning_rate=3e-4)")
-    parser.add_argument("--phase4-residual-lr-mult", type=float, default=1.0,
-                        help="Multiplier applied only to target-conditioned residual params "
-                             "(fire_q/k/scorer, ship_q/k/scorer). 1.0 uses the base LR.")
     parser.add_argument("--ppo-epochs", type=int, default=None,
                         help="Override PPO epochs per rollout (default: 4)")
     parser.add_argument("--clip-eps", type=float, default=None,
@@ -1981,16 +1887,6 @@ if __name__ == "__main__":
     parser.add_argument("--noop-target-launch-rate", type=float, default=0.10,
                         help="Target mean fire probability the no-op KL anchors to (default 0.10, "
                              "the winners' ~10%% launch rate). Only active with --noop-kl-coef > 0.")
-    parser.add_argument("--ship-kl-coef", type=float, default=0.0,
-                        help="Ship-size KL-to-prior (Ender anti-spray lever): coefficient on a KL "
-                             "that pulls each per-draw ship-count distribution toward a full-send-"
-                             "biased prior (w_i ∝ SHIP_COUNTS[i]**--ship-kl-prior-exp). Starves the "
-                             "1-3 ship spray tail; keeps small bins learnable. REPLACES the ship "
-                             "entropy bonus — pass --entropy-coef-ships 0 with it. 0 = off. Try ~0.01.")
-    parser.add_argument("--ship-kl-prior-exp", type=float, default=1.0,
-                        help="Exponent of the ship-size prior w_i ∝ SHIP_COUNTS[i]**exp "
-                             "(default 1.0 = linear-in-count; higher = more full-send-biased). "
-                             "Only active with --ship-kl-coef > 0.")
     parser.add_argument("--anchor-kl-coef", type=float, default=0.0,
                         help="Best-checkpoint anchor (Isaiah #1 / Yijie #13): coefficient on "
                              "KL(live ‖ frozen previous-best) over the executed action "
@@ -2041,10 +1937,6 @@ if __name__ == "__main__":
                              "'binary' (fire=NOOP/COMMIT, sized by --binary-commit-gates). Binary "
                              "reuses the checkpoint head shape but does not sample or optimize it. "
                              "('fraction' and 'intent' were removed in the 2026-10 cleanup.)")
-    parser.add_argument("--phase4-residual-init-std", type=float, default=None,
-                        help="Stddev for target-conditioned residual output-layer init. "
-                             "0.0 = exact parity; small nonzero values let the "
-                             "per-target residual path affect decisions sooner.")
     parser.add_argument("--max-grad-norm", type=float, default=None,
                         help="Override gradient-clipping max norm "
                              "(default: cfg.ppo.max_grad_norm=0.5)")
@@ -2053,14 +1945,6 @@ if __name__ == "__main__":
     parser.add_argument("--gamma", type=float, default=None,
                         help="Override PPO discount gamma (default: cfg.ppo.gamma=0.995; "
                              "0.999 for long-horizon economic reversals — writeup lesson)")
-    parser.add_argument("--critic-warmup-ev", type=float, default=None,
-                        help="Critic-only warmup: before PPO, freeze the trunk + policy "
-                             "heads and train ONLY the value head until explained-variance "
-                             "reaches this (e.g. 0.8), so PPO never trusts a random critic and "
-                             "unlearns a BC warmstart. 0/unset = disabled. Self-skips on a "
-                             "warm-critic resume (EV already high → 0 warmup steps).")
-    parser.add_argument("--critic-warmup-max-updates", type=int, default=None,
-                        help="Safety cap on critic-warmup rollouts if EV never reaches the threshold.")
     parser.add_argument("--action-decode", choices=["target"], default="target",
                         help="Target-conditioned action decoding. Retained as an explicit "
                              "flag for launcher and checkpoint compatibility.")
@@ -2070,28 +1954,12 @@ if __name__ == "__main__":
                              "players reinforce ~57%% of launches; default agents 0%%. "
                              "Saved in the checkpoint so eval/export mask the same way. "
                              "Off by default (attack-only, backward-compatible).")
-    parser.add_argument("--reinforce-bias-init", type=float, default=-8.0,
-                        help="Reinforcement CURRICULUM: initial additive bias on OWN-target "
-                             "logits (negative suppresses reinforcement early, ≈ a soft mask). "
-                             "Annealed linearly → 0 over --reinforce-anneal-frac. Only active "
-                             "with --allow-reinforce AND --reinforce-anneal-frac > 0.")
-    parser.add_argument("--reinforce-anneal-frac", type=float, default=0.0,
-                        help="Fraction of --total-steps over which the own-target bias anneals "
-                             "from --reinforce-bias-init → 0 (then stays 0). 0 = no curriculum "
-                             "(hard unmask at t=0 — caused the rev55 over-fire collapse). "
-                             "Suggested: 0.3.")
     parser.add_argument("--reinforce-garrison-floor", type=float, default=0.0,
                         help="Reinforcement discipline #1: a reinforce launch may not drain its "
                              "source planet below this many ships (training-time mask/veto, NOT a "
                              "penalty → no Nash risk). Kills the 'drain a planet, then lose it' "
                              "regression. Inference is unconstrained (real env has no floor). "
                              "0 = off. Only active with --allow-reinforce.")
-    parser.add_argument("--reinforce-cost", type=float, default=0.0,
-                        help="Reinforcement discipline #2: per-ship transit cost — subtract this × "
-                             "ships_reinforced from the launching player's reward each step. The "
-                             "actual flood fix (rev56: costless reinforcement floods ~30×). Scales "
-                             "with waste; the calibration knob. Watch reinforce_rate → target "
-                             "~0.4-0.6. 0 = off. Only active with --allow-reinforce.")
     parser.add_argument("--reinforce-gate-min-planets", type=int, default=0,
                         help="Reinforcement discipline #3 (empire-size gate): own planets become "
                              "legal reinforce targets only once the player owns >= this many planets; "
@@ -2114,13 +1982,6 @@ if __name__ == "__main__":
                              "0.06-0.10). Ownership-change & episode resets clear stale edges so a "
                              "recaptured planet is never mis-blocked. Pure mask, internalised at "
                              "inference. 0 = off. Try 3. Enemy/neutral untouched; needs --allow-reinforce.")
-    parser.add_argument("--ship-overflow-mode", choices=["drop", "clamp"], default="clamp",
-                        help="What torch_env does when a launch asks for more ships than the source "
-                             "garrison: 'clamp' (DEFAULT — send min(ask,src), the whole garrison, "
-                             "MATCHING EVAL's _ship_bin_to_count) or 'drop' (legacy — void the whole "
-                             "launch, the train/eval-mismatch behavior). ~35%% of attacks overask; "
-                             "default flipped to clamp 2026-06-15 (clamp is correct; pass 'drop' only "
-                             "to reproduce the legacy bug or as an A/B control).")
     parser.add_argument("--sufficient-commit-factor", type=float, default=0.0,
                         help="SUFFICIENT-COMMIT MASK: veto an ATTACK launch (enemy/neutral target) "
                              "whose ship count <= target's current defense × this factor → fragments "
@@ -2172,10 +2033,6 @@ if __name__ == "__main__":
     parser.add_argument("--staging-topk", type=int, default=2,
                         help="k for the staging potential (top-k neutral targets summed). k=2 keeps "
                              "serial expansion-breadth while bounding simultaneous spread.")
-    parser.add_argument("--disable-comets", action="store_true",
-                        help="Train WITHOUT comets (no spawns/schedule — SPS lever, 2026-07-05). "
-                             "The real kaggle game has comets; eval/export always keep them, so "
-                             "this trades a training-distribution gap for throughput.")
     parser.add_argument("--fleet-target-refresh", type=int, default=4,
                         help="Re-resolve ALL cached fleet targets every K ticks (staleness bound "
                              "for the launch-time target cache — SPS lever, 2026-07-05). Accuracy "
@@ -2296,15 +2153,6 @@ if __name__ == "__main__":
     parser.add_argument("--compile-features", action="store_true",
                         help="torch.compile env.get_features. "
                              "Disables the _obs_* obs-truncation diagnostics. CUDA only.")
-    parser.add_argument("--compile-env", action="store_true",
-                        help="torch.compile env.step (fullgraph=False) — fuses the physics "
-                             "kernels (env.step is the wall once the update is optimized). "
-                             "Semantics-preserving; verify vs the uncompiled trajectory. CUDA only.")
-    parser.add_argument("--lean-metrics", action="store_true",
-                        help="THROUGHPUT PROBE ONLY: compute the per-minibatch metrics block "
-                             "(~40 .item() GPU->CPU syncs) only ONCE per rollout instead of "
-                             "every update. Gradients unchanged; disables KL early-stop. "
-                             "Use to measure the logging-sync SPS tax, not for real training.")
     parser.add_argument("--entity-dim", type=int, default=None,
                         help="Override cfg.model.entity_dim (capacity experiments; default 96). "
                              "Must be divisible by num_heads=4.")

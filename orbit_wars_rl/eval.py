@@ -163,8 +163,6 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     cfg.model.reinforce_garrison_floor = float(ckpt_cfg.get("reinforce_garrison_floor", 0.0))
     cfg.model.sufficient_commit_factor = float(ckpt_cfg.get("sufficient_commit_factor", 0.0))
     cfg.model._discipline_persisted = ("reinforce_gate_min_planets" in ckpt_cfg)
-    # provenance (inspectable; eval always clamps regardless of how training handled overflow)
-    cfg.model.ship_overflow_mode = str(ckpt_cfg.get("ship_overflow_mode", "drop"))
     return sd, action_decode
 
 

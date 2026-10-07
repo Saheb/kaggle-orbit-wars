@@ -262,7 +262,6 @@ class VecTorchEnv:
         # all-in at any target, gated only on having MIN_BINARY_COMMIT_SHIPS. Binary mode only.
         binary_commit_gates: str = "full",
         global_econ: bool = False,   # append the 48 projected economy-delta globals (15 -> 63)
-        ship_overflow_mode: str = "clamp",   # matches eval (_ship_bin_to_count clamps); "drop"=legacy bug
         action_decode: str = "angle",
         win_margin_coeff: float = 0.0,
         expansion_coef: float = 0.0,
@@ -275,7 +274,6 @@ class VecTorchEnv:
         staging_gamma: float = 0.995,
         allow_reinforce: bool = False,
         reinforce_garrison_floor: float = 0.0,
-        reinforce_cost: float = 0.0,
         reinforce_gate_min_planets: int = 0,
         reinforce_forward_only: bool = False,
         reverse_edge_cooldown: int = 0,
@@ -310,16 +308,10 @@ class VecTorchEnv:
         #      many ships. Pure training-time mask (veto), NOT a penalty → no Nash risk.
         #      Kills the "drain a planet, then lose it" regression. The real Kaggle env
         #      has no floor, so inference is unconstrained — the policy internalises it.
-        #   #2 TRANSIT COST: subtract reinforce_cost × ships_reinforced from the
-        #      launching player's per-step reward. Scales with WASTE (a flood of
-        #      thousands of ships is expensive; one useful staging move is cheap), so it
-        #      prunes the wasteful tail rather than zeroing reinforcement — PROVIDED
-        #      credit connects a useful stage to its payoff. reinforce_cost is the
-        #      calibration knob; reinforce_rate is the dial (target ~0.4-0.6, not 0/0.8).
-        # Both only act on launches whose target is OUR OWN planet — attacks
-        # (enemy/neutral) are untouched, so neither lever can distort the attack Nash.
+        #   (#2, a per-ship reinforce transit COST, was removed in the 2026-10 cleanup.)
+        # Only acts on launches whose target is OUR OWN planet — attacks (enemy/neutral)
+        # are untouched, so it cannot distort the attack Nash.
         self.reinforce_garrison_floor = float(reinforce_garrison_floor)
-        self.reinforce_cost = float(reinforce_cost)
         #   #3 EMPIRE-SIZE GATE: own planets become legal reinforce targets only once the
         #      player owns >= this many planets. Below it, attack-only (must expand first).
         #      Reinforcement should ramp with empire size. A pure action mask that makes
@@ -391,14 +383,6 @@ class VecTorchEnv:
         self.binary_commit_gates = binary_commit_gates
         self.global_econ = bool(global_econ)
         self._binary_commit_sizes = {}
-        # What to do when a launch's ship_count exceeds the source garrison:
-        #   "drop"  — legacy: void the whole launch (valid_ships = src_ships >= ship_count)
-        #   "clamp" — send min(ship_count, src_ships), i.e. the whole garrison — MATCHES EVAL
-        #             (action_mask `_ship_bin_to_count` = min(count, max_ships)). Fixes the
-        #             train/eval gap where ~35% of attacks were silently dropped in training.
-        if ship_overflow_mode not in {"drop", "clamp"}:
-            raise ValueError(f"unknown ship_overflow_mode={ship_overflow_mode!r}")
-        self.ship_overflow_mode = ship_overflow_mode
         if action_decode not in {"angle", "target"}:
             raise ValueError(f"unknown action_decode={action_decode!r}")
         self.action_decode = action_decode
@@ -1741,12 +1725,12 @@ class VecTorchEnv:
         # Validate: planet still owned by this player AND has enough ships
         valid_owner = (src_owner == owner_id) & slot_valid
         # overask audit (nominal = pre-clamp ship_count): an intended launch whose ask exceeds
-        # the source garrison. In "drop" mode it's voided; in "clamp" mode it sends the whole
-        # garrison (matching eval). Measured regardless of mode so the A/B sees the same intent.
+        # the source garrison. It sends the whole garrison instead — the overflow CLAMP, which
+        # matches eval (action_mask `_ship_bin_to_count` = min(count, max_ships)). The legacy
+        # "drop" mode (void the launch; ~35% of attacks silently lost) was removed 2026-10.
         _attempted = fire & valid_owner & target_valid & (ship_count > 0)
         _overask = _attempted & (ship_count > src_ships)
-        if self.ship_overflow_mode == "clamp":
-            ship_count = torch.minimum(ship_count, src_ships)
+        ship_count = torch.minimum(ship_count, src_ships)
         valid_ships = src_ships >= ship_count
         can_fire = fire & valid_owner & valid_ships & target_valid & (ship_count > 0)  # (N, MAX_OWNED)
         if self._attempt_step is not None:
@@ -1794,12 +1778,6 @@ class VecTorchEnv:
                 val = torch.where(rec, step_now.unsqueeze(1).expand_as(edge), cur)
                 cd_flat.scatter_(1, edge, val)
                 self.reinf_cd[:, owner_id] = cd
-            # #2 Per-ship transit cost: accumulate ships sent to own planets this step
-            # for the launching player; the penalty is applied to the reward in step().
-            # Counts only launches that actually fire (post-floor-veto).
-            if self.reinforce_cost > 0.0:
-                reinforce_ships = (ship_count * (can_fire & is_reinforce).float()).sum(dim=1)  # (N,)
-                self._reinforce_ships[:, owner_id] = self._reinforce_ships[:, owner_id] + reinforce_ships
             # reinforce_rate metric: per-(env,player) counts of realized launches (post
             # floor-veto) and how many were reinforcement. train_torch combines these with
             # train_mask used for the current policy's reinforce-rate telemetry.
@@ -2000,11 +1978,6 @@ class VecTorchEnv:
                  NaN = no override, else a continuous launch angle that bypasses the
                  144-bin quantization (used for external heuristics — see _apply_actions).
         """
-        # Per-step buffer for the reinforcement transit cost (#2): ships each player
-        # sent to its own planets this step. Zeroed before launches accumulate into it.
-        if self.allow_reinforce and self.reinforce_cost > 0.0:
-            self._reinforce_ships = torch.zeros(
-                self.num_envs, self.num_players, dtype=torch.float32, device=self.device)
         if actions is not None:
             for pid, act in actions.items():
                 ovr = angle_overrides.get(pid) if angle_overrides else None
@@ -2276,11 +2249,6 @@ class VecTorchEnv:
             self.prev_staging_phi = phi_now                      # done envs fixed post-reset
             self._staging_phi_acc += float(phi_now.mean().item())
             self._staging_phi_n += 1
-        # Reinforcement transit cost: price the ships each player sent to its own
-        # planets this step, pruning the wasteful tail. Calibrate reinforce_cost so
-        # reinforcement is neither suppressed nor allowed to flood.
-        if self.allow_reinforce and self.reinforce_cost > 0.0:
-            terminal_rewards = terminal_rewards - self.reinforce_cost * self._reinforce_ships
         # 12. Auto-reset done envs in-place — must come AFTER capturing rewards
         if done.any():
             self._auto_reset(done)

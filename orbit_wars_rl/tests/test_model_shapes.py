@@ -241,21 +241,6 @@ def test_residual_broadcast_parity():
     print("test_residual_broadcast_parity: PASS")
 
 
-def test_residual_small_init_wakes_output_layer():
-    """Small nonzero residual init should keep the output layer off dead-zero."""
-    cfg = ModelConfig(phase4_residual_init_std=0.01)
-    model = EntityTransformer(cfg)
-
-    fire_norm = model.fire_scorer[-1].weight.norm().item()
-    ship_norm = model.ship_scorer[-1].weight.norm().item()
-
-    assert fire_norm > 0.0
-    assert ship_norm > 0.0
-    assert model.fire_scorer[-1].bias.abs().sum().item() == 0.0
-    assert model.ship_scorer[-1].bias.abs().sum().item() == 0.0
-    print("test_residual_small_init_wakes_output_layer: PASS")
-
-
 def test_end_to_end_obs_to_actions():
     """Full pipeline: obs → features → masks → model → action shapes."""
     obs = _make_obs()
@@ -300,6 +285,5 @@ if __name__ == "__main__":
     test_model_with_masks()
     test_model_forward_with_pairwise_target_head()
     test_residual_broadcast_parity()
-    test_residual_small_init_wakes_output_layer()
     test_end_to_end_obs_to_actions()
     print("\nAll model shape tests passed!")

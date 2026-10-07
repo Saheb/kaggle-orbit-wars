@@ -33,9 +33,9 @@ def _make_state():
                       episode_steps=500, enable_comets=False,
                       expansion_coef=0.0, early_capture_coef=0.0,
                       staging_shaping_coef=0.0, win_margin_coeff=0.0,
-                      first_strike_steps=0, reinforce_cost=0.0,
+                      first_strike_steps=0,
                       action_decode="target", ship_bin_mode="absolute",
-                      ship_overflow_mode="clamp", allow_reinforce=False)
+                      allow_reinforce=False)
     env.reset(seeds=list(range(N)))
     sc = env._ship_counts_t.clone()
     st = fn.state_from_torch_env(env)

@@ -125,7 +125,6 @@ def test_kl_gradient_pulls_toward_anchor():
     cfg.ppo.entropy_coef_target = 0.0
     cfg.ppo.entropy_coef_ships = 0.0
     cfg.ppo.noop_kl_coef = 0.0
-    cfg.ppo.ship_kl_coef = 0.0
     learner.set_anchor(_perturbed(model, scale=0.2))
 
     _, m_before = learner.compute_loss(batch, return_metrics=True)

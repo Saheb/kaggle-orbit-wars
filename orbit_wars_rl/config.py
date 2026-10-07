@@ -54,9 +54,6 @@ class ModelConfig:
     binary_commit_gates: str = "full"
     pairwise_feature_dim: int = 36   # 22 base + 4 intent + 6 target-CF + 4 source-CF
     max_planets: int = 48            # for target_head output size; matches EnvConfig
-    # Target-conditioned fire/ship residual output init scale. The phase4 name is
-    # retained in the checkpoint and CLI contract. 0.0 starts the residual at zero.
-    phase4_residual_init_std: float = 0.0
     # Target-decode discipline. These are persisted in checkpoints so train/eval/export
     # do not silently disagree about own-target legality or attack concentration vetoes.
     allow_reinforce: bool = False
@@ -74,9 +71,6 @@ class ModelConfig:
 @dataclass
 class PPOConfig:
     learning_rate: float = 3e-4
-    # Multiplier applied only to target-conditioned fire/ship residual parameters.
-    # The phase4 name is retained for checkpoint and CLI compatibility.
-    phase4_residual_lr_mult: float = 1.0
     lr_warmup_steps: int = 5000
     lr_decay: str = "cosine"
     total_env_steps: int = 500_000_000
@@ -96,14 +90,6 @@ class PPOConfig:
     # the fire entropy bonus. See docs/writeup_lessons.md Lesson 3.
     noop_kl_coef: float = 0.0
     noop_target_launch_rate: float = 0.10   # target mean fire probability the KL anchors to
-    # Ship-size KL-to-prior: replace the uniform-seeking ship entropy bonus with a
-    # KL from the ship-count distribution toward a full-send-biased prior over the 32 bins
-    # (w_i ∝ SHIP_COUNTS[i] ** ship_kl_prior_exp). Unlike noop_kl (batch-MEAN launch RATE), this
-    # shapes each per-draw SIZE distribution — it starves the 1-3 ship spray tail while keeping
-    # small bins learnable (reward can still buy a genuine probe). 0 = off. When ON, set
-    # entropy_coef_ships=0 because this replaces rather than stacks with entropy.
-    ship_kl_coef: float = 0.0
-    ship_kl_prior_exp: float = 1.0   # prior w_i ∝ SHIP_COUNTS[i]**exp; 1.0=linear-in-count, higher=more full-send-biased
     # Best-checkpoint ANCHOR (Isaiah #1 / Yijie #13; docs/training.md "The recipe"): KL from the
     # live policy to the frozen previous-best, plus a value-CE term. Unanchored self-play has
     # nothing pulling it back toward known-good play, so it drifts (the noopkl2 0% collapse);
@@ -114,13 +100,6 @@ class PPOConfig:
     anchor_value_coef: float = 0.0
     kl_target: float = 0.05   # KL early-stop threshold per epoch; inf = disabled
     value_coef: float = 0.5
-    # Critic-only warmup (for BC warmstarts: trained policy + UNtrained critic).
-    # Before normal PPO, freeze the trunk + policy heads and train ONLY the value
-    # head until explained-variance reaches critic_warmup_ev (so PPO never trusts a
-    # random critic's advantages and unlearns the BC policy). 0 = disabled. Adaptive
-    # threshold self-skips on a warm-critic resume (EV already high → 0 warmup steps).
-    critic_warmup_ev: float = 0.0
-    critic_warmup_max_updates: int = 30   # safety cap if EV never reaches the threshold
     # Note: env reward-shaping coefficients are CLI args wired directly to VecTorchEnv
     # (see train_torch.py) — PPOConfig is not the right owner for them.
     max_grad_norm: float = 0.5
