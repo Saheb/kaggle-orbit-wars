@@ -298,6 +298,11 @@ _cd_record = record
 _cd_on_loss = on_ownership_loss
 
 
+# --- Binary NOOP/COMMIT action distribution (inlined from binary_policy.py) ---
+
+{binary_policy_code}
+
+
 # --- Action masks (inlined from action_mask.py) ---
 
 {action_mask_code}
@@ -361,6 +366,9 @@ def agent(obs, cfg=None):
             fire_threshold=_FIRE_THRESHOLD,
             ship_bin_mode=_SHIP_BIN_MODE,
             binary_commit_gates=_BINARY_COMMIT_GATES,
+            # Binary mode sizes COMMIT from the pairwise table (raises without it).
+            pairwise_features=(features["pairwise_features"].cpu().numpy()
+                               if "pairwise_features" in features else None),
             allow_reinforce=_ALLOW_REINFORCE,
             reinforce_gate_min_planets=_REINFORCE_GATE_MIN,
             reinforce_forward_only=_REINFORCE_FORWARD_ONLY,
@@ -426,11 +434,20 @@ def _strip_module_docstring(source: str) -> str:
 
 
 def _strip_imports(source: str) -> str:
-    """Strip top-level import lines from Python source."""
+    """Strip top-level import lines from Python source, including the continuation lines of a
+    parenthesized multi-line import (else they survive as a stray indented line → SyntaxError)."""
     lines = source.split('\n')
     out = []
+    in_paren_import = False
     for line in lines:
         stripped = line.strip()
+        if in_paren_import:
+            in_paren_import = ")" not in stripped
+            continue
+        if (stripped.startswith("import ") or stripped.startswith("from ")) \
+                and "(" in stripped and ")" not in stripped:
+            in_paren_import = True
+            continue
         if stripped.startswith("from __future__"):
             continue
         if stripped.startswith("import ") or stripped.startswith("from "):
@@ -578,6 +595,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
     action_mask_code = _read_module_body(os.path.join(src_dir, "action_mask.py"))
     reinforce_cooldown_code = _read_module_body(os.path.join(src_dir, "reinforce_cooldown.py"))
     timeline_code = _read_module_body(os.path.join(src_dir, "timeline.py"))
+    binary_policy_code = _read_module_body(os.path.join(src_dir, "binary_policy.py"))
 
     m = cfg.model
     # Auto-detect reinforcement from the checkpoint so the exported mask matches how
@@ -622,6 +640,7 @@ def export_agent(checkpoint_path: str, output_path: str, cfg: Config, fire_thres
         action_mask_code=action_mask_code,
         reinforce_cooldown_code=reinforce_cooldown_code,
         timeline_code=timeline_code,
+        binary_policy_code=binary_policy_code,
         timeline_features=(m.planet_feature_dim > 20),
         global_econ=(m.global_feature_dim > 15),
     )

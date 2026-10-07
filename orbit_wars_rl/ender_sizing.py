@@ -86,33 +86,24 @@ def _show(name, hist):
         print(f"    {lab:>16}  {100*n/tot:5.1f}%  {bar}")
 
 
-def _checkpoint_agent(path, gate_min_planets=2, garrison_floor=0.0):
+def _checkpoint_agent(path):
     """Load one of OUR checkpoints as an agent_fn, so its sizing is directly comparable to a
     path-agent's on the same histogram.
 
-    ⚠ build_agent_fn reads allow_reinforce and the discipline masks OFF THE MODEL OBJECT
-    (eval.py:391 / :1560), NOT from its own kwargs. Forgetting to set them silently disables
-    reinforcement and makes any reinforce-related measurement garbage. Defaults mirror the
-    eval/watcher masks (gate2/floor0).
+    Goes through ev.load_eval_model — the SAME construction evaluate_checkpoint uses — so the
+    mask contract (commit gates, reinforce discipline, cooldown) is the checkpoint's own. Never
+    hand-copy those attributes here: build_agent_fn reads them off the model object, and a
+    forgotten one silently changes the policy being measured (Key Lesson 14).
     """
     import torch
     from config import Config
-    from model import EntityTransformer
     cfg = Config(); cfg.device = "cpu"
     device = torch.device("cpu")
-    sd, action_decode = ev.load_checkpoint(path, cfg)
-    model = EntityTransformer(cfg.model).to(device)
-    model.load_state_dict(sd)
-    model.eval()
-    model.allow_reinforce = bool(getattr(cfg.model, "allow_reinforce", False))
-    model.reinforce_gate_min_planets = int(gate_min_planets)
-    model.reinforce_forward_only = bool(getattr(cfg.model, "reinforce_forward_only", False))
-    model.reverse_edge_cooldown = int(getattr(cfg.model, "reverse_edge_cooldown", 0))
-    model.reinforce_garrison_floor = float(garrison_floor)
-    model.sufficient_commit_factor = float(getattr(cfg.model, "sufficient_commit_factor", 0.0))
+    model, action_decode = ev.load_eval_model(path, cfg)
     print(f"  [checkpoint agent] allow_reinforce={model.allow_reinforce} "
           f"gate>={model.reinforce_gate_min_planets} floor={model.reinforce_garrison_floor} "
-          f"cooldown={model.reverse_edge_cooldown} mode={cfg.model.ship_bin_mode}")
+          f"cooldown={model.reverse_edge_cooldown} mode={cfg.model.ship_bin_mode} "
+          f"gates={model.binary_commit_gates}")
     return ev.build_agent_fn(model, device, fire_threshold=0.5,
                              ship_bin_mode=cfg.model.ship_bin_mode,
                              target_decode=(action_decode == "target"), num_players=2)

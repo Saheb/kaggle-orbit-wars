@@ -38,7 +38,6 @@ os.chdir(_REPO)
 import torch                              # noqa: E402
 import eval as ev                         # noqa: E402
 from config import Config                 # noqa: E402
-from model import EntityTransformer       # noqa: E402
 from kaggle_environments import make      # noqa: E402
 
 CHAMPION = ("gpu_run_artifacts/binarymarg100m_l4_from25m/checkpoints/"
@@ -187,27 +186,17 @@ def main():
     ap.add_argument("--seeds", type=int, default=6)
     ap.add_argument("--checkpoint", default=CHAMPION)
     ap.add_argument("--opponent", default=ENDER)
-    ap.add_argument("--reinforce-gate-min-planets", type=int, default=2)
-    ap.add_argument("--reinforce-garrison-floor", type=float, default=0.0)
     ap.add_argument("--out", default="gpu_run_artifacts/binarymarg100m_l4_from25m/"
                                      "replay_analysis/peel_diagnosis_ender.json")
     args = ap.parse_args()
 
     cfg = Config(); cfg.device = "cpu"
     device = torch.device("cpu")
-    sd, action_decode = ev.load_checkpoint(args.checkpoint, cfg)
-    model = EntityTransformer(cfg.model).to(device)
-    model.load_state_dict(sd)
-    model.eval()
-    # ⚠ build_agent_fn reads these OFF THE MODEL (eval.py:391 / :1560), not from its kwargs.
-    # Omitting them silently disables reinforcement — which makes the "was this capture ever
-    # reinforced" question answer itself. Mirror the eval/watcher masks (gate2/floor0).
-    model.allow_reinforce = bool(getattr(cfg.model, "allow_reinforce", False))
-    model.reinforce_gate_min_planets = int(args.reinforce_gate_min_planets)
-    model.reinforce_forward_only = bool(getattr(cfg.model, "reinforce_forward_only", False))
-    model.reverse_edge_cooldown = int(getattr(cfg.model, "reverse_edge_cooldown", 0))
-    model.reinforce_garrison_floor = float(args.reinforce_garrison_floor)
-    model.sufficient_commit_factor = float(getattr(cfg.model, "sufficient_commit_factor", 0.0))
+    # ⚠ build_agent_fn reads the mask contract OFF THE MODEL, not from its kwargs. Omitting an
+    # attribute silently changes the policy (allow_reinforce: the "was this capture ever
+    # reinforced" question answers itself; binary_commit_gates: the champion runs under the
+    # legacy gates). load_eval_model is evaluate_checkpoint's own construction — use only it.
+    model, action_decode = ev.load_eval_model(args.checkpoint, cfg)
     if not model.allow_reinforce:
         raise SystemExit(
             "checkpoint has allow_reinforce=False — a reinforcement diagnosis on it is vacuous.")

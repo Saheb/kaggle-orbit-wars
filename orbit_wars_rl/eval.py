@@ -172,6 +172,37 @@ def load_checkpoint(path: str, cfg: Config) -> tuple[dict, str]:
     return sd, action_decode
 
 
+def load_eval_model(path: str, cfg: Config) -> tuple[EntityTransformer, str]:
+    """THE one checkpoint → eval-ready model path. evaluate_checkpoint and every probe use it.
+
+    build_agent_fn reads the mask contract (allow_reinforce, binary_commit_gates, reinforce
+    discipline, reverse-edge cooldown) OFF THE MODEL OBJECT. Probes that hand-copied this setup
+    forgot an attribute twice: allow_reinforce (Key Lesson 14), then binary_commit_gates (2026-10:
+    the minimal-gates champion was probed under the legacy "full" gates). Everything here comes
+    from the checkpoint; a caller that wants an override sets the attribute on the returned model.
+    Returns (model, action_decode); modifies cfg.model in place (see load_checkpoint).
+    """
+    state_dict, action_decode = load_checkpoint(path, cfg)
+    m = cfg.model
+    model = EntityTransformer(m).to(torch.device(cfg.device))
+    model.allow_reinforce = bool(m.allow_reinforce)
+    model.binary_commit_gates = str(m.binary_commit_gates)
+    model.reinforce_gate_min_planets = int(m.reinforce_gate_min_planets)
+    model.reinforce_forward_only = bool(m.reinforce_forward_only)
+    model.reverse_edge_cooldown = int(m.reverse_edge_cooldown)
+    model.reinforce_garrison_floor = float(m.reinforce_garrison_floor)
+    model.sufficient_commit_factor = float(m.sufficient_commit_factor)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    bad_missing = [k for k in missing if k not in PHASE4_COMPAT_MISSING_KEYS]
+    # VDN per-planet value head (Stage 2) is never used at eval — ignore it if the
+    # checkpoint carries it but this (eval-time) model doesn't.
+    bad_unexpected = [k for k in unexpected if not k.startswith("value_pp_")]
+    if bad_missing or bad_unexpected:
+        raise RuntimeError(f"Checkpoint/model mismatch: missing={bad_missing}, unexpected={bad_unexpected}")
+    model.eval()
+    return model, action_decode
+
+
 # Fire-head isolation override (eval diagnostic). On sources the fire head VETOES (fire_prob <
 # threshold) that have a high-holdable-ROI attack available, FORCE fire toward the head's own
 # argmax target (fall back to the top-ROI target if the head's pick is illegal/own), with the
@@ -1523,7 +1554,7 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     """Load a checkpoint and evaluate it."""
     device = torch.device(cfg.device)
 
-    state_dict, ckpt_action_decode = load_checkpoint(params_path, cfg)
+    model, ckpt_action_decode = load_eval_model(params_path, cfg)
     # Discipline masks: an explicit CLI value overrides; otherwise auto-load what the checkpoint
     # was trained with (load_checkpoint set these on cfg.model). Eliminates the "forgot the flag
     # → wrong panel/submission" footgun for masked runs. For OLD reinforce ckpts that never
@@ -1570,22 +1601,11 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
         target_decode = True
         print("Checkpoint action_decode=target  →  enabling target_decode automatically")
 
-    model = EntityTransformer(cfg.model).to(device)
-    # Carry the checkpoint's reinforcement setting onto the model so the agent's
-    # target masking matches training (build_agent_fn reads it off the model).
-    model.allow_reinforce = bool(getattr(cfg.model, "allow_reinforce", False))
-    # Binary commit gates — persisted mask contract (see load_checkpoint).
-    model.binary_commit_gates = str(getattr(cfg.model, "binary_commit_gates", "full"))
-    # Reinforce-discipline masks (gate / forward-staging / garrison floor) — MUST match
-    # the training env, else the policy reinforces where it was masked and self-sabotages.
-    # Values are auto-loaded from checkpoint metadata unless explicitly overridden.
+    # Explicit CLI overrides of the discipline load_eval_model set from the checkpoint (a None
+    # argument resolved to the checkpoint's own value above, so this is a no-op unless overridden).
     model.reinforce_gate_min_planets = int(reinforce_gate_min_planets)
     model.reinforce_forward_only = bool(reinforce_forward_only)
-    # Reverse-edge cooldown auto-loads from the checkpoint (persisted, stateful — eval keeps the
-    # per-game edge history in build_agent_fn's closure). Parity with training.
-    model.reverse_edge_cooldown = int(getattr(cfg.model, "reverse_edge_cooldown", 0))
     model.reinforce_garrison_floor = float(reinforce_garrison_floor)
-    # Sufficient-commit mask (attacks) — also MUST match training. Independent of reinforce.
     model.sufficient_commit_factor = float(sufficient_commit_factor)
     if model.allow_reinforce:
         print(f"Reinforcement: ON (own planets are legal targets) | "
@@ -1609,14 +1629,6 @@ def evaluate_checkpoint(params_path: str, cfg: Config, num_games: int = 32,
     if natural_head_audit:
         print(f"Natural head audit: ON | beta={natural_head_audit_beta} "
               f"(passive logits/intent diagnostics; actions unchanged)")
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    bad_missing = [k for k in missing if k not in PHASE4_COMPAT_MISSING_KEYS]
-    # VDN per-planet value head (Stage 2) is never used at eval — ignore it if the
-    # checkpoint carries it but this (eval-time) model doesn't.
-    bad_unexpected = [k for k in unexpected if not k.startswith("value_pp_")]
-    if bad_missing or bad_unexpected:
-        raise RuntimeError(f"Checkpoint/model mismatch: missing={bad_missing}, unexpected={bad_unexpected}")
-    model.eval()
 
     if panel:
         results = evaluate_panel(model, device, opponent=opponent,

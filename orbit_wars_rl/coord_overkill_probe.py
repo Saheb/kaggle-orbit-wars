@@ -1,5 +1,10 @@
 """Coordination / overkill probe (ground-truth).
 
+⚠ CORRECTED 2026-10-07: the 07-19 "us" numbers below (42.6% / 7.4%) ran the champion under the
+wrong (legacy "full") commit gates — _checkpoint_agent never set binary_commit_gates. With the fix
+(eval.load_eval_model) the champion vs Ajay is 68.8% redundant (≈ Ender's 70.3%) and 3.5% same-turn
+multi-source (Ender 0.0%). The calibration conclusion holds; the #4b slice is about half as large.
+
 ⚠⚠ CALIBRATED 2026-07-19 — "redundant-on-arrival" is NOT a defect; DO NOT read it as waste. ⚠⚠
 Reference check vs Ajay: our champion 42.6% redundant, **Yijie 63.8%, Ender 70.3%** — the top-10
 agents do it MORE than we do. So landing an attack on an already-ours target is normal *multi-wave

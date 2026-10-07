@@ -294,3 +294,6 @@ feed 20-dim features (`extract_features(timeline=False)`).
     Corollary: **never infer an offered distribution from the executed one when the offer is
     gated** — "executed reinforces are 94.6% all-in" looked like evidence the maintain sizing
     didn't bind; it was the *signature* of the gate (only max-threat options were legal).
+    **2026-10: it happened AGAIN** (`binary_commit_gates` → the minimal-gates champion was probed
+    under the legacy "full" gates; 07-19 coord numbers were wrong). Fixed structurally: every probe
+    builds its model with `eval.load_eval_model(path, cfg)` — never hand-copy model attributes.

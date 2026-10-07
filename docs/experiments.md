@@ -117,6 +117,13 @@ Arm B (#0) is the test.
 
 ### ◻ Queued  (recommended next: **#4b**)
 - **#4b · Same-turn proposal context** *(DOWNGRADED — small residual, not the wall)*.
+  ⚠⚠ **CORRECTED 2026-10-07:** the 07-19 numbers below ran the champion under the WRONG gates —
+  the probe's hand-copied model setup never set `binary_commit_gates`, so the minimal-gates
+  champion played under the legacy "full" gates (docs/repo_review_2026-10.md §0; now fixed via
+  `eval.load_eval_model`). Re-run like-for-like vs Ajay (12 games,
+  `gpu_run_artifacts/ender_panels/coord_gt3_ajay_fixedgates.log`): redundant-on-arrival **68.8%**
+  (≈ Ender's 70.3%), same-turn multi-source **3.5%** (vs Ender 0.0%) — so the #4b slice is about
+  HALF the 7.4% quoted below. vs Yijie: 37.2% / 10.3% (`coord_gt3_yijie_fixedgates.log`).
   ⚠ **CALIBRATED 2026-07-19:** the overkill probe's cross-turn "redundant-on-arrival" is **NOT a
   defect** — reference check vs Ajay put Yijie at **63.8%** and Ender at **70.3%** redundant vs our
   **42.6%**, i.e. the top-10 agents do it MORE (it's multi-wave capture-and-hold, not waste). So the
