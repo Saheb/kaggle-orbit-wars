@@ -78,6 +78,23 @@ def _load_target_conditioning_compatible(model: EntityTransformer,
         )
 
 
+def _drop_retired_q_head_from_optimizer(optim_sd: dict, model_sd: dict) -> dict:
+    """Trim the retired COMA Q-head (removed 2026-10) out of a saved Adam state.
+
+    Pre-removal checkpoints registered its q_* params LAST, so they are the trailing ids of the
+    single Adam group (and never got a gradient, so they hold no Adam state). The weights are
+    dropped by EntityTransformer.load_state_dict; without this matching trim the warm-Adam load
+    size-mismatches and silently falls back to a COLD optimizer — the noopkl2 pathology.
+    """
+    n_q = sum(k.startswith("q_") for k in model_sd)
+    if not n_q or len(optim_sd["param_groups"]) != 1:
+        return optim_sd
+    group = optim_sd["param_groups"][0]
+    dropped = set(group["params"][-n_q:])
+    return {"state": {k: v for k, v in optim_sd["state"].items() if k not in dropped},
+            "param_groups": [{**group, "params": group["params"][:-n_q]}]}
+
+
 def sample_action_batched(outputs: dict, fire_mask: torch.Tensor,
                           target_mask: torch.Tensor | None = None,
                           ship_bin_mode: str = "absolute"):
@@ -766,6 +783,8 @@ def train(args):
         if isinstance(sd, dict) and "optimizer" in sd and not args.cold_optimizer:
             _resume_optim_sd = sd["optimizer"]
         if "model" in sd: sd = sd["model"]
+        if _resume_optim_sd is not None:
+            _resume_optim_sd = _drop_retired_q_head_from_optimizer(_resume_optim_sd, sd)
         _load_target_conditioning_compatible(model, sd, "--resume")
         print(f"Resumed from {Path(args.resume).resolve()}")
         if getattr(args, "reinit_critic", False):
@@ -1582,18 +1601,6 @@ def train(args):
             "old_values": flat["values"],
         }
 
-        # Offline Q-head gate (docs/q-head.md step 1): dump ONE real torch_env+GAE
-        # batch (returns carry the dense capture/prod-share/staging reward, not a
-        # kaggle-env terminal-only MC) and exit before any optimizer step. The
-        # q_head_offline_probe then trains a Q-only head on this and measures
-        # action-sensitivity. Run self-play (no external pool) — same reward mechanics.
-        if getattr(args, "dump_rollout_and_exit", None) and not critic_warmup_active:
-            torch.save({k: (v if not isinstance(v, dict)
-                            else {kk: vv for kk, vv in v.items()})
-                        for k, v in batch.items()}, args.dump_rollout_and_exit)
-            print(f"[dump-rollout] saved batch (TN={TN}) -> {args.dump_rollout_and_exit}", flush=True)
-            return
-
         # Minibatches: split TN into num_minibatches chunks. Move each to GPU just-in-time
         # inside PPOLearner.update (a no-op when --gpu-storage keeps them on GPU already).
         # idx must live on storage_dev so advanced-indexing `v[mi]` matches v's device.
@@ -2030,9 +2037,6 @@ if __name__ == "__main__":
                         help="Split PPO update batch into this many minibatches "
                              "(increase if hitting CUDA OOM in attention)")
     parser.add_argument("--total-steps", type=int, default=10_000_000)
-    parser.add_argument("--dump-rollout-and-exit", type=str, default=None,
-                        help="Save ONE real torch_env+GAE rollout batch to this path and exit "
-                             "before any optimizer step (offline Q-head gate, docs/q-head.md).")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--resume", type=str, default="")
