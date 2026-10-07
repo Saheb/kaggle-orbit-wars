@@ -186,3 +186,68 @@ the cleanup changed behaviour. This is far stronger than a win-rate check.
    table. Delete untracked BC data only after you confirm it.
 
 Tag `pre-cleanup-2026-10` before D1 so everything stays recoverable, same as `pre-cleanup-2026-07`.
+
+---
+
+## 8. Execution log (2026-10-07)
+
+All seven stages ran, one commit each, from tag `pre-cleanup-2026-10` (= 46a2523). Tier-2
+decisions: D1 shaping **removed**, D2 external pool **removed**, D3 legacy masks **removed on both
+sides** (presres1/stgpr1 are opponents only), D4 `full` gates **default → minimal, path kept**,
+D5 global-econ **kept** (econ-alone untested), D6 mode_proj fold **skipped** (cosmetic, touches
+the checkpoint format).
+
+| Commit | Stage | Lines (+ / −, incl. tests) |
+|---|---|---|
+| 0284594 | D0 bug fixes: `load_eval_model`; export repaired (+ this doc, + tests) | +360 / −56 |
+| f68e747 | D1 eval overlays + panel shards (T2, T14) | +27 / −1,731 |
+| 9cb94d1 | D2 COMA Q-head (T1) + resume compat | +76 / −252 |
+| 4333d86 | D3 intent + fraction modes (T3, T4) | +35 / −325 |
+| a889e2e | D4a abandoned training levers (T5–T10) | +38 / −424 |
+| f21bda7 | D4b compat shims, dead symbols, run_eval.sh (T11–T13) | +33 / −250 |
+| 801386b | D4c the 2 failing tests fixed; slow test gated | +38 / −8 |
+| 333034c | D5a gates default → minimal; resume inherits gates | +10 / −2 |
+| 232693b | D5b legacy discipline masks (Tier-2 D3) | +78 / −532 |
+| cec93e2 | D5c reward shaping (Tier-2 D1) | +17 / −635 |
+| ce622cc | D5d external heuristic pool (Tier-2 D2) | +139 / −988 |
+| (D6) | hygiene: tracked infra scripts, AGENTS.md symlink, 12 dead opponents, archive/replays untracked, docs | — |
+
+`orbit_wars_rl/*.py`: 13,128 → 9,912 lines (−24.5%). action_mask.py 1,185 → 370, eval.py
+1,850 → 1,208, train_torch.py 2,434 → 1,807, torch_env.py 2,618 → 2,117. Tests: 35 → 30 files,
+**2 failed / 185 s → 0 failed / ~10 s** (the 4-minute symmetry test runs under `--runslow`).
+
+**Verification, every stage.** A golden-output harness recorded, before any change: the
+champion's (binary-minimal) exact moves through `evaluate_checkpoint` on 6 seeds vs Ajay, plus a
+binary-`full` (binarymarg) and an absolute-mode (shipkl_probe) checkpoint, the `evaluate_panel`
+path, the EXPORTED champion's moves, and the final weights of a seeded 8-update CPU training run of
+the champion recipe. After every stage all six were **bit-identical**. Training needed two fixes to
+be deterministic at all (single thread, and seeding the global `random` — see below).
+
+**New findings during execution** (beyond §0):
+1. **export_agent.py was broken for every timeline/binary checkpoint** since 2026-07-16 (fixed in
+   D0): the import stripper left the continuation line of a multi-line import (file did not
+   compile); the template never passed `pairwise_features` (binary decode raised every turn);
+   `binary_policy.py` was not inlined (NameError). Kaggle swallows agent exceptions as "no move",
+   so the export lost every game (sanity 0/4 vs Zach) without an error. Now 353/353 turns match
+   eval.py and the sanity check is 4/4.
+2. **Resume did not inherit `binary_commit_gates`** (fixed in D5a) — it took the config default,
+   the same bug class as §0. binarygates_s2 passed the flag explicitly, so no past run was hit.
+3. **Train/eval parity bug in the (now removed) sufficient-commit mask:** torch_env computed
+   `enemy_inbound` but never added it to the defense; action_mask did. presres1/stgpr1 trained under
+   a laxer veto than they were evaluated and submitted with.
+4. **`--seed` does not make training reproducible:** torch_env's auto-reset draws board seeds from
+   the global `random` module, which train_torch never seeds (torch and the pool RNG are seeded).
+   Not fixed (out of scope); a one-line `random.seed(args.seed)` would fix it.
+5. **Corrected #4b numbers** (D0 re-run, champion vs Ajay, 12 games): redundant-on-arrival 68.8%
+   (≈ Ender's 70.3%), same-turn multi-source 3.5% (Ender 0.0%) — half the 7.4% #4b was built on.
+6. `run_watchers.sh`'s 4p `_ffaeval` path calls `orbit_wars_rl/eval_ffa_checkpoint.py`, which no
+   longer exists (moved out in 9aee9a3). 4p is parked; not fixed.
+7. Seat bias, for the record: the re-posed symmetry test (pooled over a seat swap, so model strength
+   cancels) gave seat-0 shares of 44.5% and 41.4% on two runs (SE ≈ 4.4pp) — consistent with the
+   eval panels' seat-1 > seat-0 splits. Passes the ±15pp smoke threshold; may be a real env effect.
+
+**Left for you** (destructive or not mine to decide): pruning the 8 extra git worktrees (4 are
+clean + merged — incl. `~/home/orbit-audit`, 16 GB; 4 hold unmerged or modified work), deleting
+untracked BC-era data (1.7 GB pkls, 2.0 GB episode_data/replays) and pre-timeline run dirs in
+gpu_run_artifacts (42 GB). Also remaining: torch_env's angle-bin decode mode is now exercised only
+by tests (production is target-decode only), and `mode_proj` (D6 above).

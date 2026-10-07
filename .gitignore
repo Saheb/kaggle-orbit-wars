@@ -16,11 +16,20 @@ __pycache__/
 *.zip
 *.csv
 
-# Training artifacts (synced from GPU boxes; never tracked)
-gpu_run_artifacts/
+# Training artifacts (synced from GPU boxes; never tracked) — EXCEPT the live infra scripts
+# CLAUDE.md makes the only sanctioned tooling, and the probes it cites.
+gpu_run_artifacts/*
+!gpu_run_artifacts/run_watchers.sh
+!gpu_run_artifacts/launch_gpu_gcp.sh
+!gpu_run_artifacts/wandb_eval_push.py
+!gpu_run_artifacts/ender_ref/
+gpu_run_artifacts/ender_ref/*
+!gpu_run_artifacts/ender_ref/probe_*.py
 
-# Archive data (large datasets)
+# Archive data (large datasets). archive/replays (200 top-agent replays, 757 MB) was untracked in
+# the 2026-10 cleanup — kept on disk for winner analysis, no longer in every checkout/worktree.
 archive/data/
+archive/replays/
 
 # Kaggle / competition data
 leader-replays/

@@ -99,7 +99,6 @@ opponents/                 ← eval + training opponents
   candidate_ajay_1200.py     ← regression GUARD (saturated ~77-80%; NOT the objective)
   candidate_yijie.py         ← ⭐ PRIMARY eval metric (rank 13, 1640 Elo)
   candidate_ender.py         ← top-10 reference (we are 0/256)
-  candidate_producer_1200.py
   candidate_suneet_lb1200.py
   orbit_lite/                ← dependency for Ajay/Producer (intercept aiming etc.)
 
@@ -119,7 +118,8 @@ docs/                      ← runbooks and logs
   GCP_RUNBOOK.md           ← GCP L4 launch, monitoring, terminate
   JARVIS_RUNBOOK.md        ← Jarvis H100 spot instances
   perf.md                  ← ⭐ SPS profile: loop is PPO/model-compute-bound, JAX won't hit 10k
-gpu_run_artifacts/         ← training scripts, watchers, synced checkpoints (gitignored)
+gpu_run_artifacts/         ← run dirs + synced checkpoints (gitignored); TRACKED exceptions:
+                             run_watchers.sh, launch_gpu_gcp.sh, wandb_eval_push.py, ender_ref/probe_*.py
 archive/                   ← dead code, old logs (ignore unless archaeology)
   docs/training-till-submission.md ← full run history + reward/mask deltas through first submission
 ```
@@ -137,24 +137,32 @@ archive/                   ← dead code, old logs (ignore unless archaeology)
 - **After `launch_gpu_gcp.sh`**: verify sync with `ssh ... "ls ~/orbit_wars_rl/orbit_wars_rl/train_torch.py"` before starting training — rsync can drop mid-transfer
 - **Eval on training instances**: always prefix `CUDA_VISIBLE_DEVICES="" python3 orbit_wars_rl/eval.py` — training occupies GPU, eval OOMs otherwise
 - Rsync checkpoints: use `-L` flag to follow symlinks (`rsync -azL`)
-- **Watchers: ONLY via the controller** `bash gpu_run_artifacts/run_watchers.sh start <run> <platform> <target>` (sync + held-out eval; platform = `jarvis` target=IP / `gcp` target=config-ssh alias / `custom` set `RSYNC_SSH`/`HOST`/`REMOTE_*_DIR` env). NEVER launch ad-hoc per-run `*_watch.sh`/`sync_watcher.sh` — they survive across runs and end up watching the *previous* run's folder. `start` tears down all existing watchers first, and each watcher self-terminates when `.active_run` changes, so stale watchers can't accumulate. `… status` shows the active run; `… stop` kills all. Launch scripts must end with a `run_watchers.sh start` call. To add a SECOND held-out opponent (e.g. Ajay alongside the default zach) WITHOUT churning the live primary watcher, use `run_watchers.sh add-eval <run> <opp.py> [from-latest]` — it launches an extra `_eval` loop under the same run/marker (self-terminating, opponent-specific elog + own `eval_<opp>.csv`); `from-latest` seeds all-but-newest checkpoints as done so a slow panel (Ajay) tracks the frontier instead of backfilling history. Eval masks default to the current design **gate2/floor0/no-forward-only** (2026-06-14: gate3→2, winner-faithful reinforce@2≈0.10; pass `GATE=3`/`REINFORCE_MASKS` to reproduce the old gate3) — override via `REINFORCE_MASKS` if a run trains different masks (eval MUST match training).
+- **Watchers: ONLY via the controller** `bash gpu_run_artifacts/run_watchers.sh start <run> <platform> <target>` (sync + held-out eval; platform = `jarvis` target=IP / `gcp` target=config-ssh alias / `custom` set `RSYNC_SSH`/`HOST`/`REMOTE_*_DIR` env). NEVER launch ad-hoc per-run `*_watch.sh`/`sync_watcher.sh` — they survive across runs and end up watching the *previous* run's folder. `start` tears down all existing watchers first, and each watcher self-terminates when `.active_run` changes, so stale watchers can't accumulate. `… status` shows the active run; `… stop` kills all. Launch scripts must end with a `run_watchers.sh start` call. To add a SECOND held-out opponent (e.g. Ajay alongside the default zach) WITHOUT churning the live primary watcher, use `run_watchers.sh add-eval <run> <opp.py> [from-latest]` — it launches an extra `_eval` loop under the same run/marker (self-terminating, opponent-specific elog + own `eval_<opp>.csv`); `from-latest` seeds all-but-newest checkpoints as done so a slow panel (Ajay) tracks the frontier instead of backfilling history. Eval masks default to the current design **gate2** (`REINFORCE_MASKS='--reinforce-gate-min-planets 2'`) — override via `REINFORCE_MASKS` if a run trains a different gate (eval MUST match training). The floor / forward-only / sufficient-commit masks were removed in the 2026-10 cleanup.
 - One change per run; record hypothesis before launching
 
 ### Key training flags
+The champion recipe (`gpu_run_artifacts/binarygates100m_l4/start_training.sh`). Reward is sparse ±1.
 | Flag | Purpose |
 |------|---------|
-| `--first-strike-steps 50` | Double capture reward for t<50 (was the LB record fix) |
-| `--early-capture-coef 0.3` | Delta-capture shaping (exp decay + 10% floor; blessed runs used 0.3) |
-| `--expansion-coef 0.03` / `--win-margin-coeff 0.5` | Blessed-run economy shaping + terminal margin bonus |
-| `--staging-shaping-coef 0.2` | PBRS staging toward neutrals (stgpr1 "spray" arm only) |
-| `--pool-pfsp-min-games 30` | Prevents PFSP death-spiral |
-| `--pool-external-fraction` | Fraction of pool samples to external opponents |
+| `--ship-bin-mode binary` | NOOP/COMMIT action space (COMMIT = all-in) |
+| `--binary-commit-gates minimal` | The default since 2026-10; `full` = the legacy gates (Lesson 12). Resume inherits the checkpoint's own |
+| `--noop-kl-coef 0.3` | KL of the batch launch rate toward 0.10 (anti-spray) |
+| `--allow-reinforce --reinforce-gate-min-planets 2 --reverse-edge-cooldown 3` | Reinforce discipline — persisted in the ckpt, auto-loaded by eval/export |
+| `--pool-mode self --pool-fraction 0.5 --pool-pfsp-min-games 30` | PFSP self-play pool (min-games prevents the PFSP death-spiral) |
+| `--anchor-kl-coef` + `--pool-seed-rl` / `--pool-pinned-fraction` / `--pool-hard-ramp-steps` | Back-pocketed: anchor (200M+) and exploiters (#8) |
 
 C4 cleanup (2026-07-05): the training loop is pruned to the levers the blessed runs used.
 Removed (recover from git tag `pre-cleanup-2026-07`): SSDR, min-ship-bin, decisive-mass +
 dm_* diag, scenario curriculum, handicap/self-boost, neutral-garrison scale, prod-share,
 consolidation, capture-utility, speed/rank/shaping/defense coefs, eliminate-to-win,
 timeout-planet, redundant-target, path-obstruction.
+
+2026-10 cleanup (D0–D6, docs/repo_review_2026-10.md): removed (recover from git tag
+`pre-cleanup-2026-10`) the eval probe overlays, COMA Q-head, intent/fraction ship modes, ship-KL,
+critic warmup, reinforce curriculum/cost, residual-LR group, overflow-drop, ALL reward shaping
+(first-strike, early-capture, expansion, win-margin, staging PBRS), the legacy discipline masks
+(sufficient-commit, forward-only, garrison floor) and the external-heuristic pool. Checkpoints
+trained with a legacy mask active (presres1/stgpr1) are refused at load — use the tag.
 
 ---
 
@@ -246,13 +254,15 @@ that history; don't cite them as prior-best.
 
 Note: checkpoints above that predate the blessed feature config (everything before the presres
 lineage, incl. corrpack3e) are refused by HEAD's feature-semantics guards — resume/eval/export
-them from git tag `pre-cleanup-2026-07`. Of the preserved final artifacts, only
-`final_submissions/presres1_0.5M_backfilled_resolver.pt` and `stgpr1_0.5M.pt` load under HEAD.
+them from git tag `pre-cleanup-2026-07`. The preserved final artifacts
+`final_submissions/presres1_0.5M_backfilled_resolver.pt` / `stgpr1_0.5M.pt` loaded under HEAD until the
+2026-10 cleanup removed their sufficient-commit mask; HEAD now refuses them as the agent under test
+(use tag `pre-cleanup-2026-10`). As OPPONENTS they run from their frozen tarballs, unaffected.
 
 Timeline features (2026-07-10, planet dim 20→116): NO pre-timeline checkpoint can **resume**
-under HEAD (guard + shape mismatch) — training restarts from scratch (the plan anyway). presres1
-/ stgpr1 remain **eval/export-able**: eval and export infer the width from `planet_proj` and
-feed 20-dim features (`extract_features(timeline=False)`).
+under HEAD (guard + shape mismatch) — training restarts from scratch (the plan anyway). Eval and
+export still infer the planet width from `planet_proj` and feed 20-dim features
+(`extract_features(timeline=False)`) to any pre-timeline checkpoint that passes the guards.
 
 ---
 
@@ -261,7 +271,7 @@ feed 20-dim features (`extract_features(timeline=False)`).
 1. **Zach panel is saturated** (~88-89%) — use Ajay as the primary signal. Ajay uses `orbit_lite` for targeting; our agent also uses orbital intercept — the gap is conversion timing, not routing.
 2. **SSDR** (asymmetric planet starts) improves Ajay from 0.8% → 3.1% but improvement is transient — self-play Nash reforms after ~2M steps regardless of pool mask gating. *(Lever removed in C4 — revive from `pre-cleanup-2026-07` if needed.)*
 3. **ship0 collapse** — agent learns to send 1-ship probes when behind. Fix was `--min-ship-bin 4` *(removed in C4; the blessed lineage doesn't exhibit it)*. Does NOT fix the underlying SSDR regression.
-4. **First Strike** (`--first-strike-steps 50 --first-strike-mult 2.0`) fixed opening paralysis and scored 918.8 LB. It's a reward shaping band-aid, not a structural fix.
+4. **First Strike** (`--first-strike-steps 50 --first-strike-mult 2.0`) fixed opening paralysis and scored 918.8 LB. It's a reward shaping band-aid, not a structural fix. *(Removed with all shaping in the 2026-10 cleanup — tag `pre-cleanup-2026-10`.)*
 5. **BC aux at bc-coef=0.05** — too small to move the needle but can disrupt conversion (Rev34: us_first_cap 14→136 after 1M). *(BC/IL machinery removed in C5 — pre-cleanup tag if needed.)*
 6. **Pool mask gating** — SSDR should only apply to self-play envs, not pool envs (was `env.set_ssdr_mask`; removed in C4 with SSDR). Slows regression but doesn't stop it.
 7. **PFSP death-spiral**: small N games → noisy wr → never sampled. Fix: `--pool-pfsp-min-games 30`.
